@@ -50,11 +50,11 @@ async def _seed_tasks(session: AsyncSession) -> None:
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, completed_at, enqueue_sha)
+             retry_count, max_retries, completed_at, enqueue_sha, terminal_at)
         SELECT gen_random_uuid()::text,
                'plan_task_' || (g % 5), 'default', 100, '[]', '{}',
                'COMPLETED', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), FALSE, 0, 0, NOW(), 'plan-test-sha'
+               NOW(), NOW(), FALSE, 0, 0, NOW(), 'plan-test-sha', NOW()
         FROM generate_series(1, 500) AS g
     """))
     await session.execute(text("""

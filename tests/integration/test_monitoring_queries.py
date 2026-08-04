@@ -104,6 +104,24 @@ def ago(seconds: int) -> datetime:
     return datetime.now(UTC) - timedelta(seconds=seconds)
 
 
+def _terminal_instant(
+    status: TaskStatus,
+    completed_at: datetime | None,
+    failed_at: datetime | None,
+) -> datetime | None:
+    """The instant a terminal row is dated by, mirroring what production writes.
+
+    Terminal exactly when dated is a database constraint, so a fixture that
+    sets a terminal status without one is not a lighter fixture — it is a row
+    that cannot exist. The instant is taken from whichever end timestamp the
+    row carries, which keeps aged fixtures aged: a row completed sixty days ago
+    is terminal sixty days ago, not now.
+    """
+    if not status.is_terminal:
+        return None
+    return completed_at or failed_at or datetime.now(timezone.utc)
+
+
 def make_task(
     *,
     task_id: str | None = None,
@@ -143,6 +161,7 @@ def make_task(
         started_at=started_at,
         completed_at=completed_at,
         failed_at=failed_at,
+        terminal_at=_terminal_instant(status, completed_at, failed_at),
         good_until=good_until,
         error_code=error_code,
         failed_reason=failed_reason,

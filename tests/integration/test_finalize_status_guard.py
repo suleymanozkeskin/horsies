@@ -152,7 +152,19 @@ async def _set_task_status(
 ) -> None:
     """Force-set a task's status (simulating reaper intervention)."""
     await session.execute(
-        text("UPDATE horsies_tasks SET status = :status WHERE id = :id"),
+        # Terminal exactly when dated, in both directions: a forced terminal
+        # status dates the row, and a forced revival clears it. Production
+        # holds the same invariant, so a fixture that broke it would be
+        # simulating a state the database cannot hold.
+        text("""
+            UPDATE horsies_tasks
+            SET status = :status,
+                terminal_at = CASE
+                    WHEN CAST(:status AS VARCHAR)
+                         IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                    THEN NOW() ELSE NULL END
+            WHERE id = :id
+        """),
         {'status': status, 'id': task_id},
     )
     await session.flush()
@@ -361,7 +373,8 @@ async def test_reaper_then_complete_race_sequence(
             SET status = 'FAILED',
                 failed_at = NOW(),
                 result = :result,
-                updated_at = NOW()
+                updated_at = NOW(),
+                    terminal_at = NOW()
             WHERE id = :id AND status = 'RUNNING'
         """),
         {'id': task_id, 'result': reaper_result},

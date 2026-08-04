@@ -70,11 +70,16 @@ async def _insert_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha, claimed_by_worker_id)
+                 good_until, task_options, enqueue_sha, claimed_by_worker_id,
+                 terminal_at)
             VALUES
                 (:id, 'retry_test', 'default', 100, '[]', '{}', :status, :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id)
+                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id,
+                 -- Terminal exactly when dated, as the database requires.
+                 CASE WHEN CAST(:status AS VARCHAR)
+                          IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                      THEN NOW() ELSE NULL END)
         """),
         {
             'id': task_id,
