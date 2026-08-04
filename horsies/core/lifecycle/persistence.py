@@ -24,14 +24,25 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from .commands import (
     CompleteLockedTask,
     CompleteTaskFused,
+    ExpireOwnedClaim,
+    ExpirePendingTasks,
     FailLockedTask,
     FailStaleTask,
 )
 from .outcomes import TerminalizationOutcome, decode_outcome_row
 
 type ExecutableCommand = (
-    CompleteLockedTask | CompleteTaskFused | FailLockedTask | FailStaleTask
+    CompleteLockedTask
+    | CompleteTaskFused
+    | FailLockedTask
+    | FailStaleTask
+    | ExpireOwnedClaim
 )
+
+# Batch operations return zero or more rows, so they cannot share the
+# single-task adapters: exactly-one-row is a contract worth keeping honest
+# for the operations it is true of.
+type ExecutableBatchCommand = ExpirePendingTasks
 
 _COMPLETE_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_complete_locked_task(
@@ -60,6 +71,18 @@ _FAIL_STALE_TASK_SQL = text("""
         CAST(:stale_after_seconds AS INTEGER),
         CAST(:finalizing_stale_after_seconds AS INTEGER),
         :result, :error_code, :failed_reason
+    )
+""")
+
+_EXPIRE_OWNED_CLAIM_SQL = text("""
+    SELECT * FROM horsies_expire_owned_claim(
+        CAST(:task_id AS VARCHAR), :worker_id, :result, :error_code
+    )
+""")
+
+_EXPIRE_PENDING_TASKS_SQL = text("""
+    SELECT * FROM horsies_expire_pending_tasks(
+        CAST(:batch_size AS INTEGER), :result, :error_code
     )
 """)
 
@@ -122,8 +145,57 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'error_code': error_code,
                 'failed_reason': failed_reason,
             }
+        case ExpireOwnedClaim(
+            task_id=task_id,
+            fence=fence,
+            result_json=result,
+            error_code=error_code,
+        ):
+            return _EXPIRE_OWNED_CLAIM_SQL, {
+                'task_id': task_id,
+                'worker_id': fence.worker_id,
+                'result': result,
+                'error_code': error_code,
+            }
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def batch_call_for(
+    command: ExecutableBatchCommand,
+) -> tuple[Any, dict[str, Any]]:
+    """The statement and parameters that execute this batch command."""
+    match command:
+        case ExpirePendingTasks(
+            batch_size=batch_size,
+            result_json=result,
+            error_code=error_code,
+        ):
+            return _EXPIRE_PENDING_TASKS_SQL, {
+                'batch_size': batch_size,
+                'result': result,
+                'error_code': error_code,
+            }
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+async def apply_batch_async(
+    connection: AsyncConnection,
+    command: ExecutableBatchCommand,
+) -> list[TerminalizationOutcome]:
+    """Execute a batch command and decode every row it reports.
+
+    Zero rows is a valid answer — a discovery batch that found nothing
+    eligible has nothing to report, and inventing an outcome for work that
+    did not happen is what the row-per-transition contract exists to prevent.
+    """
+    statement, parameters = batch_call_for(command)
+    result = await connection.execute(statement, parameters)
+    return [
+        decode_outcome_row({str(key): value for key, value in row.items()})
+        for row in result.mappings().all()
+    ]
 
 
 async def apply_async(

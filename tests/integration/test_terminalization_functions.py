@@ -28,22 +28,29 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.commands import (
     CompleteLockedTask,
     CompleteTaskFused,
+    ExpireOwnedClaim,
+    ExpirePendingTasks,
     FailLockedTask,
     FailStaleTask,
 )
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead, WorkerOwned
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
     ObservedClaim,
+    ObservedDeadline,
     ObservedForeignTerminalization,
     ObservedStaleness,
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import apply_async
+from horsies.core.lifecycle.persistence import (
+    apply_async,
+    apply_batch_async,
+    apply_sync,
+)
 from horsies.core.types.status import TaskStatus
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -674,8 +681,14 @@ class TestFailStale:
         assert isinstance(evidence, ObservedStaleness)
         assert evidence.last_heartbeat_at is not None
         assert evidence.started_at is not None
+        assert evidence.finalizing_at is None
         assert evidence.stale_after_seconds == STALE_AFTER
         assert evidence.finalizing_stale_after_seconds == FINALIZING_STALE_AFTER
+        # The refusal is reconstructible from its own evidence: the heartbeat
+        # sits inside the freshness window the guard judged it against.
+        assert evidence.last_heartbeat_at >= evidence.evaluated_at - timedelta(
+            seconds=STALE_AFTER,
+        )
 
     async def test_a_heartbeat_from_another_role_does_not_count(
         self,
@@ -710,12 +723,19 @@ class TestFailStale:
         assert isinstance(evidence, ObservedStaleness)
         assert evidence.started_at is None
         assert evidence.last_heartbeat_at is None
+        assert evidence.evaluated_at is not None
 
     async def test_an_active_finalizer_defers(
         self,
         session: AsyncSession,
     ) -> None:
-        """A finalizer inside its window holds the row against stale-failure."""
+        """A finalizer inside its window holds the row against stale-failure.
+
+        The evidence must explain this refusal on its own: the runner is
+        silent past its threshold, so the only arm that can have refused is
+        the finalizer's — and the finalizing instant it carries sits inside
+        the window it was judged against.
+        """
         task_id = await _seed(session)
         await _age(
             session,
@@ -727,7 +747,17 @@ class TestFailStale:
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
-        assert isinstance(outcome.evidence, ObservedStaleness)
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedStaleness)
+        assert evidence.finalizing_at is not None
+        assert evidence.finalizing_at >= evidence.evaluated_at - timedelta(
+            seconds=FINALIZING_STALE_AFTER,
+        )
+        assert evidence.started_at is not None
+        assert evidence.started_at < evidence.evaluated_at - timedelta(
+            seconds=STALE_AFTER,
+        )
+        assert evidence.last_heartbeat_at is None
 
     async def test_a_stale_finalizer_does_not_defer(
         self,
@@ -796,3 +826,306 @@ class TestFailStale:
         )
         await session.commit()
         assert isinstance(outcome, TaskAbsent)
+
+
+def _expire_claim(task_id: str) -> ExpireOwnedClaim:
+    return ExpireOwnedClaim(
+        task_id=task_id,
+        fence=WorkerOwned(worker_id=WORKER),
+        result_json='{"err": 3}',
+        error_code='TASK_EXPIRED',
+    )
+
+
+def _expire_pending(batch_size: int = 10) -> ExpirePendingTasks:
+    return ExpirePendingTasks(
+        batch_size=batch_size,
+        result_json='{"err": 4}',
+        error_code='TASK_EXPIRED',
+    )
+
+
+async def _deadline(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    seconds_ago: int | None,
+) -> None:
+    """Set the row's good_until relative to now; None removes the deadline."""
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET good_until = CASE
+                    WHEN CAST(:ago AS INTEGER) IS NULL THEN NULL
+                    ELSE NOW() - make_interval(secs => :ago)
+                END
+            WHERE id = :id
+        """),
+        {'id': task_id, 'ago': seconds_ago},
+    )
+    await session.commit()
+
+
+class TestExpireOwnedClaim:
+    async def test_applies_when_the_deadline_passed(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=60)
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.EXPIRE_CLAIMED
+        assert outcome.observed.status is TaskStatus.CLAIMED
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, claimed, claim_expires_at, failed_at, error_code
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'EXPIRED'
+        assert row.claimed is False
+        assert row.claim_expires_at is None
+        assert row.failed_at is not None
+        assert row.error_code == 'TASK_EXPIRED'
+
+    async def test_a_live_deadline_refuses_with_the_evidence(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The refusal names the deadline it judged and when it judged it."""
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=-3600)
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedDeadline)
+        assert evidence.good_until is not None
+        assert evidence.evaluated_at is not None
+
+    async def test_a_row_with_no_deadline_refuses(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=None)
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedDeadline)
+        assert evidence.good_until is None
+
+    async def test_another_workers_claim_is_lost(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', worker_id='someone-else')
+        await _deadline(session, task_id, seconds_ago=60)
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+        assert isinstance(outcome, LostClaim)
+        assert outcome.observed.worker_id == 'someone-else'
+
+    async def test_the_pending_expiry_counts_as_the_same_work(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Claimed and pending expiry are one class: the same end, either door."""
+        task_id = await _seed(session, status='CLAIMED')
+        await _force_terminal(session, task_id, status='EXPIRED', kind='EXPIRE_PENDING')
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+        assert isinstance(outcome, AlreadyApplied)
+        assert outcome.kind is TerminalizationKind.EXPIRE_PENDING
+
+    async def test_a_foreign_kind_is_a_conflict_not_a_replay(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED')
+        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_STALE')
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+        assert isinstance(outcome, SourceStateConflict)
+        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
+        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_STALE
+
+    async def test_the_source_status_is_wrong(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """RUNNING is past this operation's window even with the deadline gone."""
+        task_id = await _seed(session)
+        await _deadline(session, task_id, seconds_ago=60)
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+        assert isinstance(outcome, SourceStateConflict)
+        assert outcome.observed.status is TaskStatus.RUNNING
+        assert outcome.evidence == ObservedClaim(
+            worker_id=WORKER, claimed_at=GENERATION,
+        )
+
+    async def test_a_task_that_does_not_exist(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        outcome = await apply_async(
+            await session.connection(), _expire_claim(str(uuid.uuid4())),
+        )
+        await session.commit()
+        assert isinstance(outcome, TaskAbsent)
+
+    async def test_the_sync_driver_round_trips(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The child paths call this operation on psycopg, so prove that path.
+
+        Same function, same decoder; only the parameter rendering differs,
+        and this is the test that would catch it rendering wrongly.
+        """
+        import psycopg
+
+        from tests.integration.conftest import DB_URL
+
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=60)
+
+        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        with psycopg.connect(conninfo) as connection:
+            with connection.cursor() as cursor:
+                outcome = apply_sync(cursor, _expire_claim(task_id))
+            connection.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.EXPIRE_CLAIMED
+
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'EXPIRED'
+
+
+class TestExpirePendingTasks:
+    async def test_expires_every_eligible_row_and_reports_each(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        eligible = [await _seed(session, status='PENDING') for _ in range(3)]
+        for task_id in eligible:
+            await _deadline(session, task_id, seconds_ago=60)
+        fresh = await _seed(session, status='PENDING')
+        await _deadline(session, fresh, seconds_ago=-3600)
+        undated = await _seed(session, status='PENDING')
+
+        outcomes = await apply_batch_async(
+            await session.connection(), _expire_pending(),
+        )
+        await session.commit()
+
+        assert {o.task_id for o in outcomes} == set(eligible)
+        for outcome in outcomes:
+            assert isinstance(outcome, Applied)
+            assert outcome.kind is TerminalizationKind.EXPIRE_PENDING
+            assert outcome.ordinality is None
+            assert outcome.observed.status is TaskStatus.PENDING
+
+        rows = (
+            await session.execute(
+                text("""
+                    SELECT id, status FROM horsies_tasks
+                    WHERE id = ANY(:ids)
+                """),
+                {'ids': eligible + [fresh, undated]},
+            )
+        ).all()
+        statuses = {row.id: row.status for row in rows}
+        assert all(statuses[task_id] == 'EXPIRED' for task_id in eligible)
+        assert statuses[fresh] == 'PENDING'
+        assert statuses[undated] == 'PENDING'
+
+    async def test_the_batch_size_bounds_one_pass(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        """Oldest deadlines first, and the remainder waits for the next pass."""
+        oldest = await _seed(session, status='PENDING')
+        await _deadline(session, oldest, seconds_ago=300)
+        middle = await _seed(session, status='PENDING')
+        await _deadline(session, middle, seconds_ago=200)
+        newest = await _seed(session, status='PENDING')
+        await _deadline(session, newest, seconds_ago=100)
+
+        outcomes = await apply_batch_async(
+            await session.connection(), _expire_pending(batch_size=2),
+        )
+        await session.commit()
+
+        assert {o.task_id for o in outcomes} == {oldest, middle}
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': newest},
+            )
+        ).scalar_one()
+        assert status == 'PENDING'
+
+    async def test_nothing_eligible_is_an_empty_answer(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        task_id = await _seed(session, status='PENDING')
+        await _deadline(session, task_id, seconds_ago=-3600)
+
+        outcomes = await apply_batch_async(
+            await session.connection(), _expire_pending(),
+        )
+        await session.commit()
+        assert outcomes == []
+
+    async def test_a_row_a_concurrent_claim_holds_is_stepped_around(
+        self,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        clean_workflow_tables: None,
+    ) -> None:
+        """SKIP LOCKED: the claim re-checks the deadline, so neither side waits."""
+        held = await _seed(session, status='PENDING')
+        await _deadline(session, held, seconds_ago=60)
+        free = await _seed(session, status='PENDING')
+        await _deadline(session, free, seconds_ago=60)
+
+        async with broker.async_engine.connect() as holder:
+            await holder.execute(
+                text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+                {'id': held},
+            )
+            outcomes = await apply_batch_async(
+                await session.connection(), _expire_pending(),
+            )
+            await session.commit()
+            await holder.rollback()
+
+        assert {o.task_id for o in outcomes} == {free}

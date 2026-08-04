@@ -156,6 +156,16 @@ FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
         'CREATE_FAIL_STALE_TASK_SQL',
         'FAILED',
     ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_EXPIRE_OWNED_CLAIM_SQL',
+        'EXPIRED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_EXPIRE_PENDING_TASKS_SQL',
+        'EXPIRED',
+    ): 1,
 }
 
 
@@ -518,8 +528,8 @@ class TestTerminalWriterInventory:
         whichever path the tests exercise least.
         """
         windows = _scan_runtime_terminal_windows()
-        assert len(windows) == 20, (
-            f'Expected twenty terminal-assigning SET clauses, found '
+        assert len(windows) == 22, (
+            f'Expected twenty-two terminal-assigning SET clauses, found '
             f'{len(windows)}; the inventory and this assertion disagree.'
         )
         missing = [

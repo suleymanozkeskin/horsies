@@ -521,11 +521,14 @@ DROP FUNCTION IF EXISTS horsies_fail_locked_task(
 """)
 
 # Guard family, not fence family: the worker that held this task is by
-# hypothesis not answering, so the guard is staleness rather than ownership,
-# and a refusal reports the staleness evidence the predicate judged. The
-# miss path handles the guard case inline and delegates absent, terminal and
-# wrong-source-state rows to the shared classifier with NULL claim
-# parameters, which its arms are built to accept.
+# hypothesis not answering, so the guard is staleness rather than ownership.
+# The row is locked and every observable the two arms compare — including
+# the heartbeat, which has no locking relationship with the task row — is
+# captured in that one snapshot together with the instant they are judged
+# at. The decision and the evidence come from the capture; nothing is reread
+# after a refusal, so the evidence cannot show a heartbeat the guard never
+# saw. Absent, terminal and wrong-source-state rows delegate to the shared
+# classifier with NULL claim parameters, which its arms are built to accept.
 CREATE_FAIL_STALE_TASK_SQL = text(f"""
 CREATE OR REPLACE FUNCTION horsies_fail_stale_task(
     p_task_id varchar,
@@ -545,68 +548,69 @@ DECLARE
     v_worker varchar;
     v_claimed_at timestamptz;
     v_started_at timestamptz;
+    v_finalizing_at timestamptz;
     v_last_heartbeat timestamptz;
+    v_evaluated_at timestamptz;
 BEGIN
-    UPDATE horsies_tasks AS t
-    SET status = 'FAILED',
-        failed_at = NOW(),
-        failed_reason = p_failed_reason,
-        result = p_result,
-        error_code = p_error_code,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        terminalization_kind = '{TerminalizationKind.FAIL_STALE.value}',
-        updated_at = NOW()
-    WHERE t.id = p_task_id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at
-             < NOW() - make_interval(secs => p_finalizing_stale_after_seconds)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id AND h.role = 'runner'
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - make_interval(secs => p_stale_after_seconds)
-    RETURNING t.terminal_at, t.terminalization_kind,
-              t.claimed_by_worker_id, t.claimed_at
-    INTO v_terminal_at, v_kind, v_worker, v_claimed_at;
-
-    IF FOUND THEN
-        -- Cross-worker by design: the observed claim is whichever worker's
-        -- silence the guard just judged, read from the locked row itself.
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'APPLIED'::text,
-            v_terminal_at, v_kind,
-            'RUNNING'::text, v_worker, v_claimed_at,
-            NULL::text, NULL::jsonb;
-        RETURN;
-    END IF;
-
-    SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at, t.started_at
-    INTO v_status, v_worker, v_claimed_at, v_started_at
+    -- One snapshot: the row locked, the heartbeat read beside it, and the
+    -- instant both arms are judged at. NOW() is the transaction timestamp,
+    -- so the instant captured here is the same one the transition below
+    -- stamps into terminal_at.
+    SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
+           t.started_at, t.finalizing_at,
+           (
+               SELECT h.sent_at
+               FROM horsies_heartbeats h
+               WHERE h.task_id = t.id AND h.role = 'runner'
+               ORDER BY h.sent_at DESC
+               LIMIT 1
+           ),
+           NOW()
+    INTO v_status, v_worker, v_claimed_at, v_started_at, v_finalizing_at,
+         v_last_heartbeat, v_evaluated_at
     FROM horsies_tasks t
     WHERE t.id = p_task_id
     FOR UPDATE;
 
     IF FOUND AND v_status = 'RUNNING' THEN
-        -- Live and in this operation's source state, so it was the staleness
-        -- guard that refused. Its evidence is the observations the predicate
-        -- judged, plus the thresholds it judged them against.
-        SELECT h.sent_at INTO v_last_heartbeat
-        FROM horsies_heartbeats h
-        WHERE h.task_id = p_task_id AND h.role = 'runner'
-        ORDER BY h.sent_at DESC
-        LIMIT 1;
+        IF v_started_at IS NOT NULL
+           AND (
+               v_finalizing_at IS NULL
+               OR v_finalizing_at
+                  < v_evaluated_at
+                    - make_interval(secs => p_finalizing_stale_after_seconds)
+           )
+           AND COALESCE(v_last_heartbeat, v_started_at)
+               < v_evaluated_at - make_interval(secs => p_stale_after_seconds)
+        THEN
+            UPDATE horsies_tasks t
+            SET status = 'FAILED',
+                failed_at = NOW(),
+                failed_reason = p_failed_reason,
+                result = p_result,
+                error_code = p_error_code,
+                finalizing_at = NULL,
+                finalizing_by_worker_id = NULL,
+                terminal_at = NOW(),
+                terminalization_kind =
+                    '{TerminalizationKind.FAIL_STALE.value}',
+                updated_at = NOW()
+            WHERE t.id = p_task_id
+            RETURNING t.terminal_at, t.terminalization_kind
+            INTO v_terminal_at, v_kind;
 
+            -- Cross-worker by design: the observed claim is whichever
+            -- worker's silence the guard just judged, from the capture.
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at, v_kind,
+                'RUNNING'::text, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        -- The refusal reports the capture itself — every value the two
+        -- arms compared, and the instant they were compared at.
         RETURN QUERY SELECT
             p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
             NULL::timestamptz, NULL::text,
@@ -615,9 +619,11 @@ BEGIN
             jsonb_build_object(
                 'last_heartbeat_at', v_last_heartbeat,
                 'started_at', v_started_at,
+                'finalizing_at', v_finalizing_at,
                 'stale_after_seconds', p_stale_after_seconds,
                 'finalizing_stale_after_seconds',
-                    p_finalizing_stale_after_seconds
+                    p_finalizing_stale_after_seconds,
+                'evaluated_at', v_evaluated_at
             );
         RETURN;
     END IF;
@@ -643,6 +649,158 @@ DROP FUNCTION IF EXISTS horsies_fail_stale_task(
 """)
 
 
+# ---------------------------------------------------------------------------
+# EXPIRED
+# ---------------------------------------------------------------------------
+
+# Fenced on worker ownership but deliberately not on claim generation: once
+# the deadline has passed, expiry is the correct outcome for whichever
+# generation holds the row. The claim bookkeeping columns are cleared along
+# with the transition — claimed and claim_expires_at — while claimed_at is
+# left alone, which is what makes the returned claim the pre-image.
+CREATE_EXPIRE_OWNED_CLAIM_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_expire_owned_claim(
+    p_task_id varchar,
+    p_worker_id text,
+    p_result text,
+    p_error_code text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_claimed_at timestamptz;
+    v_status text;
+    v_worker varchar;
+    v_good_until timestamptz;
+    v_evaluated_at timestamptz;
+BEGIN
+    -- One snapshot: the row locked, its deadline and the instant it is
+    -- judged at captured together. The decision and the evidence both come
+    -- from this capture; nothing is reread after a refusal.
+    SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
+           t.good_until, NOW()
+    INTO v_status, v_worker, v_claimed_at, v_good_until, v_evaluated_at
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND
+       AND v_status = 'CLAIMED'
+       AND v_worker = CAST(p_worker_id AS VARCHAR) THEN
+        IF v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at THEN
+            UPDATE horsies_tasks t
+            SET status = 'EXPIRED',
+                claimed = FALSE,
+                claim_expires_at = NULL,
+                finalizing_at = NULL,
+                finalizing_by_worker_id = NULL,
+                failed_at = NOW(),
+                result = p_result,
+                error_code = p_error_code,
+                terminal_at = NOW(),
+                terminalization_kind =
+                    '{TerminalizationKind.EXPIRE_CLAIMED.value}',
+                updated_at = NOW()
+            WHERE t.id = p_task_id
+            RETURNING t.terminal_at, t.terminalization_kind
+            INTO v_terminal_at, v_kind;
+
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at, v_kind,
+                'CLAIMED'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        -- Under this caller's claim and in the source state, so it was the
+        -- deadline guard that refused: not yet passed, or absent.
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'DEADLINE'::text,
+            jsonb_build_object(
+                'good_until', v_good_until,
+                'evaluated_at', v_evaluated_at
+            );
+        RETURN;
+    END IF;
+
+    -- Absent, terminal, another worker's claim, or live outside the source
+    -- state: the shared classifier's arms are exactly right, and the worker
+    -- parameter keeps a foreign claim reported as the lost claim it is.
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.EXPIRE_CLAIMED)},
+        p_worker_id,
+        NULL::timestamptz
+    );
+END;
+$$
+""")
+
+DROP_EXPIRE_OWNED_CLAIM_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_expire_owned_claim(
+    varchar, text, text, text
+)
+""")
+
+# Discovery batch: the function selects its own targets under the deadline
+# predicate, so there are no caller-keyed inputs to report against — only
+# transitioned rows come back, with no ordinality, and an empty set is a
+# valid answer. Batched rather than one statement because a mass expiry
+# commits two notifications per row at once and overflows listener queues;
+# the batch size is that bound. SKIP LOCKED steps around rows a concurrent
+# claim pass holds — the claim re-checks the deadline itself, so the race
+# resolves the same way either way.
+CREATE_EXPIRE_PENDING_TASKS_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_expire_pending_tasks(
+    p_batch_size integer,
+    p_result text,
+    p_error_code text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    UPDATE horsies_tasks t
+    SET status = 'EXPIRED',
+        failed_at = NOW(),
+        result = p_result,
+        error_code = p_error_code,
+        terminal_at = NOW(),
+        terminalization_kind = '{TerminalizationKind.EXPIRE_PENDING.value}',
+        updated_at = NOW()
+    FROM (
+        SELECT id FROM horsies_tasks
+        WHERE status = 'PENDING'
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        ORDER BY good_until ASC
+        LIMIT p_batch_size
+        FOR UPDATE SKIP LOCKED
+    ) s
+    WHERE t.id = s.id
+    RETURNING t.id, NULL::bigint, 'APPLIED'::text,
+              t.terminal_at, t.terminalization_kind,
+              'PENDING'::text, t.claimed_by_worker_id, t.claimed_at,
+              NULL::text, NULL::jsonb;
+END;
+$$
+""")
+
+DROP_EXPIRE_PENDING_TASKS_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_expire_pending_tasks(
+    integer, text, text
+)
+""")
+
+
 # Drops precede creates on every apply, and the drop list names exact
 # signatures: PostgreSQL overloads by signature, so a changed argument list
 # without a matching drop leaves the old overload installed and callable.
@@ -651,6 +809,8 @@ DROP_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     DROP_COMPLETE_TASK_FUSED_SQL,
     DROP_FAIL_LOCKED_TASK_SQL,
     DROP_FAIL_STALE_TASK_SQL,
+    DROP_EXPIRE_OWNED_CLAIM_SQL,
+    DROP_EXPIRE_PENDING_TASKS_SQL,
     DROP_MISS_CLASSIFIER_SQL,
 )
 
@@ -664,4 +824,6 @@ CREATE_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     CREATE_COMPLETE_TASK_FUSED_SQL,
     CREATE_FAIL_LOCKED_TASK_SQL,
     CREATE_FAIL_STALE_TASK_SQL,
+    CREATE_EXPIRE_OWNED_CLAIM_SQL,
+    CREATE_EXPIRE_PENDING_TASKS_SQL,
 )
