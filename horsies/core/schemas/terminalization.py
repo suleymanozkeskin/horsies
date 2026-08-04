@@ -51,13 +51,23 @@ _TYPE_COLUMNS = ',\n    '.join(f'{name} {kind}' for name, kind in OUTCOME_COLUMN
 # removes the collision and makes "one row shape" a fact the database enforces.
 OUTCOME_TYPE = 'horsies_terminalization_outcome'
 
+# Created once and then left alone. Every later schema release re-runs the
+# full desired state, and dropping the type each time would churn its
+# PostgreSQL identity underneath dependent functions, prepared statements and
+# rolling workers for no gain. A change to the shape is a versioned migration
+# of its own — a new type name, or an explicit ALTER — not a silent recreate.
 CREATE_OUTCOME_TYPE_SQL = text(f'''
-CREATE TYPE {OUTCOME_TYPE} AS (
-    {_TYPE_COLUMNS}
-)
-''')
-
-DROP_OUTCOME_TYPE_SQL = text(f'DROP TYPE IF EXISTS {OUTCOME_TYPE}')
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_type WHERE typname = '{OUTCOME_TYPE}'
+    ) THEN
+        CREATE TYPE {OUTCOME_TYPE} AS (
+            {_TYPE_COLUMNS}
+        );
+    END IF;
+END
+$$''')
 
 TERMINAL_STATUSES_SQL = "('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')"
 
@@ -88,18 +98,68 @@ ADD_TERMINALIZATION_KIND_COLUMN_SQL = text("""
 # cannot clear it, revives a row a new function terminalized — and the status
 # arm would fail that worker's retry. NULL passes, which is what makes the
 # value arm rolling-safe: legacy writers never supply the column at all.
-DROP_TERMINALIZATION_KIND_CHECK_SQL = text("""
+ADD_TERMINALIZATION_KIND_CHECK_SQL = text(f"""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_horsies_tasks_terminalization_kind'
+    ) THEN
+        ALTER TABLE horsies_tasks
+        ADD CONSTRAINT ck_horsies_tasks_terminalization_kind
+        CHECK (
+            terminalization_kind IS NULL
+            OR terminalization_kind IN ({_kind_domain()})
+        ) NOT VALID;
+    END IF;
+END
+$$""")
+
+# Validating separately keeps the scan off the exclusive lock the ADD takes.
+# Validating an already-valid constraint is a no-op, so this stays idempotent.
+VALIDATE_TERMINALIZATION_KIND_CHECK_SQL = text("""
     ALTER TABLE horsies_tasks
-    DROP CONSTRAINT IF EXISTS ck_horsies_tasks_terminalization_kind
+    VALIDATE CONSTRAINT ck_horsies_tasks_terminalization_kind
 """)
 
-ADD_TERMINALIZATION_KIND_CHECK_SQL = text(f"""
+
+# ---------------------------------------------------------------------------
+# terminal_at completeness
+# ---------------------------------------------------------------------------
+
+# Rows terminalized before the column existed carry no terminal instant. The
+# backfill takes the timestamp the writer did record; the handful of writers
+# that recorded neither fall back to the row's last update, which is the
+# closest bound the row still holds.
+BACKFILL_TERMINAL_AT_SQL = text(f"""
+    UPDATE horsies_tasks
+    SET terminal_at = COALESCE(completed_at, failed_at, updated_at)
+    WHERE status IN {TERMINAL_STATUSES_SQL}
+      AND terminal_at IS NOT DISTINCT FROM NULL
+""")
+
+# Terminal exactly when dated. Installed NOT VALID and validated separately so
+# the scan does not run under the lock the ADD takes, and only when absent —
+# re-adding it on every later release would rescan the table for nothing.
+ADD_TERMINAL_AT_CHECK_SQL = text(f"""
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'ck_horsies_tasks_terminal_at_terminal_only'
+    ) THEN
+        ALTER TABLE horsies_tasks
+        ADD CONSTRAINT ck_horsies_tasks_terminal_at_terminal_only
+        CHECK (
+            (status IN {TERMINAL_STATUSES_SQL}) = (terminal_at IS NOT NULL)
+        ) NOT VALID;
+    END IF;
+END
+$$""")
+
+VALIDATE_TERMINAL_AT_CHECK_SQL = text("""
     ALTER TABLE horsies_tasks
-    ADD CONSTRAINT ck_horsies_tasks_terminalization_kind
-    CHECK (
-        terminalization_kind IS NULL
-        OR terminalization_kind IN ({_kind_domain()})
-    )
+    VALIDATE CONSTRAINT ck_horsies_tasks_terminal_at_terminal_only
 """)
 
 

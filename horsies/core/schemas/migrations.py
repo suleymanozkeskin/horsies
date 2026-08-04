@@ -122,11 +122,15 @@ from sqlalchemy import text
 #      Backfilling in the migration that installs the constraint covers the
 #      window in one pass.
 
-# v18 is reserved for the terminal_at backfill and its CHECK constraint,
-#      which ship together in their own release. It is deliberately not
-#      claimed here: the apply path exits early when the stored version is at
-#      or above SCHEMA_VERSION, so a deployment that reached v19 first would
-#      never run v18. That release has to land before this one.
+# v18: terminal_at completeness — backfill, then a CHECK tying a terminal
+#      status to a terminal instant, in that order in one transaction so the
+#      constraint's precondition holds when it is enforced.
+#
+#      It ships inside this artifact rather than ahead of it. The apply path
+#      exits early once the stored version is at or above SCHEMA_VERSION, so a
+#      database that reached v19 without v18 would never receive it. The rule
+#      that follows: the artifact declaring a version must contain every
+#      migration below it that is not already published.
 
 # v19: terminalization_kind on horsies_tasks, plus the database-owned terminal
 #      operations that write it. Additive and nullable, with a value-domain
@@ -137,17 +141,25 @@ from sqlalchemy import text
 #      hardcodes its own kind, so a row cannot claim provenance it does not
 #      have. Rows terminalized before this release keep a NULL kind, which is
 #      read as unknown provenance and never inferred from.
+#
+#      Every merged change to the installed database program — a function
+#      body, a new operation, an equivalence class, the outcome shape —
+#      advances this version. A database already at the current version
+#      receives nothing, so an unversioned change to a function is a change
+#      that only fresh databases ever see.
 
 SCHEMA_VERSION = 19
 
 from .terminalization import (  # noqa: E402
+    ADD_TERMINAL_AT_CHECK_SQL,
     ADD_TERMINALIZATION_KIND_CHECK_SQL,
     ADD_TERMINALIZATION_KIND_COLUMN_SQL,
+    BACKFILL_TERMINAL_AT_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
-    DROP_OUTCOME_TYPE_SQL,
     DROP_TERMINALIZATION_FUNCTIONS_SQL,
-    DROP_TERMINALIZATION_KIND_CHECK_SQL,
+    VALIDATE_TERMINAL_AT_CHECK_SQL,
+    VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
 )
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
