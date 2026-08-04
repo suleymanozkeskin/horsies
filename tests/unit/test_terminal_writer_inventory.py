@@ -181,6 +181,36 @@ FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
         'CREATE_CANCEL_ORPHANED_TASKS_SQL',
         'CANCELLED',
     ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_ABANDON_OWNED_NODE_SQL',
+        'CANCELLED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_ABANDON_OWNED_NODES_SQL',
+        'CANCELLED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL',
+        'CANCELLED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_CANCEL_OWNED_NODE_SQL',
+        'CANCELLED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_CANCEL_OWNED_NODES_SQL',
+        'CANCELLED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL',
+        'CANCELLED',
+    ): 1,
 }
 
 
@@ -543,8 +573,8 @@ class TestTerminalWriterInventory:
         whichever path the tests exercise least.
         """
         windows = _scan_runtime_terminal_windows()
-        assert len(windows) == 25, (
-            f'Expected twenty-five terminal-assigning SET clauses, found '
+        assert len(windows) == 31, (
+            f'Expected thirty-one terminal-assigning SET clauses, found '
             f'{len(windows)}; the inventory and this assertion disagree.'
         )
         missing = [

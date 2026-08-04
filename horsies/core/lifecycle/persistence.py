@@ -22,8 +22,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .commands import (
+    AbandonNodesOfPausedWorkflows,
+    AbandonOwnedNode,
+    AbandonOwnedNodes,
     CancelLockedTask,
+    CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
+    CancelOwnedNode,
+    CancelOwnedNodes,
     CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
@@ -42,12 +48,21 @@ type ExecutableCommand = (
     | ExpireOwnedClaim
     | CancelLockedTask
     | CancelOwnedOrphan
+    | AbandonOwnedNode
+    | CancelOwnedNode
 )
 
 # Batch operations return zero or more rows, so they cannot share the
 # single-task adapters: exactly-one-row is a contract worth keeping honest
 # for the operations it is true of.
-type ExecutableBatchCommand = ExpirePendingTasks | CancelOrphanedTasks
+type ExecutableBatchCommand = (
+    ExpirePendingTasks
+    | CancelOrphanedTasks
+    | AbandonOwnedNodes
+    | AbandonNodesOfPausedWorkflows
+    | CancelOwnedNodes
+    | CancelNodesOfCancelledWorkflow
+)
 
 _COMPLETE_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_complete_locked_task(
@@ -108,6 +123,47 @@ _CANCEL_OWNED_ORPHAN_SQL = text("""
 _CANCEL_ORPHANED_TASKS_SQL = text("""
     SELECT * FROM horsies_cancel_orphaned_tasks(
         CAST(:batch_size AS INTEGER)
+    )
+""")
+
+_ABANDON_OWNED_NODE_SQL = text("""
+    SELECT * FROM horsies_abandon_owned_node(
+        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:claimed_at AS TIMESTAMPTZ)
+    )
+""")
+
+_ABANDON_OWNED_NODES_SQL = text("""
+    SELECT * FROM horsies_abandon_owned_nodes(
+        CAST(:ids AS VARCHAR[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
+        :worker_id
+    )
+""")
+
+_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL = text("""
+    SELECT * FROM horsies_abandon_nodes_of_paused_workflows(
+        CAST(:workflow_ids AS VARCHAR[])
+    )
+""")
+
+_CANCEL_OWNED_NODE_SQL = text("""
+    SELECT * FROM horsies_cancel_owned_node(
+        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:claimed_at AS TIMESTAMPTZ),
+        CAST(:accepts_requeued_pending AS BOOLEAN)
+    )
+""")
+
+_CANCEL_OWNED_NODES_SQL = text("""
+    SELECT * FROM horsies_cancel_owned_nodes(
+        CAST(:ids AS VARCHAR[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
+        :worker_id
+    )
+""")
+
+_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
+    SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow(
+        CAST(:workflow_ids AS VARCHAR[])
     )
 """)
 
@@ -198,6 +254,23 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'worker_id': fence.worker_id,
                 'claimed_at': fence.claimed_at,
             }
+        case AbandonOwnedNode(task_id=task_id, fence=fence):
+            return _ABANDON_OWNED_NODE_SQL, {
+                'task_id': task_id,
+                'worker_id': fence.worker_id,
+                'claimed_at': fence.claimed_at,
+            }
+        case CancelOwnedNode(
+            task_id=task_id,
+            fence=fence,
+            accepts_requeued_pending=accepts_requeued_pending,
+        ):
+            return _CANCEL_OWNED_NODE_SQL, {
+                'task_id': task_id,
+                'worker_id': fence.worker_id,
+                'claimed_at': fence.claimed_at,
+                'accepts_requeued_pending': accepts_requeued_pending,
+            }
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -221,6 +294,26 @@ def batch_call_for(
             return _CANCEL_ORPHANED_TASKS_SQL, {
                 'batch_size': batch_size,
             }
+        case AbandonOwnedNodes(fence=fence):
+            return _ABANDON_OWNED_NODES_SQL, {
+                'ids': list(fence.task_ids()),
+                'claimed_ats': list(fence.generations()),
+                'worker_id': fence.worker_id,
+            }
+        case AbandonNodesOfPausedWorkflows(workflow_ids=workflow_ids):
+            return _ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL, {
+                'workflow_ids': list(workflow_ids),
+            }
+        case CancelOwnedNodes(fence=fence):
+            return _CANCEL_OWNED_NODES_SQL, {
+                'ids': list(fence.task_ids()),
+                'claimed_ats': list(fence.generations()),
+                'worker_id': fence.worker_id,
+            }
+        case CancelNodesOfCancelledWorkflow(workflow_ids=workflow_ids):
+            return _CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL, {
+                'workflow_ids': list(workflow_ids),
+            }
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -237,10 +330,61 @@ async def apply_batch_async(
     """
     statement, parameters = batch_call_for(command)
     result = await connection.execute(statement, parameters)
-    return [
+    outcomes = [
         decode_outcome_row({str(key): value for key, value in row.items()})
         for row in result.mappings().all()
     ]
+    match command:
+        case AbandonOwnedNodes(fence=fence) | CancelOwnedNodes(fence=fence):
+            return _reconstruct_id_keyed_batch(
+                outcomes,
+                expected_count=len(fence.claim_generations),
+                command=command,
+            )
+        case (
+            ExpirePendingTasks()
+            | CancelOrphanedTasks()
+            | AbandonNodesOfPausedWorkflows()
+            | CancelNodesOfCancelledWorkflow()
+        ):
+            return outcomes
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _reconstruct_id_keyed_batch(
+    outcomes: Sequence[TerminalizationOutcome],
+    *,
+    expected_count: int,
+    command: AbandonOwnedNodes | CancelOwnedNodes,
+) -> list[TerminalizationOutcome]:
+    """Verify the ordinal contract and restore caller input order.
+
+    SQL result order is never trusted, even though the functions order their
+    rows. The exact ordinal set proves there is one answer per input and no
+    duplicate answer before the adapter gives the outcomes to its caller.
+    """
+    by_ordinal: dict[int, TerminalizationOutcome] = {}
+    for outcome in outcomes:
+        if outcome.ordinality is None:
+            raise RuntimeError(
+                f'{type(command).__name__} returned a row without ordinality'
+            )
+        if outcome.ordinality in by_ordinal:
+            raise RuntimeError(
+                f'{type(command).__name__} returned duplicate ordinality '
+                f'{outcome.ordinality}'
+            )
+        by_ordinal[outcome.ordinality] = outcome
+
+    expected = set(range(1, expected_count + 1))
+    actual = set(by_ordinal)
+    if actual != expected:
+        raise RuntimeError(
+            f'{type(command).__name__} ordinal set does not match its input: '
+            f'expected={sorted(expected)} actual={sorted(actual)}'
+        )
+    return [by_ordinal[ordinal] for ordinal in range(1, expected_count + 1)]
 
 
 async def apply_async(

@@ -1091,6 +1091,570 @@ DROP FUNCTION IF EXISTS horsies_cancel_orphaned_tasks(integer)
 """)
 
 
+# ---------------------------------------------------------------------------
+# CANCELLED — workflow pause
+# ---------------------------------------------------------------------------
+
+# Single claimed node, fenced to the child process's claim generation. The
+# pause literals are operation-owned, and the locked CTE preserves the claim
+# pre-image before the update clears it.
+CREATE_ABANDON_OWNED_NODE_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_abandon_owned_node(
+    p_task_id varchar,
+    p_worker_id text,
+    p_claimed_at timestamptz
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_applied boolean;
+BEGIN
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at
+        FROM horsies_tasks t
+        WHERE t.id = p_task_id
+        FOR UPDATE
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = 'TASK_CANCELLED',
+            failed_reason = 'Workflow paused before task start',
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+          AND ctx.status = 'CLAIMED'
+          AND ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+          AND (p_claimed_at IS NULL OR ctx.claimed_at = p_claimed_at)
+        RETURNING t.terminal_at, t.terminalization_kind
+    )
+    SELECT ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           upd.terminal_at, upd.terminalization_kind,
+           upd.terminal_at IS NOT NULL
+    INTO v_status, v_worker, v_claimed_at,
+         v_terminal_at, v_kind, v_applied
+    FROM ctx
+    LEFT JOIN upd ON TRUE;
+
+    IF FOUND AND v_applied THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            v_status, v_worker, v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.PAUSE_ABANDON_CLAIM)},
+        p_worker_id,
+        p_claimed_at
+    );
+END;
+$$
+""")
+
+DROP_ABANDON_OWNED_NODE_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_abandon_owned_node(
+    varchar, text, timestamptz
+)
+""")
+
+# Id-keyed pairwise batch. Every input has exactly one output, keyed by its
+# explicit ordinality. Preconditions are checked before the data-modifying CTE
+# starts; PostgreSQL otherwise pads unequal arrays with NULL and an UPDATE FROM
+# cannot define per-occurrence semantics for duplicate ids.
+CREATE_ABANDON_OWNED_NODES_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_abandon_owned_nodes(
+    p_ids varchar[],
+    p_claimed_ats timestamptz[],
+    p_worker_id text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
+        RAISE EXCEPTION 'batch arrays must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> cardinality(p_claimed_ats) THEN
+        RAISE EXCEPTION
+            'batch array lengths differ: ids=%, claimed_ats=%',
+            cardinality(p_ids), cardinality(p_claimed_ats)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF array_position(p_ids, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch task ids must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> (
+        SELECT COUNT(DISTINCT item.id)
+        FROM unnest(p_ids) AS item(id)
+    ) THEN
+        RAISE EXCEPTION 'batch task ids must be distinct'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    RETURN QUERY
+    WITH input AS MATERIALIZED (
+        SELECT g.task_id, g.claimed_at, g.ordinality
+        FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
+            AS g(task_id, claimed_at, ordinality)
+    ),
+    ctx AS MATERIALIZED (
+        SELECT input.task_id, input.claimed_at AS expected_claimed_at,
+               input.ordinality,
+               t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at,
+               t.terminal_at, t.terminalization_kind
+        FROM input
+        JOIN horsies_tasks t ON t.id = input.task_id
+        FOR UPDATE OF t
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = 'TASK_CANCELLED',
+            failed_reason = 'Workflow paused before task start',
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.task_id
+          AND ctx.status = 'CLAIMED'
+          AND ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+          AND (
+              ctx.expected_claimed_at IS NULL
+              OR ctx.claimed_at = ctx.expected_claimed_at
+          )
+        RETURNING t.id, t.terminal_at, t.terminalization_kind
+    )
+    SELECT input.task_id,
+           input.ordinality,
+           CASE
+               WHEN upd.id IS NOT NULL THEN 'APPLIED'
+               WHEN ctx.task_id IS NULL THEN 'TASK_ABSENT'
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    AND ctx.terminalization_kind = ANY(
+                        {_kind_array(TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH)}
+                    ) THEN 'ALREADY_APPLIED'
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN 'SOURCE_STATE_CONFLICT'
+               WHEN ctx.claimed_by_worker_id
+                        IS DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+                    OR (
+                        input.claimed_at IS NOT NULL
+                        AND ctx.claimed_at IS DISTINCT FROM input.claimed_at
+                    ) THEN 'LOST_CLAIM'
+               ELSE 'SOURCE_STATE_CONFLICT'
+           END::text,
+           CASE
+               WHEN upd.id IS NOT NULL THEN upd.terminal_at
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN ctx.terminal_at
+               ELSE NULL::timestamptz
+           END,
+           CASE
+               WHEN upd.id IS NOT NULL THEN upd.terminalization_kind
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN ctx.terminalization_kind
+               ELSE NULL::text
+           END,
+           ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           CASE
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    AND NOT ((
+                        ctx.terminalization_kind = ANY(
+                            {_kind_array(TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH)}
+                        )
+                    ) IS TRUE)
+                    THEN 'FOREIGN_TERMINALIZATION'::text
+               ELSE NULL::text
+           END,
+           NULL::jsonb
+    FROM input
+    LEFT JOIN ctx ON ctx.ordinality = input.ordinality
+    LEFT JOIN upd ON upd.id = input.task_id
+    ORDER BY input.ordinality;
+END;
+$$
+""")
+
+DROP_ABANDON_OWNED_NODES_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_abandon_owned_nodes(
+    varchar[], timestamptz[], text
+)
+""")
+
+# Workflow-scoped batch: the caller owns the workflow-task disposition in the
+# same transaction. This function owns only the terminal task transition and
+# reports only rows it changed; workflows whose guards match nothing produce
+# no synthetic outcome.
+CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_abandon_nodes_of_paused_workflows(
+    p_workflow_ids varchar[]
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at
+        FROM horsies_tasks t
+        WHERE t.status = 'CLAIMED'
+          AND EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t.id
+                AND wt.workflow_id = ANY(p_workflow_ids)
+                AND w.status = 'PAUSED'
+                AND wt.status IN ('ENQUEUED', 'RUNNING')
+          )
+        FOR UPDATE OF t
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = 'TASK_CANCELLED',
+            failed_reason = 'Workflow paused before task start',
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.PAUSE_ABANDON_WORKFLOW.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+        RETURNING t.id, t.terminal_at, t.terminalization_kind
+    )
+    SELECT upd.id, NULL::bigint, 'APPLIED'::text,
+           upd.terminal_at, upd.terminalization_kind,
+           ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           NULL::text, NULL::jsonb
+    FROM upd
+    JOIN ctx ON ctx.id = upd.id;
+END;
+$$
+""")
+
+DROP_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_abandon_nodes_of_paused_workflows(varchar[])
+""")
+
+
+# ---------------------------------------------------------------------------
+# CANCELLED — workflow cancellation
+# ---------------------------------------------------------------------------
+
+# A claimed task uses the full ownership fence. The explicit carve-out admits
+# a task this same child observed as requeued to PENDING, where no claim remains
+# to fence; it is a property of this variant and cannot be supplied to another.
+CREATE_CANCEL_OWNED_NODE_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_owned_node(
+    p_task_id varchar,
+    p_worker_id text,
+    p_claimed_at timestamptz,
+    p_accepts_requeued_pending boolean
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_applied boolean;
+BEGIN
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at
+        FROM horsies_tasks t
+        WHERE t.id = p_task_id
+        FOR UPDATE
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+          AND (
+              (
+                  ctx.status = 'CLAIMED'
+                  AND ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+                  AND (
+                      p_claimed_at IS NULL
+                      OR ctx.claimed_at = p_claimed_at
+                  )
+              )
+              OR (
+                  p_accepts_requeued_pending
+                  AND ctx.status = 'PENDING'
+              )
+          )
+        RETURNING t.terminal_at, t.terminalization_kind
+    )
+    SELECT ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           upd.terminal_at, upd.terminalization_kind,
+           upd.terminal_at IS NOT NULL
+    INTO v_status, v_worker, v_claimed_at,
+         v_terminal_at, v_kind, v_applied
+    FROM ctx
+    LEFT JOIN upd ON TRUE;
+
+    IF FOUND AND v_applied THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            v_status, v_worker, v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.WORKFLOW_CANCEL_CLAIM)},
+        p_worker_id,
+        p_claimed_at
+    );
+END;
+$$
+""")
+
+DROP_CANCEL_OWNED_NODE_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_owned_node(
+    varchar, text, timestamptz, boolean
+)
+""")
+
+CREATE_CANCEL_OWNED_NODES_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_owned_nodes(
+    p_ids varchar[],
+    p_claimed_ats timestamptz[],
+    p_worker_id text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
+        RAISE EXCEPTION 'batch arrays must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> cardinality(p_claimed_ats) THEN
+        RAISE EXCEPTION
+            'batch array lengths differ: ids=%, claimed_ats=%',
+            cardinality(p_ids), cardinality(p_claimed_ats)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF array_position(p_ids, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch task ids must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> (
+        SELECT COUNT(DISTINCT item.id)
+        FROM unnest(p_ids) AS item(id)
+    ) THEN
+        RAISE EXCEPTION 'batch task ids must be distinct'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    RETURN QUERY
+    WITH input AS MATERIALIZED (
+        SELECT g.task_id, g.claimed_at, g.ordinality
+        FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
+            AS g(task_id, claimed_at, ordinality)
+    ),
+    ctx AS MATERIALIZED (
+        SELECT input.task_id, input.claimed_at AS expected_claimed_at,
+               input.ordinality,
+               t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at,
+               t.terminal_at, t.terminalization_kind
+        FROM input
+        JOIN horsies_tasks t ON t.id = input.task_id
+        FOR UPDATE OF t
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.task_id
+          AND ctx.status = 'CLAIMED'
+          AND ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+          AND (
+              ctx.expected_claimed_at IS NULL
+              OR ctx.claimed_at = ctx.expected_claimed_at
+          )
+        RETURNING t.id, t.terminal_at, t.terminalization_kind
+    )
+    SELECT input.task_id,
+           input.ordinality,
+           CASE
+               WHEN upd.id IS NOT NULL THEN 'APPLIED'
+               WHEN ctx.task_id IS NULL THEN 'TASK_ABSENT'
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    AND ctx.terminalization_kind = ANY(
+                        {_kind_array(TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH)}
+                    ) THEN 'ALREADY_APPLIED'
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN 'SOURCE_STATE_CONFLICT'
+               WHEN ctx.claimed_by_worker_id
+                        IS DISTINCT FROM CAST(p_worker_id AS VARCHAR)
+                    OR (
+                        input.claimed_at IS NOT NULL
+                        AND ctx.claimed_at IS DISTINCT FROM input.claimed_at
+                    ) THEN 'LOST_CLAIM'
+               ELSE 'SOURCE_STATE_CONFLICT'
+           END::text,
+           CASE
+               WHEN upd.id IS NOT NULL THEN upd.terminal_at
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN ctx.terminal_at
+               ELSE NULL::timestamptz
+           END,
+           CASE
+               WHEN upd.id IS NOT NULL THEN upd.terminalization_kind
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    THEN ctx.terminalization_kind
+               ELSE NULL::text
+           END,
+           ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           CASE
+               WHEN ctx.status IN {TERMINAL_STATUSES_SQL}
+                    AND NOT ((
+                        ctx.terminalization_kind = ANY(
+                            {_kind_array(TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH)}
+                        )
+                    ) IS TRUE)
+                    THEN 'FOREIGN_TERMINALIZATION'::text
+               ELSE NULL::text
+           END,
+           NULL::jsonb
+    FROM input
+    LEFT JOIN ctx ON ctx.ordinality = input.ordinality
+    LEFT JOIN upd ON upd.id = input.task_id
+    ORDER BY input.ordinality;
+END;
+$$
+""")
+
+DROP_CANCEL_OWNED_NODES_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_owned_nodes(
+    varchar[], timestamptz[], text
+)
+""")
+
+CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_nodes_of_cancelled_workflow(
+    p_workflow_ids varchar[]
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at
+        FROM horsies_tasks t
+        WHERE t.status IN ('PENDING', 'CLAIMED', 'RUNNING')
+          AND EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t.id
+                AND wt.workflow_id = ANY(p_workflow_ids)
+                AND w.status = 'CANCELLED'
+                AND wt.status = 'ENQUEUED'
+          )
+        FOR UPDATE OF t
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+        RETURNING t.id, t.terminal_at, t.terminalization_kind
+    )
+    SELECT upd.id, NULL::bigint, 'APPLIED'::text,
+           upd.terminal_at, upd.terminalization_kind,
+           ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           NULL::text, NULL::jsonb
+    FROM upd
+    JOIN ctx ON ctx.id = upd.id;
+END;
+$$
+""")
+
+DROP_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_nodes_of_cancelled_workflow(varchar[])
+""")
+
+
 # Drops precede creates on every apply, and the drop list names exact
 # signatures: PostgreSQL overloads by signature, so a changed argument list
 # without a matching drop leaves the old overload installed and callable.
@@ -1104,6 +1668,12 @@ DROP_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     DROP_CANCEL_LOCKED_TASK_SQL,
     DROP_CANCEL_OWNED_ORPHAN_SQL,
     DROP_CANCEL_ORPHANED_TASKS_SQL,
+    DROP_ABANDON_OWNED_NODE_SQL,
+    DROP_ABANDON_OWNED_NODES_SQL,
+    DROP_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL,
+    DROP_CANCEL_OWNED_NODE_SQL,
+    DROP_CANCEL_OWNED_NODES_SQL,
+    DROP_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL,
     DROP_MISS_CLASSIFIER_SQL,
 )
 
@@ -1122,4 +1692,10 @@ CREATE_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     CREATE_CANCEL_LOCKED_TASK_SQL,
     CREATE_CANCEL_OWNED_ORPHAN_SQL,
     CREATE_CANCEL_ORPHANED_TASKS_SQL,
+    CREATE_ABANDON_OWNED_NODE_SQL,
+    CREATE_ABANDON_OWNED_NODES_SQL,
+    CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL,
+    CREATE_CANCEL_OWNED_NODE_SQL,
+    CREATE_CANCEL_OWNED_NODES_SQL,
+    CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL,
 )
