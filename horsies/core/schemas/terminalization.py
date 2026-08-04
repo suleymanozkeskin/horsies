@@ -60,7 +60,11 @@ CREATE_OUTCOME_TYPE_SQL = text(f'''
 DO $$
 BEGIN
     IF NOT EXISTS (
-        SELECT 1 FROM pg_type WHERE typname = '{OUTCOME_TYPE}'
+        SELECT 1
+        FROM pg_type t
+        JOIN pg_namespace n ON n.oid = t.typnamespace
+        WHERE t.typname = '{OUTCOME_TYPE}'
+          AND n.nspname = current_schema()
     ) THEN
         CREATE TYPE {OUTCOME_TYPE} AS (
             {_TYPE_COLUMNS}
@@ -103,7 +107,8 @@ DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'ck_horsies_tasks_terminalization_kind'
+        WHERE conrelid = 'horsies_tasks'::regclass
+          AND conname = 'ck_horsies_tasks_terminalization_kind'
     ) THEN
         ALTER TABLE horsies_tasks
         ADD CONSTRAINT ck_horsies_tasks_terminalization_kind
@@ -132,11 +137,25 @@ VALIDATE_TERMINALIZATION_KIND_CHECK_SQL = text("""
 # that recorded neither fall back to the row's last update, which is the
 # closest bound the row still holds.
 BACKFILL_TERMINAL_AT_SQL = text(f"""
-    UPDATE horsies_tasks
-    SET terminal_at = COALESCE(completed_at, failed_at, updated_at)
-    WHERE status IN {TERMINAL_STATUSES_SQL}
-      AND terminal_at IS NOT DISTINCT FROM NULL
-""")
+DO $$
+BEGIN
+    -- Once the constraint is validated, no undated terminal row can exist, so
+    -- the scan can only find nothing. Every later schema release would still
+    -- pay for it, which is why the proof is the guard.
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'horsies_tasks'::regclass
+          AND conname = 'ck_horsies_tasks_terminal_at_terminal_only'
+          AND convalidated
+    ) THEN
+        UPDATE horsies_tasks
+        SET terminal_at =
+            COALESCE(completed_at, failed_at, updated_at, created_at)
+        WHERE status IN {TERMINAL_STATUSES_SQL}
+          AND terminal_at IS NULL;
+    END IF;
+END
+$$""")
 
 # Terminal exactly when dated. Installed NOT VALID and validated separately so
 # the scan does not run under the lock the ADD takes, and only when absent —
@@ -146,7 +165,8 @@ DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'ck_horsies_tasks_terminal_at_terminal_only'
+        WHERE conrelid = 'horsies_tasks'::regclass
+          AND conname = 'ck_horsies_tasks_terminal_at_terminal_only'
     ) THEN
         ALTER TABLE horsies_tasks
         ADD CONSTRAINT ck_horsies_tasks_terminal_at_terminal_only

@@ -174,7 +174,7 @@ async def _assert_end_state(engine: AsyncEngine) -> None:
         )
 
         constraints = {
-            row.conname
+            row.conname: row.convalidated
             for row in (
                 await connection.execute(
                     text("""
@@ -185,8 +185,10 @@ async def _assert_end_state(engine: AsyncEngine) -> None:
                 )
             ).all()
         }
-        assert 'ck_horsies_tasks_terminalization_kind' in constraints
-        assert 'ck_horsies_tasks_terminal_at_terminal_only' in constraints
+        assert constraints.get('ck_horsies_tasks_terminalization_kind') is True
+        assert (
+            constraints.get('ck_horsies_tasks_terminal_at_terminal_only') is True
+        ), 'a constraint left NOT VALID proves nothing about existing rows'
 
 
 def _pg_spelling(declared: str) -> str:
@@ -226,20 +228,29 @@ class TestUpgradePaths:
         engine = _engine(scratch_database)
         try:
             await _rewind_to_published(engine)
+            task_id = str(uuid.uuid4())
             async with engine.connect() as connection:
+                # Eight of the writers being consolidated record neither
+                # completed_at nor failed_at, so this is the row the backfill
+                # has to reach through its later fallbacks. A COMPLETED row
+                # with a completed_at would pass without exercising them.
                 await connection.execute(
                     text("""
                         INSERT INTO horsies_tasks (
                             id, task_name, queue_name, status, args, kwargs,
                             enqueue_sha, is_workflow_task, claimed,
-                            completed_at, terminal_at
+                            completed_at, failed_at, terminal_at,
+                            created_at, updated_at
                         )
                         VALUES (
-                            :id, 'upgrade.test', 'default', 'COMPLETED', '[]',
-                            '{}', repeat('0', 64), FALSE, FALSE, NOW(), NULL
+                            :id, 'upgrade.test', 'default', 'CANCELLED', '[]',
+                            '{}', repeat('0', 64), FALSE, FALSE,
+                            NULL, NULL, NULL,
+                            TIMESTAMPTZ '2026-01-01 00:00:00+00',
+                            TIMESTAMPTZ '2026-02-02 00:00:00+00'
                         )
                     """),
-                    {'id': str(uuid.uuid4())},
+                    {'id': task_id},
                 )
                 await connection.commit()
 
@@ -258,6 +269,20 @@ class TestUpgradePaths:
                     )
                 ).scalar_one()
             assert undated == 0
+
+            async with engine.connect() as connection:
+                dated = (
+                    await connection.execute(
+                        text(
+                            'SELECT terminal_at, updated_at FROM horsies_tasks '
+                            'WHERE id = :id'
+                        ),
+                        {'id': task_id},
+                    )
+                ).one()
+            # updated_at is the first fallback that has a value here, so it is
+            # the instant the row must end up dated by.
+            assert dated.terminal_at == dated.updated_at
         finally:
             await engine.dispose()
 
@@ -292,3 +317,104 @@ class TestUpgradePaths:
             await _assert_end_state(engine)
         finally:
             await engine.dispose()
+
+    async def test_a_version_bump_restores_a_replaced_function_body(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The mechanism the versioning rule rests on, exercised directly.
+
+        Function bodies are reinstalled on every apply, but an apply only
+        happens when the stored version is behind. This replaces an installed
+        body with one that answers differently, lowers the watermark, and
+        migrates: the canonical behaviour must come back. If it does not, then
+        a merged change to a function body would reach fresh databases only,
+        which is the failure the one-version-per-change rule exists to
+        prevent.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text(f"""
+                        CREATE OR REPLACE FUNCTION horsies_complete_locked_task(
+                            p_task_id varchar,
+                            p_worker_id text,
+                            p_result text
+                        )
+                        RETURNS SETOF {OUTCOME_TYPE}
+                        LANGUAGE plpgsql
+                        AS $sentinel$
+                        BEGIN
+                            RETURN QUERY SELECT
+                                p_task_id, NULL::bigint, 'TASK_ABSENT'::text,
+                                NULL::timestamptz, NULL::text,
+                                NULL::text, NULL::varchar, NULL::timestamptz,
+                                NULL::text, NULL::jsonb;
+                        END;
+                        $sentinel$
+                    """)
+                )
+                await connection.commit()
+
+            task_id = await _seed_running(engine)
+            assert await _completion_outcome(engine, task_id) == 'TASK_ABSENT'
+
+            async with engine.connect() as connection:
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version >= :v'),
+                    {'v': SCHEMA_VERSION},
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version (version) '
+                        'VALUES (:v) ON CONFLICT DO NOTHING'
+                    ),
+                    {'v': SCHEMA_VERSION - 1},
+                )
+                await connection.commit()
+
+            await _migrate(scratch_database)
+
+            restored = await _seed_running(engine)
+            assert await _completion_outcome(engine, restored) == 'APPLIED'
+            await _assert_end_state(engine)
+        finally:
+            await engine.dispose()
+
+
+async def _seed_running(engine: AsyncEngine) -> str:
+    task_id = str(uuid.uuid4())
+    async with engine.connect() as connection:
+        await connection.execute(
+            text("""
+                INSERT INTO horsies_tasks (
+                    id, task_name, queue_name, status, args, kwargs,
+                    enqueue_sha, is_workflow_task, claimed,
+                    claimed_by_worker_id, claimed_at, started_at
+                )
+                VALUES (
+                    :id, 'upgrade.test', 'default', 'RUNNING', '[]', '{}',
+                    repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW()
+                )
+            """),
+            {'id': task_id},
+        )
+        await connection.commit()
+    return task_id
+
+
+async def _completion_outcome(engine: AsyncEngine, task_id: str) -> str:
+    async with engine.connect() as connection:
+        outcome = (
+            await connection.execute(
+                text(
+                    'SELECT outcome FROM horsies_complete_locked_task('
+                    "CAST(:id AS VARCHAR), 'w1', '{}')"
+                ),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        await connection.commit()
+    return str(outcome)
