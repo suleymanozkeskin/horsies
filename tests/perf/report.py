@@ -47,6 +47,7 @@ def render_summary(result: RunResult) -> str:
         f'| batch | {batch} |',
         f'| fsync | {conditions.fsync} |',
         f'| synchronous_commit | {conditions.synchronous_commit} |',
+        f'| autovacuum | {conditions.autovacuum} |',
         f'| bootstrap resamples | {conditions.resamples} |',
         f'| bootstrap seed | {conditions.seed} |',
         f'| demo units quiesced | {_yes_no(conditions.demo_quiesced)} |',

@@ -2,6 +2,9 @@ name: Full Test Suite
 
 on:
   workflow_dispatch:
+  # Callable so the release workflow gates publishing on this exact suite at
+  # the exact commit being published, instead of maintaining its own copy.
+  workflow_call:
 
 permissions: {}
 
@@ -96,90 +99,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: E2E - Layer 1 (tasks)
+      # The file list is derived, not enumerated: a hand-maintained list
+      # silently stops covering whatever is added next. The runner gives each
+      # file its own pytest process and cleans up workers after every file,
+      # including failures. test_pgbouncer_smoke.py is excluded there — it
+      # needs the PgBouncer topology and runs in the pgbouncer job below.
+      - name: E2E suite (one pytest process per file)
         env:
           DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer1_tasks.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Layer 2 (cluster)
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer2_cluster.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Layer 3 (scheduler)
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer3_scheduler.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Layer 4 (workflow structure)
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer4_workflow_structure.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Layer 5 (workflow dataflow)
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer5_workflow_dataflow.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Layer 6 (workflow advanced)
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_layer6_workflow_advanced.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Fanout saturation
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_fanout_saturation.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Task timeout
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_task_timeout.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Child-process hooks
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_child_process_hooks.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Child recycling
-        env:
-          DB_PASSWORD: testpassword
-        run: |
-          uv run pytest tests/e2e/test_child_recycling.py -v --tb=short
-          pkill -TERM -f "horsies worker" 2>/dev/null || true
-          sleep 5
-
-      - name: E2E - Memory recycling
-        env:
-          DB_PASSWORD: testpassword
-        run: uv run pytest tests/e2e/test_memory_recycling.py -v --tb=short
+        run: scripts/run_e2e_suite.sh -v --tb=short
 
   perf-harness:
     runs-on: ubuntu-latest

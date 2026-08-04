@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from sqlalchemy import create_engine
 
 from tests.perf.prepare import apply_schema
 from tests.perf.report import render_raw, render_summary, summary_filename
-from tests.perf.runner import RunResult, run_scenario
+from tests.perf.runner import RunResult, run_scenario, server_setting
 from tests.perf.scenarios import (
     SCENARIOS,
     BatchScenario,
@@ -48,6 +49,16 @@ SMOKE_OBSERVATIONS = 200
 SMOKE_BATCHES = 10
 GATE_RESAMPLES = 1_000
 SMOKE_RESAMPLES = 200
+
+# The server settings a gate run refuses to start without. Each is part of
+# the measurement contract with its reason in the compose file; a gate run
+# against a server reporting anything else is measuring a different
+# environment than the one the budgets were declared for.
+GATE_ENVIRONMENT: dict[str, str] = {
+    'autovacuum': 'off',
+    'fsync': 'off',
+    'synchronous_commit': 'off',
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -101,9 +112,20 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     engine = create_engine(arguments.dsn)
-    verdicts: list[Verdict] = []
+    outcomes: list[tuple[Verdict, bool]] = []
     control_failures: list[str] = []
     try:
+        if arguments.scale == 'gate':
+            with engine.connect() as connection:
+                observed = {
+                    name: server_setting(connection, name)
+                    for name in GATE_ENVIRONMENT
+                }
+            violations = _gate_environment_violations(observed)
+            if violations:
+                for violation in violations:
+                    print(f'gate run refused: {violation}', file=sys.stderr)
+                return 2
         for scenario in scenarios:
             result = run_scenario(
                 engine,
@@ -116,7 +138,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             summary = render_summary(result)
             print(summary)
-            verdicts.append(result.verdict)
+            outcomes.append(
+                (result.verdict, 'control' in result.conditions.comparison),
+            )
             control_failures += _control_disagreements(result)
 
             if arguments.write_summary:
@@ -136,14 +160,50 @@ def main(argv: list[str] | None = None) -> int:
             print(f'control run disagrees with itself: {failure}', file=sys.stderr)
         return 1
 
-    # A smoke run proves the harness works; a wide interval at 200 observations
-    # is the expected answer, not a failure. A gate run has to establish
-    # something, so anything short of a pass leaves the phase blocked.
-    match arguments.scale:
+    return _exit_status(arguments.scale, outcomes)
+
+
+def _gate_environment_violations(observed: dict[str, str]) -> list[str]:
+    """Contract settings the server does not report as required.
+
+    Verified by SHOW against the live server rather than trusted from the
+    compose file, for the same reason --demo-quiesced must be stated: a gate
+    number is only evidence under its stated conditions, and the conditions
+    are the server's to answer for.
+    """
+    return [
+        f'{name} is {observed.get(name)!r}; '
+        f'the measurement contract requires {required!r}'
+        for name, required in GATE_ENVIRONMENT.items()
+        if observed.get(name) != required
+    ]
+
+
+def _exit_status(
+    scale: str,
+    outcomes: Sequence[tuple[Verdict, bool]],
+) -> int:
+    """The run's exit code, from each scenario's verdict and comparison mode.
+
+    A gate run has to establish something, so anything short of a pass leaves
+    the phase blocked. A smoke run proves the machinery: a wide interval at
+    200 observations is the expected answer, and a control run's latency
+    verdict is not judged at all — p99 rests on a handful of samples there,
+    so a neighbour's burst during one side's blocks yields a narrow interval
+    around a real difference in the runner, not the code. What a control run
+    answers for is the exact-count checks, which fail the run at every scale
+    before this decision is reached.
+    """
+    match scale:
         case 'gate':
-            return 0 if all(v is Verdict.PASS for v in verdicts) else 1
+            return 0 if all(v is Verdict.PASS for v, _ in outcomes) else 1
         case _:
-            return 0 if Verdict.FAIL not in verdicts else 1
+            judged_failures = [
+                verdict
+                for verdict, is_control in outcomes
+                if verdict is Verdict.FAIL and not is_control
+            ]
+            return 1 if judged_failures else 0
 
 
 def _observations_for(scenario: Scenario, scale: str) -> int:
@@ -172,11 +232,14 @@ def _control_disagreements(result: RunResult) -> list[str]:
     That invalidates every number in the run, including the ones that look
     reasonable.
 
-    Write transactions are held to a looser rule for a stated reason rather
-    than a convenient one: transaction ids come from a server-wide sequence, so
-    a block that happens to overlap an autovacuum wakeup counts it. Each side
-    must still account for its own operations, and the two may differ only by
-    the background a run of this length can produce.
+    Write transactions are held to a bounded environmental allowance rather
+    than exact equality, for a stated reason: transaction ids come from a
+    server-wide counter, so unattributable activity anywhere on the server
+    lands in whichever side's block overlaps it. Routine maintenance is
+    disabled in the measurement environment, so the allowance is headroom
+    against what cannot be attributed — not tolerance on the operation's own
+    commit count, which the per-side lower bound below and the declared
+    budgets enforce.
     """
     if 'control' not in result.conditions.comparison:
         return []
