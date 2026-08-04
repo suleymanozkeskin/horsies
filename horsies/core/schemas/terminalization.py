@@ -120,8 +120,11 @@ BEGIN
 END
 $$""")
 
-# Validating separately keeps the scan off the exclusive lock the ADD takes.
-# Validating an already-valid constraint is a no-op, so this stays idempotent.
+# ADD and VALIDATE share the migration transaction, so on first apply the
+# validation scan runs under the lock the ADD takes either way. The split is
+# for idempotency: the ADD runs only when the constraint is absent, and
+# validating an already-valid constraint is a no-op, so a later release
+# neither re-adds nor rescans.
 VALIDATE_TERMINALIZATION_KIND_CHECK_SQL = text("""
     ALTER TABLE horsies_tasks
     VALIDATE CONSTRAINT ck_horsies_tasks_terminalization_kind
@@ -157,9 +160,10 @@ BEGIN
 END
 $$""")
 
-# Terminal exactly when dated. Installed NOT VALID and validated separately so
-# the scan does not run under the lock the ADD takes, and only when absent —
-# re-adding it on every later release would rescan the table for nothing.
+# Terminal exactly when dated. Installed NOT VALID only when absent, and
+# validated separately: on first apply the scan runs under the migration
+# transaction's lock regardless, but a later release neither re-adds nor
+# rescans an already-valid constraint.
 ADD_TERMINAL_AT_CHECK_SQL = text(f"""
 DO $$
 BEGIN
@@ -445,12 +449,208 @@ DROP FUNCTION IF EXISTS horsies_complete_task_fused(
 """)
 
 
+# ---------------------------------------------------------------------------
+# FAILED
+# ---------------------------------------------------------------------------
+
+# One function for the two locked-failure writers: application failure and
+# worker-level failure differ only in whether a failure reason is carried,
+# and the COALESCE below is the single asymmetric assignment that difference
+# requires. A NULL p_failed_reason means "leave the column as it is", not
+# "clear it" — no requeue path clears failed_reason, so a row can carry one
+# from an earlier attempt that this transition never owned.
+CREATE_FAIL_LOCKED_TASK_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_fail_locked_task(
+    p_task_id varchar,
+    p_worker_id text,
+    p_result text,
+    p_error_code text,
+    p_failed_reason text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_claimed_at timestamptz;
+BEGIN
+    UPDATE horsies_tasks t
+    SET status = 'FAILED',
+        failed_at = NOW(),
+        result = p_result,
+        error_code = p_error_code,
+        failed_reason = COALESCE(p_failed_reason, failed_reason),
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        terminal_at = NOW(),
+        terminalization_kind = '{TerminalizationKind.FAIL_RUNNING.value}',
+        updated_at = NOW()
+    WHERE t.id = p_task_id
+      AND t.status = 'RUNNING'
+      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+    RETURNING t.terminal_at, t.terminalization_kind, t.claimed_at
+    INTO v_terminal_at, v_kind, v_claimed_at;
+
+    IF FOUND THEN
+        -- The pre-transition image: status and worker are what the guard
+        -- matched, and this transition leaves the claim columns alone, so the
+        -- returned claim is the one the update found.
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.FAIL_RUNNING)},
+        p_worker_id,
+        NULL::timestamptz
+    );
+END;
+$$
+""")
+
+DROP_FAIL_LOCKED_TASK_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_fail_locked_task(
+    varchar, text, text, text, text
+)
+""")
+
+# Guard family, not fence family: the worker that held this task is by
+# hypothesis not answering, so the guard is staleness rather than ownership,
+# and a refusal reports the staleness evidence the predicate judged. The
+# miss path handles the guard case inline and delegates absent, terminal and
+# wrong-source-state rows to the shared classifier with NULL claim
+# parameters, which its arms are built to accept.
+CREATE_FAIL_STALE_TASK_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_fail_stale_task(
+    p_task_id varchar,
+    p_stale_after_seconds integer,
+    p_finalizing_stale_after_seconds integer,
+    p_result text,
+    p_error_code text,
+    p_failed_reason text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_started_at timestamptz;
+    v_last_heartbeat timestamptz;
+BEGIN
+    UPDATE horsies_tasks AS t
+    SET status = 'FAILED',
+        failed_at = NOW(),
+        failed_reason = p_failed_reason,
+        result = p_result,
+        error_code = p_error_code,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        terminal_at = NOW(),
+        terminalization_kind = '{TerminalizationKind.FAIL_STALE.value}',
+        updated_at = NOW()
+    WHERE t.id = p_task_id
+      AND t.status = 'RUNNING'
+      AND t.started_at IS NOT NULL
+      AND (
+          t.finalizing_at IS NULL
+          OR t.finalizing_at
+             < NOW() - make_interval(secs => p_finalizing_stale_after_seconds)
+      )
+      AND COALESCE(
+          (
+              SELECT h.sent_at
+              FROM horsies_heartbeats h
+              WHERE h.task_id = t.id AND h.role = 'runner'
+              ORDER BY h.sent_at DESC
+              LIMIT 1
+          ),
+          t.started_at
+      ) < NOW() - make_interval(secs => p_stale_after_seconds)
+    RETURNING t.terminal_at, t.terminalization_kind,
+              t.claimed_by_worker_id, t.claimed_at
+    INTO v_terminal_at, v_kind, v_worker, v_claimed_at;
+
+    IF FOUND THEN
+        -- Cross-worker by design: the observed claim is whichever worker's
+        -- silence the guard just judged, read from the locked row itself.
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            'RUNNING'::text, v_worker, v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at, t.started_at
+    INTO v_status, v_worker, v_claimed_at, v_started_at
+    FROM horsies_tasks t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND AND v_status = 'RUNNING' THEN
+        -- Live and in this operation's source state, so it was the staleness
+        -- guard that refused. Its evidence is the observations the predicate
+        -- judged, plus the thresholds it judged them against.
+        SELECT h.sent_at INTO v_last_heartbeat
+        FROM horsies_heartbeats h
+        WHERE h.task_id = p_task_id AND h.role = 'runner'
+        ORDER BY h.sent_at DESC
+        LIMIT 1;
+
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'STALENESS'::text,
+            jsonb_build_object(
+                'last_heartbeat_at', v_last_heartbeat,
+                'started_at', v_started_at,
+                'stale_after_seconds', p_stale_after_seconds,
+                'finalizing_stale_after_seconds',
+                    p_finalizing_stale_after_seconds
+            );
+        RETURN;
+    END IF;
+
+    -- Absent, terminal, or live outside the source state: the shared
+    -- classifier's arms are exactly right, and with no fence to check the
+    -- claim parameters are NULL. The row lock taken above is held for the
+    -- rest of this transaction, so the classifier re-reads a settled image.
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.FAIL_STALE)},
+        NULL::text,
+        NULL::timestamptz
+    );
+END;
+$$
+""")
+
+DROP_FAIL_STALE_TASK_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_fail_stale_task(
+    varchar, integer, integer, text, text, text
+)
+""")
+
+
 # Drops precede creates on every apply, and the drop list names exact
 # signatures: PostgreSQL overloads by signature, so a changed argument list
 # without a matching drop leaves the old overload installed and callable.
 DROP_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     DROP_COMPLETE_LOCKED_TASK_SQL,
     DROP_COMPLETE_TASK_FUSED_SQL,
+    DROP_FAIL_LOCKED_TASK_SQL,
+    DROP_FAIL_STALE_TASK_SQL,
     DROP_MISS_CLASSIFIER_SQL,
 )
 
@@ -462,4 +662,6 @@ CREATE_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     CREATE_MISS_CLASSIFIER_SQL,
     CREATE_COMPLETE_LOCKED_TASK_SQL,
     CREATE_COMPLETE_TASK_FUSED_SQL,
+    CREATE_FAIL_LOCKED_TASK_SQL,
+    CREATE_FAIL_STALE_TASK_SQL,
 )

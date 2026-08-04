@@ -25,7 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 
-from horsies.core.lifecycle.commands import CompleteLockedTask, CompleteTaskFused
+from horsies.core.lifecycle.commands import (
+    CompleteLockedTask,
+    CompleteTaskFused,
+    FailLockedTask,
+    FailStaleTask,
+)
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -34,6 +39,7 @@ from horsies.core.lifecycle.outcomes import (
     LostClaim,
     ObservedClaim,
     ObservedForeignTerminalization,
+    ObservedStaleness,
     SourceStateConflict,
     TaskAbsent,
 )
@@ -393,3 +399,400 @@ class TestKindVocabularyIsEnforced:
             {'id': task_id},
         )
         await session.commit()
+
+
+STALE_AFTER = 60
+FINALIZING_STALE_AFTER = 30
+
+
+def _fail_locked(task_id: str, failed_reason: str | None = None) -> FailLockedTask:
+    return FailLockedTask(
+        task_id=task_id,
+        fence=PriorLockedRead(worker_id=WORKER),
+        result_json='{"err": 1}',
+        error_code='TASK_EXCEPTION',
+        failed_reason=failed_reason,
+    )
+
+
+def _fail_stale(task_id: str) -> FailStaleTask:
+    return FailStaleTask(
+        task_id=task_id,
+        stale_after_seconds=STALE_AFTER,
+        finalizing_stale_after_seconds=FINALIZING_STALE_AFTER,
+        result_json='{"err": 2}',
+        error_code='WORKER_CRASHED',
+        failed_reason='Worker crashed',
+    )
+
+
+async def _age(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    started_seconds_ago: int | None,
+    finalizing_seconds_ago: int | None = None,
+) -> None:
+    """Put the row's liveness columns where a staleness case needs them."""
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET started_at = CASE
+                    WHEN CAST(:started AS INTEGER) IS NULL THEN NULL
+                    ELSE NOW() - make_interval(secs => :started)
+                END,
+                finalizing_at = CASE
+                    WHEN CAST(:finalizing AS INTEGER) IS NULL THEN NULL
+                    ELSE NOW() - make_interval(secs => :finalizing)
+                END
+            WHERE id = :id
+        """),
+        {
+            'id': task_id,
+            'started': started_seconds_ago,
+            'finalizing': finalizing_seconds_ago,
+        },
+    )
+    await session.commit()
+
+
+async def _heartbeat(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    seconds_ago: int,
+    role: str = 'runner',
+) -> None:
+    await session.execute(
+        text("""
+            INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at)
+            VALUES (:id, 'staleness-test', :role, NOW() - make_interval(secs => :ago))
+        """),
+        {'id': task_id, 'role': role, 'ago': seconds_ago},
+    )
+    await session.commit()
+
+
+class TestFailLocked:
+    async def test_applies_and_stamps_its_kind(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        outcome = await apply_async(
+            await session.connection(), _fail_locked(task_id, 'worker failure'),
+        )
+        await session.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.FAIL_RUNNING
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, failed_at, failed_reason, error_code, result
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'FAILED'
+        assert row.failed_at is not None
+        assert row.failed_reason == 'worker failure'
+        assert row.error_code == 'TASK_EXCEPTION'
+        assert row.result == '{"err": 1}'
+
+    async def test_a_null_reason_leaves_an_earlier_attempts_reason(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """NULL means "leave the column as it is", not "clear it".
+
+        No requeue path clears failed_reason, so a row can carry one from an
+        earlier attempt that this transition never owned.
+        """
+        task_id = await _seed(session)
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+        await session.commit()
+
+        outcome = await apply_async(
+            await session.connection(), _fail_locked(task_id, None),
+        )
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+        reason = (
+            await session.execute(
+                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert reason == 'attempt one crashed'
+
+    async def test_a_supplied_reason_overwrites(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+        await session.commit()
+
+        await apply_async(
+            await session.connection(), _fail_locked(task_id, 'attempt two crashed'),
+        )
+        await session.commit()
+
+        reason = (
+            await session.execute(
+                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert reason == 'attempt two crashed'
+
+    async def test_replay_is_already_applied(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await apply_async(await session.connection(), _fail_locked(task_id))
+        await session.commit()
+
+        replay = await apply_async(await session.connection(), _fail_locked(task_id))
+        await session.commit()
+        assert isinstance(replay, AlreadyApplied)
+        assert replay.kind is TerminalizationKind.FAIL_RUNNING
+
+    async def test_a_stale_failure_is_a_conflict_not_a_replay(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Both write FAILED; they are deliberately not one class.
+
+        Distinctness is the conservative direction: a conflict makes the
+        caller look, an already-applied lets it walk away.
+        """
+        task_id = await _seed(session)
+        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_STALE')
+
+        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        await session.commit()
+        assert isinstance(outcome, SourceStateConflict)
+        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
+        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_STALE
+
+    async def test_another_worker_holds_the_claim(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, worker_id='someone-else')
+        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, LostClaim)
+        assert outcome.observed.worker_id == 'someone-else'
+
+    async def test_the_source_status_is_wrong(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED')
+        outcome = await apply_async(await session.connection(), _fail_locked(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        assert outcome.observed.status is TaskStatus.CLAIMED
+        assert outcome.evidence == ObservedClaim(
+            worker_id=WORKER, claimed_at=GENERATION,
+        )
+
+    async def test_a_task_that_does_not_exist(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        outcome = await apply_async(
+            await session.connection(), _fail_locked(str(uuid.uuid4())),
+        )
+        await session.commit()
+        assert isinstance(outcome, TaskAbsent)
+
+
+class TestFailStale:
+    async def test_a_silent_runner_is_failed(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """No heartbeat at all: staleness is judged from started_at."""
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.FAIL_STALE
+        assert outcome.observed.worker_id == WORKER
+
+    async def test_a_stale_heartbeat_is_failed(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 4)
+        await _heartbeat(session, task_id, seconds_ago=STALE_AFTER * 2)
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+    async def test_a_recent_heartbeat_refuses_with_the_evidence(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The refusal carries what the guard judged, not just that it refused."""
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _heartbeat(session, task_id, seconds_ago=1)
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        assert outcome.observed.status is TaskStatus.RUNNING
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedStaleness)
+        assert evidence.last_heartbeat_at is not None
+        assert evidence.started_at is not None
+        assert evidence.stale_after_seconds == STALE_AFTER
+        assert evidence.finalizing_stale_after_seconds == FINALIZING_STALE_AFTER
+
+    async def test_a_heartbeat_from_another_role_does_not_count(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Only the runner's heartbeats prove the runner is alive."""
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _heartbeat(session, task_id, seconds_ago=1, role='worker')
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+    async def test_a_row_that_never_started_refuses(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """RUNNING with no started_at is not judgeable as stale.
+
+        The evidence says why: a null started_at, so the guard had no instant
+        to measure silence from.
+        """
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=None)
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedStaleness)
+        assert evidence.started_at is None
+        assert evidence.last_heartbeat_at is None
+
+    async def test_an_active_finalizer_defers(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A finalizer inside its window holds the row against stale-failure."""
+        task_id = await _seed(session)
+        await _age(
+            session,
+            task_id,
+            started_seconds_ago=STALE_AFTER * 2,
+            finalizing_seconds_ago=1,
+        )
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(outcome, SourceStateConflict)
+        assert isinstance(outcome.evidence, ObservedStaleness)
+
+    async def test_a_stale_finalizer_does_not_defer(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await _age(
+            session,
+            task_id,
+            started_seconds_ago=STALE_AFTER * 2,
+            finalizing_seconds_ago=FINALIZING_STALE_AFTER * 2,
+        )
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+    async def test_replay_is_already_applied(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+
+        replay = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(replay, AlreadyApplied)
+        assert replay.kind is TerminalizationKind.FAIL_STALE
+
+    async def test_a_locked_failure_is_a_conflict_not_a_replay(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session)
+        await _force_terminal(session, task_id, status='FAILED', kind='FAIL_RUNNING')
+
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+        assert isinstance(outcome, SourceStateConflict)
+        assert isinstance(outcome.evidence, ObservedForeignTerminalization)
+        assert outcome.evidence.committed_kind is TerminalizationKind.FAIL_RUNNING
+
+    async def test_the_source_status_is_wrong(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """Not RUNNING, so no staleness was judged and no evidence is claimed."""
+        task_id = await _seed(session, status='CLAIMED')
+        outcome = await apply_async(await session.connection(), _fail_stale(task_id))
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        assert outcome.observed.status is TaskStatus.CLAIMED
+        assert outcome.evidence == ObservedClaim(
+            worker_id=WORKER, claimed_at=GENERATION,
+        )
+
+    async def test_a_task_that_does_not_exist(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        outcome = await apply_async(
+            await session.connection(), _fail_stale(str(uuid.uuid4())),
+        )
+        await session.commit()
+        assert isinstance(outcome, TaskAbsent)
