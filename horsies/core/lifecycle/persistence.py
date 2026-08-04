@@ -14,16 +14,24 @@ type checker says so at the call site rather than at run time.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from .commands import CompleteLockedTask, CompleteTaskFused
+from .commands import (
+    CompleteLockedTask,
+    CompleteTaskFused,
+    FailLockedTask,
+    FailStaleTask,
+)
 from .outcomes import TerminalizationOutcome, decode_outcome_row
 
-type ExecutableCommand = CompleteLockedTask | CompleteTaskFused
+type ExecutableCommand = (
+    CompleteLockedTask | CompleteTaskFused | FailLockedTask | FailStaleTask
+)
 
 _COMPLETE_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_complete_locked_task(
@@ -36,6 +44,22 @@ _COMPLETE_TASK_FUSED_SQL = text("""
         CAST(:task_id AS VARCHAR), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ), :result,
         :notify_channel, :notify_payload
+    )
+""")
+
+_FAIL_LOCKED_TASK_SQL = text("""
+    SELECT * FROM horsies_fail_locked_task(
+        CAST(:task_id AS VARCHAR), :worker_id,
+        :result, :error_code, :failed_reason
+    )
+""")
+
+_FAIL_STALE_TASK_SQL = text("""
+    SELECT * FROM horsies_fail_stale_task(
+        CAST(:task_id AS VARCHAR),
+        CAST(:stale_after_seconds AS INTEGER),
+        CAST(:finalizing_stale_after_seconds AS INTEGER),
+        :result, :error_code, :failed_reason
     )
 """)
 
@@ -67,6 +91,36 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'result': result,
                 'notify_channel': channel,
                 'notify_payload': payload,
+            }
+        case FailLockedTask(
+            task_id=task_id,
+            fence=fence,
+            result_json=result,
+            error_code=error_code,
+            failed_reason=failed_reason,
+        ):
+            return _FAIL_LOCKED_TASK_SQL, {
+                'task_id': task_id,
+                'worker_id': fence.worker_id,
+                'result': result,
+                'error_code': error_code,
+                'failed_reason': failed_reason,
+            }
+        case FailStaleTask(
+            task_id=task_id,
+            stale_after_seconds=stale_after_seconds,
+            finalizing_stale_after_seconds=finalizing_stale_after_seconds,
+            result_json=result,
+            error_code=error_code,
+            failed_reason=failed_reason,
+        ):
+            return _FAIL_STALE_TASK_SQL, {
+                'task_id': task_id,
+                'stale_after_seconds': stale_after_seconds,
+                'finalizing_stale_after_seconds': finalizing_stale_after_seconds,
+                'result': result,
+                'error_code': error_code,
+                'failed_reason': failed_reason,
             }
         case _ as unreachable:
             assert_never(unreachable)
@@ -121,12 +175,12 @@ def _single_row(
     return rows[0]
 
 
+# Named-parameter syntax differs between the drivers; the call does not.
+# The lookbehind leaves `::` casts alone, and matching every `:name` at once
+# avoids the trap a hand-kept name list carries: two parameters where one is
+# a prefix of the other would corrupt the longer one if replaced first.
+_NAMED_PARAMETER_RE = re.compile(r'(?<!:):(\w+)')
+
+
 def _as_psycopg(statement: Any) -> str:
-    """Bound-parameter syntax differs between the drivers; the call does not."""
-    rendered = str(statement)
-    for name in (
-        'task_id', 'worker_id', 'claimed_at', 'result',
-        'notify_channel', 'notify_payload',
-    ):
-        rendered = rendered.replace(f':{name}', f'%({name})s')
-    return rendered
+    return _NAMED_PARAMETER_RE.sub(r'%(\1)s', str(statement))

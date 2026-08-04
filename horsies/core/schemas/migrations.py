@@ -148,7 +148,14 @@ from sqlalchemy import text
 #      receives nothing, so an unversioned change to a function is a change
 #      that only fresh databases ever see.
 
-SCHEMA_VERSION = 19
+# v20: the failure operations — horsies_fail_locked_task, which merges the
+#      two locked-failure statements behind one COALESCE on failed_reason,
+#      and horsies_fail_stale_task, whose guard is staleness rather than
+#      ownership and whose refusals carry the staleness evidence. No schema
+#      change; the version is what delivers the new function bodies to a
+#      database that already reached v19.
+
+SCHEMA_VERSION = 20
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

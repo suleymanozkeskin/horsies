@@ -55,6 +55,17 @@ EXPECTED_SIGNATURES = {
         'p_claimed_at timestamp with time zone, p_result text, '
         'p_notify_channel text, p_notify_payload text',
     ),
+    (
+        'horsies_fail_locked_task',
+        'p_task_id character varying, p_worker_id text, p_result text, '
+        'p_error_code text, p_failed_reason text',
+    ),
+    (
+        'horsies_fail_stale_task',
+        'p_task_id character varying, p_stale_after_seconds integer, '
+        'p_finalizing_stale_after_seconds integer, p_result text, '
+        'p_error_code text, p_failed_reason text',
+    ),
 }
 
 EXPECTED_FUNCTIONS = {name for name, _ in EXPECTED_SIGNATURES}
