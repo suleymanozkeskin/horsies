@@ -1105,6 +1105,40 @@ class TestExpirePendingTasks:
         await session.commit()
         assert outcomes == []
 
+    @pytest.mark.parametrize('batch_size', ['NULL', '0', '-1'])
+    async def test_an_unbounded_or_absurd_batch_mutates_nothing(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+        batch_size: str,
+    ) -> None:
+        """LIMIT NULL means no limit at all, so NULL must be an error.
+
+        The bound exists to keep one pass from committing an unbounded
+        notification burst; a call that disables it is refused before any
+        row is touched.
+        """
+        task_id = await _seed(session, status='PENDING')
+        await _deadline(session, task_id, seconds_ago=60)
+
+        with pytest.raises(Exception, match='positive integer'):
+            await session.execute(
+                text(f"""
+                    SELECT * FROM horsies_expire_pending_tasks(
+                        CAST({batch_size} AS INTEGER), '{{}}', 'TASK_EXPIRED'
+                    )
+                """),
+            )
+        await session.rollback()
+
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'PENDING'
+
     async def test_a_row_a_concurrent_claim_holds_is_stepped_around(
         self,
         session: AsyncSession,

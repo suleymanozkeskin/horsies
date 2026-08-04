@@ -122,6 +122,21 @@ class FailStaleTask:
     failed_reason: str
 
 
+def _require_positive_batch_size(batch_size: int) -> None:
+    """A discovery batch's bound is load-bearing, so it must actually bound.
+
+    The database function raises on the same precondition; validating at
+    construction reports the mistake at the call site that made it, before a
+    connection is ever involved.
+    """
+    if batch_size <= 0:
+        raise ValueError(
+            f'batch_size must be a positive integer, got {batch_size}; the '
+            f'bound exists to keep one pass from committing an unbounded '
+            f'notification burst'
+        )
+
+
 # ---------------------------------------------------------------------------
 # EXPIRED
 # ---------------------------------------------------------------------------
@@ -155,6 +170,9 @@ class ExpirePendingTasks:
     batch_size: int
     result_json: str
     error_code: str
+
+    def __post_init__(self) -> None:
+        _require_positive_batch_size(self.batch_size)
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +217,9 @@ class CancelOrphanedTasks:
     """The same condition, swept in bounded batches across all workers."""
 
     batch_size: int
+
+    def __post_init__(self) -> None:
+        _require_positive_batch_size(self.batch_size)
 
 
 # ---------------------------------------------------------------------------
