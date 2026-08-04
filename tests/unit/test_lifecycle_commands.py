@@ -266,6 +266,32 @@ class TestClaimBatchPreconditions:
         assert batch.generations() == (_GENERATION, None)
 
 
+class TestDiscoveryBatchPreconditions:
+    """The bound is load-bearing: a batch that does not bound is a caller error."""
+
+    @pytest.mark.parametrize('batch_size', [0, -1])
+    def test_a_non_positive_expiry_bound_is_rejected(
+        self, batch_size: int,
+    ) -> None:
+        with pytest.raises(ValueError, match='positive integer'):
+            ExpirePendingTasks(
+                batch_size=batch_size, result_json='{}', error_code='TASK_EXPIRED',
+            )
+
+    @pytest.mark.parametrize('batch_size', [0, -1])
+    def test_a_non_positive_orphan_sweep_bound_is_rejected(
+        self, batch_size: int,
+    ) -> None:
+        with pytest.raises(ValueError, match='positive integer'):
+            CancelOrphanedTasks(batch_size=batch_size)
+
+    def test_positive_bounds_construct(self) -> None:
+        assert ExpirePendingTasks(
+            batch_size=1, result_json='{}', error_code='TASK_EXPIRED',
+        ).batch_size == 1
+        assert CancelOrphanedTasks(batch_size=500).batch_size == 500
+
+
 class TestFenceCoverageMatchesTheWriters:
     """Every ownership model the writers use has exactly one fence type."""
 

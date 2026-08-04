@@ -767,6 +767,16 @@ RETURNS SETOF {OUTCOME_TYPE}
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    -- The bound is load-bearing: LIMIT NULL means no limit at all, and a
+    -- non-positive value is a caller error, not a smaller batch. Raising is
+    -- the contracted shape for a batch precondition violation — this is not
+    -- an outcome of any row's transition, so no row can carry it.
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION
+            'p_batch_size must be a positive integer, got %', p_batch_size
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     RETURN QUERY
     UPDATE horsies_tasks t
     SET status = 'EXPIRED',

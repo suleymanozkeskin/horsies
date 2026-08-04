@@ -159,10 +159,18 @@ from sqlalchemy import text
 #      ownership but deliberately not on claim generation, refusing with the
 #      deadline it judged; and horsies_expire_pending_tasks, the first
 #      discovery batch: it selects its own targets under the deadline
-#      predicate and reports only the rows it transitioned. No schema
-#      change.
+#      predicate and reports only the rows it transitioned. Also replaces
+#      the stale-failure body: the guard now captures every observable it
+#      compares, with the instant it compares them at, in the one statement
+#      that locks the row, and its evidence carries finalizing_at and
+#      evaluated_at. No schema change.
 
-SCHEMA_VERSION = 21
+# v22: horsies_expire_pending_tasks rejects a NULL or non-positive batch
+#      size before mutating anything — LIMIT NULL means no limit at all,
+#      which would disable the notification-burst bound the batch exists
+#      to enforce.
+
+SCHEMA_VERSION = 22
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,
