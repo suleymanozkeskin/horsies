@@ -811,6 +811,286 @@ DROP FUNCTION IF EXISTS horsies_expire_pending_tasks(
 """)
 
 
+# ---------------------------------------------------------------------------
+# CANCELLED — administrative
+# ---------------------------------------------------------------------------
+
+# The caller already holds this row's lock and decides whether RUNNING is in
+# the permitted source set. The database still owns the fixed part of the
+# transition: only a plain live task can be cancelled, terminal rows are never
+# overwritten even if a malformed status array names one, and the operation's
+# literals and provenance are not caller-supplied.
+CREATE_CANCEL_LOCKED_TASK_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_locked_task(
+    p_task_id varchar,
+    p_permitted_source_statuses text[]
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+BEGIN
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at
+        FROM horsies_tasks t
+        WHERE t.id = p_task_id
+          AND t.is_workflow_task = FALSE
+          AND t.status::text IN ('PENDING', 'CLAIMED', 'RUNNING')
+          AND t.status::text = ANY(p_permitted_source_statuses)
+        FOR UPDATE
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            error_code = 'TASK_CANCELLED',
+            failed_reason = 'Cancelled via monitoring API',
+            failed_at = NOW(),
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.CANCEL_ADMIN.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+        RETURNING t.terminal_at, t.terminalization_kind
+    )
+    SELECT upd.terminal_at, upd.terminalization_kind,
+           ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at
+    INTO v_terminal_at, v_kind, v_status, v_worker, v_claimed_at
+    FROM upd, ctx;
+
+    IF FOUND THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            v_status, v_worker, v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- CallerHoldsRowLock carries no ownership predicate. A miss is therefore
+    -- absent, already terminalized, or a source-state conflict; the shared
+    -- classifier's NULL claim parameters express exactly that ordering.
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.CANCEL_ADMIN)},
+        NULL::text,
+        NULL::timestamptz
+    );
+END;
+$$
+""")
+
+DROP_CANCEL_LOCKED_TASK_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_locked_task(varchar, text[])
+""")
+
+
+# ---------------------------------------------------------------------------
+# CANCELLED — orphan cleanup
+# ---------------------------------------------------------------------------
+
+_RUNNABLE_WORKFLOW_TASK_STATUSES_SQL = "('ENQUEUED', 'READY', 'PENDING', 'RUNNING')"
+
+# The row, its runnable-link observation and the update share one PostgreSQL
+# statement and therefore one snapshot. The task lock prevents another task
+# transition from interleaving; the link has no locking relationship with the
+# task row, so its status is captured beside the row and used both to decide
+# and, on refusal, to explain the decision. A terminal workflow-task link does
+# not count as runnable and therefore still leaves the backing task orphaned.
+CREATE_CANCEL_OWNED_ORPHAN_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_owned_orphan(
+    p_task_id varchar,
+    p_worker_id text,
+    p_claimed_at timestamptz
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_terminal_at timestamptz;
+    v_kind text;
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_is_workflow_task boolean;
+    v_node_status text;
+    v_applied boolean;
+BEGIN
+    WITH ctx AS MATERIALIZED (
+        SELECT t.id, t.status::text AS status,
+               t.claimed_by_worker_id, t.claimed_at,
+               t.is_workflow_task,
+               (
+                   SELECT wt.status
+                   FROM horsies_workflow_tasks wt
+                   WHERE wt.task_id = t.id
+                     AND wt.status IN {_RUNNABLE_WORKFLOW_TASK_STATUSES_SQL}
+                   ORDER BY wt.id
+                   LIMIT 1
+               ) AS node_status
+        FROM horsies_tasks t
+        WHERE t.id = p_task_id
+        FOR UPDATE
+    ),
+    upd AS (
+        UPDATE horsies_tasks t
+        SET status = 'CANCELLED',
+            claimed = FALSE,
+            claimed_at = NULL,
+            claimed_by_worker_id = NULL,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            error_code = 'WORKFLOW_CHECK_FAILED',
+            failed_reason =
+                'Workflow task orphaned: no live workflow_task linkage',
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.CANCEL_ORPHAN.value}',
+            updated_at = NOW()
+        FROM ctx
+        WHERE t.id = ctx.id
+          AND ctx.status = 'CLAIMED'
+          AND ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+          AND (
+              p_claimed_at IS NULL
+              OR ctx.claimed_at = p_claimed_at
+          )
+          AND ctx.is_workflow_task = TRUE
+          AND ctx.node_status IS NULL
+        RETURNING t.terminal_at, t.terminalization_kind
+    )
+    SELECT ctx.status, ctx.claimed_by_worker_id, ctx.claimed_at,
+           ctx.is_workflow_task, ctx.node_status,
+           upd.terminal_at, upd.terminalization_kind,
+           upd.terminal_at IS NOT NULL
+    INTO v_status, v_worker, v_claimed_at, v_is_workflow_task,
+         v_node_status, v_terminal_at, v_kind, v_applied
+    FROM ctx
+    LEFT JOIN upd ON TRUE;
+
+    IF FOUND AND v_applied THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'APPLIED'::text,
+            v_terminal_at, v_kind,
+            v_status, v_worker, v_claimed_at,
+            NULL::text, NULL::jsonb;
+        RETURN;
+    END IF;
+
+    -- Classification order puts the fence ahead of the guard. Only a live
+    -- CLAIMED workflow task still held by this generation can truthfully say
+    -- that a runnable link, rather than ownership, refused the operation.
+    IF FOUND
+       AND v_status = 'CLAIMED'
+       AND v_worker = CAST(p_worker_id AS VARCHAR)
+       AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+       AND v_is_workflow_task
+       AND v_node_status IS NOT NULL
+    THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'WORKFLOW_LINK_STATE'::text,
+            jsonb_build_object('node_status', v_node_status);
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+        p_task_id,
+        {_kind_array(TerminalizationKind.CANCEL_ORPHAN)},
+        p_worker_id,
+        p_claimed_at
+    );
+END;
+$$
+""")
+
+DROP_CANCEL_OWNED_ORPHAN_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_owned_orphan(
+    varchar, text, timestamptz
+)
+""")
+
+# Discovery batch: the orphan predicate is identical to the single-row
+# operation's. It selects only valid task statuses, locks and bounds its own
+# target set, and reports only rows it actually transitioned. Candidate order
+# is deliberately unspecified: no supporting age index exists, so ordering
+# before LIMIT would sort the whole orphan set and defeat the bound's purpose.
+CREATE_CANCEL_ORPHANED_TASKS_SQL = text(f"""
+CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks(
+    p_batch_size integer
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION
+            'p_batch_size must be a positive integer, got %', p_batch_size
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    RETURN QUERY
+    UPDATE horsies_tasks t
+    SET status = 'CANCELLED',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        error_code = 'WORKFLOW_CHECK_FAILED',
+        failed_reason =
+            'Workflow task orphaned: no live workflow_task linkage',
+        terminal_at = NOW(),
+        terminalization_kind =
+            '{TerminalizationKind.CANCEL_ORPHAN_SWEEP.value}',
+        updated_at = NOW()
+    FROM (
+        SELECT t2.id, t2.status::text AS observed_status,
+               t2.claimed_by_worker_id AS observed_worker_id,
+               t2.claimed_at AS observed_claimed_at
+        FROM horsies_tasks t2
+        WHERE t2.is_workflow_task = TRUE
+          AND t2.status::text IN ('CLAIMED', 'PENDING')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              WHERE wt.task_id = t2.id
+                AND wt.status IN {_RUNNABLE_WORKFLOW_TASK_STATUSES_SQL}
+          )
+        LIMIT p_batch_size
+        FOR UPDATE OF t2 SKIP LOCKED
+    ) s
+    WHERE t.id = s.id
+    RETURNING t.id, NULL::bigint, 'APPLIED'::text,
+              t.terminal_at, t.terminalization_kind,
+              s.observed_status, s.observed_worker_id,
+              s.observed_claimed_at,
+              NULL::text, NULL::jsonb;
+END;
+$$
+""")
+
+DROP_CANCEL_ORPHANED_TASKS_SQL = text("""
+DROP FUNCTION IF EXISTS horsies_cancel_orphaned_tasks(integer)
+""")
+
+
 # Drops precede creates on every apply, and the drop list names exact
 # signatures: PostgreSQL overloads by signature, so a changed argument list
 # without a matching drop leaves the old overload installed and callable.
@@ -821,6 +1101,9 @@ DROP_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     DROP_FAIL_STALE_TASK_SQL,
     DROP_EXPIRE_OWNED_CLAIM_SQL,
     DROP_EXPIRE_PENDING_TASKS_SQL,
+    DROP_CANCEL_LOCKED_TASK_SQL,
+    DROP_CANCEL_OWNED_ORPHAN_SQL,
+    DROP_CANCEL_ORPHANED_TASKS_SQL,
     DROP_MISS_CLASSIFIER_SQL,
 )
 
@@ -836,4 +1119,7 @@ CREATE_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     CREATE_FAIL_STALE_TASK_SQL,
     CREATE_EXPIRE_OWNED_CLAIM_SQL,
     CREATE_EXPIRE_PENDING_TASKS_SQL,
+    CREATE_CANCEL_LOCKED_TASK_SQL,
+    CREATE_CANCEL_OWNED_ORPHAN_SQL,
+    CREATE_CANCEL_ORPHANED_TASKS_SQL,
 )

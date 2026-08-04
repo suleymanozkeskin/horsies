@@ -22,6 +22,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from .commands import (
+    CancelLockedTask,
+    CancelOrphanedTasks,
+    CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
     ExpireOwnedClaim,
@@ -37,12 +40,14 @@ type ExecutableCommand = (
     | FailLockedTask
     | FailStaleTask
     | ExpireOwnedClaim
+    | CancelLockedTask
+    | CancelOwnedOrphan
 )
 
 # Batch operations return zero or more rows, so they cannot share the
 # single-task adapters: exactly-one-row is a contract worth keeping honest
 # for the operations it is true of.
-type ExecutableBatchCommand = ExpirePendingTasks
+type ExecutableBatchCommand = ExpirePendingTasks | CancelOrphanedTasks
 
 _COMPLETE_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_complete_locked_task(
@@ -83,6 +88,26 @@ _EXPIRE_OWNED_CLAIM_SQL = text("""
 _EXPIRE_PENDING_TASKS_SQL = text("""
     SELECT * FROM horsies_expire_pending_tasks(
         CAST(:batch_size AS INTEGER), :result, :error_code
+    )
+""")
+
+_CANCEL_LOCKED_TASK_SQL = text("""
+    SELECT * FROM horsies_cancel_locked_task(
+        CAST(:task_id AS VARCHAR),
+        CAST(:permitted_source_statuses AS TEXT[])
+    )
+""")
+
+_CANCEL_OWNED_ORPHAN_SQL = text("""
+    SELECT * FROM horsies_cancel_owned_orphan(
+        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:claimed_at AS TIMESTAMPTZ)
+    )
+""")
+
+_CANCEL_ORPHANED_TASKS_SQL = text("""
+    SELECT * FROM horsies_cancel_orphaned_tasks(
+        CAST(:batch_size AS INTEGER)
     )
 """)
 
@@ -157,6 +182,22 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
                 'result': result,
                 'error_code': error_code,
             }
+        case CancelLockedTask(
+            task_id=task_id,
+            permitted_source_statuses=permitted_source_statuses,
+        ):
+            return _CANCEL_LOCKED_TASK_SQL, {
+                'task_id': task_id,
+                'permitted_source_statuses': [
+                    status.value for status in permitted_source_statuses
+                ],
+            }
+        case CancelOwnedOrphan(task_id=task_id, fence=fence):
+            return _CANCEL_OWNED_ORPHAN_SQL, {
+                'task_id': task_id,
+                'worker_id': fence.worker_id,
+                'claimed_at': fence.claimed_at,
+            }
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -175,6 +216,10 @@ def batch_call_for(
                 'batch_size': batch_size,
                 'result': result,
                 'error_code': error_code,
+            }
+        case CancelOrphanedTasks(batch_size=batch_size):
+            return _CANCEL_ORPHANED_TASKS_SQL, {
+                'batch_size': batch_size,
             }
         case _ as unreachable:
             assert_never(unreachable)
