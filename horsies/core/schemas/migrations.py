@@ -155,7 +155,14 @@ from sqlalchemy import text
 #      change; the version is what delivers the new function bodies to a
 #      database that already reached v19.
 
-SCHEMA_VERSION = 20
+# v21: the expiry operations — horsies_expire_owned_claim, fenced on worker
+#      ownership but deliberately not on claim generation, refusing with the
+#      deadline it judged; and horsies_expire_pending_tasks, the first
+#      discovery batch: it selects its own targets under the deadline
+#      predicate and reports only the rows it transitioned. No schema
+#      change.
+
+SCHEMA_VERSION = 21
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

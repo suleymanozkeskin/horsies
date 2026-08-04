@@ -89,12 +89,21 @@ class ObservedDeadline:
 
 @dataclass(frozen=True, slots=True)
 class ObservedStaleness:
-    """A staleness guard's evidence: what was reported, and how long ago."""
+    """A staleness guard's evidence, captured in the snapshot that judged it.
+
+    Every value the two arms compared travels together with the instant they
+    were compared at, so both comparisons are reconstructible from the log
+    exactly — an active finalizer's refusal is explained by `finalizing_at`,
+    a live runner's by `last_heartbeat_at`, and `evaluated_at` is the NOW()
+    the guard actually used.
+    """
 
     last_heartbeat_at: datetime | None
     started_at: datetime | None
+    finalizing_at: datetime | None
     stale_after_seconds: int
     finalizing_stale_after_seconds: int
+    evaluated_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,8 +240,10 @@ _GUARD_PAYLOAD_KEYS: dict[GuardKind, frozenset[str]] = {
     GuardKind.STALENESS: frozenset({
         'last_heartbeat_at',
         'started_at',
+        'finalizing_at',
         'stale_after_seconds',
         'finalizing_stale_after_seconds',
+        'evaluated_at',
     }),
     GuardKind.WORKFLOW_STATUS: frozenset({'workflow_id', 'workflow_status'}),
     GuardKind.WORKFLOW_LINK_ABSENT: frozenset(),
@@ -327,10 +338,12 @@ def _decode_evidence(
             return ObservedStaleness(
                 last_heartbeat_at=_optional_datetime(payload, 'last_heartbeat_at'),
                 started_at=_optional_datetime(payload, 'started_at'),
+                finalizing_at=_optional_datetime(payload, 'finalizing_at'),
                 stale_after_seconds=_require_int(payload, 'stale_after_seconds'),
                 finalizing_stale_after_seconds=_require_int(
                     payload, 'finalizing_stale_after_seconds',
                 ),
+                evaluated_at=_require_datetime(payload, 'evaluated_at'),
             )
         case GuardKind.WORKFLOW_STATUS:
             return ObservedWorkflowState(

@@ -66,6 +66,15 @@ EXPECTED_SIGNATURES = {
         'p_finalizing_stale_after_seconds integer, p_result text, '
         'p_error_code text, p_failed_reason text',
     ),
+    (
+        'horsies_expire_owned_claim',
+        'p_task_id character varying, p_worker_id text, p_result text, '
+        'p_error_code text',
+    ),
+    (
+        'horsies_expire_pending_tasks',
+        'p_batch_size integer, p_result text, p_error_code text',
+    ),
 }
 
 EXPECTED_FUNCTIONS = {name for name, _ in EXPECTED_SIGNATURES}

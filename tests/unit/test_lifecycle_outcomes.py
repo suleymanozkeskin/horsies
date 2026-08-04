@@ -203,8 +203,10 @@ class TestGuardEvidence:
                 observed_guard={
                     'last_heartbeat_at': None,
                     'started_at': '2026-08-04T11:00:00+00:00',
+                    'finalizing_at': '2026-08-04T11:59:00+00:00',
                     'stale_after_seconds': 60,
                     'finalizing_stale_after_seconds': 120,
+                    'evaluated_at': '2026-08-04T12:00:00+00:00',
                 },
             )
         )
@@ -212,8 +214,10 @@ class TestGuardEvidence:
         assert outcome.evidence == ObservedStaleness(
             last_heartbeat_at=None,
             started_at=datetime(2026, 8, 4, 11, 0, tzinfo=timezone.utc),
+            finalizing_at=datetime(2026, 8, 4, 11, 59, tzinfo=timezone.utc),
             stale_after_seconds=60,
             finalizing_stale_after_seconds=120,
+            evaluated_at=datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
         )
 
     def test_workflow_state_evidence(self) -> None:
