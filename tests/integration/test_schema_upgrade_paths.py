@@ -88,6 +88,35 @@ EXPECTED_SIGNATURES = {
         'horsies_cancel_orphaned_tasks',
         'p_batch_size integer',
     ),
+    (
+        'horsies_abandon_owned_node',
+        'p_task_id character varying, p_worker_id text, '
+        'p_claimed_at timestamp with time zone',
+    ),
+    (
+        'horsies_abandon_owned_nodes',
+        'p_ids character varying[], '
+        'p_claimed_ats timestamp with time zone[], p_worker_id text',
+    ),
+    (
+        'horsies_abandon_nodes_of_paused_workflows',
+        'p_workflow_ids character varying[]',
+    ),
+    (
+        'horsies_cancel_owned_node',
+        'p_task_id character varying, p_worker_id text, '
+        'p_claimed_at timestamp with time zone, '
+        'p_accepts_requeued_pending boolean',
+    ),
+    (
+        'horsies_cancel_owned_nodes',
+        'p_ids character varying[], '
+        'p_claimed_ats timestamp with time zone[], p_worker_id text',
+    ),
+    (
+        'horsies_cancel_nodes_of_cancelled_workflow',
+        'p_workflow_ids character varying[]',
+    ),
 }
 
 EXPECTED_FUNCTIONS = {name for name, _ in EXPECTED_SIGNATURES}
@@ -206,6 +235,23 @@ async def _assert_end_state(engine: AsyncEngine) -> None:
             'installed operations differ from the expected signatures; an '
             'overload left behind by a changed argument list appears here'
         )
+
+        postures = {
+            (row.proname, row.language, row.prokind)
+            for row in (
+                await connection.execute(
+                    text(f"""
+                        SELECT p.proname, l.lanname AS language, p.prokind
+                        FROM pg_proc p
+                        JOIN pg_language l ON l.oid = p.prolang
+                        WHERE p.prorettype = '{OUTCOME_TYPE}'::regtype
+                    """)
+                )
+            ).all()
+        }
+        assert postures == {
+            (name, 'plpgsql', 'f') for name in EXPECTED_FUNCTIONS
+        }, 'every terminalization operation is a PL/pgSQL function'
 
         constraints = {
             row.conname: row.convalidated

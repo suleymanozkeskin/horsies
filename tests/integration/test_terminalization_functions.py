@@ -26,8 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 
 from horsies.core.lifecycle.commands import (
+    AbandonNodesOfPausedWorkflows,
+    AbandonOwnedNode,
+    AbandonOwnedNodes,
     CancelLockedTask,
+    CancelNodesOfCancelledWorkflow,
     CancelOrphanedTasks,
+    CancelOwnedNode,
+    CancelOwnedNodes,
     CancelOwnedOrphan,
     CompleteLockedTask,
     CompleteTaskFused,
@@ -39,6 +45,7 @@ from horsies.core.lifecycle.commands import (
 from horsies.core.lifecycle.fences import (
     CallerHoldsRowLock,
     OwnedClaim,
+    OwnedClaimBatch,
     PriorLockedRead,
     WorkerOwned,
 )
@@ -1206,7 +1213,8 @@ async def _link_workflow_task(
     task_id: str,
     *,
     node_status: str,
-) -> None:
+    workflow_status: str = 'RUNNING',
+) -> str:
     workflow_id = str(uuid.uuid4())
     await session.execute(
         text("""
@@ -1215,11 +1223,11 @@ async def _link_workflow_task(
                 sent_at, created_at, started_at, updated_at
             )
             VALUES (
-                :id, 'terminalization.test', 'RUNNING', 'FAIL', 0, :id,
+                :id, 'terminalization.test', :workflow_status, 'FAIL', 0, :id,
                 NOW(), NOW(), NOW(), NOW()
             )
         """),
-        {'id': workflow_id},
+        {'id': workflow_id, 'workflow_status': workflow_status},
     )
     await session.execute(
         text("""
@@ -1243,6 +1251,7 @@ async def _link_workflow_task(
         },
     )
     await session.commit()
+    return workflow_id
 
 
 class TestCancelLockedTask:
@@ -1717,3 +1726,806 @@ class TestCancelOrphanedTasks:
             await holder.rollback()
 
         assert {outcome.task_id for outcome in outcomes} == {free}
+
+
+def _abandon_owned(
+    task_id: str,
+    claimed_at: datetime | None = GENERATION,
+) -> AbandonOwnedNode:
+    return AbandonOwnedNode(
+        task_id=task_id,
+        fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
+    )
+
+
+def _cancel_owned_node(
+    task_id: str,
+    claimed_at: datetime | None = GENERATION,
+    *,
+    accepts_requeued_pending: bool = True,
+) -> CancelOwnedNode:
+    return CancelOwnedNode(
+        task_id=task_id,
+        fence=OwnedClaim(worker_id=WORKER, claimed_at=claimed_at),
+        accepts_requeued_pending=accepts_requeued_pending,
+    )
+
+
+class TestAbandonOwnedNode:
+    async def test_applies_pause_literals_and_reports_the_claim_pre_image(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+
+        outcome = await apply_async(
+            await session.connection(),
+            _abandon_owned(task_id),
+        )
+        await session.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.PAUSE_ABANDON_CLAIM
+        assert outcome.observed.status is TaskStatus.CLAIMED
+        assert outcome.observed.worker_id == WORKER
+        assert outcome.observed.claimed_at == GENERATION
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, claimed, claimed_at,
+                           claimed_by_worker_id, claim_expires_at,
+                           finalizing_at, finalizing_by_worker_id,
+                           error_code, failed_reason, failed_at,
+                           terminal_at, terminalization_kind
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'CANCELLED'
+        assert row.claimed is False
+        assert row.claimed_at is None
+        assert row.claimed_by_worker_id is None
+        assert row.claim_expires_at is None
+        assert row.finalizing_at is None
+        assert row.finalizing_by_worker_id is None
+        assert row.error_code == 'TASK_CANCELLED'
+        assert row.failed_reason == 'Workflow paused before task start'
+        assert row.failed_at is None
+        assert row.terminal_at == outcome.terminal_at
+        assert row.terminalization_kind == 'PAUSE_ABANDON_CLAIM'
+
+    async def test_a_stale_generation_is_a_lost_claim(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+
+        outcome = await apply_async(
+            await session.connection(),
+            _abandon_owned(task_id, GENERATION - timedelta(seconds=1)),
+        )
+        await session.commit()
+
+        assert isinstance(outcome, LostClaim)
+        assert outcome.observed.claimed_at == GENERATION
+
+    async def test_a_null_generation_keeps_the_worker_fence(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        outcome = await apply_async(
+            await session.connection(),
+            _abandon_owned(task_id, None),
+        )
+        await session.commit()
+        assert isinstance(outcome, Applied)
+        assert outcome.observed.worker_id == WORKER
+        assert outcome.observed.claimed_at == GENERATION
+
+    async def test_pause_kinds_are_equivalent_but_workflow_cancel_is_not(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        same_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            same_id,
+            status='CANCELLED',
+            kind='PAUSE_ABANDON_WORKFLOW',
+        )
+        same = await apply_async(
+            await session.connection(),
+            _abandon_owned(same_id),
+        )
+        await session.commit()
+        assert isinstance(same, AlreadyApplied)
+
+        foreign_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            foreign_id,
+            status='CANCELLED',
+            kind='WORKFLOW_CANCEL_CLAIM',
+        )
+        foreign = await apply_async(
+            await session.connection(),
+            _abandon_owned(foreign_id),
+        )
+        await session.commit()
+        assert isinstance(foreign, SourceStateConflict)
+        assert isinstance(foreign.evidence, ObservedForeignTerminalization)
+
+    async def test_absence_is_an_outcome(self, session: AsyncSession) -> None:
+        outcome = await apply_async(
+            await session.connection(),
+            _abandon_owned(str(uuid.uuid4())),
+        )
+        await session.commit()
+        assert isinstance(outcome, TaskAbsent)
+
+
+class TestCancelOwnedNode:
+    async def test_claimed_and_requeued_pending_are_the_two_apply_arms(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        claimed_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        claimed = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(claimed_id),
+        )
+        await session.commit()
+        assert isinstance(claimed, Applied)
+        assert claimed.kind is TerminalizationKind.WORKFLOW_CANCEL_CLAIM
+        assert claimed.observed.status is TaskStatus.CLAIMED
+
+        pending_id = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            is_workflow_task=True,
+        )
+        pending = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(pending_id),
+        )
+        await session.commit()
+        assert isinstance(pending, Applied)
+        assert pending.observed.status is TaskStatus.PENDING
+
+    async def test_pending_requires_the_explicit_carveout(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            is_workflow_task=True,
+        )
+
+        outcome = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(task_id, accepts_requeued_pending=False),
+        )
+        await session.commit()
+
+        assert isinstance(outcome, LostClaim)
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'PENDING'
+
+    async def test_preserves_error_summary_columns_it_does_not_own(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET error_code = 'OLD_CODE', failed_reason = 'old reason'
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+        await session.commit()
+
+        await apply_async(
+            await session.connection(),
+            _cancel_owned_node(task_id),
+        )
+        await session.commit()
+        row = (
+            await session.execute(
+                text("""
+                    SELECT error_code, failed_reason, failed_at
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.error_code == 'OLD_CODE'
+        assert row.failed_reason == 'old reason'
+        assert row.failed_at is None
+
+    async def test_a_stale_claim_is_lost(self, session: AsyncSession) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        outcome = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(
+                task_id,
+                GENERATION - timedelta(seconds=1),
+            ),
+        )
+        await session.commit()
+        assert isinstance(outcome, LostClaim)
+
+    async def test_replay_foreign_kind_wrong_source_and_absence_are_distinct(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        replay_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            replay_id,
+            status='CANCELLED',
+            kind='WORKFLOW_CANCEL_WORKFLOW',
+        )
+        replay = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(replay_id),
+        )
+        await session.commit()
+        assert isinstance(replay, AlreadyApplied)
+
+        foreign_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            foreign_id,
+            status='CANCELLED',
+            kind='PAUSE_ABANDON_CLAIM',
+        )
+        foreign = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(foreign_id),
+        )
+        await session.commit()
+        assert isinstance(foreign, SourceStateConflict)
+        assert isinstance(foreign.evidence, ObservedForeignTerminalization)
+
+        running_id = await _seed(
+            session,
+            status='RUNNING',
+            is_workflow_task=True,
+        )
+        wrong_source = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(running_id),
+        )
+        await session.commit()
+        assert isinstance(wrong_source, SourceStateConflict)
+        assert wrong_source.observed.status is TaskStatus.RUNNING
+
+        absent = await apply_async(
+            await session.connection(),
+            _cancel_owned_node(str(uuid.uuid4())),
+        )
+        await session.commit()
+        assert isinstance(absent, TaskAbsent)
+
+    async def test_the_sync_driver_carries_the_pending_carveout(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        import psycopg
+
+        from tests.integration.conftest import DB_URL
+
+        task_id = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            is_workflow_task=True,
+        )
+        conninfo = DB_URL.replace('postgresql+psycopg://', 'postgresql://')
+        with psycopg.connect(conninfo) as connection:
+            with connection.cursor() as cursor:
+                outcome = apply_sync(cursor, _cancel_owned_node(task_id))
+            connection.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.observed.status is TaskStatus.PENDING
+
+
+class TestIdKeyedWorkflowBatches:
+    @pytest.mark.parametrize(
+        ('command_type', 'same_kind', 'foreign_kind', 'applied_kind'),
+        [
+            (
+                AbandonOwnedNodes,
+                'PAUSE_ABANDON_WORKFLOW',
+                'WORKFLOW_CANCEL_WORKFLOW',
+                TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH,
+            ),
+            (
+                CancelOwnedNodes,
+                'WORKFLOW_CANCEL_WORKFLOW',
+                'PAUSE_ABANDON_WORKFLOW',
+                TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
+            ),
+        ],
+    )
+    async def test_one_ordered_outcome_per_input_across_every_outcome(
+        self,
+        session: AsyncSession,
+        command_type: type[AbandonOwnedNodes] | type[CancelOwnedNodes],
+        same_kind: str,
+        foreign_kind: str,
+        applied_kind: TerminalizationKind,
+    ) -> None:
+        applied_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        lost_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        conflict_id = await _seed(
+            session,
+            status='RUNNING',
+            is_workflow_task=True,
+        )
+        same_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            same_id,
+            status='CANCELLED',
+            kind=same_kind,
+        )
+        foreign_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            foreign_id,
+            status='CANCELLED',
+            kind=foreign_kind,
+        )
+        legacy_id = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        await _force_terminal(
+            session,
+            legacy_id,
+            status='CANCELLED',
+            kind=None,
+        )
+        absent_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET error_code = 'OLD_CODE', failed_reason = 'old reason'
+                WHERE id = :id
+            """),
+            {'id': applied_id},
+        )
+        await session.commit()
+        command = command_type(
+            fence=OwnedClaimBatch(
+                worker_id=WORKER,
+                claim_generations=(
+                    (applied_id, GENERATION),
+                    (lost_id, GENERATION - timedelta(seconds=1)),
+                    (conflict_id, GENERATION),
+                    (same_id, GENERATION),
+                    (foreign_id, GENERATION),
+                    (legacy_id, GENERATION),
+                    (absent_id, GENERATION),
+                ),
+            ),
+        )
+
+        outcomes = await apply_batch_async(await session.connection(), command)
+        await session.commit()
+
+        assert [outcome.task_id for outcome in outcomes] == [
+            applied_id,
+            lost_id,
+            conflict_id,
+            same_id,
+            foreign_id,
+            legacy_id,
+            absent_id,
+        ]
+        assert [outcome.ordinality for outcome in outcomes] == list(range(1, 8))
+        assert isinstance(outcomes[0], Applied)
+        assert outcomes[0].kind is applied_kind
+        assert isinstance(outcomes[1], LostClaim)
+        assert isinstance(outcomes[2], SourceStateConflict)
+        assert isinstance(outcomes[3], AlreadyApplied)
+        assert isinstance(outcomes[4], SourceStateConflict)
+        assert isinstance(outcomes[4].evidence, ObservedForeignTerminalization)
+        assert isinstance(outcomes[5], SourceStateConflict)
+        assert isinstance(outcomes[5].evidence, ObservedForeignTerminalization)
+        assert outcomes[5].evidence.committed_kind is None
+        assert isinstance(outcomes[6], TaskAbsent)
+
+        summary = (
+            await session.execute(
+                text("""
+                    SELECT error_code, failed_reason
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': applied_id},
+            )
+        ).one()
+        if command_type is AbandonOwnedNodes:
+            assert summary.error_code == 'TASK_CANCELLED'
+            assert summary.failed_reason == 'Workflow paused before task start'
+        else:
+            assert summary.error_code == 'OLD_CODE'
+            assert summary.failed_reason == 'old reason'
+
+    @pytest.mark.parametrize(
+        'function_name',
+        ['horsies_abandon_owned_nodes', 'horsies_cancel_owned_nodes'],
+    )
+    @pytest.mark.parametrize(
+        ('ids_sql', 'generations_sql', 'message'),
+        [
+            ('NULL', "ARRAY['2026-08-04 09:00:00+00']", 'non-NULL'),
+            ("ARRAY['one']", 'NULL', 'non-NULL'),
+            (
+                "ARRAY['one', 'two']",
+                "ARRAY['2026-08-04 09:00:00+00']",
+                'lengths differ',
+            ),
+            (
+                'ARRAY[NULL]::varchar[]',
+                "ARRAY['2026-08-04 09:00:00+00']",
+                'non-NULL',
+            ),
+            (
+                "ARRAY['one', 'one']",
+                "ARRAY['2026-08-04 09:00:00+00', " "'2026-08-04 09:00:01+00']",
+                'distinct',
+            ),
+        ],
+    )
+    async def test_invalid_arrays_raise_before_mutation(
+        self,
+        session: AsyncSession,
+        function_name: str,
+        ids_sql: str,
+        generations_sql: str,
+        message: str,
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        ids = ids_sql.replace('one', task_id)
+
+        with pytest.raises(Exception, match=message):
+            await session.execute(
+                text(f"""
+                    SELECT * FROM {function_name}(
+                        CAST({ids} AS VARCHAR[]),
+                        CAST({generations_sql} AS TIMESTAMPTZ[]),
+                        :worker_id
+                    )
+                """),
+                {'worker_id': WORKER},
+            )
+        await session.rollback()
+
+        status = (
+            await session.execute(
+                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                {'id': task_id},
+            )
+        ).scalar_one()
+        assert status == 'CLAIMED'
+
+    @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
+    async def test_a_null_generation_keeps_the_per_task_worker_fence(
+        self,
+        session: AsyncSession,
+        command_type: type[AbandonOwnedNodes] | type[CancelOwnedNodes],
+    ) -> None:
+        task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
+        command = command_type(
+            fence=OwnedClaimBatch(
+                worker_id=WORKER,
+                claim_generations=((task_id, None),),
+            ),
+        )
+        outcomes = await apply_batch_async(await session.connection(), command)
+        await session.commit()
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], Applied)
+        assert outcomes[0].observed.claimed_at == GENERATION
+
+    @pytest.mark.parametrize('command_type', [AbandonOwnedNodes, CancelOwnedNodes])
+    async def test_empty_input_is_valid(
+        self,
+        session: AsyncSession,
+        command_type: type[AbandonOwnedNodes] | type[CancelOwnedNodes],
+    ) -> None:
+        command = command_type(
+            fence=OwnedClaimBatch(worker_id=WORKER, claim_generations=()),
+        )
+        outcomes = await apply_batch_async(await session.connection(), command)
+        await session.commit()
+        assert outcomes == []
+
+
+class TestWorkflowScopedBatches:
+    async def test_pause_applies_only_under_both_live_guards(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        eligible = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        eligible_workflow = await _link_workflow_task(
+            session,
+            eligible,
+            node_status='RUNNING',
+            workflow_status='PAUSED',
+        )
+        eligible_enqueued = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        eligible_enqueued_workflow = await _link_workflow_task(
+            session,
+            eligible_enqueued,
+            node_status='ENQUEUED',
+            workflow_status='PAUSED',
+        )
+        wrong_workflow = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        wrong_workflow_id = await _link_workflow_task(
+            session,
+            wrong_workflow,
+            node_status='RUNNING',
+            workflow_status='RUNNING',
+        )
+        wrong_link = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        wrong_link_workflow = await _link_workflow_task(
+            session,
+            wrong_link,
+            node_status='READY',
+            workflow_status='PAUSED',
+        )
+        wrong_task_source = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            is_workflow_task=True,
+        )
+        wrong_task_workflow = await _link_workflow_task(
+            session,
+            wrong_task_source,
+            node_status='ENQUEUED',
+            workflow_status='PAUSED',
+        )
+
+        outcomes = await apply_batch_async(
+            await session.connection(),
+            AbandonNodesOfPausedWorkflows(
+                workflow_ids=(
+                    eligible_workflow,
+                    eligible_enqueued_workflow,
+                    wrong_workflow_id,
+                    wrong_link_workflow,
+                    wrong_task_workflow,
+                ),
+            ),
+        )
+        await session.commit()
+
+        assert {outcome.task_id for outcome in outcomes} == {
+            eligible,
+            eligible_enqueued,
+        }
+        outcome = next(outcome for outcome in outcomes if outcome.task_id == eligible)
+        assert isinstance(outcome, Applied)
+        assert outcome.ordinality is None
+        assert outcome.kind is TerminalizationKind.PAUSE_ABANDON_WORKFLOW
+        row = (
+            await session.execute(
+                text("""
+                    SELECT error_code, failed_reason, failed_at
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': eligible},
+            )
+        ).one()
+        assert row.error_code == 'TASK_CANCELLED'
+        assert row.failed_reason == 'Workflow paused before task start'
+        assert row.failed_at is None
+        persisted = (
+            await session.execute(
+                text("""
+                    SELECT status, terminalization_kind,
+                           claimed_by_worker_id, claimed_at
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': eligible},
+            )
+        ).one()
+        assert persisted.status == 'CANCELLED'
+        assert persisted.terminalization_kind == 'PAUSE_ABANDON_WORKFLOW'
+        assert persisted.claimed_by_worker_id is None
+        assert persisted.claimed_at is None
+        refused_rows = (
+            await session.execute(
+                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                {'ids': [wrong_workflow, wrong_link, wrong_task_source]},
+            )
+        ).all()
+        assert {row.id: row.status for row in refused_rows} == {
+            wrong_workflow: 'CLAIMED',
+            wrong_link: 'CLAIMED',
+            wrong_task_source: 'PENDING',
+        }
+
+    async def test_cancel_accepts_all_three_legacy_task_source_states(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        task_ids: list[str] = []
+        workflow_ids: list[str] = []
+        for status in ('PENDING', 'CLAIMED', 'RUNNING'):
+            worker_id = None if status == 'PENDING' else WORKER
+            claimed_at = None if status == 'PENDING' else GENERATION
+            task_id = await _seed(
+                session,
+                status=status,
+                worker_id=worker_id,
+                claimed_at=claimed_at,
+                is_workflow_task=True,
+            )
+            task_ids.append(task_id)
+            workflow_ids.append(
+                await _link_workflow_task(
+                    session,
+                    task_id,
+                    node_status='ENQUEUED',
+                    workflow_status='CANCELLED',
+                )
+            )
+
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET error_code = 'OLD_CODE', failed_reason = 'old reason'
+                WHERE id = :id
+            """),
+            {'id': task_ids[0]},
+        )
+        await session.commit()
+
+        outcomes = await apply_batch_async(
+            await session.connection(),
+            CancelNodesOfCancelledWorkflow(workflow_ids=tuple(workflow_ids)),
+        )
+        await session.commit()
+
+        assert {outcome.task_id for outcome in outcomes} == set(task_ids)
+        assert all(isinstance(outcome, Applied) for outcome in outcomes)
+        assert all(
+            outcome.kind is TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW
+            for outcome in outcomes
+            if isinstance(outcome, Applied)
+        )
+        assert all(outcome.ordinality is None for outcome in outcomes)
+        summary = (
+            await session.execute(
+                text("""
+                    SELECT error_code, failed_reason, failed_at
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_ids[0]},
+            )
+        ).one()
+        assert summary.error_code == 'OLD_CODE'
+        assert summary.failed_reason == 'old reason'
+        assert summary.failed_at is None
+
+    async def test_cancel_refuses_a_live_workflow_or_non_enqueued_link(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        live_workflow_task = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        live_workflow_id = await _link_workflow_task(
+            session,
+            live_workflow_task,
+            node_status='ENQUEUED',
+            workflow_status='RUNNING',
+        )
+        ready_link_task = await _seed(
+            session,
+            status='CLAIMED',
+            is_workflow_task=True,
+        )
+        ready_link_workflow = await _link_workflow_task(
+            session,
+            ready_link_task,
+            node_status='READY',
+            workflow_status='CANCELLED',
+        )
+
+        outcomes = await apply_batch_async(
+            await session.connection(),
+            CancelNodesOfCancelledWorkflow(
+                workflow_ids=(live_workflow_id, ready_link_workflow),
+            ),
+        )
+        await session.commit()
+
+        assert outcomes == []
+        rows = (
+            await session.execute(
+                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                {'ids': [live_workflow_task, ready_link_task]},
+            )
+        ).all()
+        assert {row.status for row in rows} == {'CLAIMED'}

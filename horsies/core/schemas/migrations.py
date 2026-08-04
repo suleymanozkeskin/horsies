@@ -178,7 +178,13 @@ from sqlalchemy import text
 #      The sweep's effective task source set is CLAIMED/PENDING; the legacy
 #      READY/ENQUEUED literals are not TaskStatus values and are removed.
 
-SCHEMA_VERSION = 23
+# v24: the workflow pause/cancellation operations — three ownership shapes
+#      for each semantic family: one claim, one id-keyed pairwise claim batch,
+#      and one workflow-scoped cross-worker batch. Id-keyed results carry and
+#      are verified by ordinality; workflow-scoped batches report transitions
+#      only. No schema change.
+
+SCHEMA_VERSION = 24
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,
