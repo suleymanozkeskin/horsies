@@ -122,7 +122,33 @@ from sqlalchemy import text
 #      Backfilling in the migration that installs the constraint covers the
 #      window in one pass.
 
-SCHEMA_VERSION = 17
+# v18 is reserved for the terminal_at backfill and its CHECK constraint,
+#      which ship together in their own release. It is deliberately not
+#      claimed here: the apply path exits early when the stored version is at
+#      or above SCHEMA_VERSION, so a deployment that reached v19 first would
+#      never run v18. That release has to land before this one.
+
+# v19: terminalization_kind on horsies_tasks, plus the database-owned terminal
+#      operations that write it. Additive and nullable, with a value-domain
+#      CHECK only — see schemas/terminalization.py for why the status arm of
+#      that constraint cannot ship in the same release.
+#
+#      The column is never supplied by a caller: each operation function
+#      hardcodes its own kind, so a row cannot claim provenance it does not
+#      have. Rows terminalized before this release keep a NULL kind, which is
+#      read as unknown provenance and never inferred from.
+
+SCHEMA_VERSION = 19
+
+from .terminalization import (  # noqa: E402
+    ADD_TERMINALIZATION_KIND_CHECK_SQL,
+    ADD_TERMINALIZATION_KIND_COLUMN_SQL,
+    CREATE_OUTCOME_TYPE_SQL,
+    CREATE_TERMINALIZATION_FUNCTIONS_SQL,
+    DROP_OUTCOME_TYPE_SQL,
+    DROP_TERMINALIZATION_FUNCTIONS_SQL,
+    DROP_TERMINALIZATION_KIND_CHECK_SQL,
+)
 
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))

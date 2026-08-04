@@ -155,13 +155,20 @@ class TestMatrixShape:
         The allowlist keys on (module, statement, statuses) with a count; the
         matrix carries one row per writer. T10 and T11 share a function, so
         they collapse to a single allowlist entry with count 2.
+
+        The allowlist also guards the database-owned operations these
+        statements are being migrated to. Those are not matrix rows — the
+        matrix describes what exists to be replaced — so the comparison is
+        scoped to the runtime modules the matrix covers.
         """
         from_matrix = Counter(
             (row.module, row.statement, row.target_status) for row in MATRIX
         )
-        from_allowlist = Counter(
-            {key: count for key, count in FROZEN_TERMINAL_WRITERS.items()},
-        )
+        from_allowlist = Counter({
+            key: count
+            for key, count in FROZEN_TERMINAL_WRITERS.items()
+            if not key[0].endswith('schemas/terminalization.py')
+        })
         assert from_matrix == from_allowlist, (
             'matrix and allowlist disagree.\n'
             f'matrix only: {sorted(from_matrix - from_allowlist)}\n'

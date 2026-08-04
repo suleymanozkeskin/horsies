@@ -132,6 +132,20 @@ FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
         'MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL',
         'CANCELLED',
     ): 1,
+    # The database-owned operations. Not new legacy writers: these are what the
+    # statements above are being migrated to, and they live in a migration
+    # rather than a runtime module. Each was verified against a real server for
+    # every outcome its contract defines before it was added here.
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_COMPLETE_LOCKED_TASK_SQL',
+        'COMPLETED',
+    ): 1,
+    (
+        'horsies/core/schemas/terminalization.py',
+        'CREATE_COMPLETE_TASK_FUSED_SQL',
+        'COMPLETED',
+    ): 1,
 }
 
 
@@ -494,8 +508,8 @@ class TestTerminalWriterInventory:
         whichever path the tests exercise least.
         """
         windows = _scan_runtime_terminal_windows()
-        assert len(windows) == 16, (
-            f'Expected sixteen terminal-assigning SET clauses, found '
+        assert len(windows) == 18, (
+            f'Expected eighteen terminal-assigning SET clauses, found '
             f'{len(windows)}; the inventory and this assertion disagree.'
         )
         missing = [
