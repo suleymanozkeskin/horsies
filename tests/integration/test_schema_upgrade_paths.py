@@ -16,6 +16,7 @@ end state.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
@@ -60,7 +61,7 @@ EXPECTED_FUNCTIONS = {name for name, _ in EXPECTED_SIGNATURES}
 
 
 @pytest_asyncio.fixture
-async def scratch_database() -> str:
+async def scratch_database() -> AsyncIterator[str]:
     """A disposable database, dropped however the test ends."""
     name = f'horsies_upgrade_{uuid.uuid4().hex[:12]}'
     admin = create_async_engine(DB_URL, isolation_level='AUTOCOMMIT')
@@ -290,30 +291,17 @@ class TestUpgradePaths:
         self,
         scratch_database: str,
     ) -> None:
-        """A database already at this version must not be mutated by a re-run.
+        """A database already at this version is left exactly as it was.
 
-        Including the composite type: recreating it would give the same shape
-        a new identity underneath everything that depends on it.
+        The apply path exits early here, so this asserts that early exit is
+        harmless rather than that the installation statements are idempotent —
+        identity across a real installation is proven by the restoration test
+        below, which lowers the watermark and runs them.
         """
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
-            async with engine.connect() as connection:
-                type_identity_before = (
-                    await connection.execute(
-                        text(f"SELECT '{OUTCOME_TYPE}'::regtype::oid")
-                    )
-                ).scalar_one()
-
             await _migrate(scratch_database)
-
-            async with engine.connect() as connection:
-                type_identity_after = (
-                    await connection.execute(
-                        text(f"SELECT '{OUTCOME_TYPE}'::regtype::oid")
-                    )
-                ).scalar_one()
-            assert type_identity_after == type_identity_before
             await _assert_end_state(engine)
         finally:
             await engine.dispose()
@@ -335,6 +323,7 @@ class TestUpgradePaths:
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
+            type_identity_before = await _outcome_type_oid(engine)
             async with engine.connect() as connection:
                 await connection.execute(
                     text(f"""
@@ -379,6 +368,10 @@ class TestUpgradePaths:
 
             restored = await _seed_running(engine)
             assert await _completion_outcome(engine, restored) == 'APPLIED'
+            # The installation statements ran this time, so this is where the
+            # create-once design is provable: recreating the type would give
+            # the same shape a new identity underneath everything holding it.
+            assert await _outcome_type_oid(engine) == type_identity_before
             await _assert_end_state(engine)
         finally:
             await engine.dispose()
@@ -418,3 +411,14 @@ async def _completion_outcome(engine: AsyncEngine, task_id: str) -> str:
         ).scalar_one()
         await connection.commit()
     return str(outcome)
+
+
+async def _outcome_type_oid(engine: AsyncEngine) -> int:
+    async with engine.connect() as connection:
+        return int(
+            (
+                await connection.execute(
+                    text(f"SELECT '{OUTCOME_TYPE}'::regtype::oid")
+                )
+            ).scalar_one()
+        )

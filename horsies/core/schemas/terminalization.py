@@ -454,10 +454,10 @@ DROP_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     DROP_MISS_CLASSIFIER_SQL,
 )
 
-# The type is dropped after the functions and recreated before them. A stale
-# drop list announces itself here rather than silently: the type drop fails
-# while a function still returns it, which names the omission instead of
-# leaving an orphan overload installed.
+# The type is created once and never dropped, so it cannot announce a stale
+# drop list. Catalog conformance does that instead: the installed signature set
+# is asserted against the expected one, and an overload left behind by a
+# changed argument list appears there as a difference.
 CREATE_TERMINALIZATION_FUNCTIONS_SQL: tuple[TextClause, ...] = (
     CREATE_MISS_CLASSIFIER_SQL,
     CREATE_COMPLETE_LOCKED_TASK_SQL,
