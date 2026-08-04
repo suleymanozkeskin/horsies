@@ -7,7 +7,7 @@ conditions that make its numbers meaningful have been stated.
 
     uv run python -m tests.perf --scenario fused-completion-small-result \\
         --dsn postgresql+psycopg://postgres:testpassword@localhost:15446/horsies \\
-        --scale smoke
+        --scale smoke --control
 
     uv run python -m tests.perf --scenario fused-completion-small-result \\
         --dsn ... --scale gate --demo-quiesced
@@ -57,6 +57,7 @@ SMOKE_RESAMPLES = 200
 GATE_ENVIRONMENT: dict[str, str] = {
     'autovacuum': 'off',
     'fsync': 'off',
+    'full_page_writes': 'off',
     'synchronous_commit': 'off',
 }
 
@@ -71,10 +72,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         '--scenario',
-        choices=[s.name for s in SCENARIOS] + ['all'],
+        choices=[s.name for s in SCENARIOS] + ['all', 'candidates'],
     )
     parser.add_argument('--scale', choices=['smoke', 'gate'])
     parser.add_argument('--block-size', type=int, default=100)
+    parser.add_argument(
+        '--observations',
+        type=int,
+        help=(
+            'per-side operation count, or batch count for batch scenarios; '
+            'use a value above the gate minimum when a confidence interval '
+            'is inconclusive'
+        ),
+    )
     parser.add_argument('--seed', type=int, default=20260804)
     parser.add_argument(
         '--demo-quiesced',
@@ -87,6 +97,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument('--write-summary', action='store_true')
+    parser.add_argument(
+        '--control',
+        action='store_true',
+        help='run every candidate side with its baseline implementation',
+    )
     arguments = parser.parse_args(argv)
 
     if arguments.apply_schema:
@@ -105,11 +120,28 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     resamples = GATE_RESAMPLES if arguments.scale == 'gate' else SMOKE_RESAMPLES
-    scenarios = (
-        SCENARIOS
-        if arguments.scenario == 'all'
-        else (scenario_by_name(arguments.scenario),)
-    )
+    scenarios = _select_scenarios(arguments.scenario)
+    if arguments.observations is not None and arguments.observations <= 0:
+        parser.error('--observations must be positive')
+    if arguments.scale == 'gate' and arguments.observations is not None:
+        undersized = [
+            scenario.name
+            for scenario in scenarios
+            if arguments.observations < _minimum_observations(scenario, 'gate')
+        ]
+        if undersized:
+            parser.error(
+                '--observations cannot lower the gate minimum for: '
+                + ', '.join(undersized)
+            )
+    if arguments.scale == 'gate' and not arguments.control:
+        missing = [
+            scenario.name for scenario in scenarios if scenario.candidate is None
+        ]
+        if missing:
+            parser.error(
+                'a gate requires a real candidate; missing for: ' + ', '.join(missing)
+            )
 
     engine = create_engine(arguments.dsn)
     outcomes: list[tuple[Verdict, bool]] = []
@@ -118,8 +150,7 @@ def main(argv: list[str] | None = None) -> int:
         if arguments.scale == 'gate':
             with engine.connect() as connection:
                 observed = {
-                    name: server_setting(connection, name)
-                    for name in GATE_ENVIRONMENT
+                    name: server_setting(connection, name) for name in GATE_ENVIRONMENT
                 }
             violations = _gate_environment_violations(observed)
             if violations:
@@ -130,11 +161,16 @@ def main(argv: list[str] | None = None) -> int:
             result = run_scenario(
                 engine,
                 scenario=scenario,
-                observations=_observations_for(scenario, arguments.scale),
+                observations=_observations_for(
+                    scenario,
+                    arguments.scale,
+                    arguments.observations,
+                ),
                 block_size=_block_size_for(scenario, arguments.block_size),
                 resamples=resamples,
                 seed=arguments.seed,
                 demo_quiesced=arguments.demo_quiesced,
+                control=arguments.control,
             )
             summary = render_summary(result)
             print(summary)
@@ -149,7 +185,8 @@ def main(argv: list[str] | None = None) -> int:
                 name = summary_filename(result)
                 (RESULTS_DIR / name).write_text(summary, encoding='utf-8')
                 (RAW_DIR / f'{name[:-3]}.json').write_text(
-                    render_raw(result), encoding='utf-8',
+                    render_raw(result),
+                    encoding='utf-8',
                 )
                 print(f'wrote {RESULTS_DIR / name}')
     finally:
@@ -179,6 +216,19 @@ def _gate_environment_violations(observed: dict[str, str]) -> list[str]:
     ]
 
 
+def _select_scenarios(selector: str) -> tuple[Scenario, ...]:
+    """Resolve an explicit scenario or a mechanically complete group."""
+    match selector:
+        case 'all':
+            return SCENARIOS
+        case 'candidates':
+            return tuple(
+                scenario for scenario in SCENARIOS if scenario.candidate is not None
+            )
+        case name:
+            return (scenario_by_name(name),)
+
+
 def _exit_status(
     scale: str,
     outcomes: Sequence[tuple[Verdict, bool]],
@@ -206,12 +256,20 @@ def _exit_status(
             return 1 if judged_failures else 0
 
 
-def _observations_for(scenario: Scenario, scale: str) -> int:
+def _minimum_observations(scenario: Scenario, scale: str) -> int:
     match scenario:
         case BatchScenario():
             return GATE_BATCHES if scale == 'gate' else SMOKE_BATCHES
         case _:
             return GATE_OBSERVATIONS if scale == 'gate' else SMOKE_OBSERVATIONS
+
+
+def _observations_for(
+    scenario: Scenario,
+    scale: str,
+    override: int | None,
+) -> int:
+    return override if override is not None else _minimum_observations(scenario, scale)
 
 
 def _block_size_for(scenario: Scenario, requested: int) -> int:
@@ -255,7 +313,26 @@ def _control_disagreements(result: RunResult) -> list[str]:
                 baseline.client_statements,
                 candidate.client_statements,
             ),
-            ('rows affected', baseline.rows_affected, candidate.rows_affected),
+            (
+                'client rows',
+                baseline.client_rows,
+                candidate.client_rows,
+            ),
+            (
+                'nested statements',
+                baseline.nested_statements,
+                candidate.nested_statements,
+            ),
+            (
+                'nested rows',
+                baseline.nested_rows,
+                candidate.nested_rows,
+            ),
+            (
+                'terminal rows',
+                baseline.terminal_rows,
+                candidate.terminal_rows,
+            ),
         )
         if left != right
     ]

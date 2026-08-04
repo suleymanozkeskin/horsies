@@ -52,7 +52,13 @@ class TestSummariesAreSelfContained:
 
     def test_every_summary_states_its_conditions(self) -> None:
         """A number without conditions is not evidence of anything."""
-        required = ('## Conditions', '| server |', '| observations per side |')
+        required = (
+            '## Conditions',
+            '| server |',
+            '| full_page_writes | off |',
+            '| observations per side |',
+            '## Instrumented plan evidence',
+        )
         for path in _summaries():
             if path.name == 'README.md':
                 continue
