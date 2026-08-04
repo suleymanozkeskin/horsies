@@ -55,3 +55,6 @@ examples/
 
 # built web UI assets (produced by the webui build, never committed)
 horsies/web/static/
+
+# Raw measurement samples: large, unreadable, uploaded as CI artifacts instead.
+tests/perf/results/raw/
