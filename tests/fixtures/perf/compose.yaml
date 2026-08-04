@@ -1,0 +1,110 @@
+name: horsies-perf-measurement
+
+# Two servers, one per supported major, so a measurement can be repeated on the
+# declared floor as well as the version CI normally runs.
+#
+# The settings below are part of the measurement contract, not conveniences.
+# Changing them changes what a recorded result means, so each is here with its
+# reason:
+#
+#   shared_preload_libraries=pg_stat_statements
+#   pg_stat_statements.track=all
+#   pg_stat_statements.track_utility=off
+#     Statement counts, WAL records and WAL bytes are read from this view, and
+#     `track=all` is what lets statements executed inside a PL/pgSQL function be
+#     recorded separately from the client statements that called them. Neither
+#     is reachable through a GitHub Actions `services:` container, which cannot
+#     pass server arguments — that is why this stack is a compose file.
+#     Utility statements are excluded because BEGIN and COMMIT are each
+#     recorded as a statement when they are not: leaving that on triples the
+#     client-statement count of every single-row operation and makes the
+#     one-statement requirement unverifiable. Commits are counted separately,
+#     from the database's own commit counter.
+#
+#   fsync=off, synchronous_commit=off
+#     DELIBERATE, AND NOT A "REALISTIC DISK" OVERSIGHT — please do not switch
+#     these on to make the environment look more production-like. A measurement
+#     here compares two implementations that perform an equal number of commits
+#     by contract, so per-commit flush cost cancels between them and only its
+#     variance survives. That variance widens the confidence interval until the
+#     comparison reports "inconclusive" — a storage-jitter verdict wearing the
+#     costume of a code verdict. The regressions flushing could hide are caught
+#     by the commit-count and WAL budgets instead, and neither of those is
+#     affected by these settings.
+#
+#   full_page_writes=on, checkpoint_timeout=30min, max_wal_size=4GB
+#     Full-page images are reported separately and excluded from the WAL byte
+#     comparison, because whether a page is being written for the first time
+#     since a checkpoint otherwise dominates the result. Leaving FPIs on and
+#     pushing checkpoints out keeps them countable and rare instead of
+#     unpredictable.
+
+services:
+  pg14:
+    # PostgreSQL 14 amd64 manifest — the declared floor. The tag documents the
+    # major; the digest pins it.
+    image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+    platform: linux/amd64
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.track_utility=off
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=on
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - max_wal_size=4GB
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: horsies
+    ports:
+      - "15442:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  pg16:
+    # PostgreSQL 16 amd64 manifest — the version CI runs.
+    image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    platform: linux/amd64
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - pg_stat_statements.track_utility=off
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=on
+      - -c
+      - checkpoint_timeout=30min
+      - -c
+      - max_wal_size=4GB
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: testpassword
+      POSTGRES_DB: horsies
+    ports:
+      - "15446:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d horsies"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
