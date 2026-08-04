@@ -13,6 +13,12 @@ cannot be attached to a cancellation, and a workflow-scoped command cannot name
 the workflow status it requires — the variant means it. Each variant holds
 exactly the data its guard needs and nothing that could contradict it.
 
+Payload obeys the same rule and is per-variant. A variant carries a result, an
+error code, or a failure reason only where its statement takes that value from
+the caller; nine of the fifteen own those values as literals — a workflow pause
+always writes the same reason — so those variants carry none, and cannot be
+handed a payload the database would silently ignore.
+
 One union, not one per cardinality. Cardinality is variant identity here — a
 separate batch union would encode shape twice and let the two encodings drift.
 
@@ -36,19 +42,6 @@ from .fences import (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class TerminalResultPayload:
-    """What a transition records about the outcome it is writing.
-
-    Payload is the one axis on which two commands may agree and still be one
-    command — the difference between the two failure writers.
-    """
-
-    result_json: str | None
-    error_code: str | None
-    failed_reason: str | None
-
-
 # ---------------------------------------------------------------------------
 # COMPLETED
 # ---------------------------------------------------------------------------
@@ -64,7 +57,7 @@ class CompleteLockedTask:
 
     task_id: str
     fence: PriorLockedRead
-    payload: TerminalResultPayload
+    result_json: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +74,7 @@ class CompleteTaskFused:
 
     task_id: str
     fence: OwnedClaim
-    payload: TerminalResultPayload
+    result_json: str
     notify_channel: str
     notify_payload: str
 
@@ -96,12 +89,19 @@ class FailLockedTask:
     """Failure for a task whose row the caller already locked and read.
 
     Covers both application failure and worker-level failure; they differ only
-    in whether `payload.failed_reason` is carried.
+    in whether a failure reason is carried.
+
+    `failed_reason` of None means "leave the column as it is", not "clear it".
+    Only the worker-level path supplies a reason, and no requeue clears the
+    column, so a row can be carrying one from an earlier attempt — assigning
+    NULL over it would erase history this transition never owned.
     """
 
     task_id: str
     fence: PriorLockedRead
-    payload: TerminalResultPayload
+    result_json: str
+    error_code: str | None
+    failed_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,7 +117,9 @@ class FailStaleTask:
     task_id: str
     stale_after_seconds: int
     finalizing_stale_after_seconds: int
-    payload: TerminalResultPayload
+    result_json: str
+    error_code: str
+    failed_reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +138,8 @@ class ExpireOwnedClaim:
 
     task_id: str
     fence: WorkerOwned
-    payload: TerminalResultPayload
+    result_json: str
+    error_code: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +153,8 @@ class ExpirePendingTasks:
     """
 
     batch_size: int
-    payload: TerminalResultPayload
+    result_json: str
+    error_code: str
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +175,6 @@ class CancelLockedTask:
     task_id: str
     fence: CallerHoldsRowLock
     permitted_source_statuses: tuple[TaskStatus, ...]
-    payload: TerminalResultPayload
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +192,6 @@ class CancelOwnedOrphan:
 
     task_id: str
     fence: OwnedClaim
-    payload: TerminalResultPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,7 +199,6 @@ class CancelOrphanedTasks:
     """The same condition, swept in bounded batches across all workers."""
 
     batch_size: int
-    payload: TerminalResultPayload
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +218,6 @@ class AbandonOwnedNode:
 
     task_id: str
     fence: OwnedClaim
-    payload: TerminalResultPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,7 +225,6 @@ class AbandonOwnedNodes:
     """The same, for a batch this worker just claimed."""
 
     fence: OwnedClaimBatch
-    payload: TerminalResultPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +236,6 @@ class AbandonNodesOfPausedWorkflows:
     """
 
     workflow_ids: tuple[str, ...]
-    payload: TerminalResultPayload
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +256,6 @@ class CancelOwnedNode:
     task_id: str
     fence: OwnedClaim
     accepts_requeued_pending: bool
-    payload: TerminalResultPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +263,6 @@ class CancelOwnedNodes:
     """The same, for a batch this worker just claimed."""
 
     fence: OwnedClaimBatch
-    payload: TerminalResultPayload
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,7 +275,6 @@ class CancelNodesOfCancelledWorkflow:
     """
 
     workflow_ids: tuple[str, ...]
-    payload: TerminalResultPayload
 
 
 type TerminalizationCommand = (
