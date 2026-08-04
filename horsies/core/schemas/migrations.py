@@ -170,7 +170,15 @@ from sqlalchemy import text
 #      which would disable the notification-burst bound the batch exists
 #      to enforce.
 
-SCHEMA_VERSION = 22
+# v23: the cancellation operations — horsies_cancel_locked_task preserves the
+#      operator's explicit RUNNING opt-in under its existing row lock;
+#      horsies_cancel_owned_orphan fences one claim and reports a runnable
+#      workflow-task link as guard evidence; horsies_cancel_orphaned_tasks is
+#      the bounded, SKIP LOCKED discovery form of the same orphan predicate.
+#      The sweep's effective task source set is CLAIMED/PENDING; the legacy
+#      READY/ENQUEUED literals are not TaskStatus values and are removed.
+
+SCHEMA_VERSION = 23
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

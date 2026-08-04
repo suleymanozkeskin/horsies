@@ -75,6 +75,19 @@ EXPECTED_SIGNATURES = {
         'horsies_expire_pending_tasks',
         'p_batch_size integer, p_result text, p_error_code text',
     ),
+    (
+        'horsies_cancel_locked_task',
+        'p_task_id character varying, p_permitted_source_statuses text[]',
+    ),
+    (
+        'horsies_cancel_owned_orphan',
+        'p_task_id character varying, p_worker_id text, '
+        'p_claimed_at timestamp with time zone',
+    ),
+    (
+        'horsies_cancel_orphaned_tasks',
+        'p_batch_size integer',
+    ),
 }
 
 EXPECTED_FUNCTIONS = {name for name, _ in EXPECTED_SIGNATURES}
