@@ -90,11 +90,15 @@ async def _insert_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result, enqueue_sha)
+                 max_retries, started_at, result, enqueue_sha, terminal_at)
             VALUES
                 (:id, 'load_result_test', 'default', 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :result, :enqueue_sha)
+                 0, NOW(), :result, :enqueue_sha,
+                 -- Terminal exactly when dated, as the database requires.
+                 CASE WHEN CAST(:status AS VARCHAR)
+                          IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                      THEN NOW() ELSE NULL END)
         """),
         {'id': task_id, 'status': status, 'result': result, 'sent_at': sent_at, 'enqueue_sha': sha},
     )
@@ -342,11 +346,11 @@ async def test_unknown_task_err_result_uses_fast_path(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result, enqueue_sha)
+                 max_retries, started_at, result, enqueue_sha, terminal_at)
             VALUES
                 (:id, 'unknown_task_xyz', 'default', 100, '[]', '{}',
                  'FAILED', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :result, :enqueue_sha)
+                 0, NOW(), :result, :enqueue_sha, NOW())
         """),
         {'id': task_id, 'sent_at': sent_at, 'result': err_result_json, 'enqueue_sha': sha},
     )

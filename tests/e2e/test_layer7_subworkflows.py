@@ -261,7 +261,8 @@ async def _mark_workflow_task_completed(
             await session.execute(
                 text("""
                     UPDATE horsies_tasks
-                    SET status = 'COMPLETED', result = :result, updated_at = NOW()
+                    SET status = 'COMPLETED', result = :result,
+                        terminal_at = NOW(), updated_at = NOW()
                     WHERE id = :task_id
                 """),
                 {'task_id': task_id, 'result': result_json},

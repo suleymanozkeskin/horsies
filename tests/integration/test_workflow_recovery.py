@@ -692,7 +692,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = :result
+                    result = :result,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {
@@ -772,7 +773,10 @@ class TestWorkflowRecovery:
                 text(
                     "UPDATE horsies_tasks SET status = 'FAILED', "
                     'failed_at = NOW() - make_interval(secs => CAST(:age AS double precision)), '
-                    'result = :result WHERE id = :tid'
+                    'result = :result, '
+                    'terminal_at = NOW() - make_interval('
+                    'secs => CAST(:age AS double precision)) '
+                    'WHERE id = :tid'
                 ),
                 {
                     'tid': task_id,
@@ -861,7 +865,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = :result
+                    result = :result,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {
@@ -942,7 +947,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = :result
+                    result = :result,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {
@@ -1007,7 +1013,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'CANCELLED',
-                    result = NULL
+                    result = NULL,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {'tid': task_id},
@@ -1071,7 +1078,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'COMPLETED',
-                    result = NULL
+                    result = NULL,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {'tid': task_id},
@@ -1151,7 +1159,8 @@ class TestWorkflowRecovery:
             text("""
                 UPDATE horsies_tasks
                 SET status = 'FAILED',
-                    result = :result
+                    result = :result,
+                    terminal_at = NOW()
                 WHERE id = :tid
             """),
             {
@@ -1662,7 +1671,7 @@ class TestWorkflowRecovery:
         await session.execute(
             text("""
                 UPDATE horsies_tasks
-                SET status = 'FAILED', result = NULL
+                SET status = 'FAILED', result = NULL, terminal_at = NOW()
                 WHERE id = :tid
             """),
             {'tid': task_id},

@@ -909,7 +909,10 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
     # Cancel directly in DB (no cancel API exists)
     async with broker.session_factory() as session:
         await session.execute(
-            text("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = :tid"),
+            text(
+                'UPDATE horsies_tasks '
+                "SET status = 'CANCELLED', terminal_at = NOW() WHERE id = :tid"
+            ),
             {'tid': task_id},
         )
         await session.commit()
@@ -1161,10 +1164,10 @@ async def test_legacy_pydantic_result_envelope_rejected(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, result, priority, sent_at, completed_at,
-                     claimed, retry_count, max_retries, enqueue_sha)
+                     claimed, retry_count, max_retries, enqueue_sha, terminal_at)
                 VALUES
                     (:tid, 'e2e_simple', 'default', 'COMPLETED', :result, 100, :sent_at, now(),
-                     FALSE, 0, 0, :enqueue_sha)
+                     FALSE, 0, 0, :enqueue_sha, now())
             """),
             {'tid': task_id, 'result': legacy_result, 'sent_at': sent_at, 'enqueue_sha': sha},
         )

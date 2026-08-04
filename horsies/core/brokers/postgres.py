@@ -126,10 +126,19 @@ from horsies.core.schemas.indexes import (
 )
 from horsies.core.schemas.migrations import (
     ANALYZE_EXPRESSION_INDEXED_TABLES_SQL,
+    ADD_TERMINAL_AT_CHECK_SQL,
+    ADD_TERMINALIZATION_KIND_CHECK_SQL,
+    ADD_TERMINALIZATION_KIND_COLUMN_SQL,
+    BACKFILL_TERMINAL_AT_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
+    CREATE_OUTCOME_TYPE_SQL,
+    CREATE_TERMINALIZATION_FUNCTIONS_SQL,
     CREATE_TASKS_RETENTION_STATISTICS_SQL,
     CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL,
     DROP_CLAIM_FUNCTION_SQL,
+    DROP_TERMINALIZATION_FUNCTIONS_SQL,
+    VALIDATE_TERMINAL_AT_CHECK_SQL,
+    VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
     CREATE_TASK_ATTEMPTS_TABLE_SQL,
     CREATE_SCHEMA_VERSION_TABLE_SQL,
     ADD_DEPTH_COLUMN_SQL,
@@ -868,6 +877,31 @@ class PostgresBroker:
             # dropping the v10/v11 definition first.
             await conn.execute(DROP_CLAIM_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
+
+            # Migration (v18): terminal_at completeness. Backfill first, then
+            # constrain, in that order and in this transaction — the
+            # constraint's precondition has to be true at the moment it is
+            # enforced. This ships inside the v19 artifact rather than ahead of
+            # it: the apply path exits early once the stored version is at or
+            # above SCHEMA_VERSION, so a database that reached v19 without this
+            # would never run it afterwards.
+            await conn.execute(BACKFILL_TERMINAL_AT_SQL)
+            await conn.execute(ADD_TERMINAL_AT_CHECK_SQL)
+            await conn.execute(VALIDATE_TERMINAL_AT_CHECK_SQL)
+
+            # Migration (v19): terminalization kind, and the operations that
+            # write it. The column, the type and the constraint are installed
+            # only when absent; the functions are dropped and recreated on
+            # every apply, following the claim precedent, because a function
+            # body is program rather than state.
+            await conn.execute(ADD_TERMINALIZATION_KIND_COLUMN_SQL)
+            await conn.execute(ADD_TERMINALIZATION_KIND_CHECK_SQL)
+            await conn.execute(VALIDATE_TERMINALIZATION_KIND_CHECK_SQL)
+            await conn.execute(CREATE_OUTCOME_TYPE_SQL)
+            for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
+                await conn.execute(drop_function)
+            for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
+                await conn.execute(create_function)
 
             # Migration (v11): retention eligibility indexes.
             await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)

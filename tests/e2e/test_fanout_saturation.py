@@ -115,6 +115,7 @@ class TestTaskDoneFanout:
                 UPDATE horsies_tasks
                 SET status = 'COMPLETED',
                     result = '{"ok": 0}',
+                    terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = :tid
             """),
@@ -192,6 +193,7 @@ class TestTaskDoneFanout:
                 UPDATE horsies_tasks
                 SET status = 'COMPLETED',
                     result = '{"ok": 0}',
+                    terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = :tid
             """),
@@ -262,6 +264,7 @@ class TestTaskDoneFanout:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 1}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -357,6 +360,7 @@ class TestTaskDoneFanout:
                         UPDATE horsies_tasks
                         SET status = 'COMPLETED',
                             result = '{"ok": 1}',
+                            terminal_at = NOW(),
                             updated_at = NOW()
                         WHERE id = :tid
                     """),
@@ -435,6 +439,7 @@ class TestFanoutBoundary:
                 UPDATE horsies_tasks
                 SET status = 'COMPLETED',
                     result = '{"ok": 0}',
+                    terminal_at = NOW(),
                     updated_at = NOW()
                 WHERE id = :tid
             """),
@@ -457,6 +462,7 @@ class TestFanoutBoundary:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 1}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -489,6 +495,7 @@ class TestFanoutBoundary:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 0}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -553,6 +560,7 @@ class TestFanoutBoundary:
                         UPDATE horsies_tasks
                         SET status = 'COMPLETED',
                             result = '{"ok": 0}',
+                            terminal_at = NOW(),
                             updated_at = NOW()
                         WHERE id = :tid
                     """),
@@ -584,6 +592,7 @@ class TestFanoutBoundary:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 0}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -715,6 +724,7 @@ class TestFanoutErrorPaths:
                         UPDATE horsies_tasks
                         SET status = 'COMPLETED',
                             result = '{"ok": 1}',
+                            terminal_at = NOW(),
                             updated_at = NOW()
                         WHERE id = :tid
                     """),
@@ -765,6 +775,7 @@ class TestFanoutContracts:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 0}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -815,6 +826,7 @@ class TestFanoutContracts:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 0}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),
@@ -863,6 +875,7 @@ class TestFanoutContracts:
                     UPDATE horsies_tasks
                     SET status = 'COMPLETED',
                         result = '{"ok": 0}',
+                        terminal_at = NOW(),
                         updated_at = NOW()
                     WHERE id = :tid
                 """),

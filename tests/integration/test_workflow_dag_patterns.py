@@ -227,7 +227,7 @@ class TestDAGPatterns:
         await session.execute(
             text("""
                 UPDATE horsies_tasks
-                SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW()
+                SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW(), terminal_at = NOW()
                 WHERE id = :task_id
             """),
             {'task_id': root_task_id},

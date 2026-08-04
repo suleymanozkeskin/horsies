@@ -444,12 +444,12 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
              'COMPLETED', :sent_at, NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours', :enqueue_sha)
+             0, NOW() - INTERVAL '48 hours', :enqueue_sha, NOW() - INTERVAL '48 hours')
     """), {'id': old_completed_task, 'sent_at': sent_at_1, 'enqueue_sha': sha_1})
 
     # 2. Old RUNNING task (48h ago) — should survive (not terminal)
@@ -477,12 +477,12 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
              'COMPLETED', :sent_at, NOW() - INTERVAL '1 hour',
              NOW() - INTERVAL '1 hour', FALSE, 0,
-             0, NOW() - INTERVAL '1 hour', :enqueue_sha)
+             0, NOW() - INTERVAL '1 hour', :enqueue_sha, NOW() - INTERVAL '1 hour')
     """), {'id': recent_completed_task, 'sent_at': sent_at_3, 'enqueue_sha': sha_3})
 
     # 4. Old COMPLETED task linked to a RUNNING workflow — should survive (protected)
@@ -494,12 +494,12 @@ async def test_expired_terminal_tasks_deleted_but_protected_by_workflow(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         VALUES
             (:id, 'ret_test', 'default', 100, '[]', '{}',
              'COMPLETED', :sent_at, NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours', :enqueue_sha)
+             0, NOW() - INTERVAL '48 hours', :enqueue_sha, NOW() - INTERVAL '48 hours')
     """), {'id': old_completed_protected, 'sent_at': sent_at_4, 'enqueue_sha': sha_4})
 
     # Create a RUNNING workflow linking to the protected task
@@ -579,12 +579,12 @@ async def test_expired_tasks_delete_is_bounded_by_batch_size(
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, priority, args, kwargs,
                      status, sent_at, created_at, updated_at, claimed, retry_count,
-                     max_retries, completed_at, enqueue_sha)
+                     max_retries, completed_at, enqueue_sha, terminal_at)
                 VALUES
                     (:id, 'ret_batch_test', 'default', 100, '[]', '{}',
                      'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
                      NOW() - (:h || ' hours')::interval, FALSE, 0,
-                     0, NOW() - (:h || ' hours')::interval, :enqueue_sha)
+                     0, NOW() - (:h || ' hours')::interval, :enqueue_sha, NOW() - (:h || ' hours')::interval)
             """), {
                 'id': str(uuid.uuid4()),
                 'sent_at': sent_at,
@@ -635,12 +635,12 @@ async def test_expired_tasks_delete_purges_attempts_set_wise(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, completed_at, enqueue_sha)
+                 max_retries, completed_at, enqueue_sha, terminal_at)
             VALUES
                 (:id, 'ret_attempts_test', 'default', 100, '[]', '{}',
                  'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
                  NOW() - (:h || ' hours')::interval, FALSE, 0,
-                 0, NOW() - (:h || ' hours')::interval, :enqueue_sha)
+                 0, NOW() - (:h || ' hours')::interval, :enqueue_sha, NOW() - (:h || ' hours')::interval)
         """), {
             'id': task_id,
             'sent_at': sent_at,
@@ -705,12 +705,14 @@ async def _insert_plain_task(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha, is_workflow_task)
+             max_retries, completed_at, enqueue_sha, is_workflow_task,
+             terminal_at)
         VALUES
             (:id, 'ret_queue_test', :queue_name, 100, '[]', '{}',
              'COMPLETED', :sent_at, NOW() - (:h || ' hours')::interval,
              NOW() - (:h || ' hours')::interval, FALSE, 0,
-             0, NOW() - (:h || ' hours')::interval, :enqueue_sha, :is_wf)
+             0, NOW() - (:h || ' hours')::interval, :enqueue_sha, :is_wf,
+             NOW() - (:h || ' hours')::interval)
     """), {
         'id': task_id,
         'queue_name': queue_name,
@@ -889,22 +891,23 @@ async def test_expired_tasks_delete_uses_retention_index(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         SELECT gen_random_uuid()::text, 'ret_idx_test', 'default', 100, '[]', '{}',
                'COMPLETED', NOW(), NOW(), NOW(), FALSE, 0,
-               0, NOW(), 'ret-idx-test-sha'
+               0, NOW(), 'ret-idx-test-sha', NOW()
         FROM generate_series(1, 500)
     """))
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         VALUES
             (gen_random_uuid()::text, 'ret_idx_test', 'default', 100, '[]', '{}',
              'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours', 'ret-idx-test-sha')
+             0, NOW() - INTERVAL '48 hours', 'ret-idx-test-sha',
+             NOW() - INTERVAL '48 hours')
     """))
     await session.commit()
     await session.execute(text('ANALYZE horsies_tasks'))
@@ -1003,22 +1006,23 @@ async def test_retention_delete_statements_plan_on_retention_indexes(
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         SELECT gen_random_uuid()::text, 'ret_plan_task_test', 'default', 100, '[]', '{}',
                'COMPLETED', NOW(), NOW(), NOW(), FALSE, 0,
-               0, NOW(), 'ret-plan-test-sha'
+               0, NOW(), 'ret-plan-test-sha', NOW()
         FROM generate_series(1, 500)
     """))
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, created_at, updated_at, claimed, retry_count,
-             max_retries, completed_at, enqueue_sha)
+             max_retries, completed_at, enqueue_sha, terminal_at)
         VALUES
             (gen_random_uuid()::text, 'ret_plan_task_test', 'default', 100, '[]', '{}',
              'COMPLETED', NOW(), NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', FALSE, 0,
-             0, NOW() - INTERVAL '48 hours', 'ret-plan-test-sha')
+             0, NOW() - INTERVAL '48 hours', 'ret-plan-test-sha',
+             NOW() - INTERVAL '48 hours')
     """))
     # One attempt per task: the tasks delete must purge these set-wise via
     # its purged_attempts CTE, visible below as a plan node.
