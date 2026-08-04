@@ -15,8 +15,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
+from typing import cast
 
-from tests.perf.runner import Measurement, RunResult
+from tests.perf.runner import (
+    WAL_RECORD_DELTA_PER_TERMINAL_ROW,
+    Measurement,
+    RunResult,
+)
 from tests.perf.statistics import Comparison
 
 
@@ -46,6 +51,7 @@ def render_summary(result: RunResult) -> str:
         f'| result payload | {conditions.payload_bytes} bytes |',
         f'| batch | {batch} |',
         f'| fsync | {conditions.fsync} |',
+        f'| full_page_writes | {conditions.full_page_writes} |',
         f'| synchronous_commit | {conditions.synchronous_commit} |',
         f'| autovacuum | {conditions.autovacuum} |',
         f'| bootstrap resamples | {conditions.resamples} |',
@@ -58,6 +64,20 @@ def render_summary(result: RunResult) -> str:
         '|---|---|---|---|---|---|---|',
     ]
     lines += [_latency_row(c) for c in result.comparisons]
+    if result.plans is not None:
+        lines += [
+            '',
+            '## Instrumented plan evidence',
+            '',
+            'One eligible transition per side, executed with '
+            '`EXPLAIN (ANALYZE, BUFFERS, WAL, TIMING OFF, FORMAT JSON)` and '
+            'rolled back. These executions are excluded from the latency and '
+            'server-count measurements.',
+            '',
+            '| | baseline | candidate |',
+            '|---|---|---|',
+            *_plan_rows(result.plans.baseline, result.plans.candidate),
+        ]
     lines += [
         '',
         '## Server counts',
@@ -66,9 +86,23 @@ def render_summary(result: RunResult) -> str:
         '|---|---|---|',
         *_counts_rows(result.baseline, result.candidate),
         '',
-        'Full-page images are reported and excluded from the byte comparison: '
-        'whether a page is written for the first time since a checkpoint '
-        'otherwise dominates the result.',
+        '## Contract checks',
+        '',
+        'Limits: client statements may not increase; write transactions and '
+        'terminal task rows must match; WAL-record delta must be at most '
+        f'{WAL_RECORD_DELTA_PER_TERMINAL_ROW:.3f} per terminal task row; '
+        'WAL-byte delta must be at most the greater of 10% or 128 bytes per '
+        'terminal task row.',
+        '',
+        *(
+            [f'- FAIL: {violation}' for violation in result.contract_violations]
+            if result.contract_violations
+            else ['- PASS']
+        ),
+        '',
+        'Full-page writes are disabled in this disposable measurement '
+        'environment, so checkpoint-dependent image bytes are absent from '
+        'the WAL-byte comparison.',
         '',
         f'**Verdict: {result.verdict.value}**',
         '',
@@ -90,9 +124,10 @@ def render_raw(result: RunResult) -> str:
                 'counts': asdict(result.candidate.counts),
             },
             'comparisons': [
-                {**asdict(c), 'verdict': c.verdict.value}
-                for c in result.comparisons
+                {**asdict(c), 'verdict': c.verdict.value} for c in result.comparisons
             ],
+            'plans': asdict(result.plans) if result.plans is not None else None,
+            'contract_violations': list(result.contract_violations),
             'verdict': result.verdict.value,
         },
         indent=2,
@@ -100,7 +135,7 @@ def render_raw(result: RunResult) -> str:
 
 
 def summary_filename(result: RunResult) -> str:
-    """Dated and versioned, so two runs never overwrite each other."""
+    """Name the authoritative run for one day, scenario, and server major."""
     conditions = result.conditions
     day = conditions.measured_at[:10]
     major = conditions.server_version.split('.')[0]
@@ -127,15 +162,76 @@ def _counts_rows(baseline: Measurement, candidate: Measurement) -> list[str]:
         f'| {candidate.counts.nested_statements} |',
         f'| write transactions | {baseline.counts.write_transactions} '
         f'| {candidate.counts.write_transactions} |',
-        f'| rows affected | {baseline.counts.rows_affected} '
-        f'| {candidate.counts.rows_affected} |',
-        f'| WAL records per row | {baseline.counts.wal_records_per_row:.2f} '
+        f'| client rows | {baseline.counts.client_rows} '
+        f'| {candidate.counts.client_rows} |',
+        f'| nested rows | {baseline.counts.nested_rows} '
+        f'| {candidate.counts.nested_rows} |',
+        f'| terminal task rows | {baseline.counts.terminal_rows} '
+        f'| {candidate.counts.terminal_rows} |',
+        '| WAL records per terminal task row '
+        f'| {baseline.counts.wal_records_per_row:.2f} '
         f'| {candidate.counts.wal_records_per_row:.2f} |',
-        f'| WAL bytes per row | {baseline.counts.wal_bytes_per_row:.0f} '
+        '| WAL bytes per terminal task row '
+        f'| {baseline.counts.wal_bytes_per_row:.0f} '
         f'| {candidate.counts.wal_bytes_per_row:.0f} |',
         f'| full-page images | {baseline.counts.wal_fpi} '
         f'| {candidate.counts.wal_fpi} |',
     ]
+
+
+def _plan_rows(
+    baseline_document: dict[str, object],
+    candidate_document: dict[str, object],
+) -> list[str]:
+    baseline = _root_plan(baseline_document)
+    candidate = _root_plan(candidate_document)
+    return [
+        f'| node shape | `{_node_shape(baseline)}` ' f'| `{_node_shape(candidate)}` |',
+        f'| shared hit blocks | {_integer(baseline, "Shared Hit Blocks")} '
+        f'| {_integer(candidate, "Shared Hit Blocks")} |',
+        f'| shared read blocks | {_integer(baseline, "Shared Read Blocks")} '
+        f'| {_integer(candidate, "Shared Read Blocks")} |',
+        f'| shared dirtied blocks | {_integer(baseline, "Shared Dirtied Blocks")} '
+        f'| {_integer(candidate, "Shared Dirtied Blocks")} |',
+        f'| shared written blocks | {_integer(baseline, "Shared Written Blocks")} '
+        f'| {_integer(candidate, "Shared Written Blocks")} |',
+        f'| WAL records | {_integer(baseline, "WAL Records")} '
+        f'| {_integer(candidate, "WAL Records")} |',
+        f'| WAL full-page images | {_integer(baseline, "WAL FPI")} '
+        f'| {_integer(candidate, "WAL FPI")} |',
+        f'| WAL bytes | {_integer(baseline, "WAL Bytes")} '
+        f'| {_integer(candidate, "WAL Bytes")} |',
+    ]
+
+
+def _root_plan(document: dict[str, object]) -> dict[str, object]:
+    plan = document.get('Plan')
+    if not isinstance(plan, dict):
+        raise RuntimeError('EXPLAIN document has no root Plan object')
+    return cast(dict[str, object], plan)
+
+
+def _node_shape(node: dict[str, object]) -> str:
+    label = str(node.get('Node Type', 'unknown'))
+    detail = node.get('Relation Name') or node.get('Function Name')
+    if detail is not None:
+        label += f'({detail})'
+    children = node.get('Plans', [])
+    if not isinstance(children, list):
+        raise RuntimeError('EXPLAIN Plan children are not a list')
+    descendants = [
+        _node_shape(cast(dict[str, object], child))
+        for child in cast(list[object], children)
+        if isinstance(child, dict)
+    ]
+    return ' > '.join([label, *descendants])
+
+
+def _integer(plan: dict[str, object], key: str) -> int:
+    value = plan.get(key, 0)
+    if not isinstance(value, int):
+        raise RuntimeError(f'EXPLAIN field {key!r} is not an integer')
+    return value
 
 
 def _yes_no(value: bool) -> str:

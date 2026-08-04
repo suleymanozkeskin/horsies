@@ -142,6 +142,7 @@ jobs:
         run: |
           for port in 15442 15446; do
             uv run python -m tests.perf --scenario all --scale smoke \
+              --control \
               --dsn postgresql+psycopg://postgres:testpassword@localhost:${port}/horsies
           done
 

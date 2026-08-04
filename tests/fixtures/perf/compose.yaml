@@ -18,8 +18,8 @@ name: horsies-perf-measurement
 #     Utility statements are excluded because BEGIN and COMMIT are each
 #     recorded as a statement when they are not: leaving that on triples the
 #     client-statement count of every single-row operation and makes the
-#     one-statement requirement unverifiable. Commits are counted separately,
-#     from the database's own commit counter.
+#     one-statement requirement unverifiable. Committed writes are counted
+#     separately through immediate transaction-id consumption.
 #
 #   fsync=off, synchronous_commit=off
 #     DELIBERATE, AND NOT A "REALISTIC DISK" OVERSIGHT — please do not switch
@@ -32,12 +32,13 @@ name: horsies-perf-measurement
 #     by the commit-count and WAL budgets instead, and neither of those is
 #     affected by these settings.
 #
-#   full_page_writes=on, checkpoint_timeout=30min, max_wal_size=4GB
-#     Full-page images are reported separately and excluded from the WAL byte
-#     comparison, because whether a page is being written for the first time
-#     since a checkpoint otherwise dominates the result. Leaving FPIs on and
-#     pushing checkpoints out keeps them countable and rare instead of
-#     unpredictable.
+#   full_page_writes=off, checkpoint_timeout=30min, max_wal_size=4GB
+#     This disposable comparison excludes checkpoint-dependent full-page-image
+#     bytes at their source. PostgreSQL 14 and 16 statement statistics expose
+#     the image count but not its encoded byte length, so leaving full-page
+#     writes on would make the WAL-byte budget include a value the harness
+#     cannot subtract exactly. Crash recovery is not measured here, and this
+#     setting does not affect production configuration.
 #
 #   autovacuum=off
 #     This is a disposable, short-lived comparison environment, not a
@@ -71,7 +72,7 @@ services:
       - -c
       - synchronous_commit=off
       - -c
-      - full_page_writes=on
+      - full_page_writes=off
       - -c
       - checkpoint_timeout=30min
       - -c
@@ -107,7 +108,7 @@ services:
       - -c
       - synchronous_commit=off
       - -c
-      - full_page_writes=on
+      - full_page_writes=off
       - -c
       - checkpoint_timeout=30min
       - -c
