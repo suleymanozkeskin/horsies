@@ -67,6 +67,7 @@ class Conditions:
     server_version: str
     fsync: str
     synchronous_commit: str
+    autovacuum: str
     observations_per_side: int
     block_size: int
     ballast_rows: int
@@ -113,9 +114,10 @@ def run_scenario(
 
     with engine.connect() as connection:
         install_extension(connection)
-        server_version = _server_setting(connection, 'server_version')
-        fsync = _server_setting(connection, 'fsync')
-        synchronous_commit = _server_setting(connection, 'synchronous_commit')
+        server_version = server_setting(connection, 'server_version')
+        fsync = server_setting(connection, 'fsync')
+        synchronous_commit = server_setting(connection, 'synchronous_commit')
+        autovacuum = server_setting(connection, 'autovacuum')
 
         for stale in (baseline_prefix, candidate_prefix, ballast_prefix):
             delete_seeded(connection, prefix=stale)
@@ -160,6 +162,7 @@ def run_scenario(
             server_version=server_version,
             fsync=fsync,
             synchronous_commit=synchronous_commit,
+            autovacuum=autovacuum,
             observations_per_side=len(baseline.samples_ms),
             block_size=block_size,
             ballast_rows=BALLAST_ROWS,
@@ -400,5 +403,5 @@ def _comparison_label(scenario: Scenario) -> str:
             assert_never(unreachable)
 
 
-def _server_setting(connection: Connection, name: str) -> str:
+def server_setting(connection: Connection, name: str) -> str:
     return str(connection.execute(text(f'SHOW {name}')).scalar_one())

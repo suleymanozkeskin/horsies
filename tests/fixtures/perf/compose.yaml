@@ -38,6 +38,19 @@ name: horsies-perf-measurement
 #     since a checkpoint otherwise dominates the result. Leaving FPIs on and
 #     pushing checkpoints out keeps them countable and rare instead of
 #     unpredictable.
+#
+#   autovacuum=off
+#     This is a disposable, short-lived comparison environment, not a
+#     production-autovacuum simulation. Autovacuum is an uncontrolled third
+#     workload: it consumes server-wide transaction ids, performs I/O,
+#     changes visibility maps, and runs ANALYZE on its own schedule — one
+#     wakeup after a seed failed a control run on transaction-id drift and
+#     another put a burst under one side's latency tail. Explicit ANALYZE
+#     after seeding is the sole owner of planner statistics here. If
+#     behavior under concurrent autovacuum ever matters, it is a separate,
+#     non-gating profile: mixing it into a deterministic gate weakens both
+#     measurements. (Anti-wraparound vacuum can still run despite the
+#     setting; a fresh disposable cluster never approaches that threshold.)
 
 services:
   pg14:
@@ -63,6 +76,8 @@ services:
       - checkpoint_timeout=30min
       - -c
       - max_wal_size=4GB
+      - -c
+      - autovacuum=off
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: testpassword
@@ -97,6 +112,8 @@ services:
       - checkpoint_timeout=30min
       - -c
       - max_wal_size=4GB
+      - -c
+      - autovacuum=off
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: testpassword

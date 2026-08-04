@@ -24,7 +24,7 @@ from sqlalchemy import create_engine
 
 from tests.perf.prepare import apply_schema
 from tests.perf.report import render_raw, render_summary, summary_filename
-from tests.perf.runner import RunResult, run_scenario
+from tests.perf.runner import RunResult, run_scenario, server_setting
 from tests.perf.scenarios import (
     SCENARIOS,
     BatchScenario,
@@ -49,6 +49,16 @@ SMOKE_OBSERVATIONS = 200
 SMOKE_BATCHES = 10
 GATE_RESAMPLES = 1_000
 SMOKE_RESAMPLES = 200
+
+# The server settings a gate run refuses to start without. Each is part of
+# the measurement contract with its reason in the compose file; a gate run
+# against a server reporting anything else is measuring a different
+# environment than the one the budgets were declared for.
+GATE_ENVIRONMENT: dict[str, str] = {
+    'autovacuum': 'off',
+    'fsync': 'off',
+    'synchronous_commit': 'off',
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -105,6 +115,17 @@ def main(argv: list[str] | None = None) -> int:
     outcomes: list[tuple[Verdict, bool]] = []
     control_failures: list[str] = []
     try:
+        if arguments.scale == 'gate':
+            with engine.connect() as connection:
+                observed = {
+                    name: server_setting(connection, name)
+                    for name in GATE_ENVIRONMENT
+                }
+            violations = _gate_environment_violations(observed)
+            if violations:
+                for violation in violations:
+                    print(f'gate run refused: {violation}', file=sys.stderr)
+                return 2
         for scenario in scenarios:
             result = run_scenario(
                 engine,
@@ -140,6 +161,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     return _exit_status(arguments.scale, outcomes)
+
+
+def _gate_environment_violations(observed: dict[str, str]) -> list[str]:
+    """Contract settings the server does not report as required.
+
+    Verified by SHOW against the live server rather than trusted from the
+    compose file, for the same reason --demo-quiesced must be stated: a gate
+    number is only evidence under its stated conditions, and the conditions
+    are the server's to answer for.
+    """
+    return [
+        f'{name} is {observed.get(name)!r}; '
+        f'the measurement contract requires {required!r}'
+        for name, required in GATE_ENVIRONMENT.items()
+        if observed.get(name) != required
+    ]
 
 
 def _exit_status(
@@ -195,11 +232,14 @@ def _control_disagreements(result: RunResult) -> list[str]:
     That invalidates every number in the run, including the ones that look
     reasonable.
 
-    Write transactions are held to a looser rule for a stated reason rather
-    than a convenient one: transaction ids come from a server-wide sequence, so
-    a block that happens to overlap an autovacuum wakeup counts it. Each side
-    must still account for its own operations, and the two may differ only by
-    the background a run of this length can produce.
+    Write transactions are held to a bounded environmental allowance rather
+    than exact equality, for a stated reason: transaction ids come from a
+    server-wide counter, so unattributable activity anywhere on the server
+    lands in whichever side's block overlaps it. Routine maintenance is
+    disabled in the measurement environment, so the allowance is headroom
+    against what cannot be attributed — not tolerance on the operation's own
+    commit count, which the per-side lower bound below and the declared
+    budgets enforce.
     """
     if 'control' not in result.conditions.comparison:
         return []

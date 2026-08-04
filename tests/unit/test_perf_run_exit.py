@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import pytest
 
-from tests.perf.__main__ import _control_disagreements, _exit_status
+from tests.perf.__main__ import (
+    GATE_ENVIRONMENT,
+    _control_disagreements,
+    _exit_status,
+    _gate_environment_violations,
+)
 from tests.perf.counters import Counts
 from tests.perf.runner import Conditions, Measurement, RunResult
 from tests.perf.statistics import Verdict
@@ -29,6 +34,7 @@ def _conditions(comparison: str, observations: int = 200) -> Conditions:
         server_version='PostgreSQL 16.4',
         fsync='off',
         synchronous_commit='off',
+        autovacuum='off',
         observations_per_side=observations,
         block_size=100,
         ballast_rows=100_000,
@@ -138,3 +144,21 @@ class TestControlCountChecks:
             verdict=Verdict.PASS,
         )
         assert _control_disagreements(result) == []
+
+
+class TestGateEnvironment:
+    def test_conforming_environment_has_no_violations(self) -> None:
+        assert _gate_environment_violations(dict(GATE_ENVIRONMENT)) == []
+
+    def test_autovacuum_on_is_a_named_violation(self) -> None:
+        observed = {**GATE_ENVIRONMENT, 'autovacuum': 'on'}
+        report = _gate_environment_violations(observed)
+        assert len(report) == 1
+        assert "autovacuum is 'on'" in report[0]
+
+    def test_a_setting_the_server_did_not_answer_is_a_violation(self) -> None:
+        observed = dict(GATE_ENVIRONMENT)
+        del observed['fsync']
+        report = _gate_environment_violations(observed)
+        assert len(report) == 1
+        assert 'fsync' in report[0]
