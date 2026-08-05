@@ -616,9 +616,9 @@ async def test_lookup_leaf_generator_reaches_declared_count(
                 CROSS JOIN LATERAL pg_partition_tree(parent.oid) tree
                 WHERE namespace.nspname = :schema
                   AND parent.relname IN (
-                      'no_directory_history',
-                      'key_registry_history',
-                      'combined_history'
+                      'no_directory_history_finite',
+                      'key_registry_history_finite',
+                      'combined_history_finite'
                   )
                   AND tree.isleaf
                 GROUP BY parent.relname
@@ -629,7 +629,55 @@ async def test_lookup_leaf_generator_reaches_declared_count(
         )
     ).all()
     assert {row.relname: row.leaves for row in counts} == {
-        'combined_history': 4,
-        'key_registry_history': 4,
-        'no_directory_history': 4,
+        'combined_history_finite': 4,
+        'key_registry_history_finite': 4,
+        'no_directory_history_finite': 4,
     }
+
+    forever_leaves = (
+        await identity_schema.execute(
+            text(
+                """
+                SELECT count(*)
+                FROM pg_class child
+                JOIN pg_namespace namespace ON namespace.oid = child.relnamespace
+                WHERE namespace.nspname = :schema
+                  AND child.relname IN (
+                      'no_directory_history_forever',
+                      'key_registry_history_forever',
+                      'combined_history_forever'
+                  )
+                """
+            ),
+            {'schema': schema.name},
+        )
+    ).scalar_one()
+    assert forever_leaves == 3
+
+    no_directory_leaf_indexes = (
+        await identity_schema.execute(
+            text(
+                """
+                SELECT child.relname,
+                       count(index_relation.indexrelid) FILTER (
+                           WHERE pg_get_indexdef(index_relation.indexrelid)
+                               LIKE '%(idempotency_key_digest, idempotency_expires_at)%'
+                       ) AS key_indexes
+                FROM pg_class parent
+                JOIN pg_namespace namespace ON namespace.oid = parent.relnamespace
+                CROSS JOIN LATERAL pg_partition_tree(parent.oid) tree
+                JOIN pg_class child ON child.oid = tree.relid
+                LEFT JOIN pg_index index_relation
+                    ON index_relation.indrelid = child.oid
+                WHERE namespace.nspname = :schema
+                  AND parent.relname = 'no_directory_history'
+                  AND tree.isleaf
+                GROUP BY child.relname
+                ORDER BY child.relname
+                """
+            ),
+            {'schema': schema.name},
+        )
+    ).all()
+    assert len(no_directory_leaf_indexes) == 5
+    assert all(row.key_indexes == 1 for row in no_directory_leaf_indexes)

@@ -36,8 +36,8 @@ async def extend_identity_history_leaves(
             await connection.execute(
                 text(
                     f"""
-                    CREATE TABLE {schema.sql}.{prefix}_history_{year}
-                        PARTITION OF {schema.sql}.{prefix}_history
+                    CREATE TABLE {schema.sql}.{prefix}_history_finite_{year}
+                        PARTITION OF {schema.sql}.{prefix}_history_finite
                         FOR VALUES FROM ('{year}-01-01T00:00:00Z')
                         TO ('{year + 1}-01-01T00:00:00Z')
                     """
@@ -46,8 +46,8 @@ async def extend_identity_history_leaves(
             await connection.execute(
                 text(
                     f"""
-                    CREATE INDEX {prefix}_history_{year}_task_idx
-                        ON {schema.sql}.{prefix}_history_{year} (task_id)
+                    CREATE INDEX {prefix}_history_finite_{year}_task_idx
+                        ON {schema.sql}.{prefix}_history_finite_{year} (task_id)
                     """
                 )
             )
@@ -55,8 +55,8 @@ async def extend_identity_history_leaves(
                 await connection.execute(
                     text(
                         f"""
-                        CREATE INDEX no_directory_history_{year}_key_idx
-                            ON {schema.sql}.no_directory_history_{year}
+                        CREATE INDEX no_directory_history_finite_{year}_key_idx
+                            ON {schema.sql}.no_directory_history_finite_{year}
                                 (idempotency_key_digest, idempotency_expires_at)
                             WHERE idempotency_key_digest IS NOT NULL
                         """
@@ -99,8 +99,20 @@ def _identity_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
                 WHERE idempotency_key_digest IS NOT NULL
             """,
             f"""
-            CREATE INDEX no_directory_history_2026_key_idx
-                ON {namespace}.no_directory_history_2026
+            CREATE INDEX no_directory_history_finite_2026_key_idx
+                ON {namespace}.no_directory_history_finite_2026
+                    (idempotency_key_digest, idempotency_expires_at)
+                WHERE idempotency_key_digest IS NOT NULL
+            """,
+            f"""
+            CREATE INDEX no_directory_history_finite_2027_key_idx
+                ON {namespace}.no_directory_history_finite_2027
+                    (idempotency_key_digest, idempotency_expires_at)
+                WHERE idempotency_key_digest IS NOT NULL
+            """,
+            f"""
+            CREATE INDEX no_directory_history_forever_key_idx
+                ON {namespace}.no_directory_history_forever
                     (idempotency_key_digest, idempotency_expires_at)
                 WHERE idempotency_key_digest IS NOT NULL
             """,
@@ -218,27 +230,42 @@ def _authoritative_task_tables(namespace: str, prefix: str) -> tuple[str, ...]:
             terminal_at timestamptz NOT NULL,
             CHECK (octet_length(command_fingerprint) = 32)
             {key_checks}
-        ) PARTITION BY RANGE (terminal_at)
+        ) PARTITION BY LIST (retention_class_key)
         """,
         f"""
-        CREATE TABLE {namespace}.{prefix}_history_2026
+        CREATE TABLE {namespace}.{prefix}_history_finite
             PARTITION OF {namespace}.{prefix}_history
+            FOR VALUES IN ('finite_30d_v1')
+            PARTITION BY RANGE (terminal_at)
+        """,
+        f"""
+        CREATE TABLE {namespace}.{prefix}_history_finite_2026
+            PARTITION OF {namespace}.{prefix}_history_finite
             FOR VALUES FROM ('2026-01-01T00:00:00Z')
             TO ('2027-01-01T00:00:00Z')
         """,
         f"""
-        CREATE TABLE {namespace}.{prefix}_history_2027
-            PARTITION OF {namespace}.{prefix}_history
+        CREATE TABLE {namespace}.{prefix}_history_finite_2027
+            PARTITION OF {namespace}.{prefix}_history_finite
             FOR VALUES FROM ('2027-01-01T00:00:00Z')
             TO ('2028-01-01T00:00:00Z')
         """,
         f"""
-        CREATE INDEX {prefix}_history_2026_task_idx
-            ON {namespace}.{prefix}_history_2026 (task_id)
+        CREATE TABLE {namespace}.{prefix}_history_forever
+            PARTITION OF {namespace}.{prefix}_history
+            FOR VALUES IN ('forever')
         """,
         f"""
-        CREATE INDEX {prefix}_history_2027_task_idx
-            ON {namespace}.{prefix}_history_2027 (task_id)
+        CREATE INDEX {prefix}_history_finite_2026_task_idx
+            ON {namespace}.{prefix}_history_finite_2026 (task_id)
+        """,
+        f"""
+        CREATE INDEX {prefix}_history_finite_2027_task_idx
+            ON {namespace}.{prefix}_history_finite_2027 (task_id)
+        """,
+        f"""
+        CREATE INDEX {prefix}_history_forever_task_idx
+            ON {namespace}.{prefix}_history_forever (task_id)
         """,
     )
 
@@ -626,12 +653,15 @@ def _combined_lookup_function(namespace: str) -> str:
     DECLARE
         v_location text;
         v_anchor timestamptz;
+        v_retention_class_key text;
         v_fingerprint_version smallint;
         v_fingerprint bytea;
     BEGIN
-        SELECT location, retention_anchor_at, fingerprint_version,
+        SELECT location, retention_anchor_at, retention_class_key,
+               fingerprint_version,
                command_fingerprint
-        INTO v_location, v_anchor, v_fingerprint_version, v_fingerprint
+        INTO v_location, v_anchor, v_retention_class_key,
+             v_fingerprint_version, v_fingerprint
         FROM {namespace}.combined_registry
         WHERE task_id = p_task_id;
         IF NOT FOUND THEN
@@ -646,6 +676,7 @@ def _combined_lookup_function(namespace: str) -> str:
             WHEN 'HISTORY' THEN
                 PERFORM 1 FROM {namespace}.combined_history
                 WHERE task_id = p_task_id
+                  AND retention_class_key = v_retention_class_key
                   AND terminal_at = v_anchor;
             ELSE
                 RAISE EXCEPTION 'unrecognized combined-registry location: %',
