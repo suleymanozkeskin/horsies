@@ -578,8 +578,8 @@ class FinalizeMixin:
                     return Err(load_r.err_value)
                 return load_r
             case ApplyTerminalization(command=CancelOwnedOrphan()):
-                # The orphan family migrates in T6. Classification is shared
-                # now, but its legacy writer remains until that gated cutover.
+                # The orphan family has its own gated cutover. Classification
+                # is shared now, but its legacy writer remains until then.
                 try:
                     async with self.sf() as s:
                         terminate_res = await s.execute(
@@ -632,8 +632,8 @@ class FinalizeMixin:
                 retry_error = error
             case ApplyTerminalization(command=unsupported):
                 raise RuntimeError(
-                    f'{type(unsupported).__name__} is not part of the T3 '
-                    f'normal-finalization cutover'
+                    f'{type(unsupported).__name__} is not part of this '
+                    f"cutover's authorized scope"
                 )
             case _ as unreachable:
                 assert_never(unreachable)
