@@ -140,28 +140,38 @@ async def _seed_history(
             text(
                 f"""
                 INSERT INTO {schema.sql}.history_aggregate (
-                    task_id, task_name, queue_name, priority, status,
+                    task_id, task_name, queue_name, priority,
+                    command_fingerprint_version, command_fingerprint, status,
                     terminalization_kind, terminal_at, retention_anchor_at,
                     retention_class_key, enqueued_at, created_at,
-                    result_envelope_version, result_codec, result_payload,
+                    result_envelope_version, result_codec, result_content_type,
+                    result_payload,
                     result_digest, error_code, final_failed_reason,
-                    retry_count, rerun_of_task_id, rerun_root_task_id,
+                    retry_count, max_retries,
+                    rerun_of_task_id, rerun_root_task_id,
                     rerun_input_version, rerun_input_codec,
-                    rerun_input_form, rerun_input_digest,
+                    rerun_input_content_type, rerun_input_form,
+                    rerun_input_digest,
                     rerun_input_inline, is_workflow_task,
                     history_schema_version, attempt_archive_version,
-                    attempt_snapshot_codec, attempt_snapshot,
+                    attempt_snapshot_codec, attempt_snapshot_content_type,
+                    attempt_snapshot,
                     attempt_snapshot_digest
                 ) VALUES (
-                    :task_id, 'prototype.transcode', 'default', 100, 'FAILED',
-                    'FAIL_LOCKED', :terminal_at, :terminal_at,
+                    :task_id, 'prototype.transcode', 'default', 100,
+                    1, decode(repeat('ab', 32), 'hex'),
+                    'FAILED',
+                    'FAIL_RUNNING', :terminal_at, :terminal_at,
                     :class_key, :terminal_at, :terminal_at,
-                    :version, :codec, :result_payload, :result_digest,
-                    'FINAL_FAILURE', 'final worker failure', 1,
+                    :version, :codec, 'application/json',
+                    :result_payload, :result_digest,
+                    'FINAL_FAILURE', 'final worker failure', 1, 1,
                     :source_task_id, :root_task_id,
-                    :version, :codec, 'INLINE', :rerun_input_digest,
+                    :version, :codec, 'application/json', 'INLINE',
+                    :rerun_input_digest,
                     :rerun_input, FALSE,
-                    :version, :version, :codec, :attempt_snapshot,
+                    :version, :version, :codec, 'application/json',
+                    :attempt_snapshot,
                     :attempt_digest
                 )
                 """
@@ -329,7 +339,8 @@ async def test_result_transcode_includes_named_administrative_prior_result(
             text(
                 f"""
                 SELECT result_envelope_version, result_codec,
-                       result_payload, prior_result_payload, result_digest
+                       result_content_type, result_payload,
+                       prior_result_payload, result_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
                 """
@@ -343,6 +354,7 @@ async def test_result_transcode_includes_named_administrative_prior_result(
         domain=ArchiveDomain.RESULT,
         version=row.result_envelope_version,
         codec=row.result_codec,
+        content_type=row.result_content_type,
         payload=bytes(row.prior_result_payload),
         digest=bytes(row.result_digest),
     )
@@ -469,10 +481,11 @@ async def test_batches_resume_and_preserve_identity_across_connections(
             text(
                 f"""
                 SELECT task_id, result_envelope_version, result_codec,
-                       result_payload, result_digest,
+                       result_content_type, result_payload, result_digest,
                        {schema.sql}.archive_component_value_is_valid(
                            'RESULT', result_envelope_version, result_codec,
-                           result_payload, result_digest, NULL, NULL
+                           result_content_type, result_payload,
+                           result_digest, NULL, NULL
                        ) AS valid
                 FROM {schema.sql}.history_aggregate
                 ORDER BY task_id
@@ -489,6 +502,7 @@ async def test_batches_resume_and_preserve_identity_across_connections(
             domain=ArchiveDomain.RESULT,
             version=row.result_envelope_version,
             codec=row.result_codec,
+            content_type=row.result_content_type,
             payload=bytes(row.result_payload),
             digest=bytes(row.result_digest),
         )
@@ -649,8 +663,8 @@ async def test_attempt_snapshot_transcode_preserves_ordered_attempts(
         await transcode_schema.execute(
             text(
                 f"""
-                SELECT attempt_snapshot, attempt_snapshot_digest,
-                       result_envelope_version
+                SELECT attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest, result_envelope_version
                 FROM {schema.sql}.history_aggregate
                 ORDER BY task_id
                 """
@@ -664,6 +678,7 @@ async def test_attempt_snapshot_transcode_preserves_ordered_attempts(
         decoded = decode_attempts(
             version=2,
             codec=ARCHIVE_CODEC_V2,
+            content_type=row.attempt_snapshot_content_type,
             payload=framed,
             digest=bytes(row.attempt_snapshot_digest),
         )
@@ -944,7 +959,8 @@ async def test_referenced_rerun_input_is_transcoded_and_blocks_decoder_retiremen
             text(
                 f"""
                 SELECT task_id, rerun_input_version, rerun_input_codec,
-                       rerun_input_form, rerun_input_digest,
+                       rerun_input_content_type, rerun_input_form,
+                       rerun_input_digest,
                        rerun_input_inline, rerun_input_reference
                 FROM {schema.sql}.history_aggregate
                 ORDER BY task_id
@@ -984,11 +1000,13 @@ async def test_referenced_rerun_input_is_transcoded_and_blocks_decoder_retiremen
             text(
                 f"""
                 SELECT task_id, rerun_input_version, rerun_input_codec,
-                       rerun_input_form, rerun_input_digest,
+                       rerun_input_content_type, rerun_input_form,
+                       rerun_input_digest,
                        rerun_input_inline, rerun_input_reference,
                        {schema.sql}.archive_component_value_is_valid(
                            'RERUN_INPUT', rerun_input_version,
-                           rerun_input_codec, rerun_input_inline,
+                           rerun_input_codec, rerun_input_content_type,
+                           rerun_input_inline,
                            rerun_input_digest, rerun_input_form,
                            rerun_input_reference
                        ) AS valid
@@ -1005,6 +1023,7 @@ async def test_referenced_rerun_input_is_transcoded_and_blocks_decoder_retiremen
         decoded = decode_rerun_input(
             version=row.rerun_input_version,
             codec=row.rerun_input_codec,
+            content_type=row.rerun_input_content_type,
             form=row.rerun_input_form,
             digest=bytes(row.rerun_input_digest),
             inline_payload=(
@@ -1059,7 +1078,8 @@ async def test_referenced_rerun_input_is_transcoded_and_blocks_decoder_retiremen
             text(
                 f"""
                 SELECT task_id, rerun_input_version, rerun_input_codec,
-                       rerun_input_form, rerun_input_digest,
+                       rerun_input_content_type, rerun_input_form,
+                       rerun_input_digest,
                        rerun_input_inline, rerun_input_reference
                 FROM {schema.sql}.history_aggregate
                 ORDER BY task_id

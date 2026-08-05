@@ -90,21 +90,27 @@ async def _seed_pending_locator(connection: AsyncConnection) -> str:
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
-                result_digest, retry_count, workflow_id, is_workflow_task,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload, result_digest, retry_count, max_retries,
+                workflow_id, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             ) VALUES (
                 :task_id, 'prototype.workflow_task', 'default', 100,
+                1, decode(repeat('ab', 32), 'hex'),
                 'COMPLETED', 'COMPLETE_LOCKED', :terminal_at, :terminal_at,
                 :class_key, :terminal_at, :terminal_at,
-                :version, :codec, :result_payload, :result_digest,
-                0, :workflow_id, TRUE,
-                :version, :version, :codec, :attempts, :attempts_digest
+                :version, :codec, 'application/json',
+                :result_payload, :result_digest,
+                0, 0, :workflow_id, TRUE,
+                :version, :version, :codec, 'application/json',
+                :attempts, :attempts_digest
             )
             """
         ),

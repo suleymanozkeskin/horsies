@@ -200,30 +200,38 @@ async def measure_rerun_storage_candidate(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
-                result_digest, retry_count, is_workflow_task,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload, result_digest, retry_count, max_retries,
+                is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest, input_digest,
-                rerun_input_version, rerun_input_codec, rerun_input_form,
+                rerun_input_version, rerun_input_codec,
+                rerun_input_content_type, rerun_input_form,
                 rerun_input_digest, rerun_input_inline,
                 rerun_input_reference
             )
             SELECT
                 md5('rerun-' || series::text)::uuid::text,
-                'prototype.task', 'default', 100, 'FAILED',
-                'FAIL_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
+                'prototype.task', 'default', 100, 1,
+                sha256(convert_to('rerun-' || series::text, 'UTF8')), 'FAILED',
+                'FAIL_RUNNING', '2026-08-05T12:00:00Z'::timestamptz,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
                 '2026-08-05T11:58:00Z'::timestamptz,
-                1, 'json-utf8', :result, :result_digest,
-                0, FALSE, 1, 1, 'json-utf8', '[]'::bytea,
+                1, 'json-utf8', 'application/json', :result, :result_digest,
+                0, 0, FALSE, 1, 1, 'json-utf8', 'application/json',
+                '[]'::bytea,
                 :empty_attempt_digest, :input_digest,
-                :rerun_version, :rerun_codec, :rerun_form,
-                :rerun_digest, :rerun_inline, :rerun_reference
+                :rerun_version, :rerun_codec,
+                CASE WHEN CAST(:rerun_form AS varchar) IS NULL
+                     THEN NULL ELSE 'application/json' END,
+                :rerun_form, :rerun_digest, :rerun_inline, :rerun_reference
             FROM generate_series(1, :rows) AS series
             """
         ),
@@ -282,24 +290,30 @@ async def measure_administrative_result_candidate(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, prior_result_payload, retry_count,
-                is_workflow_task, history_schema_version,
+                max_retries, is_workflow_task, history_schema_version,
                 attempt_archive_version, attempt_snapshot_codec,
-                attempt_snapshot, attempt_snapshot_digest
+                attempt_snapshot_content_type, attempt_snapshot,
+                attempt_snapshot_digest
             )
             SELECT
                 md5('admin-' || series::text)::uuid::text,
-                'prototype.task', 'default', 100, 'CANCELLED',
+                'prototype.task', 'default', 100, 1,
+                sha256(convert_to('admin-' || series::text, 'UTF8')), 'CANCELLED',
                 'CANCEL_ADMIN', '2026-08-05T12:00:00Z'::timestamptz,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
                 '2026-08-05T11:58:00Z'::timestamptz,
-                1, 'json-utf8', NULL, :result_digest, :prior_result,
-                0, FALSE, 1, 1, 'json-utf8', '[]'::bytea,
+                1, 'json-utf8', 'application/json', NULL,
+                :result_digest, :prior_result,
+                0, 0, FALSE, 1, 1, 'json-utf8', 'application/json',
+                '[]'::bytea,
                 :empty_attempt_digest
             FROM generate_series(1, :rows) AS series
             """
@@ -347,25 +361,30 @@ async def _measure_aggregate(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
-                result_digest, retry_count, is_workflow_task,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload, result_digest, retry_count, max_retries,
+                is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             )
             SELECT
                 md5(series::text)::uuid::text,
-                'prototype.task', 'default', 100, 'COMPLETED',
+                'prototype.task', 'default', 100, 1,
+                sha256(convert_to(series::text, 'UTF8')), 'COMPLETED',
                 'COMPLETE_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
                 '2026-08-05T11:58:00Z'::timestamptz,
-                :result_version, :result_codec, :result_payload,
-                :result_digest, :retry_count, FALSE,
-                1, :attempt_version, :attempt_codec, :attempt_payload,
+                :result_version, :result_codec, :result_content_type,
+                :result_payload, :result_digest, :retry_count, :retry_count,
+                FALSE, 1, :attempt_version, :attempt_codec,
+                :attempt_content_type, :attempt_payload,
                 :attempt_digest
             FROM generate_series(1, :rows) AS series
             """
@@ -374,11 +393,13 @@ async def _measure_aggregate(
             'rows': rows,
             'result_version': result.version,
             'result_codec': result.codec,
+            'result_content_type': result.content_type,
             'result_payload': result.payload,
             'result_digest': result.digest,
             'retry_count': attempts_per_task - 1,
             'attempt_version': attempts.version,
             'attempt_codec': attempts.codec,
+            'attempt_content_type': attempts.content_type,
             'attempt_payload': attempts.payload,
             'attempt_digest': attempts.digest,
         },
@@ -437,22 +458,25 @@ async def _measure_copartitioned(
         text(
             f"""
             INSERT INTO {schema.sql}.history_copartitioned (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
-                result_digest, retry_count, is_workflow_task,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload, result_digest, retry_count, max_retries,
+                is_workflow_task,
                 history_schema_version, attempt_archive_version
             )
             SELECT
                 md5(series::text)::uuid::text,
-                'prototype.task', 'default', 100, 'COMPLETED',
+                'prototype.task', 'default', 100, 1,
+                sha256(convert_to(series::text, 'UTF8')), 'COMPLETED',
                 'COMPLETE_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
                 '2026-08-05T11:58:00Z'::timestamptz,
-                :result_version, :result_codec, :result_payload,
-                :result_digest, :retry_count, FALSE,
+                :result_version, :result_codec, :result_content_type,
+                :result_payload, :result_digest, :retry_count, :retry_count, FALSE,
                 1, :attempt_version
             FROM generate_series(1, :rows) AS series
             """
@@ -461,6 +485,7 @@ async def _measure_copartitioned(
             'rows': rows,
             'result_version': result.version,
             'result_codec': result.codec,
+            'result_content_type': result.content_type,
             'result_payload': result.payload,
             'result_digest': result.digest,
             'retry_count': attempts_per_task - 1,
@@ -564,8 +589,9 @@ async def _measure_aggregate_detail(
 ) -> AbsoluteLatencyMeasurement:
     statement = text(
         f"""
-        SELECT attempt_archive_version, attempt_snapshot_codec,
-               attempt_snapshot, attempt_snapshot_digest
+            SELECT attempt_archive_version, attempt_snapshot_codec,
+                   attempt_snapshot_content_type, attempt_snapshot,
+                   attempt_snapshot_digest
         FROM {schema.sql}.history_aggregate
         WHERE task_id = :task_id
         """
@@ -576,6 +602,7 @@ async def _measure_aggregate_detail(
         decoded = decode_attempts(
             version=row.attempt_archive_version,
             codec=row.attempt_snapshot_codec,
+            content_type=row.attempt_snapshot_content_type,
             payload=row.attempt_snapshot,
             digest=row.attempt_snapshot_digest,
         )

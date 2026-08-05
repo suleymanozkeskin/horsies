@@ -301,32 +301,38 @@ async def _seed_history(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, prior_result_payload, error_code,
-                final_failed_reason, retry_count, rerun_input_version,
-                rerun_input_codec, rerun_input_form, rerun_input_digest,
+                final_failed_reason, retry_count, max_retries,
+                rerun_input_version,
+                rerun_input_codec, rerun_input_content_type,
+                rerun_input_form, rerun_input_digest,
                 rerun_input_inline, rerun_input_reference,
                 is_workflow_task, history_schema_version,
                 attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot_content_type,
                 attempt_snapshot, attempt_snapshot_digest
             )
             SELECT
                 md5('transcode-' || series::text)::uuid::text,
-                'prototype.transcode', 'default', 100,
+                'prototype.transcode', 'default', 100, 1,
+                sha256(convert_to('transcode-' || series::text, 'UTF8')),
                 CASE WHEN mod(series, 2) = 0
                      THEN 'FAILED' ELSE 'CANCELLED' END,
                 CASE WHEN mod(series, 2) = 0
-                     THEN 'FAIL_LOCKED' ELSE 'CANCEL_ADMIN' END,
+                     THEN 'FAIL_RUNNING' ELSE 'CANCEL_ADMIN' END,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 '2026-08-05T12:00:00Z'::timestamptz,
                 CASE WHEN mod(series, 2) = 0
                      THEN 'finite_30d_v1' ELSE 'forever' END,
                 '2026-08-05T11:59:00Z'::timestamptz,
                 '2026-08-05T11:58:00Z'::timestamptz,
-                :version, :codec,
+                :version, :codec, 'application/json',
                 CASE WHEN mod(series, 2) = 0 THEN :payload END,
                 :digest,
                 CASE WHEN mod(series, 2) = 1 THEN :payload END,
@@ -335,13 +341,14 @@ async def _seed_history(
                 CASE WHEN mod(series, 2) = 0
                      THEN 'final worker failure'
                      ELSE 'Cancelled via monitoring API' END,
-                :retry_count, :version, :codec,
+                :retry_count, :retry_count, :version, :codec,
+                'application/json',
                 CASE WHEN mod(series, 4) < 2 THEN 'INLINE' ELSE 'REFERENCE' END,
                 :digest,
                 CASE WHEN mod(series, 4) < 2 THEN :payload END,
                 CASE WHEN mod(series, 4) >= 2
                      THEN 'sha256:' || encode(:digest, 'hex') END,
-                FALSE, :version, :version, :codec,
+                FALSE, :version, :version, :codec, 'application/json',
                 :attempts, :attempt_digest
             FROM generate_series(1, :rows) AS series
             """

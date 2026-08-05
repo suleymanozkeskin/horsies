@@ -148,6 +148,7 @@ class ArchiveVersionInventory:
 class _ComponentColumns:
     version: str
     codec: str
+    content_type: str
     payload: str
     digest: str
     presence_predicate: str
@@ -267,7 +268,8 @@ async def inventory_archive_versions(
                                WHERE {schema.sql}.
                                    archive_component_value_is_valid(
                                        :component, {columns.version},
-                                       {columns.codec}, {columns.payload},
+                                       {columns.codec}, {columns.content_type},
+                                       {columns.payload},
                                        {columns.digest}, {columns.form},
                                        {columns.reference}
                                    ) IS NOT TRUE
@@ -342,7 +344,8 @@ async def plan_archive_transcode(
                   AND ({columns.presence_predicate})
                   AND {schema.sql}.archive_component_value_is_valid(
                         :component, {columns.version}, {columns.codec},
-                        {columns.payload}, {columns.digest},
+                        {columns.content_type}, {columns.payload},
+                        {columns.digest},
                         {columns.form}, {columns.reference}
                       ) IS NOT TRUE
                 """
@@ -540,7 +543,8 @@ async def run_archive_transcode_batch(
                   AND ({columns.presence_predicate})
                   AND {schema.sql}.archive_component_value_is_valid(
                         :component, {columns.version}, {columns.codec},
-                        {columns.payload}, {columns.digest},
+                        {columns.content_type}, {columns.payload},
+                        {columns.digest},
                         {columns.form}, {columns.reference}
                       ) IS NOT TRUE
                 """
@@ -707,7 +711,8 @@ async def verify_archive_transcode(
                   AND ({columns.presence_predicate})
                   AND {schema.sql}.archive_component_value_is_valid(
                         :component, {columns.version}, {columns.codec},
-                        {columns.payload}, {columns.digest},
+                        {columns.content_type}, {columns.payload},
+                        {columns.digest},
                         {columns.form}, {columns.reference}
                       ) IS NOT TRUE
                 """
@@ -944,6 +949,7 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
                     'CASE history_schema_version '
                     "WHEN 1 THEN 'row-v1' WHEN 2 THEN 'row-v2' END"
                 ),
+                content_type='NULL::text',
                 payload='NULL::bytea',
                 digest='NULL::bytea',
                 presence_predicate='TRUE',
@@ -957,6 +963,7 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
             return _ComponentColumns(
                 version='result_envelope_version',
                 codec='result_codec',
+                content_type='result_content_type',
                 payload='COALESCE(result_payload, prior_result_payload)',
                 digest='result_digest',
                 presence_predicate=(
@@ -981,6 +988,7 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
             return _ComponentColumns(
                 version='attempt_archive_version',
                 codec='attempt_snapshot_codec',
+                content_type='attempt_snapshot_content_type',
                 payload='attempt_snapshot',
                 digest='attempt_snapshot_digest',
                 presence_predicate='attempt_snapshot IS NOT NULL',
@@ -994,6 +1002,7 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
             return _ComponentColumns(
                 version='rerun_input_version',
                 codec='rerun_input_codec',
+                content_type='rerun_input_content_type',
                 payload='rerun_input_inline',
                 digest='rerun_input_digest',
                 presence_predicate=("rerun_input_form IN ('INLINE', 'REFERENCE')"),
@@ -1112,6 +1121,7 @@ def _archive_value_validator(namespace: str) -> str:
         p_component text,
         p_version smallint,
         p_codec text,
+        p_content_type text,
         p_payload bytea,
         p_digest bytea,
         p_form text,
@@ -1131,12 +1141,16 @@ def _archive_value_validator(namespace: str) -> str:
         IF p_component = 'HISTORY_ROW' THEN
             RETURN p_payload IS NULL
                 AND p_digest IS NULL
+                AND p_content_type IS NULL
                 AND p_form IS NULL
                 AND p_reference IS NULL
                 AND (
                     (p_version = 1 AND p_codec = 'row-v1')
                     OR (p_version = 2 AND p_codec = 'row-v2')
                 );
+        END IF;
+        IF p_content_type <> 'application/json' THEN
+            RETURN FALSE;
         END IF;
         CASE p_version
             WHEN 1 THEN

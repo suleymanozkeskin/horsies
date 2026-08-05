@@ -11,6 +11,7 @@ import pytest
 from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC,
     ARCHIVE_CODEC_V2,
+    ARCHIVE_CONTENT_TYPE,
     ARCHIVE_FRAME_V2,
     ARCHIVE_VERSION,
     CANDIDATE_RERUN_INLINE_MAX_BYTES,
@@ -21,6 +22,7 @@ from tests.task_history_prototypes.archive import (
     DecodedArchiveValue,
     InlineRerunInput,
     UnknownArchiveCodec,
+    UnknownArchiveContentType,
     UnknownArchiveVersion,
     archive_digest,
     decode_attempts,
@@ -57,6 +59,7 @@ def test_result_decoder_accepts_current_contract() -> None:
         domain=ArchiveDomain.RESULT,
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         payload=stored.payload,
         digest=stored.digest,
     ) == DecodedArchiveValue({'ok': {'value': 42}})
@@ -69,6 +72,7 @@ def test_result_decoder_accepts_retained_version_two_contract() -> None:
         domain=ArchiveDomain.RESULT,
         version=2,
         codec=ARCHIVE_CODEC_V2,
+        content_type=ARCHIVE_CONTENT_TYPE,
         payload=payload,
         digest=hashlib.sha256(payload).digest(),
     ) == DecodedArchiveValue({'ok': {'value': 42}})
@@ -84,16 +88,36 @@ def test_history_row_decoder_tracks_its_version_independently() -> None:
 
 
 @pytest.mark.parametrize(
-    ('version', 'codec', 'digest', 'expected_type'),
+    ('version', 'codec', 'content_type', 'digest', 'expected_type'),
     [
-        (99, ARCHIVE_CODEC, None, UnknownArchiveVersion),
-        (ARCHIVE_VERSION, 'unknown', None, UnknownArchiveCodec),
-        (ARCHIVE_VERSION, ARCHIVE_CODEC, b'0' * 32, ArchiveDigestMismatch),
+        (99, ARCHIVE_CODEC, ARCHIVE_CONTENT_TYPE, None, UnknownArchiveVersion),
+        (
+            ARCHIVE_VERSION,
+            'unknown',
+            ARCHIVE_CONTENT_TYPE,
+            None,
+            UnknownArchiveCodec,
+        ),
+        (
+            ARCHIVE_VERSION,
+            ARCHIVE_CODEC,
+            'application/octet-stream',
+            None,
+            UnknownArchiveContentType,
+        ),
+        (
+            ARCHIVE_VERSION,
+            ARCHIVE_CODEC,
+            ARCHIVE_CONTENT_TYPE,
+            b'0' * 32,
+            ArchiveDigestMismatch,
+        ),
     ],
 )
 def test_result_decoder_rejects_unknown_or_mismatched_contract(
     version: int,
     codec: str,
+    content_type: str,
     digest: bytes | None,
     expected_type: type[object],
 ) -> None:
@@ -102,6 +126,7 @@ def test_result_decoder_rejects_unknown_or_mismatched_contract(
         domain=ArchiveDomain.RESULT,
         version=version,
         codec=codec,
+        content_type=content_type,
         payload=stored.payload,
         digest=digest if digest is not None else stored.digest,
     )
@@ -114,6 +139,7 @@ def test_result_decoder_rejects_corrupt_json() -> None:
         domain=ArchiveDomain.RESULT,
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
+        content_type=ARCHIVE_CONTENT_TYPE,
         payload=payload,
         digest=hashlib.sha256(payload).digest(),
     )
@@ -128,6 +154,7 @@ def test_attempt_decoder_rejects_non_contiguous_sequence() -> None:
     decoded = decode_attempts(
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         payload=stored.payload,
         digest=stored.digest,
     )
@@ -144,6 +171,7 @@ def test_attempt_snapshot_uses_typed_positional_rows() -> None:
     assert decode_attempts(
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         payload=stored.payload,
         digest=stored.digest,
     ) == DecodedArchiveValue(attempts)
@@ -158,6 +186,7 @@ def test_attempt_decoder_rejects_fractional_epoch_microseconds() -> None:
     decoded = decode_attempts(
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         payload=malformed,
         digest=archive_digest(malformed),
     )
@@ -168,6 +197,7 @@ def test_rerun_input_decoder_rejects_invalid_discriminant_and_digest() -> None:
     invalid = decode_rerun_input(
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
+        content_type=ARCHIVE_CONTENT_TYPE,
         form='INLINE',
         digest=b'0' * 32,
         inline_payload=None,
@@ -179,6 +209,7 @@ def test_rerun_input_decoder_rejects_invalid_discriminant_and_digest() -> None:
     mismatched = decode_rerun_input(
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         form=stored.form,
         digest=b'0' * 32,
         inline_payload=stored.inline_payload,
@@ -189,6 +220,7 @@ def test_rerun_input_decoder_rejects_invalid_discriminant_and_digest() -> None:
     decoded = decode_rerun_input(
         version=stored.version,
         codec=stored.codec,
+        content_type=stored.content_type,
         form=stored.form,
         digest=stored.digest,
         inline_payload=stored.inline_payload,

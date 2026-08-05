@@ -71,6 +71,107 @@ def _schema(connection: AsyncConnection) -> PrototypeSchema:
     return schema
 
 
+async def test_aggregate_history_projection_is_exact_and_bounded(
+    archive_schema: AsyncConnection,
+) -> None:
+    schema = _schema(archive_schema)
+    attributes = (
+        await archive_schema.execute(
+            text(
+                """
+                SELECT attribute.attname,
+                       format_type(attribute.atttypid, attribute.atttypmod),
+                       attribute.attnotnull
+                FROM pg_attribute AS attribute
+                JOIN pg_class AS relation
+                  ON relation.oid = attribute.attrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relname = 'history_aggregate'
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                ORDER BY attribute.attnum
+                """
+            ),
+            {'schema_name': schema.name},
+        )
+    ).all()
+    expected = [
+        ('task_id', 'character varying(36)', True),
+        ('task_name', 'character varying(255)', True),
+        ('queue_name', 'character varying(100)', True),
+        ('priority', 'integer', True),
+        ('command_fingerprint_version', 'smallint', True),
+        ('command_fingerprint', 'bytea', True),
+        ('status', 'text', True),
+        ('terminalization_kind', 'character varying(32)', True),
+        ('terminal_at', 'timestamp with time zone', True),
+        ('retention_anchor_at', 'timestamp with time zone', True),
+        ('retention_class_key', 'character varying(64)', True),
+        ('sent_at', 'timestamp with time zone', False),
+        ('enqueued_at', 'timestamp with time zone', True),
+        ('claimed_at', 'timestamp with time zone', False),
+        ('started_at', 'timestamp with time zone', False),
+        ('created_at', 'timestamp with time zone', True),
+        ('good_until', 'timestamp with time zone', False),
+        ('retry_count', 'integer', True),
+        ('max_retries', 'integer', True),
+        ('last_claimed_worker_id', 'character varying(255)', False),
+        ('last_worker_hostname', 'character varying(255)', False),
+        ('last_worker_pid', 'integer', False),
+        ('last_worker_process_name', 'character varying(255)', False),
+        ('result_envelope_version', 'smallint', True),
+        ('result_codec', 'character varying(64)', True),
+        ('result_content_type', 'character varying(255)', True),
+        ('result_payload', 'bytea', False),
+        ('result_digest', 'bytea', False),
+        ('error_code', 'text', False),
+        ('final_failed_reason', 'text', False),
+        ('prior_result_payload', 'bytea', False),
+        ('rerun_of_task_id', 'character varying(36)', False),
+        ('rerun_root_task_id', 'character varying(36)', False),
+        ('input_digest', 'bytea', False),
+        ('rerun_input_version', 'smallint', False),
+        ('rerun_input_codec', 'character varying(64)', False),
+        ('rerun_input_content_type', 'character varying(255)', False),
+        ('rerun_input_form', 'character varying(16)', False),
+        ('rerun_input_digest', 'bytea', False),
+        ('rerun_input_inline', 'bytea', False),
+        ('rerun_input_reference', 'character varying(2048)', False),
+        ('workflow_id', 'character varying(36)', False),
+        ('is_workflow_task', 'boolean', True),
+        ('history_schema_version', 'smallint', True),
+        ('attempt_archive_version', 'smallint', True),
+        ('attempt_snapshot_codec', 'character varying(64)', True),
+        ('attempt_snapshot_content_type', 'character varying(255)', True),
+        ('attempt_snapshot', 'bytea', True),
+        ('attempt_snapshot_digest', 'bytea', True),
+    ]
+    assert [tuple(attribute) for attribute in attributes] == expected
+    defaults = (
+        await archive_schema.execute(
+            text(
+                """
+                SELECT attribute.attname
+                FROM pg_attrdef AS default_value
+                JOIN pg_class AS relation
+                  ON relation.oid = default_value.adrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = default_value.adrelid
+                 AND attribute.attnum = default_value.adnum
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relname = 'history_aggregate'
+                """
+            ),
+            {'schema_name': schema.name},
+        )
+    ).scalars()
+    assert list(defaults) == []
+
+
 def _history_parameters(
     *,
     task_id: str,
@@ -92,6 +193,9 @@ def _history_parameters(
         'attempt_snapshot_digest': attempts_digest,
         'rerun_input_version': ARCHIVE_VERSION if rerun_input_form else None,
         'rerun_input_codec': ARCHIVE_CODEC if rerun_input_form else None,
+        'rerun_input_content_type': (
+            'application/json' if rerun_input_form else None
+        ),
         'rerun_input_form': rerun_input_form,
         'rerun_input_digest': rerun_input_digest,
         'rerun_input_inline': rerun_input_inline,
@@ -102,35 +206,42 @@ def _history_parameters(
 def _insert_history_sql(schema: PrototypeSchema, table: str, aggregate: bool) -> str:
     attempt_columns = (
         ', attempt_archive_version, attempt_snapshot_codec, '
-        'attempt_snapshot, attempt_snapshot_digest'
+        'attempt_snapshot_content_type, attempt_snapshot, '
+        'attempt_snapshot_digest'
         if aggregate
         else ', attempt_archive_version'
     )
     attempt_values = (
-        ', :archive_version, :archive_codec, :attempt_snapshot, '
+        ", :archive_version, :archive_codec, 'application/json', "
+        ':attempt_snapshot, '
         ':attempt_snapshot_digest'
         if aggregate
         else ', :archive_version'
     )
     return f"""
         INSERT INTO {schema.sql}.{table} (
-            task_id, task_name, queue_name, priority, status,
+            task_id, task_name, queue_name, priority,
+            command_fingerprint_version, command_fingerprint, status,
             terminalization_kind, terminal_at, retention_anchor_at,
             retention_class_key, enqueued_at, created_at,
-            result_envelope_version, result_codec, result_payload,
-            result_digest, retry_count, is_workflow_task,
+            result_envelope_version, result_codec, result_content_type,
+            result_payload, result_digest, retry_count, max_retries,
+            is_workflow_task,
             history_schema_version, rerun_input_version,
-            rerun_input_codec, rerun_input_form, rerun_input_digest,
+            rerun_input_codec, rerun_input_content_type, rerun_input_form,
+            rerun_input_digest,
             rerun_input_inline, rerun_input_reference
             {attempt_columns}
         ) VALUES (
-            :task_id, 'prototype.task', 'default', 100, 'FAILED',
-            'FAIL_LOCKED', :terminal_at, :terminal_at,
+            :task_id, 'prototype.task', 'default', 100,
+            1, decode(repeat('ab', 32), 'hex'), 'FAILED',
+            'FAIL_RUNNING', :terminal_at, :terminal_at,
             'finite_30d_v1', :terminal_at, :terminal_at,
-            :archive_version, :archive_codec, :result_payload,
-            :result_digest, 20, FALSE,
+            :archive_version, :archive_codec, 'application/json',
+            :result_payload, :result_digest, 20, 20, FALSE,
             :archive_version, :rerun_input_version,
-            :rerun_input_codec, :rerun_input_form, :rerun_input_digest,
+            :rerun_input_codec, :rerun_input_content_type,
+            :rerun_input_form, :rerun_input_digest,
             :rerun_input_inline, :rerun_input_reference
             {attempt_values}
         )
@@ -159,7 +270,8 @@ async def test_aggregate_snapshot_preserves_complete_attempt_sequence(
             text(
                 f"""
                 SELECT attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot, attempt_snapshot_digest
+                       attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
                 """
@@ -171,6 +283,7 @@ async def test_aggregate_snapshot_preserves_complete_attempt_sequence(
     decoded = decode_attempts(
         version=stored.attempt_archive_version,
         codec=stored.attempt_snapshot_codec,
+        content_type=stored.attempt_snapshot_content_type,
         payload=bytes(stored.attempt_snapshot),
         digest=bytes(stored.attempt_snapshot_digest),
     )
@@ -276,7 +389,8 @@ async def test_rerun_input_discriminant_round_trips(
             text(
                 f"""
                 SELECT rerun_input_version, rerun_input_codec,
-                       rerun_input_form, rerun_input_digest,
+                       rerun_input_content_type, rerun_input_form,
+                       rerun_input_digest,
                        rerun_input_inline, rerun_input_reference
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
@@ -288,6 +402,7 @@ async def test_rerun_input_discriminant_round_trips(
     decoded = decode_rerun_input(
         version=row.rerun_input_version,
         codec=row.rerun_input_codec,
+        content_type=row.rerun_input_content_type,
         form=row.rerun_input_form,
         digest=bytes(row.rerun_input_digest),
         inline_payload=(
@@ -315,24 +430,28 @@ async def test_completed_and_workflow_rows_reject_rerun_input(
 ) -> None:
     schema = _schema(archive_schema)
     columns = """
-        task_id, task_name, queue_name, priority, status,
+        task_id, task_name, queue_name, priority,
+        command_fingerprint_version, command_fingerprint, status,
         terminalization_kind, terminal_at, retention_anchor_at,
         retention_class_key, enqueued_at, created_at,
-        result_envelope_version, result_codec, retry_count,
-        is_workflow_task, history_schema_version,
-        rerun_input_version, rerun_input_codec, rerun_input_form,
+        result_envelope_version, result_codec, result_content_type,
+        retry_count, max_retries, is_workflow_task, history_schema_version,
+        rerun_input_version, rerun_input_codec, rerun_input_content_type,
+        rerun_input_form,
         rerun_input_digest, rerun_input_inline,
         attempt_archive_version, attempt_snapshot_codec,
+        attempt_snapshot_content_type,
         attempt_snapshot, attempt_snapshot_digest
     """
     values = """
-        :task_id, 'prototype.task', 'default', 100, :status,
+        :task_id, 'prototype.task', 'default', 100,
+        1, decode(repeat('ab', 32), 'hex'), :status,
         'COMPLETE_LOCKED', :terminal_at, :terminal_at,
         'finite_30d_v1', :terminal_at, :terminal_at,
-        1, 'json-utf8', 0,
+        1, 'json-utf8', 'application/json', 0, 0,
         :is_workflow_task, 1,
-        1, 'json-utf8', 'INLINE', :digest, :payload,
-        1, 'json-utf8', :attempts, :attempts_digest
+        1, 'json-utf8', 'application/json', 'INLINE', :digest, :payload,
+        1, 'json-utf8', 'application/json', :attempts, :attempts_digest
     """
     attempts = encode_attempts(prototype_attempts(1))
     for status, is_workflow_task in (
@@ -368,20 +487,26 @@ async def test_administrative_cancel_cannot_present_prior_result_as_disposition(
             text(
                 f"""
                 INSERT INTO {schema.sql}.history_aggregate (
-                    task_id, task_name, queue_name, priority, status,
+                    task_id, task_name, queue_name, priority,
+                    command_fingerprint_version, command_fingerprint, status,
                     terminalization_kind, terminal_at, retention_anchor_at,
                     retention_class_key, enqueued_at, created_at,
-                    result_envelope_version, result_codec, result_payload,
-                    retry_count, is_workflow_task, history_schema_version,
+                    result_envelope_version, result_codec,
+                    result_content_type, result_payload,
+                    retry_count, max_retries, is_workflow_task,
+                    history_schema_version,
                     attempt_archive_version, attempt_snapshot_codec,
+                    attempt_snapshot_content_type,
                     attempt_snapshot, attempt_snapshot_digest
                 ) VALUES (
-                    :task_id, 'prototype.task', 'default', 100, 'CANCELLED',
+                    :task_id, 'prototype.task', 'default', 100,
+                    1, decode(repeat('ab', 32), 'hex'), 'CANCELLED',
                     'CANCEL_ADMIN', :terminal_at, :terminal_at,
                     'finite_30d_v1', :terminal_at, :terminal_at,
-                    1, 'json-utf8', :prior_result,
-                    0, FALSE, 1,
-                    1, 'json-utf8', :attempts, :attempts_digest
+                    1, 'json-utf8', 'application/json', :prior_result,
+                    0, 0, FALSE, 1,
+                    1, 'json-utf8', 'application/json',
+                    :attempts, :attempts_digest
                 )
                 """
             ),
@@ -407,22 +532,27 @@ async def test_named_prior_result_is_separate_from_cancel_disposition(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, prior_result_payload,
-                retry_count, is_workflow_task,
+                retry_count, max_retries, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             ) VALUES (
-                :task_id, 'prototype.task', 'default', 100, 'CANCELLED',
+                :task_id, 'prototype.task', 'default', 100,
+                1, decode(repeat('ab', 32), 'hex'), 'CANCELLED',
                 'CANCEL_ADMIN', :terminal_at, :terminal_at,
                 'finite_30d_v1', :terminal_at, :terminal_at,
-                1, 'json-utf8', NULL,
-                :prior_result_digest, :prior_result, 0, FALSE,
-                1, 1, 'json-utf8', :attempts, :attempts_digest
+                1, 'json-utf8', 'application/json', NULL,
+                :prior_result_digest, :prior_result, 0, 0, FALSE,
+                1, 1, 'json-utf8', 'application/json',
+                :attempts, :attempts_digest
             )
             """
         ),

@@ -324,35 +324,43 @@ def _move_function(namespace: str) -> str:
         END IF;
 
         INSERT INTO {namespace}.history_aggregate (
-            task_id, task_name, queue_name, priority, status,
+            task_id, task_name, queue_name, priority,
+            command_fingerprint_version, command_fingerprint, status,
             terminalization_kind, terminal_at, retention_anchor_at,
             retention_class_key, sent_at, enqueued_at, claimed_at,
-            started_at, created_at,
-            result_envelope_version, result_codec, result_payload,
+            started_at, created_at, good_until,
+            result_envelope_version, result_codec, result_content_type,
+            result_payload,
             result_digest, error_code, final_failed_reason,
-            prior_result_payload,
-            retry_count, rerun_of_task_id, rerun_root_task_id,
+            prior_result_payload, retry_count, max_retries,
+            last_claimed_worker_id, last_worker_hostname,
+            last_worker_pid, last_worker_process_name,
+            rerun_of_task_id, rerun_root_task_id,
             input_digest, workflow_id, is_workflow_task,
             history_schema_version, attempt_archive_version,
-            attempt_snapshot_codec, attempt_snapshot,
+            attempt_snapshot_codec, attempt_snapshot_content_type,
+            attempt_snapshot,
             attempt_snapshot_digest
         ) VALUES (
             v_task.id, v_task.task_name, v_task.queue_name, v_task.priority,
+            1, decode(v_task.enqueue_sha, 'hex'),
             p_terminal_status, p_terminalization_kind,
             p_terminal_at, p_terminal_at, v_task.retention_class_key,
             v_task.sent_at, v_task.enqueued_at, v_task.claimed_at,
-            v_task.started_at, v_task.created_at,
-            1, 'json-utf8', v_result_payload,
+            v_task.started_at, v_task.created_at, v_task.good_until,
+            1, 'json-utf8', 'application/json', v_result_payload,
             CASE WHEN v_result_payload IS NULL
                  THEN CASE WHEN v_prior_result_payload IS NULL
                            THEN NULL ELSE sha256(v_prior_result_payload) END
                  ELSE sha256(v_result_payload) END,
             p_error_code, p_failed_reason,
-            v_prior_result_payload,
-            v_task.retry_count, v_task.rerun_of_task_id,
+            v_prior_result_payload, v_task.retry_count, v_task.max_retries,
+            v_task.claimed_by_worker_id, v_task.worker_hostname,
+            v_task.worker_pid, v_task.worker_process_name,
+            v_task.rerun_of_task_id,
             v_task.rerun_root_task_id, v_task.input_digest,
             v_workflow_id, v_task.is_workflow_task,
-            1, 1, 'json-utf8', v_attempt_snapshot,
+            1, 1, 'json-utf8', 'application/json', v_attempt_snapshot,
             sha256(v_attempt_snapshot)
         );
         GET DIAGNOSTICS v_history_rows = ROW_COUNT;
@@ -425,13 +433,13 @@ def _miss_function(namespace: str) -> str:
             IF v_history.terminalization_kind = ANY(p_equivalent_kinds) THEN
                 RETURN QUERY SELECT
                     p_task_id, NULL::bigint, 'ALREADY_APPLIED'::text,
-                    v_history.terminal_at, v_history.terminalization_kind,
+                    v_history.terminal_at, v_history.terminalization_kind::text,
                     v_history.status, NULL::varchar, v_history.claimed_at,
                     NULL::text, NULL::jsonb;
             ELSE
                 RETURN QUERY SELECT
                     p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-                    v_history.terminal_at, v_history.terminalization_kind,
+                    v_history.terminal_at, v_history.terminalization_kind::text,
                     v_history.status, NULL::varchar, v_history.claimed_at,
                     'FOREIGN_TERMINALIZATION'::text, NULL::jsonb;
             END IF;
@@ -885,32 +893,44 @@ def _expire_pending_function(namespace: str) -> str:
         ),
         history_rows AS (
             INSERT INTO {namespace}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, sent_at, enqueued_at, claimed_at,
-                started_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                started_at, created_at, good_until,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, error_code, final_failed_reason,
-                retry_count, rerun_of_task_id, rerun_root_task_id,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                last_worker_pid, last_worker_process_name,
+                rerun_of_task_id, rerun_root_task_id,
                 input_digest, workflow_id, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             )
             SELECT target.id, target.task_name, target.queue_name,
-                   target.priority, 'EXPIRED',
+                   target.priority, 1, decode(target.enqueue_sha, 'hex'),
+                   'EXPIRED',
                    '{TerminalizationKind.EXPIRE_PENDING.value}',
                    target.assigned_terminal_at, target.assigned_terminal_at,
                    target.retention_class_key, target.sent_at,
                    target.enqueued_at, target.claimed_at, target.started_at,
-                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   target.created_at, target.good_until,
+                   1, 'json-utf8', 'application/json', target.encoded_result,
                    CASE WHEN target.encoded_result IS NULL THEN NULL
                         ELSE sha256(target.encoded_result) END,
                    p_error_code, NULL,
-                   target.retry_count, target.rerun_of_task_id,
+                   target.retry_count, target.max_retries,
+                   target.claimed_by_worker_id, target.worker_hostname,
+                   target.worker_pid, target.worker_process_name,
+                   target.rerun_of_task_id,
                    target.rerun_root_task_id, target.input_digest,
                    target.workflow_id, target.is_workflow_task,
-                   1, 1, 'json-utf8', target.encoded_attempts,
+                   1, 1, 'json-utf8', 'application/json',
+                   target.encoded_attempts,
                    sha256(target.encoded_attempts)
             FROM targets AS target
             RETURNING task_id, terminal_at, terminalization_kind
@@ -962,7 +982,7 @@ def _expire_pending_function(namespace: str) -> str:
             JOIN deleted_tasks AS deleted ON deleted.id = ready.task_id
         )
         SELECT history.task_id, NULL::bigint, 'APPLIED'::text,
-               history.terminal_at, history.terminalization_kind,
+               history.terminal_at, history.terminalization_kind::text,
                'PENDING'::text, target.claimed_by_worker_id,
                target.claimed_at, NULL::text, NULL::jsonb
         FROM history_rows AS history
@@ -1178,33 +1198,45 @@ def _cancel_orphaned_batch_function(namespace: str) -> str:
         ),
         history_rows AS (
             INSERT INTO {namespace}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, sent_at, enqueued_at, claimed_at,
-                started_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                started_at, created_at, good_until,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, error_code, final_failed_reason,
-                retry_count, rerun_of_task_id, rerun_root_task_id,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                last_worker_pid, last_worker_process_name,
+                rerun_of_task_id, rerun_root_task_id,
                 input_digest, workflow_id, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             )
             SELECT target.id, target.task_name, target.queue_name,
-                   target.priority, 'CANCELLED',
+                   target.priority, 1, decode(target.enqueue_sha, 'hex'),
+                   'CANCELLED',
                    '{TerminalizationKind.CANCEL_ORPHAN_SWEEP.value}',
                    target.assigned_terminal_at, target.assigned_terminal_at,
                    target.retention_class_key, target.sent_at,
                    target.enqueued_at, target.claimed_at, target.started_at,
-                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   target.created_at, target.good_until,
+                   1, 'json-utf8', 'application/json', target.encoded_result,
                    CASE WHEN target.encoded_result IS NULL THEN NULL
                         ELSE sha256(target.encoded_result) END,
                    'WORKFLOW_CHECK_FAILED',
                    'Workflow task orphaned: no live workflow_task linkage',
-                   target.retry_count, target.rerun_of_task_id,
+                   target.retry_count, target.max_retries,
+                   target.claimed_by_worker_id, target.worker_hostname,
+                   target.worker_pid, target.worker_process_name,
+                   target.rerun_of_task_id,
                    target.rerun_root_task_id, target.input_digest,
                    target.workflow_id, TRUE,
-                   1, 1, 'json-utf8', target.encoded_attempts,
+                   1, 1, 'json-utf8', 'application/json',
+                   target.encoded_attempts,
                    sha256(target.encoded_attempts)
             FROM targets AS target
             RETURNING task_id, terminal_at, terminalization_kind
@@ -1229,7 +1261,7 @@ def _cancel_orphaned_batch_function(namespace: str) -> str:
             JOIN deleted_tasks AS deleted ON deleted.id = history.task_id
         )
         SELECT history.task_id, NULL::bigint, 'APPLIED'::text,
-               history.terminal_at, history.terminalization_kind,
+               history.terminal_at, history.terminalization_kind::text,
                target.status::text, target.claimed_by_worker_id,
                target.claimed_at, NULL::text, NULL::jsonb
         FROM history_rows AS history
@@ -1496,31 +1528,43 @@ def _owned_node_batch_function(namespace: str, *, pause: bool) -> str:
         ),
         history_rows AS (
             INSERT INTO {namespace}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, sent_at, enqueued_at, claimed_at,
-                started_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                started_at, created_at, good_until,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, error_code, final_failed_reason,
-                retry_count, rerun_of_task_id, rerun_root_task_id,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                last_worker_pid, last_worker_process_name,
+                rerun_of_task_id, rerun_root_task_id,
                 input_digest, workflow_id, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             )
             SELECT target.id, target.task_name, target.queue_name,
-                   target.priority, 'CANCELLED', '{kind}',
+                   target.priority, 1, decode(target.enqueue_sha, 'hex'),
+                   'CANCELLED', '{kind}',
                    target.assigned_terminal_at, target.assigned_terminal_at,
                    target.retention_class_key, target.sent_at,
                    target.enqueued_at, target.claimed_at, target.started_at,
-                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   target.created_at, target.good_until,
+                   1, 'json-utf8', 'application/json', target.encoded_result,
                    CASE WHEN target.encoded_result IS NULL THEN NULL
                         ELSE sha256(target.encoded_result) END,
                    {error_projection}, {reason_projection},
-                   target.retry_count, target.rerun_of_task_id,
+                   target.retry_count, target.max_retries,
+                   target.claimed_by_worker_id, target.worker_hostname,
+                   target.worker_pid, target.worker_process_name,
+                   target.rerun_of_task_id,
                    target.rerun_root_task_id, target.input_digest,
                    target.workflow_id, TRUE,
-                   1, 1, 'json-utf8', target.encoded_attempts,
+                   1, 1, 'json-utf8', 'application/json',
+                   target.encoded_attempts,
                    sha256(target.encoded_attempts)
             FROM targets AS target
             RETURNING task_id, terminal_at, terminalization_kind
@@ -1581,7 +1625,7 @@ def _owned_node_batch_function(namespace: str, *, pause: bool) -> str:
                     ELSE retained.terminal_at END,
                CASE WHEN deleted.id IS NOT NULL
                         THEN inserted.terminalization_kind
-                    ELSE retained.terminalization_kind END,
+                    ELSE retained.terminalization_kind END::text,
                COALESCE(live.status::text, retained.status),
                live.claimed_by_worker_id,
                COALESCE(live.claimed_at, retained.claimed_at),
@@ -1676,31 +1720,43 @@ def _workflow_scoped_batch_function(namespace: str, *, pause: bool) -> str:
         ),
         history_rows AS (
             INSERT INTO {namespace}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, sent_at, enqueued_at, claimed_at,
-                started_at, created_at,
-                result_envelope_version, result_codec, result_payload,
+                started_at, created_at, good_until,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload,
                 result_digest, error_code, final_failed_reason,
-                retry_count, rerun_of_task_id, rerun_root_task_id,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                last_worker_pid, last_worker_process_name,
+                rerun_of_task_id, rerun_root_task_id,
                 input_digest, workflow_id, is_workflow_task,
                 history_schema_version, attempt_archive_version,
-                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_codec, attempt_snapshot_content_type,
+                attempt_snapshot,
                 attempt_snapshot_digest
             )
             SELECT target.id, target.task_name, target.queue_name,
-                   target.priority, 'CANCELLED', '{kind}',
+                   target.priority, 1, decode(target.enqueue_sha, 'hex'),
+                   'CANCELLED', '{kind}',
                    target.assigned_terminal_at, target.assigned_terminal_at,
                    target.retention_class_key, target.sent_at,
                    target.enqueued_at, target.claimed_at, target.started_at,
-                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   target.created_at, target.good_until,
+                   1, 'json-utf8', 'application/json', target.encoded_result,
                    CASE WHEN target.encoded_result IS NULL THEN NULL
                         ELSE sha256(target.encoded_result) END,
                    {error_projection}, {reason_projection},
-                   target.retry_count, target.rerun_of_task_id,
+                   target.retry_count, target.max_retries,
+                   target.claimed_by_worker_id, target.worker_hostname,
+                   target.worker_pid, target.worker_process_name,
+                   target.rerun_of_task_id,
                    target.rerun_root_task_id, target.input_digest,
                    target.workflow_id, TRUE,
-                   1, 1, 'json-utf8', target.encoded_attempts,
+                   1, 1, 'json-utf8', 'application/json',
+                   target.encoded_attempts,
                    sha256(target.encoded_attempts)
             FROM targets AS target
             RETURNING task_id, terminal_at, terminalization_kind
@@ -1738,7 +1794,7 @@ def _workflow_scoped_batch_function(namespace: str, *, pause: bool) -> str:
             JOIN deleted_tasks AS deleted ON deleted.id = ready.task_id
         )
         SELECT history.task_id, NULL::bigint, 'APPLIED'::text,
-               history.terminal_at, history.terminalization_kind,
+               history.terminal_at, history.terminalization_kind::text,
                target.status::text, target.claimed_by_worker_id,
                target.claimed_at, NULL::text, NULL::jsonb
         FROM history_rows AS history

@@ -736,9 +736,10 @@ async def test_fused_completion_moves_task_and_attempt_once(
         await terminalization_schema.execute(
             text(
                 f"""
-                SELECT result_envelope_version, result_codec, result_payload,
-                       result_digest, attempt_archive_version,
-                       attempt_snapshot_codec, attempt_snapshot,
+                SELECT result_envelope_version, result_codec,
+                       result_content_type, result_payload, result_digest,
+                       attempt_archive_version, attempt_snapshot_codec,
+                       attempt_snapshot_content_type, attempt_snapshot,
                        attempt_snapshot_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
@@ -751,6 +752,7 @@ async def test_fused_completion_moves_task_and_attempt_once(
         domain=ArchiveDomain.RESULT,
         version=history.result_envelope_version,
         codec=history.result_codec,
+        content_type=history.result_content_type,
         payload=bytes(history.result_payload),
         digest=bytes(history.result_digest),
     )
@@ -758,6 +760,7 @@ async def test_fused_completion_moves_task_and_attempt_once(
     attempts = decode_attempts(
         version=history.attempt_archive_version,
         codec=history.attempt_snapshot_codec,
+        content_type=history.attempt_snapshot_content_type,
         payload=bytes(history.attempt_snapshot),
         digest=bytes(history.attempt_snapshot_digest),
     )
@@ -765,6 +768,57 @@ async def test_fused_completion_moves_task_and_attempt_once(
     assert [(attempt.attempt, attempt.outcome) for attempt in attempts.value] == [
         (1, 'COMPLETED')
     ]
+
+
+async def test_terminalization_copies_request_and_last_worker_attribution(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, _ = await _seed_live_task(terminalization_schema)
+    good_until = datetime(2026, 8, 6, 9, tzinfo=timezone.utc)
+    await terminalization_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.live_tasks
+            SET max_retries = 7,
+                good_until = :good_until,
+                worker_hostname = 'worker.example',
+                worker_pid = 412,
+                worker_process_name = 'slot-3'
+            WHERE id = :task_id
+            """
+        ),
+        {'task_id': task_id, 'good_until': good_until},
+    )
+    await terminalization_schema.commit()
+
+    outcome = await _complete_locked(terminalization_schema, task_id)
+    assert isinstance(outcome, Applied)
+    archived = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT command_fingerprint_version, command_fingerprint,
+                       good_until, max_retries, last_claimed_worker_id,
+                       last_worker_hostname, last_worker_pid,
+                       last_worker_process_name
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert archived.command_fingerprint_version == 1
+    assert bytes(archived.command_fingerprint) == bytes.fromhex('a' * 64)
+    assert archived.good_until == good_until
+    assert archived.max_retries == 7
+    assert (
+        archived.last_claimed_worker_id,
+        archived.last_worker_hostname,
+        archived.last_worker_pid,
+        archived.last_worker_process_name,
+    ) == (_WORKER, 'worker.example', 412, 'slot-3')
 
 
 async def test_workflow_completion_creates_precise_pending_and_phase2_applies(
@@ -851,7 +905,8 @@ async def test_workflow_failure_archives_attempt_and_defers_phase2(
                 f"""
                 SELECT status, error_code, final_failed_reason,
                        attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot, attempt_snapshot_digest
+                       attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
                 """
@@ -863,6 +918,7 @@ async def test_workflow_failure_archives_attempt_and_defers_phase2(
     attempts = decode_attempts(
         version=history.attempt_archive_version,
         codec=history.attempt_snapshot_codec,
+        content_type=history.attempt_snapshot_content_type,
         payload=bytes(history.attempt_snapshot),
         digest=bytes(history.attempt_snapshot_digest),
     )
@@ -1038,7 +1094,8 @@ async def test_pending_expiry_is_bounded_set_wise_and_preserves_attempts(
             text(
                 f"""
                 SELECT attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot, attempt_snapshot_digest
+                       attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
                 """
@@ -1049,6 +1106,7 @@ async def test_pending_expiry_is_bounded_set_wise_and_preserves_attempts(
     decoded_attempts = decode_attempts(
         version=archived_attempt.attempt_archive_version,
         codec=archived_attempt.attempt_snapshot_codec,
+        content_type=archived_attempt.attempt_snapshot_content_type,
         payload=bytes(archived_attempt.attempt_snapshot),
         digest=bytes(archived_attempt.attempt_snapshot_digest),
     )
@@ -1179,7 +1237,7 @@ async def test_admin_cancel_separates_versioned_prior_result_from_disposition(
             text(
                 f"""
                 SELECT status, error_code, final_failed_reason,
-                       result_envelope_version, result_codec,
+                       result_envelope_version, result_codec, result_content_type,
                        result_payload, prior_result_payload, result_digest
                 FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
@@ -1198,6 +1256,7 @@ async def test_admin_cancel_separates_versioned_prior_result_from_disposition(
         domain=ArchiveDomain.RESULT,
         version=history.result_envelope_version,
         codec=history.result_codec,
+        content_type=history.result_content_type,
         payload=bytes(history.prior_result_payload),
         digest=bytes(history.result_digest),
     )
@@ -2283,18 +2342,22 @@ async def test_live_and_history_duplicate_is_rejected(
         text(
             f"""
             INSERT INTO {schema.sql}.history_aggregate (
-                task_id, task_name, queue_name, priority, status,
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint, status,
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
-                result_envelope_version, result_codec,
-                retry_count, is_workflow_task, history_schema_version,
+                result_envelope_version, result_codec, result_content_type,
+                retry_count, max_retries, is_workflow_task,
+                history_schema_version,
                 attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot_content_type,
                 attempt_snapshot, attempt_snapshot_digest
             ) VALUES (
-                :task_id, 'duplicate', 'default', 100, 'COMPLETED',
+                :task_id, 'duplicate', 'default', 100,
+                1, decode(repeat('ab', 32), 'hex'), 'COMPLETED',
                 'COMPLETE_FUSED', NOW(), NOW(), 'forever', NOW(), NOW(),
-                1, 'json-utf8', 0, FALSE, 1,
-                1, 'json-utf8', convert_to('[]', 'UTF8'),
+                1, 'json-utf8', 'application/json', 0, 0, FALSE, 1,
+                1, 'json-utf8', 'application/json', convert_to('[]', 'UTF8'),
                 sha256(convert_to('[]', 'UTF8'))
             )
             """

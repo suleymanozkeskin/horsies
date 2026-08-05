@@ -16,6 +16,7 @@ ARCHIVE_CODEC = 'json-utf8'
 ARCHIVE_VERSION = 1
 ARCHIVE_CODEC_V2 = 'framed-json-v2'
 ARCHIVE_FRAME_V2 = b'H2'
+ARCHIVE_CONTENT_TYPE = 'application/json'
 CANDIDATE_RERUN_INLINE_MAX_BYTES = 64 * 1024
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
@@ -40,6 +41,12 @@ class UnknownArchiveCodec:
 
 
 @dataclass(frozen=True, slots=True)
+class UnknownArchiveContentType:
+    domain: ArchiveDomain
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
 class CorruptArchiveValue:
     domain: ArchiveDomain
     detail: str
@@ -53,6 +60,7 @@ class ArchiveDigestMismatch:
 type ArchiveDecodeFailure = (
     UnknownArchiveVersion
     | UnknownArchiveCodec
+    | UnknownArchiveContentType
     | CorruptArchiveValue
     | ArchiveDigestMismatch
 )
@@ -135,6 +143,7 @@ _ATTEMPT_FIELD_NAMES = (
 class StoredArchiveValue:
     version: int
     codec: str
+    content_type: str
     payload: bytes
     digest: bytes
 
@@ -163,6 +172,7 @@ type RerunInput = InlineRerunInput | ReferencedRerunInput
 class StoredRerunInput:
     version: int
     codec: str
+    content_type: str
     form: RerunInputForm
     digest: bytes
     inline_payload: bytes | None
@@ -183,6 +193,7 @@ def encode_json_value(value: Any) -> StoredArchiveValue:
     return StoredArchiveValue(
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
+        content_type=ARCHIVE_CONTENT_TYPE,
         payload=payload,
         digest=archive_digest(payload),
     )
@@ -193,6 +204,7 @@ def decode_json_value(
     domain: ArchiveDomain,
     version: int,
     codec: str,
+    content_type: str,
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[Any]:
@@ -200,6 +212,7 @@ def decode_json_value(
         domain=domain,
         version=version,
         codec=codec,
+        content_type=content_type,
         payload=payload,
         digest=digest,
     )
@@ -230,6 +243,7 @@ def decode_attempts(
     *,
     version: int,
     codec: str,
+    content_type: str,
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[tuple[AttemptRecord, ...]]:
@@ -237,6 +251,7 @@ def decode_attempts(
         domain=ArchiveDomain.ATTEMPTS,
         version=version,
         codec=codec,
+        content_type=content_type,
         payload=payload,
         digest=digest,
     )
@@ -343,6 +358,7 @@ def store_inline_rerun_input(payload: bytes) -> StoredRerunInput:
     return StoredRerunInput(
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
+        content_type=ARCHIVE_CONTENT_TYPE,
         form=RerunInputForm.INLINE,
         digest=archive_digest(payload),
         inline_payload=payload,
@@ -356,6 +372,7 @@ def store_referenced_rerun_input(*, reference: str, payload: bytes) -> StoredRer
     return StoredRerunInput(
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
+        content_type=ARCHIVE_CONTENT_TYPE,
         form=RerunInputForm.REFERENCE,
         digest=archive_digest(payload),
         inline_payload=None,
@@ -367,15 +384,17 @@ def decode_rerun_input(
     *,
     version: int,
     codec: str,
+    content_type: str,
     form: str,
     digest: bytes,
     inline_payload: bytes | None,
     reference: str | None,
 ) -> ArchiveDecodeResult[RerunInput]:
-    contract_error = _validate_version_and_codec(
+    contract_error = _validate_archive_contract(
         domain=ArchiveDomain.RERUN_INPUT,
         version=version,
         codec=codec,
+        content_type=content_type,
     )
     if contract_error is not None:
         return contract_error
@@ -385,6 +404,7 @@ def decode_rerun_input(
                 domain=ArchiveDomain.RERUN_INPUT,
                 version=version,
                 codec=codec,
+                content_type=content_type,
                 payload=payload,
                 digest=digest,
             )
@@ -420,13 +440,15 @@ def _decode_payload_contract(
     domain: ArchiveDomain,
     version: int,
     codec: str,
+    content_type: str,
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[bytes]:
-    contract_error = _validate_version_and_codec(
+    contract_error = _validate_archive_contract(
         domain=domain,
         version=version,
         codec=codec,
+        content_type=content_type,
     )
     if contract_error is not None:
         return contract_error
@@ -446,18 +468,25 @@ def _decode_payload_contract(
             raise AssertionError('version validation was not exhaustive')
 
 
-def _validate_version_and_codec(
+def _validate_archive_contract(
     *,
     domain: ArchiveDomain,
     version: int,
     codec: str,
+    content_type: str,
 ) -> ArchiveDecodeFailure | None:
     match version:
         case 1 if codec == ARCHIVE_CODEC:
-            return None
+            pass
         case 2 if codec == ARCHIVE_CODEC_V2:
-            return None
+            pass
         case 1 | 2:
             return UnknownArchiveCodec(domain=domain, codec=codec)
         case _:
             return UnknownArchiveVersion(domain=domain, version=version)
+    if content_type != ARCHIVE_CONTENT_TYPE:
+        return UnknownArchiveContentType(
+            domain=domain,
+            content_type=content_type,
+        )
+    return None

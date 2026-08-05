@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC,
+    ARCHIVE_CONTENT_TYPE,
     ARCHIVE_VERSION,
     StoredArchiveValue,
     archive_digest,
@@ -320,6 +321,7 @@ async def collect_attempt_storage_evidence(
         result = StoredArchiveValue(
             version=ARCHIVE_VERSION,
             codec=ARCHIVE_CODEC,
+            content_type=ARCHIVE_CONTENT_TYPE,
             payload=result_payload,
             digest=archive_digest(result_payload),
         )

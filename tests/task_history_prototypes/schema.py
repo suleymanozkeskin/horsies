@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.migrations import SCHEMA_VERSION
 
 
@@ -67,12 +68,15 @@ async def remove_archive_candidates(
 
 def _archive_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
     namespace = schema.sql
-    common_columns = _common_history_columns(namespace)
+    terminalization_kinds = ', '.join(
+        f"'{kind.value}'" for kind in TerminalizationKind
+    )
+    common_columns = _common_history_columns(namespace, terminalization_kinds)
     return (
         f'CREATE SCHEMA {namespace}',
         f"""
         CREATE TABLE {namespace}.retention_classes (
-            class_key text PRIMARY KEY,
+            class_key varchar(64) PRIMARY KEY,
             duration interval,
             partition_interval interval,
             CHECK (
@@ -92,9 +96,15 @@ def _archive_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         CREATE TABLE {namespace}.history_aggregate (
             {common_columns},
             attempt_archive_version smallint NOT NULL,
-            attempt_snapshot_codec text NOT NULL,
+            attempt_snapshot_codec varchar(64) NOT NULL,
+            attempt_snapshot_content_type varchar(255) NOT NULL,
             attempt_snapshot bytea NOT NULL,
             attempt_snapshot_digest bytea NOT NULL,
+            CHECK (attempt_archive_version > 0),
+            CHECK (octet_length(attempt_snapshot_codec) BETWEEN 1 AND 64),
+            CHECK (
+                octet_length(attempt_snapshot_content_type) BETWEEN 1 AND 255
+            ),
             CHECK (octet_length(attempt_snapshot_digest) = 32)
         ) PARTITION BY LIST (retention_class_key)
         """,
@@ -133,68 +143,109 @@ def _archive_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
     )
 
 
-def _common_history_columns(namespace: str) -> str:
+def _common_history_columns(
+    namespace: str,
+    terminalization_kinds: str,
+) -> str:
     return f"""
         task_id varchar(36) NOT NULL,
-        task_name text NOT NULL,
-        queue_name text NOT NULL,
-        priority integer NOT NULL,
+        task_name varchar(255) NOT NULL,
+        queue_name varchar(100) NOT NULL,
+        priority integer NOT NULL CHECK (priority BETWEEN 1 AND 100),
+        command_fingerprint_version smallint NOT NULL
+            CHECK (command_fingerprint_version > 0),
+        command_fingerprint bytea NOT NULL
+            CHECK (octet_length(command_fingerprint) = 32),
         status text NOT NULL CHECK (
             status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
         ),
-        terminalization_kind text NOT NULL,
+        terminalization_kind varchar(32) NOT NULL CHECK (
+            terminalization_kind IN ({terminalization_kinds})
+        ),
         terminal_at timestamptz NOT NULL,
         retention_anchor_at timestamptz NOT NULL,
-        retention_class_key text NOT NULL
+        retention_class_key varchar(64) NOT NULL
             REFERENCES {namespace}.retention_classes(class_key),
         sent_at timestamptz,
         enqueued_at timestamptz NOT NULL,
         claimed_at timestamptz,
         started_at timestamptz,
         created_at timestamptz NOT NULL,
-        result_envelope_version smallint NOT NULL,
-        result_codec text NOT NULL,
+        good_until timestamptz,
+        retry_count integer NOT NULL CHECK (retry_count >= 0),
+        max_retries integer NOT NULL CHECK (max_retries >= 0),
+        last_claimed_worker_id varchar(255),
+        last_worker_hostname varchar(255),
+        last_worker_pid integer,
+        last_worker_process_name varchar(255),
+        result_envelope_version smallint NOT NULL
+            CHECK (result_envelope_version > 0),
+        result_codec varchar(64) NOT NULL,
+        result_content_type varchar(255) NOT NULL,
         result_payload bytea,
         result_digest bytea,
         error_code text,
         final_failed_reason text,
         prior_result_payload bytea,
-        retry_count integer NOT NULL CHECK (retry_count >= 0),
         rerun_of_task_id varchar(36),
         rerun_root_task_id varchar(36),
         input_digest bytea,
         rerun_input_version smallint,
-        rerun_input_codec text,
-        rerun_input_form text,
+        rerun_input_codec varchar(64),
+        rerun_input_content_type varchar(255),
+        rerun_input_form varchar(16),
         rerun_input_digest bytea,
         rerun_input_inline bytea,
-        rerun_input_reference text,
+        rerun_input_reference varchar(2048),
         workflow_id varchar(36),
         is_workflow_task boolean NOT NULL,
-        history_schema_version smallint NOT NULL,
+        history_schema_version smallint NOT NULL
+            CHECK (history_schema_version > 0),
         CHECK (retention_anchor_at = terminal_at),
+        CHECK (octet_length(result_codec) BETWEEN 1 AND 64),
+        CHECK (octet_length(result_content_type) BETWEEN 1 AND 255),
         CHECK (result_digest IS NULL OR octet_length(result_digest) = 32),
         CHECK (input_digest IS NULL OR octet_length(input_digest) = 32),
         CHECK (rerun_input_digest IS NULL OR octet_length(rerun_input_digest) = 32),
         CHECK (
+            rerun_input_reference IS NULL
+            OR octet_length(rerun_input_reference) BETWEEN 1 AND 2048
+        ),
+        CHECK (
+            (rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL)
+            OR (rerun_of_task_id IS NOT NULL AND rerun_root_task_id IS NOT NULL)
+        ),
+        CHECK (
             (rerun_input_form IS NULL
                 AND rerun_input_version IS NULL
                 AND rerun_input_codec IS NULL
+                AND rerun_input_content_type IS NULL
                 AND rerun_input_digest IS NULL
                 AND rerun_input_inline IS NULL
                 AND rerun_input_reference IS NULL)
             OR (rerun_input_form = 'INLINE'
                 AND rerun_input_version IS NOT NULL
                 AND rerun_input_codec IS NOT NULL
+                AND rerun_input_content_type IS NOT NULL
                 AND rerun_input_digest IS NOT NULL
                 AND rerun_input_inline IS NOT NULL
                 AND rerun_input_reference IS NULL)
             OR (rerun_input_form = 'REFERENCE'
                 AND rerun_input_version IS NOT NULL
                 AND rerun_input_codec IS NOT NULL
+                AND rerun_input_content_type IS NOT NULL
                 AND rerun_input_digest IS NOT NULL
                 AND rerun_input_inline IS NULL
                 AND rerun_input_reference IS NOT NULL)
+        ),
+        CHECK (rerun_input_version IS NULL OR rerun_input_version > 0),
+        CHECK (
+            rerun_input_codec IS NULL
+            OR octet_length(rerun_input_codec) BETWEEN 1 AND 64
+        ),
+        CHECK (
+            rerun_input_content_type IS NULL
+            OR octet_length(rerun_input_content_type) BETWEEN 1 AND 255
         ),
         CHECK (status <> 'COMPLETED' OR rerun_input_form IS NULL),
         CHECK (NOT is_workflow_task OR rerun_input_form IS NULL),
