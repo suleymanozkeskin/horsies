@@ -213,7 +213,8 @@ async def read_task(session: AsyncSession, task_id: str) -> Any:
                        claimed_by_worker_id, claim_expires_at, finalizing_at,
                        finalizing_by_worker_id, retry_count, max_retries,
                        good_until, enqueued_at, next_retry_at, worker_pid,
-                       worker_hostname, worker_process_name, queue_name
+                       worker_hostname, worker_process_name, queue_name,
+                       terminalization_kind
                 FROM horsies_tasks WHERE id = :id
             """),
             {'id': task_id},
@@ -327,6 +328,7 @@ class TestCancelTaskSucceeds:
         assert row.status == 'CANCELLED'
         assert row.error_code == 'TASK_CANCELLED'
         assert row.failed_reason == 'Cancelled via monitoring API'
+        assert row.terminalization_kind == 'CANCEL_ADMIN'
 
     async def test_claimed_task_is_cancelled_and_claim_released(
         self, broker: PostgresBroker, session: AsyncSession
