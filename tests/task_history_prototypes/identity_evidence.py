@@ -188,27 +188,24 @@ async def collect_identity_evidence(
         ballast_bytes = await _install_ballast(connection, schema)
         candidates: list[IdentityCandidateEvidence] = []
         for candidate in IdentityCandidate:
-            candidates.append(
-                await _measure_identity_candidate(
-                    connection,
-                    schema,
-                    candidate=candidate,
-                    live_rows=live_rows,
-                    finite_history_rows=finite_history_rows,
-                    forever_history_rows=forever_history_rows,
-                    attached_finite_leaves=attached_finite_leaves,
-                    keyed_percent=keyed_percent,
-                    warm_observations_per_category=(
-                        warm_observations_per_category
-                    ),
-                    cold_observations_per_category=(
-                        cold_observations_per_category
-                    ),
-                    ballast_bytes=ballast_bytes,
-                    bootstrap_resamples=bootstrap_resamples,
-                    seed=seed,
-                )
+            measured = await _measure_identity_candidate(
+                connection,
+                schema,
+                candidate=candidate,
+                live_rows=live_rows,
+                finite_history_rows=finite_history_rows,
+                forever_history_rows=forever_history_rows,
+                attached_finite_leaves=attached_finite_leaves,
+                keyed_percent=keyed_percent,
+                warm_observations_per_category=warm_observations_per_category,
+                cold_observations_per_category=cold_observations_per_category,
+                ballast_bytes=ballast_bytes,
+                bootstrap_resamples=bootstrap_resamples,
+                seed=seed,
             )
+            candidates.append(measured)
+            await _truncate_candidate(connection, schema, candidate)
+            await connection.commit()
         return IdentityEvidence(
             conditions=conditions,
             warm_observations_per_category=warm_observations_per_category,
