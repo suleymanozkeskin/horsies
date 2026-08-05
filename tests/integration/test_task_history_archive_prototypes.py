@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import asdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -17,7 +17,6 @@ from horsies.core.brokers.postgres import PostgresBroker
 from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC,
     ARCHIVE_VERSION,
-    AttemptRecord,
     DecodedArchiveValue,
     InlineRerunInput,
     ReferencedRerunInput,
@@ -26,6 +25,7 @@ from tests.task_history_prototypes.archive import (
     decode_rerun_input,
     encode_attempts,
     encode_json_value,
+    prototype_attempts,
     store_inline_rerun_input,
     store_referenced_rerun_input,
 )
@@ -64,27 +64,6 @@ def _schema(connection: AsyncConnection) -> PrototypeSchema:
     schema = connection.info.get('task_history_schema')
     assert isinstance(schema, PrototypeSchema)
     return schema
-
-
-def _attempts(count: int) -> tuple[AttemptRecord, ...]:
-    base = datetime(2026, 8, 5, tzinfo=timezone.utc)
-    return tuple(
-        AttemptRecord(
-            attempt=number,
-            outcome='FAILED' if number < count else 'COMPLETED',
-            will_retry=number < count,
-            started_at=(base + timedelta(seconds=number * 2)).isoformat(),
-            finished_at=(base + timedelta(seconds=number * 2 + 1)).isoformat(),
-            error_code='RETRYABLE' if number < count else None,
-            error_message='retry' if number < count else None,
-            failed_reason='worker failure' if number < count else None,
-            worker_id=f'worker-{number % 3}',
-            worker_hostname='test-host',
-            worker_pid=1000 + number,
-            worker_process_name='test-process',
-        )
-        for number in range(1, count + 1)
-    )
 
 
 def _history_parameters(
@@ -157,7 +136,7 @@ async def test_aggregate_snapshot_preserves_complete_attempt_sequence(
     archive_schema: AsyncConnection,
 ) -> None:
     schema = _schema(archive_schema)
-    attempts = _attempts(21)
+    attempts = prototype_attempts(21)
     snapshot = encode_attempts(attempts)
     parameters = _history_parameters(
         task_id=str(uuid4()),
@@ -210,7 +189,7 @@ async def test_copartitioned_attempts_preserve_order_and_attribution(
         parameters,
     )
 
-    for attempt in _attempts(21):
+    for attempt in prototype_attempts(21):
         await archive_schema.execute(
             text(
                 f"""
@@ -272,7 +251,7 @@ async def test_rerun_input_discriminant_round_trips(
                 reference='sha256://prototype/input',
                 payload=payload,
             )
-    attempts = encode_attempts(_attempts(1))
+    attempts = encode_attempts(prototype_attempts(1))
     parameters = _history_parameters(
         task_id=str(uuid4()),
         encoded_attempts=attempts.payload,
@@ -350,7 +329,7 @@ async def test_completed_and_workflow_rows_reject_rerun_input(
         1, 'json-utf8', 'INLINE', :digest, :payload,
         1, 'json-utf8', :attempts, :attempts_digest
     """
-    attempts = encode_attempts(_attempts(1))
+    attempts = encode_attempts(prototype_attempts(1))
     for status, is_workflow_task in (
         ('COMPLETED', False),
         ('FAILED', True),
@@ -415,7 +394,7 @@ async def test_named_prior_result_is_separate_from_cancel_disposition(
     archive_schema: AsyncConnection,
 ) -> None:
     schema = _schema(archive_schema)
-    attempts = encode_attempts(_attempts(1))
+    attempts = encode_attempts(prototype_attempts(1))
     task_id = str(uuid4())
     terminal_at = datetime(2026, 8, 5, tzinfo=timezone.utc)
     prior_result = b'{"old":"success"}'
@@ -518,7 +497,7 @@ async def test_storage_probe_measures_both_attempt_candidates(
     archive_schema: AsyncConnection,
 ) -> None:
     result = encode_json_value({'ok': 'x' * 200})
-    attempts = encode_attempts(_attempts(4))
+    attempts = encode_attempts(prototype_attempts(4))
     aggregate, copartitioned = await measure_attempt_storage_candidates(
         archive_schema,
         _schema(archive_schema),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Any
 
@@ -75,6 +76,30 @@ class AttemptRecord:
     worker_hostname: str | None
     worker_pid: int | None
     worker_process_name: str | None
+
+
+def prototype_attempts(count: int) -> tuple[AttemptRecord, ...]:
+    """Build a contiguous attempt sequence for storage prototype fixtures."""
+    if count < 1:
+        raise ValueError('count must be positive')
+    base = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    return tuple(
+        AttemptRecord(
+            attempt=number,
+            outcome='FAILED' if number < count else 'COMPLETED',
+            will_retry=number < count,
+            started_at=(base + timedelta(seconds=number * 2)).isoformat(),
+            finished_at=(base + timedelta(seconds=number * 2 + 1)).isoformat(),
+            error_code='RETRYABLE' if number < count else None,
+            error_message='retry' if number < count else None,
+            failed_reason='worker failure' if number < count else None,
+            worker_id=f'worker-{number % 3}',
+            worker_hostname='test-host',
+            worker_pid=1000 + number,
+            worker_process_name='test-process',
+        )
+        for number in range(1, count + 1)
+    )
 
 
 _ATTEMPTS_ADAPTER = TypeAdapter(tuple[AttemptRecord, ...])
