@@ -29,7 +29,11 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
-from horsies.core.lifecycle.commands import ExpirePendingTasks, FailStaleTask
+from horsies.core.lifecycle.commands import (
+    CancelOrphanedTasks,
+    ExpirePendingTasks,
+    FailStaleTask,
+)
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
@@ -426,6 +430,10 @@ EXPIRE_PENDING_TASKS_SQL = text("""
 _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
+_ORPHAN_BATCH_SIZE = 500
+# Match expiry's bounded drain: each transaction is small and one reaper pass
+# cannot run forever if orphan production remains above its drain rate.
+_ORPHAN_MAX_BATCHES_PER_PASS = 200
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     SELECT task_id, attempt, outcome, will_retry,
@@ -2211,12 +2219,42 @@ class PostgresBroker:
         them CANCELLED releases the claim and lets retention sweep them.
         """
         try:
-            async with self.session_factory() as session:
-                result = await session.execute(
-                    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
-                )
-                await session.commit()
-                return Ok(getattr(result, 'rowcount', 0))
+            total_terminated = 0
+            for _ in range(_ORPHAN_MAX_BATCHES_PER_PASS):
+                async with self.session_factory() as session:
+                    outcomes = await apply_batch_async(
+                        await session.connection(),
+                        CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
+                    )
+                    for outcome in outcomes:
+                        match outcome:
+                            case Applied():
+                                continue
+                            case (
+                                AlreadyApplied()
+                                | LostClaim()
+                                | SourceStateConflict()
+                                | TaskAbsent()
+                            ):
+                                raise RuntimeError(
+                                    'orphan sweep returned '
+                                    f'{type(outcome).__name__}; discovery '
+                                    'batches report transitioned rows only'
+                                )
+                            case _ as unreachable:
+                                assert_never(unreachable)
+                    await session.commit()
+                batch_terminated = len(outcomes)
+                total_terminated += batch_terminated
+                if batch_terminated < _ORPHAN_BATCH_SIZE:
+                    return Ok(total_terminated)
+            self.logger.warning(
+                'terminate_orphaned_workflow_tasks reached the per-pass '
+                'batch cap after terminating %s task(s); the remainder '
+                'will be handled next interval',
+                total_terminated,
+            )
+            return Ok(total_terminated)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,

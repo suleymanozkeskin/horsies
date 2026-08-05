@@ -88,7 +88,6 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.sql import (
     NOTIFY_TASK_QUEUE_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-    TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 
@@ -577,20 +576,25 @@ class FinalizeMixin:
                 if is_err(load_r):
                     return Err(load_r.err_value)
                 return load_r
-            case ApplyTerminalization(command=CancelOwnedOrphan()):
-                # The orphan family has its own gated cutover. Classification
-                # is shared now, but its legacy writer remains until then.
+            case ApplyTerminalization(command=CancelOwnedOrphan() as command):
                 try:
                     async with self.sf() as s:
-                        terminate_res = await s.execute(
-                            TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-                            {
-                                'id': task_id,
-                                'wid': self.worker_instance_id,
-                                'claimed_at': claimed_at,
-                            },
+                        outcome = await apply_async(
+                            await s.connection(),
+                            command,
                         )
-                        terminated = terminate_res.fetchone() is not None
+                        match outcome:
+                            case Applied():
+                                terminated = True
+                            case (
+                                AlreadyApplied()
+                                | LostClaim()
+                                | SourceStateConflict()
+                                | TaskAbsent()
+                            ):
+                                terminated = False
+                            case _ as unreachable:
+                                assert_never(unreachable)
                         await s.commit()
                 except Exception as exc:
                     return Err(

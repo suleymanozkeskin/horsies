@@ -2008,6 +2008,120 @@ class TestExpirePendingTasks:
 
 
 # ---------------------------------------------------------------------------
+# TestTerminateOrphanedWorkflowTasks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestTerminateOrphanedWorkflowTasks:
+    """Tests for the bounded orphan discovery operation."""
+
+    @pytest.mark.asyncio
+    async def test_no_orphans_returns_zero(self) -> None:
+        from horsies.core.lifecycle.commands import CancelOrphanedTasks
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=[]),
+        ) as apply_batch:
+            result = await broker.terminate_orphaned_workflow_tasks()
+
+        assert is_ok(result)
+        assert result.ok_value == 0
+        assert apply_batch.await_args is not None
+        command = apply_batch.await_args.args[1]
+        assert isinstance(command, CancelOrphanedTasks)
+        assert command.batch_size == 500
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_counts_only_transitioned_rows(self) -> None:
+        from horsies.core.lifecycle.outcomes import Applied
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+        outcomes = [MagicMock(spec=Applied) for _ in range(3)]
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=outcomes),
+        ):
+            result = await broker.terminate_orphaned_workflow_tasks()
+
+        assert is_ok(result)
+        assert result.ok_value == 3
+        session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_a_full_batch_continues_until_a_short_batch(self) -> None:
+        from horsies.core.lifecycle.outcomes import Applied
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+        full = [MagicMock(spec=Applied) for _ in range(500)]
+        final = [MagicMock(spec=Applied) for _ in range(2)]
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(side_effect=[full, final]),
+        ) as apply_batch:
+            result = await broker.terminate_orphaned_workflow_tasks()
+
+        assert is_ok(result)
+        assert result.ok_value == 502
+        assert apply_batch.await_count == 2
+        assert session.commit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_non_applied_outcome_fails_closed(self) -> None:
+        from horsies.core.lifecycle.outcomes import TaskAbsent
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=[MagicMock(spec=TaskAbsent)]),
+        ):
+            result = await broker.terminate_orphaned_workflow_tasks()
+
+        assert not is_ok(result)
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_database_error_returns_err(self) -> None:
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(side_effect=Exception('db down')),
+        ):
+            result = await broker.terminate_orphaned_workflow_tasks()
+
+        assert not is_ok(result)
+        session.commit.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # TestRequeueStaleClaimed
 # ---------------------------------------------------------------------------
 
