@@ -412,6 +412,57 @@ async def test_concurrent_same_key_commits_exactly_one_request(
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
+async def test_concurrent_same_key_different_fingerprints_classify_by_winner(
+    identity_schema: AsyncConnection,
+    db_url: str,
+    candidate: str,
+) -> None:
+    schema = _schema(identity_schema)
+    key = ScopedIdempotencyKey(_command().task_name, 'concurrent-conflict')
+    commands = tuple(
+        _command() if index % 2 == 0 else replace(_command(), priority=11)
+        for index in range(64)
+    )
+    task_ids = tuple(str(uuid4()) for _ in commands)
+    concurrent_engine = create_async_engine(
+        db_url,
+        pool_size=64,
+        max_overflow=0,
+    )
+    try:
+        outcomes = await asyncio.gather(
+            *(
+                _enqueue_committed(
+                    concurrent_engine,
+                    schema,
+                    candidate,
+                    task_id=task_id,
+                    command=command,
+                    key=key,
+                )
+                for task_id, command in zip(task_ids, commands, strict=True)
+            )
+        )
+    finally:
+        await concurrent_engine.dispose()
+
+    applied_indexes = tuple(
+        index for index, outcome in enumerate(outcomes) if outcome[0] == 'APPLIED'
+    )
+    assert len(applied_indexes) == 1
+    applied_index = applied_indexes[0]
+    applied_task_id = task_ids[applied_index]
+    winning_fingerprint = commands[applied_index].fingerprint
+    for command, outcome in zip(commands, outcomes, strict=True):
+        expected = 'REPLAY' if command.fingerprint == winning_fingerprint else 'CONFLICT'
+        if outcome[0] == 'APPLIED':
+            assert command.fingerprint == winning_fingerprint
+        else:
+            assert outcome[0] == expected
+            assert outcome[1] == applied_task_id
+
+
+@pytest.mark.parametrize('candidate', _CANDIDATES)
 async def test_uncertain_commit_replay_returns_the_committed_request(
     identity_schema: AsyncConnection,
     db_url: str,
@@ -502,6 +553,132 @@ async def test_post_history_removal_follows_reservation_storage_lifetime(
     )
     assert outcome[0] == expected_outcome
     assert outcome[1] == (second_id if expected_outcome == 'APPLIED' else first_id)
+
+
+@pytest.mark.parametrize(
+    ('candidate', 'cleanup_function'),
+    [
+        ('key_registry', 'cleanup_key_reservations'),
+        ('combined_registry', 'cleanup_combined_reservations'),
+    ],
+)
+async def test_expired_registry_reservations_clean_in_bounded_batches(
+    identity_schema: AsyncConnection,
+    candidate: str,
+    cleanup_function: str,
+) -> None:
+    schema = _schema(identity_schema)
+    command = _command()
+    terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    expired_ids: list[str] = []
+    for ordinal in range(2):
+        task_id = str(uuid4())
+        expired_ids.append(task_id)
+        await _enqueue(
+            identity_schema,
+            candidate,
+            task_id=task_id,
+            command=command,
+            key=ScopedIdempotencyKey(command.task_name, f'expired-{ordinal}'),
+            key_window='1 microsecond',
+        )
+        await identity_schema.execute(
+            text(
+                f"""
+                SELECT {schema.sql}.terminalize_{terminal_prefix}(
+                    CAST(:task_id AS varchar(36)), statement_timestamp()
+                )
+                """
+            ),
+            {'task_id': task_id},
+        )
+    live_id = str(uuid4())
+    await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=live_id,
+        command=command,
+        key=ScopedIdempotencyKey(command.task_name, 'still-live'),
+    )
+    await identity_schema.execute(text('SELECT pg_sleep(0.001)'))
+
+    cleaned: list[str] = []
+    for _ in range(3):
+        rows = (
+            await identity_schema.execute(
+                text(
+                    f"""
+                    SELECT task_id
+                    FROM {schema.sql}.{cleanup_function}(1)
+                    """
+                )
+            )
+        ).scalars()
+        cleaned.extend(rows)
+    assert set(cleaned) == set(expired_ids)
+    assert len(cleaned) == 2
+
+    if candidate == 'key_registry':
+        remaining = (
+            await identity_schema.execute(
+                text(
+                    f"""
+                    SELECT task_id FROM {schema.sql}.key_reservations
+                    ORDER BY task_id
+                    """
+                )
+            )
+        ).scalars().all()
+        assert remaining == [live_id]
+    else:
+        rows = (
+            await identity_schema.execute(
+                text(
+                    f"""
+                    SELECT task_id, idempotency_key_digest
+                    FROM {schema.sql}.combined_registry
+                    ORDER BY task_id
+                    """
+                )
+            )
+        ).all()
+        assert {row.task_id for row in rows} == {*expired_ids, live_id}
+        assert {
+            row.task_id
+            for row in rows
+            if row.idempotency_key_digest is not None
+        } == {live_id}
+
+
+@pytest.mark.parametrize(
+    ('cleanup_function', 'batch_size'),
+    [
+        ('cleanup_key_reservations', None),
+        ('cleanup_key_reservations', 0),
+        ('cleanup_key_reservations', -1),
+        ('cleanup_combined_reservations', None),
+        ('cleanup_combined_reservations', 0),
+        ('cleanup_combined_reservations', -1),
+    ],
+)
+async def test_reservation_cleanup_rejects_invalid_bound_before_mutation(
+    identity_schema: AsyncConnection,
+    cleanup_function: str,
+    batch_size: int | None,
+) -> None:
+    schema = _schema(identity_schema)
+    with pytest.raises(DBAPIError, match='batch size must be a positive integer'):
+        await identity_schema.execute(
+            text(
+                f"""
+                SELECT task_id
+                FROM {schema.sql}.{cleanup_function}(
+                    CAST(:batch_size AS integer)
+                )
+                """
+            ),
+            {'batch_size': batch_size},
+        )
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)

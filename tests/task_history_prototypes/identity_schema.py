@@ -179,6 +179,8 @@ def _identity_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             _terminalize_function(namespace, 'no_directory', registry='none'),
             _terminalize_function(namespace, 'key_registry', registry='key'),
             _terminalize_function(namespace, 'combined', registry='combined'),
+            _cleanup_key_reservations_function(namespace),
+            _cleanup_combined_reservations_function(namespace),
             _fanout_lookup_function(namespace, 'no_directory'),
             _fanout_lookup_function(namespace, 'key_registry'),
             _combined_lookup_function(namespace),
@@ -617,6 +619,74 @@ def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
         SELECT COALESCE(bool_or(TRUE), FALSE) INTO v_moved FROM inserted;
         {final_statement}
         RETURN v_moved;
+    END
+    $function$
+    """
+
+
+def _cleanup_key_reservations_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.cleanup_key_reservations(p_batch_size integer)
+    RETURNS TABLE(task_id varchar(36))
+    LANGUAGE plpgsql
+    AS $function$
+    BEGIN
+        IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+            RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+                MESSAGE = 'batch size must be a positive integer';
+        END IF;
+        RETURN QUERY
+        WITH targets AS MATERIALIZED (
+            SELECT reservation.idempotency_key_digest
+            FROM {namespace}.key_reservations AS reservation
+            WHERE reservation.disposition = 'TERMINAL'
+              AND reservation.expires_at <= statement_timestamp()
+            ORDER BY reservation.expires_at,
+                     reservation.idempotency_key_digest
+            LIMIT p_batch_size
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM {namespace}.key_reservations AS reservation
+        USING targets
+        WHERE reservation.idempotency_key_digest =
+              targets.idempotency_key_digest
+        RETURNING reservation.task_id;
+    END
+    $function$
+    """
+
+
+def _cleanup_combined_reservations_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.cleanup_combined_reservations(
+        p_batch_size integer
+    ) RETURNS TABLE(task_id varchar(36))
+    LANGUAGE plpgsql
+    AS $function$
+    BEGIN
+        IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+            RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+                MESSAGE = 'batch size must be a positive integer';
+        END IF;
+        RETURN QUERY
+        WITH targets AS MATERIALIZED (
+            SELECT registry.task_id
+            FROM {namespace}.combined_registry AS registry
+            WHERE registry.location = 'HISTORY'
+              AND registry.idempotency_key_digest IS NOT NULL
+              AND registry.key_expires_at <= statement_timestamp()
+            ORDER BY registry.key_expires_at, registry.task_id
+            LIMIT p_batch_size
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE {namespace}.combined_registry AS registry
+        SET idempotency_key_digest = NULL,
+            key_scope_version = NULL,
+            key_window = NULL,
+            key_expires_at = NULL
+        FROM targets
+        WHERE registry.task_id = targets.task_id
+        RETURNING registry.task_id;
     END
     $function$
     """
