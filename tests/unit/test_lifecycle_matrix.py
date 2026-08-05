@@ -5,13 +5,9 @@ declaration nobody executes drifts from the code silently, so these tests read
 the statement text back and assert the declared guards, shape, and notification
 behavior are actually there.
 
-Statements defined as module-level SQL constants are checked directly. Retired
-inline child-process writers are checked against the database-owned functions
-that replaced them.
-
-The matrix preserves the contracts of the original sixteen writers. Active
-runtime writers are cross-checked against the inventory; retired writer rows
-are re-anchored to their database-owned replacements.
+The matrix preserves the contracts of the original sixteen writers. Every row
+is anchored to the database-owned operation that now implements that contract;
+T04 and T05 deliberately share one function.
 """
 
 from __future__ import annotations
@@ -20,33 +16,23 @@ from collections import Counter
 
 import pytest
 
-from horsies.core.worker import child_runner
-
-from horsies.core.brokers.postgres import (
-    EXPIRE_PENDING_TASKS_SQL,
-    MARK_STALE_TASK_FAILED_SQL,
-    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
-)
-from horsies.core.models.workflow.handle import (
-    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-)
 from horsies.core.schemas.terminalization import (
+    CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL,
     CREATE_ABANDON_OWNED_NODE_SQL,
+    CREATE_ABANDON_OWNED_NODES_SQL,
+    CREATE_CANCEL_LOCKED_TASK_SQL,
+    CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL,
+    CREATE_CANCEL_ORPHANED_TASKS_SQL,
     CREATE_CANCEL_OWNED_NODE_SQL,
+    CREATE_CANCEL_OWNED_NODES_SQL,
+    CREATE_CANCEL_OWNED_ORPHAN_SQL,
+    CREATE_COMPLETE_LOCKED_TASK_SQL,
+    CREATE_COMPLETE_TASK_FUSED_SQL,
+    CREATE_EXPIRE_OWNED_CLAIM_SQL,
+    CREATE_EXPIRE_PENDING_TASKS_SQL,
+    CREATE_FAIL_LOCKED_TASK_SQL,
+    CREATE_FAIL_STALE_TASK_SQL,
 )
-from horsies.core.worker.sql import (
-    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-    FINALIZE_TASK_COMPLETED_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
-    MARK_TASK_FAILED_WORKER_SQL,
-    TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-    UNCLAIM_PAUSED_TASKS_SQL,
-)
-from horsies.core.workflows.sql import (
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-)
-from horsies.monitoring.task_actions import _CANCEL_TASK_SQL
 from tests.lifecycle_matrix import (
     MATRIX,
     Attempt,
@@ -66,24 +52,24 @@ from tests.unit.test_terminal_writer_inventory import (
 pytestmark = [pytest.mark.unit]
 
 
-# Statement text for every writer the matrix describes as a SQL constant.
+# Database function text for every original writer contract.
 _STATEMENT_TEXT: dict[str, str] = {
-    'T01': _CANCEL_TASK_SQL.text,
-    'T02': UNCLAIM_PAUSED_TASKS_SQL.text,
-    'T03': CANCEL_CANCELLED_WORKFLOW_TASKS_SQL.text,
-    'T04': MARK_TASK_FAILED_WORKER_SQL.text,
-    'T05': MARK_TASK_FAILED_SQL.text,
-    'T06': MARK_TASK_COMPLETED_SQL.text,
-    'T07': FINALIZE_TASK_COMPLETED_SQL.text,
-    'T08': TERMINATE_ORPHANED_WORKFLOW_TASK_SQL.text,
-    'T09': CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL.text,
+    'T01': CREATE_CANCEL_LOCKED_TASK_SQL.text,
+    'T02': CREATE_ABANDON_OWNED_NODES_SQL.text,
+    'T03': CREATE_CANCEL_OWNED_NODES_SQL.text,
+    'T04': CREATE_FAIL_LOCKED_TASK_SQL.text,
+    'T05': CREATE_FAIL_LOCKED_TASK_SQL.text,
+    'T06': CREATE_COMPLETE_LOCKED_TASK_SQL.text,
+    'T07': CREATE_COMPLETE_TASK_FUSED_SQL.text,
+    'T08': CREATE_CANCEL_OWNED_ORPHAN_SQL.text,
+    'T09': CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL.text,
     'T10': CREATE_ABANDON_OWNED_NODE_SQL.text,
     'T11': CREATE_CANCEL_OWNED_NODE_SQL.text,
-    'T12': child_runner._EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
-    'T13': MARK_STALE_TASK_FAILED_SQL.text,
-    'T14': EXPIRE_PENDING_TASKS_SQL.text,
-    'T15': TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL.text,
-    'T16': MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL.text,
+    'T12': CREATE_EXPIRE_OWNED_CLAIM_SQL.text,
+    'T13': CREATE_FAIL_STALE_TASK_SQL.text,
+    'T14': CREATE_EXPIRE_PENDING_TASKS_SQL.text,
+    'T15': CREATE_CANCEL_ORPHANED_TASKS_SQL.text,
+    'T16': CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL.text,
 }
 
 _TEXT_ROWS = [row for row in MATRIX if row.writer_id in _STATEMENT_TEXT]
@@ -184,7 +170,7 @@ class TestDeclaredGuardsMatchTheStatements:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
                 # Deliberately generation-free: the deadline guard makes the
                 # outcome correct for whichever generation holds the row.
-                assert 'claimed_at' not in sql, row.writer_id
+                assert 'p_claimed_at' not in sql, row.writer_id
             case Fence.PRIOR_LOCKED_SELECT:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
             case Fence.WORKER_AND_GENERATION:
@@ -193,7 +179,7 @@ class TestDeclaredGuardsMatchTheStatements:
             case Fence.WORKER_AND_GENERATION_PAIRWISE:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
                 assert 'unnest(' in sql, row.writer_id
-                assert 'g.claimed_at' in sql, row.writer_id
+                assert 'input.claimed_at' in sql, row.writer_id
 
     @pytest.mark.parametrize('row', _TEXT_ROWS, ids=_ids(_TEXT_ROWS))
     def test_guard_markers(self, row: TerminalWriter) -> None:
@@ -204,11 +190,13 @@ class TestDeclaredGuardsMatchTheStatements:
                     assert 'good_until' in sql, row.writer_id
                 case Guard.STALENESS:
                     assert 'finalizing_at' in sql, row.writer_id
-                    assert 'stale_threshold' in sql, row.writer_id
+                    assert 'p_stale_after_ms' in sql, row.writer_id
                 case Guard.WORKFLOW_STATUS:
                     assert 'w.status =' in sql, row.writer_id
                 case Guard.WORKFLOW_LINK_ABSENT:
-                    assert 'NOT EXISTS' in sql, row.writer_id
+                    assert (
+                        'NOT EXISTS' in sql or 'ctx.node_status IS NULL' in sql
+                    ), row.writer_id
                 case Guard.WORKFLOW_LINK_STATE:
                     assert 'wt.status' in sql, row.writer_id
                 case Guard.NONE:
@@ -221,7 +209,7 @@ class TestDeclaredGuardsMatchTheStatements:
             case Shape.SET_WISE_SKIP_LOCKED:
                 assert 'SKIP LOCKED' in sql, row.writer_id
             case Shape.FUSED_CTE:
-                assert sql.lstrip().upper().startswith('WITH'), row.writer_id
+                assert 'WITH ctx AS (' in sql, row.writer_id
             case Shape.SINGLE | Shape.SET_WISE:
                 assert 'SKIP LOCKED' not in sql, row.writer_id
 

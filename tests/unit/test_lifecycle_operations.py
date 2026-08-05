@@ -113,7 +113,12 @@ def _caller_supplied_payload_columns(writer_id: str) -> set[str]:
         if match is None:
             continue
         value = match.group(1).strip()
-        if value.startswith(':') or value.startswith('%s') or value == '%s':
+        if (
+            value.startswith(':')
+            or value.startswith('%s')
+            or value == '%s'
+            or re.search(r'\bp_[a-z_]+\b', value)
+        ):
             supplied.add(column)
     return supplied
 

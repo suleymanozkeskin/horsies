@@ -1,8 +1,10 @@
-"""Every terminal writer pinned in both directions, against real PostgreSQL.
+"""Every terminalization operation pinned in both directions on PostgreSQL.
 
-Sixteen statements can move a `horsies_tasks` row to a terminal status. Each is
-exercised twice here: once where its guards are satisfied and the transition
-must happen, once where they are not and the row must be left alone.
+The original sixteen writer contracts map to fifteen database-owned operations.
+Each matrix row is exercised twice here: once where its guards are satisfied
+and the transition must happen, once where they are not and the row must be
+left alone. T04 and T05 intentionally exercise the shared failure operation
+with its two payload shapes.
 
 Coverage is driven by `tests/lifecycle_matrix.py` rather than by this file's
 contents. Every row of that matrix must have a scenario registered below, so a
@@ -14,9 +16,9 @@ missing workflow linkage for the orphan paths. What the tests assert is uniform
 and read off the matrix row: the eligible case reaches the declared target
 status and records `terminal_at`; the ineligible case changes neither.
 
-These are characterization tests. They pin behavior as it is, including where
-it is asymmetric between writers, so that a later refactor is measured against
-what the system does rather than what it was assumed to do.
+These are the executable transition matrix. They pin the behavior the typed
+commands and database functions must preserve, including the asymmetric
+failure payloads.
 
 Revert-proofing a refusal test: disable the guard, confirm the test fails,
 restore. Before concluding from a still-passing result, check that the disable
@@ -44,31 +46,35 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.brokers.postgres import (
-    EXPIRE_PENDING_TASKS_SQL,
-    MARK_STALE_TASK_FAILED_SQL,
-    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
+from horsies.core.lifecycle.commands import (
+    AbandonNodesOfPausedWorkflows,
+    AbandonOwnedNodes,
+    CancelLockedTask,
+    CancelNodesOfCancelledWorkflow,
+    CancelOrphanedTasks,
+    CancelOwnedNodes,
+    CancelOwnedOrphan,
+    CompleteLockedTask,
+    CompleteTaskFused,
+    ExpirePendingTasks,
+    FailLockedTask,
+    FailStaleTask,
 )
-from horsies.core.models.workflow.handle import (
-    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+from horsies.core.lifecycle.fences import (
+    CallerHoldsRowLock,
+    OwnedClaim,
+    OwnedClaimBatch,
+    PriorLockedRead,
 )
+from horsies.core.lifecycle.persistence import (
+    apply_async,
+    apply_batch_async,
+)
+from horsies.core.types.status import TaskStatus
 from horsies.core.worker.child_runner import (
     _expire_claimed_task_before_start,
     _handle_workflow_stop_before_start,
 )
-from horsies.core.worker.sql import (
-    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-    FINALIZE_TASK_COMPLETED_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
-    MARK_TASK_FAILED_WORKER_SQL,
-    TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-    UNCLAIM_PAUSED_TASKS_SQL,
-)
-from horsies.core.workflows.sql import (
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-)
-from horsies.monitoring.task_actions import _CANCEL_TASK_SQL
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.lifecycle_matrix import MATRIX, TerminalWriter
 
@@ -223,12 +229,24 @@ decides for itself.
 
 async def _t01_monitoring_cancel(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='CLAIMED', claimed_at=_now())
-    await ctx.session.commit()
     # The caller supplies the permitted source statuses; ineligible here means
     # the row's status is outside the set the caller allows.
-    allowed = ['PENDING', 'CLAIMED'] if eligible else ['PENDING']
     await ctx.session.execute(
-        _CANCEL_TASK_SQL, {'id': task.task_id, 'allowed': allowed},
+        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        {'id': task.task_id},
+    )
+    permitted = (
+        (TaskStatus.PENDING, TaskStatus.CLAIMED)
+        if eligible
+        else (TaskStatus.PENDING,)
+    )
+    await apply_async(
+        await ctx.session.connection(),
+        CancelLockedTask(
+            task_id=task.task_id,
+            fence=CallerHoldsRowLock(),
+            permitted_source_statuses=permitted,
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -242,13 +260,14 @@ async def _paused_batch(ctx: Context, eligible: bool) -> str:
     await _seed_workflow(ctx.session, task.task_id, wf_status='PAUSED')
     await ctx.session.commit()
     dispatched = generation if eligible else generation - timedelta(minutes=1)
-    await ctx.session.execute(
-        UNCLAIM_PAUSED_TASKS_SQL,
-        {
-            'ids': [task.task_id],
-            'claimed_ats': [dispatched],
-            'wid': WORKER_ID,
-        },
+    await apply_batch_async(
+        await ctx.session.connection(),
+        AbandonOwnedNodes(
+            fence=OwnedClaimBatch(
+                worker_id=WORKER_ID,
+                claim_generations=((task.task_id, dispatched),),
+            )
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -262,13 +281,14 @@ async def _cancelled_batch(ctx: Context, eligible: bool) -> str:
     await _seed_workflow(ctx.session, task.task_id, wf_status='CANCELLED')
     await ctx.session.commit()
     dispatched = generation if eligible else generation - timedelta(minutes=1)
-    await ctx.session.execute(
-        CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-        {
-            'ids': [task.task_id],
-            'claimed_ats': [dispatched],
-            'wid': WORKER_ID,
-        },
+    await apply_batch_async(
+        await ctx.session.connection(),
+        CancelOwnedNodes(
+            fence=OwnedClaimBatch(
+                worker_id=WORKER_ID,
+                claim_generations=((task.task_id, dispatched),),
+            )
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -276,16 +296,21 @@ async def _cancelled_batch(ctx: Context, eligible: bool) -> str:
 
 async def _fail_worker(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.commit()
     await ctx.session.execute(
-        MARK_TASK_FAILED_WORKER_SQL,
-        {
-            'id': task.task_id,
-            'wid': WORKER_ID if eligible else OTHER_WORKER_ID,
-            'reason': 'characterization',
-            'result_json': '{"err": null}',
-            'error_code': 'BROKER_ERROR',
-        },
+        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        {'id': task.task_id},
+    )
+    await apply_async(
+        await ctx.session.connection(),
+        FailLockedTask(
+            task_id=task.task_id,
+            fence=PriorLockedRead(
+                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
+            ),
+            result_json='{"err": null}',
+            error_code='BROKER_ERROR',
+            failed_reason='characterization',
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -293,15 +318,21 @@ async def _fail_worker(ctx: Context, eligible: bool) -> str:
 
 async def _fail_running(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.commit()
     await ctx.session.execute(
-        MARK_TASK_FAILED_SQL,
-        {
-            'id': task.task_id,
-            'wid': WORKER_ID if eligible else OTHER_WORKER_ID,
-            'result_json': '{"err": null}',
-            'error_code': 'WORKER_SERIALIZATION_ERROR',
-        },
+        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        {'id': task.task_id},
+    )
+    await apply_async(
+        await ctx.session.connection(),
+        FailLockedTask(
+            task_id=task.task_id,
+            fence=PriorLockedRead(
+                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
+            ),
+            result_json='{"err": null}',
+            error_code='WORKER_SERIALIZATION_ERROR',
+            failed_reason=None,
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -309,14 +340,19 @@ async def _fail_running(ctx: Context, eligible: bool) -> str:
 
 async def _complete_running(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
-    await ctx.session.commit()
     await ctx.session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'id': task.task_id,
-            'wid': WORKER_ID if eligible else OTHER_WORKER_ID,
-            'result_json': '{"ok": 1}',
-        },
+        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        {'id': task.task_id},
+    )
+    await apply_async(
+        await ctx.session.connection(),
+        CompleteLockedTask(
+            task_id=task.task_id,
+            fence=PriorLockedRead(
+                worker_id=WORKER_ID if eligible else OTHER_WORKER_ID
+            ),
+            result_json='{"ok": 1}',
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -334,16 +370,15 @@ async def _fused_complete(ctx: Context, eligible: bool) -> str:
     # Ineligible here is the claim-generation race the fused path exists to
     # reject: same worker, same status, a generation it no longer owns.
     dispatched = generation if eligible else generation - timedelta(minutes=1)
-    await ctx.session.execute(
-        FINALIZE_TASK_COMPLETED_SQL,
-        {
-            'id': task.task_id,
-            'wid': WORKER_ID,
-            'claimed_at': dispatched,
-            'result_json': '{"ok": 1}',
-            'notify_channel': 'task_queue_default',
-            'notify_payload': f'capacity:{task.task_id}',
-        },
+    await apply_async(
+        await ctx.session.connection(),
+        CompleteTaskFused(
+            task_id=task.task_id,
+            fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=dispatched),
+            result_json='{"ok": 1}',
+            notify_channel='task_queue_default',
+            notify_payload=f'capacity:{task.task_id}',
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -358,9 +393,12 @@ async def _orphan_single(ctx: Context, eligible: bool) -> str:
         # A live workflow-task linkage means it is not an orphan.
         await _seed_workflow(ctx.session, task.task_id, wf_status='RUNNING')
     await ctx.session.commit()
-    await ctx.session.execute(
-        TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-        {'id': task.task_id, 'wid': WORKER_ID, 'claimed_at': generation},
+    await apply_async(
+        await ctx.session.connection(),
+        CancelOwnedOrphan(
+            task_id=task.task_id,
+            fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=generation),
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -376,8 +414,9 @@ async def _paused_workflow_api(ctx: Context, eligible: bool) -> str:
         wf_status='PAUSED' if eligible else 'RUNNING',
     )
     await ctx.session.commit()
-    await ctx.session.execute(
-        CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL, {'workflow_ids': [wf_id]},
+    await apply_batch_async(
+        await ctx.session.connection(),
+        AbandonNodesOfPausedWorkflows(workflow_ids=(wf_id,)),
     )
     await ctx.session.commit()
     return task.task_id
@@ -394,7 +433,12 @@ async def _child_pause(ctx: Context, eligible: bool) -> str:
     with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
         with conn.cursor() as cursor:
             _handle_workflow_stop_before_start(
-                cursor, conn, task.task_id, 'PAUSED', WORKER_ID, dispatched,
+                cursor,
+                conn,
+                task.task_id,
+                'PAUSED',
+                WORKER_ID,
+                dispatched,
             )
     await ctx.session.commit()
     return task.task_id
@@ -411,7 +455,12 @@ async def _child_cancel(ctx: Context, eligible: bool) -> str:
     with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
         with conn.cursor() as cursor:
             _handle_workflow_stop_before_start(
-                cursor, conn, task.task_id, 'CANCELLED', WORKER_ID, dispatched,
+                cursor,
+                conn,
+                task.task_id,
+                'CANCELLED',
+                WORKER_ID,
+                dispatched,
             )
     await ctx.session.commit()
     return task.task_id
@@ -428,7 +477,10 @@ async def _child_expire(ctx: Context, eligible: bool) -> str:
     with psycopg.connect(_psycopg_dsn(ctx.db_url)) as conn:
         with conn.cursor() as cursor:
             _expire_claimed_task_before_start(
-                cursor, conn, task.task_id, WORKER_ID,
+                cursor,
+                conn,
+                task.task_id,
+                WORKER_ID,
             )
     await ctx.session.commit()
     return task.task_id
@@ -442,17 +494,17 @@ async def _stale_running(ctx: Context, eligible: bool) -> str:
     await ctx.session.commit()
     # Ineligible raises the staleness bar past the row's own age rather than
     # changing the row, so the guard is what differs and nothing else.
-    threshold = 60 if eligible else 86400
-    await ctx.session.execute(
-        MARK_STALE_TASK_FAILED_SQL,
-        {
-            'task_id': task.task_id,
-            'failed_reason': 'characterization',
-            'result': '{"err": null}',
-            'error_code': 'WORKER_CRASHED',
-            'stale_threshold': threshold,
-            'finalizing_stale_threshold': threshold,
-        },
+    threshold_ms = 60_000 if eligible else 86_400_000
+    await apply_async(
+        await ctx.session.connection(),
+        FailStaleTask(
+            task_id=task.task_id,
+            stale_after_ms=threshold_ms,
+            finalizing_stale_after_ms=threshold_ms,
+            result_json='{"err": null}',
+            error_code='WORKER_CRASHED',
+            failed_reason='characterization',
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -464,13 +516,13 @@ async def _expire_pending(ctx: Context, eligible: bool) -> str:
         ctx.session, status='PENDING', worker_id=None, good_until=good_until,
     )
     await ctx.session.commit()
-    await ctx.session.execute(
-        EXPIRE_PENDING_TASKS_SQL,
-        {
-            'result': '{"err": null}',
-            'error_code': 'TASK_EXPIRED',
-            'batch_size': 100,
-        },
+    await apply_batch_async(
+        await ctx.session.connection(),
+        ExpirePendingTasks(
+            batch_size=100,
+            result_json='{"err": null}',
+            error_code='TASK_EXPIRED',
+        ),
     )
     await ctx.session.commit()
     return task.task_id
@@ -483,7 +535,10 @@ async def _orphan_batch(ctx: Context, eligible: bool) -> str:
     if not eligible:
         await _seed_workflow(ctx.session, task.task_id, wf_status='RUNNING')
     await ctx.session.commit()
-    await ctx.session.execute(TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL)
+    await apply_batch_async(
+        await ctx.session.connection(),
+        CancelOrphanedTasks(batch_size=100),
+    )
     await ctx.session.commit()
     return task.task_id
 
@@ -498,8 +553,9 @@ async def _workflow_cancel_batch(ctx: Context, eligible: bool) -> str:
         wf_status='CANCELLED' if eligible else 'RUNNING',
     )
     await ctx.session.commit()
-    await ctx.session.execute(
-        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL, {'wf_id': wf_id},
+    await apply_batch_async(
+        await ctx.session.connection(),
+        CancelNodesOfCancelledWorkflow(workflow_ids=(wf_id,)),
     )
     await ctx.session.commit()
     return task.task_id
