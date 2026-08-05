@@ -8,10 +8,17 @@ from datetime import datetime, timezone
 import pytest
 
 from tests.task_history_prototypes.identity import (
+    CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT,
+    CANDIDATE_IDEMPOTENCY_WINDOW_MAX,
     COMMAND_FINGERPRINT_VERSION,
     EnqueueCommandV1,
     ScopedIdempotencyKey,
 )
+
+
+def test_candidate_idempotency_window_bounds_are_explicit() -> None:
+    assert CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT.total_seconds() == 24 * 60 * 60
+    assert CANDIDATE_IDEMPOTENCY_WINDOW_MAX.total_seconds() == 30 * 24 * 60 * 60
 
 
 def _command() -> EnqueueCommandV1:

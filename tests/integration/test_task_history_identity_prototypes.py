@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 
 from horsies.core.brokers.postgres import PostgresBroker
 from tests.task_history_prototypes.identity import (
+    CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT,
+    CANDIDATE_IDEMPOTENCY_WINDOW_MAX,
     EnqueueCommandV1,
     ScopedIdempotencyKey,
 )
@@ -84,7 +86,7 @@ async def _enqueue(
     task_id: str,
     command: EnqueueCommandV1,
     key: ScopedIdempotencyKey | None,
-    key_window: str | None = None,
+    key_window: str | timedelta | None = None,
 ) -> tuple[str, str, int | None]:
     schema = _schema(connection)
     row = (
@@ -110,7 +112,9 @@ async def _enqueue(
                 'task_name': command.task_name,
                 'key_digest': key.digest if key else None,
                 'key_scope_version': 1 if key else None,
-                'key_window': (key_window or '24 hours') if key else None,
+                'key_window': (
+                    key_window or CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT
+                ) if key else None,
                 'fingerprint': command.fingerprint,
                 'retention_class_key': command.retention_class_key,
             },
@@ -520,7 +524,7 @@ async def test_post_history_removal_follows_reservation_storage_lifetime(
         task_id=first_id,
         command=command,
         key=key,
-        key_window='60 days',
+        key_window='30 days',
     )
     terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
     history_prefix = 'combined' if candidate == 'combined_registry' else candidate
@@ -750,23 +754,35 @@ async def test_expired_key_can_be_reused_without_removing_old_task_identity(
         assert sum(row.idempotency_key_digest is not None for row in rows) == 1
 
 
+@pytest.mark.parametrize(
+    ('key_window', 'message'),
+    [
+        ('0 seconds', 'idempotency window must be positive'),
+        (
+            CANDIDATE_IDEMPOTENCY_WINDOW_MAX + timedelta(microseconds=1),
+            'idempotency window must not exceed 30 days',
+        ),
+    ],
+)
 @pytest.mark.parametrize('candidate', _CANDIDATES)
 async def test_enqueue_rejects_invalid_window_before_mutation(
     identity_schema: AsyncConnection,
     candidate: str,
+    key_window: str | timedelta,
+    message: str,
 ) -> None:
     schema = _schema(identity_schema)
     command = _command()
     task_id = str(uuid4())
     key = ScopedIdempotencyKey(command.task_name, 'invalid-window')
-    with pytest.raises(DBAPIError, match='idempotency window must be positive'):
+    with pytest.raises(DBAPIError, match=message):
         await _enqueue(
             identity_schema,
             candidate,
             task_id=task_id,
             command=command,
             key=key,
-            key_window='0 seconds',
+            key_window=key_window,
         )
     await identity_schema.rollback()
     live_prefix = 'combined' if candidate == 'combined_registry' else candidate
@@ -782,6 +798,25 @@ async def test_enqueue_rejects_invalid_window_before_mutation(
         )
     ).scalar_one()
     assert count == 0
+
+
+@pytest.mark.parametrize('candidate', _CANDIDATES)
+async def test_enqueue_accepts_proposed_maximum_window(
+    identity_schema: AsyncConnection,
+    candidate: str,
+) -> None:
+    command = _command()
+    task_id = str(uuid4())
+    key = ScopedIdempotencyKey(command.task_name, 'maximum-window')
+    outcome = await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=task_id,
+        command=command,
+        key=key,
+        key_window=CANDIDATE_IDEMPOTENCY_WINDOW_MAX,
+    )
+    assert outcome == ('APPLIED', task_id, None)
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)

@@ -5,11 +5,17 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from tests.task_history_prototypes.identity import (
+    CANDIDATE_IDEMPOTENCY_WINDOW_MAX,
+)
 from tests.task_history_prototypes.schema import PrototypeSchema
 
 
 _BASE_LOOKUP_LEAVES = 2
 _MAX_LOOKUP_LEAVES = 512
+_CANDIDATE_WINDOW_MAX_SECONDS = int(
+    CANDIDATE_IDEMPOTENCY_WINDOW_MAX.total_seconds()
+)
 
 
 async def install_identity_candidates(
@@ -336,6 +342,12 @@ def _function_header(namespace: str, name: str) -> str:
         IF p_key_window IS NOT NULL AND p_key_window <= interval '0' THEN
             RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
                 MESSAGE = 'idempotency window must be positive';
+        END IF;
+        IF p_key_window IS NOT NULL
+           AND p_key_window > make_interval(secs => {_CANDIDATE_WINDOW_MAX_SECONDS})
+        THEN
+            RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+                MESSAGE = 'idempotency window must not exceed 30 days';
         END IF;
         {_lock_sql()}
     """

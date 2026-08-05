@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 IDEMPOTENCY_KEY_MAX_BYTES = 255
 IDEMPOTENCY_SCOPE_VERSION = 1
 COMMAND_FINGERPRINT_VERSION = 1
+CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT = timedelta(hours=24)
+CANDIDATE_IDEMPOTENCY_WINDOW_MAX = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
