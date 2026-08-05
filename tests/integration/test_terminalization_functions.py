@@ -124,6 +124,55 @@ async def _seed(
     return task_id
 
 
+async def _requeued_after_failed_attempt(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    failed_reason: str,
+) -> None:
+    """Leave the row and history where a requeued first attempt leaves them.
+
+    The retry path records attempt 1 as FAILED with will_retry and advances
+    retry_count, but no requeue path clears the summary fields on the task
+    row — that residue is what the terminal writers must not carry into the
+    terminal record.
+    """
+    await session.execute(
+        text("""
+            INSERT INTO horsies_task_attempts (
+                task_id, attempt, outcome, will_retry,
+                started_at, finished_at,
+                error_code, error_message, failed_reason, worker_id
+            )
+            VALUES (
+                :id, 1, 'FAILED', TRUE,
+                NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute',
+                'TASK_EXCEPTION', 'attempt one raised', :reason, :worker
+            )
+        """),
+        {'id': task_id, 'reason': failed_reason, 'worker': WORKER},
+    )
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET retry_count = 1,
+                error_code = 'TASK_EXCEPTION',
+                failed_reason = :reason
+            WHERE id = :id
+        """),
+        {'id': task_id, 'reason': failed_reason},
+    )
+    await session.commit()
+
+
+_ATTEMPT_HISTORY_SQL = text("""
+    SELECT attempt, outcome, failed_reason
+    FROM horsies_task_attempts
+    WHERE task_id = :id
+    ORDER BY attempt
+""")
+
+
 async def _force_terminal(
     session: AsyncSession,
     task_id: str,
@@ -292,35 +341,43 @@ class TestAppliedTransitions:
         assert row.result == '{"ok": 1}'
 
     @pytest.mark.parametrize(
-        'command',
+        ('command', 'expected_attempts'),
         [
-            pytest.param(_locked, id='locked'),
-            pytest.param(_fused, id='fused'),
+            pytest.param(
+                _locked,
+                [(1, 'FAILED', 'attempt one crashed')],
+                id='locked',
+            ),
+            pytest.param(
+                _fused,
+                [
+                    (1, 'FAILED', 'attempt one crashed'),
+                    (2, 'COMPLETED', None),
+                ],
+                id='fused',
+            ),
         ],
     )
     async def test_completion_clears_an_earlier_attempts_failure_summary(
         self,
         session: AsyncSession,
         command: Callable[[str], CompleteLockedTask | CompleteTaskFused],
+        expected_attempts: list[tuple[int, str, str | None]],
     ) -> None:
-        """A task that failed, requeued, and then succeeded reports success.
+        """Attempt one failed and requeued; attempt two completes.
 
-        The terminal writer owns the complete final-attempt summary: the
-        error_code and failed_reason a requeued earlier attempt left on the
-        row are cleared beside COMPLETED, not carried into the terminal
-        record. Per-attempt history lives in horsies_task_attempts.
+        Both halves of the invariant: the terminal row contains only the
+        final disposition — the error_code and failed_reason the requeued
+        attempt left there are cleared beside COMPLETED — and attempt one's
+        history row keeps its reason untouched. The fused operation records
+        the completion as attempt two after attempt one's failure; the
+        locked operation writes no attempt row of its own, so history stays
+        exactly the failed attempt.
         """
         task_id = await _seed(session)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET error_code = 'TASK_EXCEPTION',
-                    failed_reason = 'attempt one crashed'
-                WHERE id = :id
-            """),
-            {'id': task_id},
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
         )
-        await session.commit()
 
         outcome = await apply_async(await session.connection(), command(task_id))
         await session.commit()
@@ -338,6 +395,11 @@ class TestAppliedTransitions:
         assert row.status == 'COMPLETED'
         assert row.error_code is None
         assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == expected_attempts
 
 
 class TestAlreadyApplied:
@@ -640,20 +702,15 @@ class TestFailLocked:
     ) -> None:
         """The terminal writer owns the complete final-attempt summary.
 
-        A NULL reason means this final attempt has no failure reason. A value
-        a requeued earlier attempt left on the row is cleared rather than
-        carried into the terminal record; per-attempt reasons live in
-        horsies_task_attempts.
+        Attempt one failed with a reason and requeued; the final attempt
+        fails with none. A NULL reason means this final attempt has no
+        failure reason: the requeued attempt's residue on the row is cleared,
+        while attempt one's history row keeps its reason untouched.
         """
         task_id = await _seed(session)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
-                WHERE id = :id
-            """),
-            {'id': task_id},
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
         )
-        await session.commit()
 
         outcome = await apply_async(
             await session.connection(), _fail_locked(task_id, None),
@@ -668,6 +725,13 @@ class TestFailLocked:
             )
         ).scalar_one()
         assert reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
 
     async def test_a_supplied_reason_overwrites(
         self,
@@ -1078,20 +1142,16 @@ class TestExpireOwnedClaim:
     ) -> None:
         """A requeued row's stale reason does not sit beside TASK_EXPIRED.
 
-        The terminal writer owns the complete final-attempt summary: expiry
-        has no failure reason of its own, so the value a requeued earlier
-        attempt left on the row is cleared with the transition.
+        Attempt one failed with a reason and requeued; the reclaimed row then
+        expires. Expiry has no failure reason of its own, so the requeued
+        attempt's residue on the row is cleared with the transition, while
+        attempt one's history row keeps its reason untouched.
         """
         task_id = await _seed(session, status='CLAIMED')
         await _deadline(session, task_id, seconds_ago=60)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
-                WHERE id = :id
-            """),
-            {'id': task_id},
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
         )
-        await session.commit()
 
         outcome = await apply_async(await session.connection(), _expire_claim(task_id))
         await session.commit()
@@ -1108,6 +1168,13 @@ class TestExpireOwnedClaim:
         ).one()
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
 
     async def test_deadline_change_while_waiting_on_the_row_is_rechecked(
         self,
@@ -1350,20 +1417,16 @@ class TestExpirePendingTasks:
     ) -> None:
         """A pending row that failed and requeued expires without its old reason.
 
-        The terminal writer owns the complete final-attempt summary: the
-        discovery sweep writes TASK_EXPIRED and clears the reason a requeued
-        earlier attempt left behind.
+        Attempt one failed with a reason and the task requeued to PENDING —
+        exactly the state the sweep discovers. The sweep writes TASK_EXPIRED
+        and clears the requeued attempt's residue, while attempt one's
+        history row keeps its reason untouched.
         """
         task_id = await _seed(session, status='PENDING')
         await _deadline(session, task_id, seconds_ago=60)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
-                WHERE id = :id
-            """),
-            {'id': task_id},
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
         )
-        await session.commit()
 
         outcomes = await apply_batch_async(
             await session.connection(), _expire_pending(),
@@ -1383,6 +1446,13 @@ class TestExpirePendingTasks:
         assert row.status == 'EXPIRED'
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
 
     async def test_the_batch_size_bounds_one_pass(
         self,
