@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import asyncio
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.lifecycle.operations import TerminalizationKind
+from horsies.core.lifecycle.operations import function_name_of
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
@@ -30,6 +31,7 @@ from horsies.core.lifecycle.outcomes import (
     TaskAbsent,
     decode_outcome_row,
 )
+from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.task_history_prototypes.archive import (
@@ -54,8 +56,19 @@ from tests.task_history_prototypes.transcode import (
 from tests.task_history_prototypes.workflow_schema import (
     install_workflow_recovery_prototype,
 )
+from tests.unit.test_lifecycle_commands import ONE_OF_EACH
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+type _FaultBoundary = Literal[
+    'attempt_capture',
+    'history_insert',
+    'pending_insert',
+    'coupled_node_update',
+    'attempt_delete',
+    'live_delete',
+    'task_notification',
+]
 
 _WORKER = 'history-prototype-worker'
 _OTHER_WORKER = 'history-prototype-other-worker'
@@ -101,6 +114,7 @@ async def _seed_live_task(
     claimed_at: datetime | None = _GENERATION,
     good_until: datetime | None = None,
     node_status: str = 'RUNNING',
+    workflow_status: str = 'RUNNING',
 ) -> tuple[str, str | None]:
     schema = _schema(connection)
     task_id = str(uuid4())
@@ -136,10 +150,10 @@ async def _seed_live_task(
             text(
                 f"""
                 INSERT INTO {schema.sql}.phase2_workflows (workflow_id, status)
-                VALUES (:workflow_id, 'RUNNING')
+                VALUES (:workflow_id, :workflow_status)
                 """
             ),
-            {'workflow_id': workflow_id},
+            {'workflow_id': workflow_id, 'workflow_status': workflow_status},
         )
         await connection.execute(
             text(
@@ -486,6 +500,73 @@ async def _cancel_owned_node(
     return decode_outcome_row(_plain_mapping(row))
 
 
+async def _owned_node_batch(
+    connection: AsyncConnection,
+    *,
+    pause: bool,
+    ids: list[str | None] | None,
+    claimed_ats: list[datetime | None] | None,
+) -> list[Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent]:
+    schema = _schema(connection)
+    function_name = (
+        'horsies_abandon_owned_nodes' if pause else 'horsies_cancel_owned_nodes'
+    )
+    rows = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.{function_name}(
+                    CAST(:ids AS varchar[]),
+                    CAST(:claimed_ats AS timestamptz[]),
+                    :worker_id
+                )
+                """
+                ),
+                {
+                    'ids': ids,
+                    'claimed_ats': claimed_ats,
+                    'worker_id': _WORKER,
+                },
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [decode_outcome_row(_plain_mapping(row)) for row in rows]
+
+
+async def _workflow_scoped_batch(
+    connection: AsyncConnection,
+    *,
+    pause: bool,
+    workflow_ids: list[str],
+) -> list[Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent]:
+    schema = _schema(connection)
+    function_name = (
+        'horsies_abandon_nodes_of_paused_workflows'
+        if pause
+        else 'horsies_cancel_nodes_of_cancelled_workflow'
+    )
+    rows = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.{function_name}(
+                    CAST(:workflow_ids AS varchar[])
+                )
+                """
+                ),
+                {'workflow_ids': workflow_ids},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [decode_outcome_row(_plain_mapping(row)) for row in rows]
+
+
 async def _seed_attempt(
     connection: AsyncConnection,
     task_id: str,
@@ -550,6 +631,40 @@ async def _relation_counts(
         )
     ).one()
     return tuple(int(value) for value in row)  # type: ignore[return-value]
+
+
+async def _install_mutation_fault(
+    connection: AsyncConnection,
+    *,
+    relation: str,
+    event: Literal['INSERT', 'UPDATE', 'DELETE'],
+) -> None:
+    schema = _schema(connection)
+    await connection.execute(
+        text(
+            f"""
+            CREATE FUNCTION {schema.sql}.reject_terminalization_mutation()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            BEGIN
+                RAISE EXCEPTION 'injected terminalization fault';
+            END
+            $function$
+            """
+        )
+    )
+    await connection.execute(
+        text(
+            f"""
+            CREATE TRIGGER reject_terminalization_mutation
+            BEFORE {event} ON {schema.sql}.{relation}
+            FOR EACH ROW
+            EXECUTE FUNCTION {schema.sql}.reject_terminalization_mutation()
+            """
+        )
+    )
+    await connection.commit()
 
 
 async def test_fused_completion_moves_task_and_attempt_once(
@@ -1379,6 +1494,472 @@ async def test_coupled_node_failure_rolls_back_history_and_live_delete(
         )
     ).one()
     assert tuple(node) == ('COMPLETED', task_id)
+
+
+async def test_pairwise_pause_batch_returns_one_ordered_outcome_per_input(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    valid_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    stale_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    replay_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    assert isinstance(
+        await _abandon_owned_node(terminalization_schema, replay_id), Applied
+    )
+    await terminalization_schema.commit()
+    absent_id = str(uuid4())
+
+    outcomes = await _owned_node_batch(
+        terminalization_schema,
+        pause=True,
+        ids=[valid_id, stale_id, absent_id, replay_id],
+        claimed_ats=[
+            _GENERATION,
+            _GENERATION + timedelta(seconds=1),
+            _GENERATION,
+            _GENERATION,
+        ],
+    )
+    assert [outcome.ordinality for outcome in outcomes] == [1, 2, 3, 4]
+    assert isinstance(outcomes[0], Applied)
+    assert isinstance(outcomes[1], LostClaim)
+    assert isinstance(outcomes[2], TaskAbsent)
+    assert isinstance(outcomes[3], AlreadyApplied)
+    assert outcomes[3].kind is TerminalizationKind.PAUSE_ABANDON_CLAIM
+    assert await _relation_counts(terminalization_schema, valid_id) == (0, 0, 1, 0)
+    assert await _relation_counts(terminalization_schema, stale_id) == (1, 0, 0, 0)
+
+
+async def test_pairwise_cancel_batch_preserves_summary_and_skips_node(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    assert workflow_id is not None
+    await terminalization_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.live_tasks
+            SET result = '{{"err":"prior"}}',
+                error_code = 'TASK_EXCEPTION',
+                failed_reason = 'prior attempt'
+            WHERE id = :task_id
+            """
+        ),
+        {'task_id': task_id},
+    )
+    await terminalization_schema.commit()
+
+    outcomes = await _owned_node_batch(
+        terminalization_schema,
+        pause=False,
+        ids=[task_id],
+        claimed_ats=[_GENERATION],
+    )
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], Applied)
+    assert outcomes[0].kind is TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH
+    node_status = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).scalar_one()
+    assert node_status == 'SKIPPED'
+    summary = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT convert_from(result_payload, 'UTF8'),
+                       error_code, final_failed_reason
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(summary) == (
+        '{"err":"prior"}',
+        'TASK_EXCEPTION',
+        'prior attempt',
+    )
+
+
+@pytest.mark.parametrize(
+    ('ids', 'claimed_ats', 'message'),
+    [
+        (None, None, 'non-NULL'),
+        (['one'], [], 'lengths differ'),
+        (['one', None], [_GENERATION, _GENERATION], 'ids must be non-NULL'),
+        (
+            ['duplicate', 'duplicate'],
+            [_GENERATION, _GENERATION],
+            'ids must be distinct',
+        ),
+    ],
+)
+async def test_pairwise_batch_preconditions_raise_before_mutation(
+    terminalization_schema: AsyncConnection,
+    ids: list[str | None] | None,
+    claimed_ats: list[datetime | None] | None,
+    message: str,
+) -> None:
+    with pytest.raises(DBAPIError, match=message):
+        await _owned_node_batch(
+            terminalization_schema,
+            pause=True,
+            ids=ids,
+            claimed_ats=claimed_ats,
+        )
+    await terminalization_schema.rollback()
+
+
+async def test_paused_workflow_batch_reports_only_transitioned_rows(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    eligible_id, paused_workflow = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+        workflow_status='PAUSED',
+    )
+    skipped_id, running_workflow = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+        workflow_status='RUNNING',
+    )
+    assert paused_workflow is not None
+    assert running_workflow is not None
+
+    outcomes = await _workflow_scoped_batch(
+        terminalization_schema,
+        pause=True,
+        workflow_ids=[paused_workflow, running_workflow],
+    )
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], Applied)
+    assert outcomes[0].task_id == eligible_id
+    assert outcomes[0].kind is TerminalizationKind.PAUSE_ABANDON_WORKFLOW
+    assert await _relation_counts(terminalization_schema, skipped_id) == (1, 0, 0, 0)
+    node = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, task_id FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': paused_workflow},
+        )
+    ).one()
+    assert tuple(node) == ('READY', None)
+
+
+async def test_cancelled_workflow_batch_keeps_enqueued_handoff_gate(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    eligible_id, cancelled_workflow = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='RUNNING',
+        node_status='ENQUEUED',
+        workflow_status='CANCELLED',
+    )
+    running_node_id, second_workflow = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='RUNNING',
+        node_status='RUNNING',
+        workflow_status='CANCELLED',
+    )
+    assert cancelled_workflow is not None
+    assert second_workflow is not None
+
+    outcomes = await _workflow_scoped_batch(
+        terminalization_schema,
+        pause=False,
+        workflow_ids=[cancelled_workflow, second_workflow],
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].task_id == eligible_id
+    assert isinstance(outcomes[0], Applied)
+    assert outcomes[0].kind is TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW
+    assert await _relation_counts(terminalization_schema, running_node_id) == (
+        1,
+        0,
+        0,
+        0,
+    )
+    status = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': cancelled_workflow},
+        )
+    ).scalar_one()
+    assert status == 'SKIPPED'
+
+
+async def test_prototype_catalog_contains_exact_terminalization_function_set(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    installed = {
+        row.proname
+        for row in (
+            await terminalization_schema.execute(
+                text(
+                    """
+                    SELECT procedure.proname
+                    FROM pg_proc AS procedure
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = procedure.pronamespace
+                    WHERE namespace.nspname = :schema_name
+                      AND procedure.proname LIKE 'horsies_%'
+                    """
+                ),
+                {'schema_name': schema.name},
+            )
+        ).all()
+    }
+    expected = {function_name_of(command) for command in ONE_OF_EACH}
+    assert installed == expected
+    signatures = (
+        await terminalization_schema.execute(
+            text(
+                """
+                SELECT namespace.nspname, procedure.proname,
+                       pg_get_function_identity_arguments(procedure.oid)
+                           AS identity_arguments
+                FROM pg_proc AS procedure
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = procedure.pronamespace
+                WHERE namespace.nspname IN (:prototype_schema, current_schema())
+                  AND procedure.proname = ANY(CAST(:function_names AS text[]))
+                """
+            ),
+            {
+                'prototype_schema': schema.name,
+                'function_names': sorted(expected),
+            },
+        )
+    ).all()
+    by_schema = {
+        namespace: {
+            (row.proname, row.identity_arguments)
+            for row in signatures
+            if row.nspname == namespace
+        }
+        for namespace in {schema.name, 'public'}
+    }
+    assert by_schema[schema.name] == by_schema['public']
+    outcome_attributes = (
+        await terminalization_schema.execute(
+            text(
+                """
+                SELECT attribute.attname,
+                       format_type(attribute.atttypid, attribute.atttypmod)
+                FROM pg_type AS type
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = type.typnamespace
+                JOIN pg_class AS relation ON relation.oid = type.typrelid
+                JOIN pg_attribute AS attribute
+                  ON attribute.attrelid = relation.oid
+                WHERE namespace.nspname = :schema_name
+                  AND type.typname = 'terminalization_outcome'
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                ORDER BY attribute.attnum
+                """
+            ),
+            {'schema_name': schema.name},
+        )
+    ).all()
+    postgres_spelling = {
+        'varchar': 'character varying',
+        'timestamptz': 'timestamp with time zone',
+    }
+    expected_attributes = [
+        (name, postgres_spelling.get(kind, kind)) for name, kind in OUTCOME_COLUMNS
+    ]
+    assert [tuple(row) for row in outcome_attributes] == expected_attributes
+
+
+@pytest.mark.parametrize(
+    'boundary',
+    [
+        'attempt_capture',
+        'history_insert',
+        'pending_insert',
+        'coupled_node_update',
+        'attempt_delete',
+        'live_delete',
+        'task_notification',
+    ],
+)
+async def test_terminalization_boundary_failure_rolls_back_every_relation(
+    terminalization_schema: AsyncConnection,
+    boundary: _FaultBoundary,
+) -> None:
+    schema = _schema(terminalization_schema)
+    needs_workflow = boundary in {'pending_insert', 'coupled_node_update'}
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=needs_workflow,
+        status='CLAIMED' if boundary == 'coupled_node_update' else 'RUNNING',
+        node_status='ENQUEUED',
+    )
+    match boundary:
+        case 'attempt_capture':
+            await terminalization_schema.execute(
+                text(
+                    f"""
+                    CREATE OR REPLACE FUNCTION
+                        {schema.sql}.encode_live_attempts(p_task_id varchar)
+                    RETURNS bytea
+                    LANGUAGE plpgsql
+                    AS $function$
+                    BEGIN
+                        RAISE EXCEPTION 'injected terminalization fault';
+                    END
+                    $function$
+                    """
+                )
+            )
+            await terminalization_schema.commit()
+        case 'history_insert':
+            await _install_mutation_fault(
+                terminalization_schema,
+                relation='history_aggregate',
+                event='INSERT',
+            )
+        case 'pending_insert':
+            await _install_mutation_fault(
+                terminalization_schema,
+                relation='workflow_phase2_pending',
+                event='INSERT',
+            )
+        case 'coupled_node_update':
+            await _install_mutation_fault(
+                terminalization_schema,
+                relation='phase2_nodes',
+                event='UPDATE',
+            )
+        case 'attempt_delete':
+            await _install_mutation_fault(
+                terminalization_schema,
+                relation='live_attempts',
+                event='DELETE',
+            )
+        case 'live_delete':
+            await _install_mutation_fault(
+                terminalization_schema,
+                relation='live_tasks',
+                event='DELETE',
+            )
+        case 'task_notification':
+            await terminalization_schema.execute(
+                text(
+                    f"""
+                    CREATE OR REPLACE FUNCTION
+                        {schema.sql}.emit_task_done(p_task_id varchar)
+                    RETURNS void
+                    LANGUAGE plpgsql
+                    AS $function$
+                    BEGIN
+                        RAISE EXCEPTION 'injected terminalization fault';
+                    END
+                    $function$
+                    """
+                )
+            )
+            await terminalization_schema.commit()
+
+    with pytest.raises(DBAPIError, match='injected terminalization fault'):
+        if boundary == 'coupled_node_update':
+            await _abandon_owned_node(terminalization_schema, task_id)
+        elif boundary == 'pending_insert':
+            await _complete_locked(terminalization_schema, task_id)
+        else:
+            await _complete_fused(terminalization_schema, task_id)
+    await terminalization_schema.rollback()
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+    if workflow_id is not None:
+        node = (
+            await terminalization_schema.execute(
+                text(
+                    f"""
+                    SELECT status, task_id FROM {schema.sql}.phase2_nodes
+                    WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                    """
+                ),
+                {'workflow_id': workflow_id},
+            )
+        ).one()
+        assert tuple(node) == ('ENQUEUED', task_id)
+
+
+async def test_capacity_notification_failure_rolls_back_fused_completion(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, _ = await _seed_live_task(terminalization_schema)
+
+    with pytest.raises(DBAPIError, match='channel name too long'):
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT * FROM {schema.sql}.horsies_complete_task_fused(
+                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:claimed_at AS timestamptz), :result,
+                    :channel, :task_id
+                )
+                """
+            ),
+            {
+                'task_id': task_id,
+                'worker_id': _WORKER,
+                'claimed_at': _GENERATION,
+                'result': _RESULT,
+                'channel': 'x' * 64,
+            },
+        )
+    await terminalization_schema.rollback()
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
 
 
 @pytest.mark.parametrize('first', ['fused', 'locked'])
