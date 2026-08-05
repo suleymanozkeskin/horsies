@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -16,6 +16,7 @@ ARCHIVE_CODEC = 'json-utf8'
 ARCHIVE_VERSION = 1
 ARCHIVE_CODEC_V2 = 'framed-json-v2'
 ARCHIVE_FRAME_V2 = b'H2'
+_UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 class ArchiveDomain(StrEnum):
@@ -113,6 +114,20 @@ def prototype_attempts(count: int) -> tuple[AttemptRecord, ...]:
 
 
 _ATTEMPTS_ADAPTER = TypeAdapter(tuple[AttemptRecord, ...])
+_ATTEMPT_FIELD_NAMES = (
+    'attempt',
+    'outcome',
+    'will_retry',
+    'started_at',
+    'finished_at',
+    'error_code',
+    'error_message',
+    'failed_reason',
+    'worker_id',
+    'worker_hostname',
+    'worker_pid',
+    'worker_process_name',
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +220,9 @@ def encode_attempts(attempts: tuple[AttemptRecord, ...]) -> StoredArchiveValue:
     actual = tuple(attempt.attempt for attempt in attempts)
     if actual != expected:
         raise ValueError('attempts must be ordered and contiguous from 1')
-    return encode_json_value([asdict(attempt) for attempt in attempts])
+    return encode_json_value(
+        [_encode_attempt_row(attempt) for attempt in attempts]
+    )
 
 
 def decode_attempts(
@@ -224,8 +241,14 @@ def decode_attempts(
     )
     match decoded:
         case DecodedArchiveValue(value=value) if isinstance(value, list):
+            attempt_objects = _attempt_objects(cast(list[object], value))
+            if attempt_objects is None:
+                return CorruptArchiveValue(
+                    domain=ArchiveDomain.ATTEMPTS,
+                    detail='expected_positional_attempts',
+                )
             try:
-                attempts = _ATTEMPTS_ADAPTER.validate_python(value)
+                attempts = _ATTEMPTS_ADAPTER.validate_python(attempt_objects)
             except ValidationError as exc:
                 return CorruptArchiveValue(
                     domain=ArchiveDomain.ATTEMPTS,
@@ -246,6 +269,68 @@ def decode_attempts(
             )
         case failure:
             return failure
+
+
+def _attempt_objects(value: list[object]) -> list[dict[str, Any]] | None:
+    objects: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, list):
+            return None
+        positional = cast(list[Any], item)
+        if len(positional) != len(_ATTEMPT_FIELD_NAMES):
+            return None
+        started_at = positional[3]
+        finished_at = positional[4]
+        if (
+            not isinstance(started_at, int)
+            or isinstance(started_at, bool)
+            or not isinstance(finished_at, int)
+            or isinstance(finished_at, bool)
+        ):
+            return None
+        try:
+            positional[3] = _epoch_us_to_datetime(started_at).isoformat()
+            positional[4] = _epoch_us_to_datetime(finished_at).isoformat()
+        except ValueError:
+            return None
+        objects.append(dict(zip(_ATTEMPT_FIELD_NAMES, positional, strict=True)))
+    return objects
+
+
+def _encode_attempt_row(attempt: AttemptRecord) -> list[Any]:
+    return [
+        attempt.attempt,
+        attempt.outcome,
+        attempt.will_retry,
+        _datetime_to_epoch_us(attempt.started_at),
+        _datetime_to_epoch_us(attempt.finished_at),
+        attempt.error_code,
+        attempt.error_message,
+        attempt.failed_reason,
+        attempt.worker_id,
+        attempt.worker_hostname,
+        attempt.worker_pid,
+        attempt.worker_process_name,
+    ]
+
+
+def _datetime_to_epoch_us(value: str) -> int:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError('attempt timestamp must be timezone-aware')
+    delta = parsed.astimezone(timezone.utc) - _UTC_EPOCH
+    return (
+        delta.days * 86_400_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+
+
+def _epoch_us_to_datetime(value: int) -> datetime:
+    try:
+        return _UTC_EPOCH + timedelta(microseconds=value)
+    except OverflowError as exc:
+        raise ValueError('attempt timestamp is outside the supported range') from exc
 
 
 def store_inline_rerun_input(payload: bytes) -> StoredRerunInput:

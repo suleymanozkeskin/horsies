@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from typing import Any, cast
 
 import pytest
 
@@ -19,6 +21,7 @@ from tests.task_history_prototypes.archive import (
     InlineRerunInput,
     UnknownArchiveCodec,
     UnknownArchiveVersion,
+    archive_digest,
     decode_attempts,
     decode_history_row_version,
     decode_json_value,
@@ -126,6 +129,36 @@ def test_attempt_decoder_rejects_non_contiguous_sequence() -> None:
         codec=stored.codec,
         payload=stored.payload,
         digest=stored.digest,
+    )
+    assert isinstance(decoded, CorruptArchiveValue)
+
+
+def test_attempt_snapshot_uses_typed_positional_rows() -> None:
+    attempts = (_attempt(1), _attempt(2))
+    stored = encode_attempts(attempts)
+
+    encoded = cast(list[list[Any]], json.loads(stored.payload))
+    assert all(isinstance(item, list) and len(item) == 12 for item in encoded)
+    assert b'"attempt"' not in stored.payload
+    assert decode_attempts(
+        version=stored.version,
+        codec=stored.codec,
+        payload=stored.payload,
+        digest=stored.digest,
+    ) == DecodedArchiveValue(attempts)
+
+
+def test_attempt_decoder_rejects_fractional_epoch_microseconds() -> None:
+    stored = encode_attempts((_attempt(1),))
+    positional = cast(list[list[Any]], json.loads(stored.payload))
+    positional[0][3] = 1.5
+    malformed = json.dumps(positional, separators=(',', ':')).encode()
+
+    decoded = decode_attempts(
+        version=stored.version,
+        codec=stored.codec,
+        payload=malformed,
+        digest=archive_digest(malformed),
     )
     assert isinstance(decoded, CorruptArchiveValue)
 

@@ -142,25 +142,35 @@ def _attempt_snapshot_function(namespace: str) -> str:
     STRICT
     AS $function$
         SELECT convert_to(
-            COALESCE(
-                jsonb_agg(
-                    jsonb_build_object(
-                        'attempt', a.attempt,
-                        'outcome', a.outcome,
-                        'will_retry', a.will_retry,
-                        'started_at', a.started_at,
-                        'finished_at', a.finished_at,
-                        'error_code', a.error_code,
-                        'error_message', a.error_message,
-                        'failed_reason', a.failed_reason,
-                        'worker_id', a.worker_id,
-                        'worker_hostname', a.worker_hostname,
-                        'worker_pid', a.worker_pid,
-                        'worker_process_name', a.worker_process_name
-                    ) ORDER BY a.attempt
+            '[' || COALESCE(
+                string_agg(
+                    '[' || to_jsonb(a.attempt)::text || ',' ||
+                    to_jsonb(a.outcome)::text || ',' ||
+                    to_jsonb(a.will_retry)::text || ',' ||
+                    to_jsonb(
+                        floor(
+                            extract(epoch FROM a.started_at) * 1000000
+                        )::bigint
+                    )::text || ',' ||
+                    to_jsonb(
+                        floor(
+                            extract(epoch FROM a.finished_at) * 1000000
+                        )::bigint
+                    )::text || ',' ||
+                    COALESCE(to_jsonb(a.error_code)::text, 'null') || ',' ||
+                    COALESCE(to_jsonb(a.error_message)::text, 'null') || ',' ||
+                    COALESCE(to_jsonb(a.failed_reason)::text, 'null') || ',' ||
+                    COALESCE(to_jsonb(a.worker_id)::text, 'null') || ',' ||
+                    COALESCE(to_jsonb(a.worker_hostname)::text, 'null') || ',' ||
+                    COALESCE(to_jsonb(a.worker_pid)::text, 'null') || ',' ||
+                    COALESCE(
+                        to_jsonb(a.worker_process_name)::text,
+                        'null'
+                    ) || ']',
+                    ',' ORDER BY a.attempt
                 ),
-                '[]'::jsonb
-            )::text,
+                ''
+            ) || ']',
             'UTF8'
         )
         FROM {namespace}.live_attempts AS a

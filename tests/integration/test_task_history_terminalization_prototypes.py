@@ -36,9 +36,11 @@ from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
 from tests.task_history_prototypes.archive import (
     ArchiveDomain,
+    AttemptRecord,
     DecodedArchiveValue,
     decode_attempts,
     decode_json_value,
+    encode_attempts,
 )
 from tests.task_history_prototypes.schema import (
     PrototypeSchema,
@@ -603,6 +605,58 @@ async def _seed_attempt(
     await connection.commit()
 
 
+async def test_sql_attempt_encoder_matches_archive_codec_bytes(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, _ = await _seed_live_task(terminalization_schema)
+    await _seed_attempt(terminalization_schema, task_id)
+    special = 'retry, quoted "value" with \\ and é'
+    await terminalization_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.live_attempts
+            SET error_message = CAST(:special AS text),
+                worker_hostname = CAST(:special AS varchar),
+                worker_pid = 4242,
+                worker_process_name = CAST(:special AS varchar)
+            WHERE task_id = :task_id
+            """
+        ),
+        {'task_id': task_id, 'special': special},
+    )
+
+    encoded = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT {schema.sql}.encode_live_attempts(:task_id)
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).scalar_one()
+    expected = encode_attempts(
+        (
+            AttemptRecord(
+                attempt=1,
+                outcome='FAILED',
+                will_retry=False,
+                started_at=_GENERATION.isoformat(),
+                finished_at=(_GENERATION + timedelta(seconds=1)).isoformat(),
+                error_code='TASK_EXCEPTION',
+                error_message=special,
+                failed_reason='final attempt failed',
+                worker_id=_WORKER,
+                worker_hostname=special,
+                worker_pid=4242,
+                worker_process_name=special,
+            ),
+        )
+    )
+    assert bytes(encoded) == expected.payload
+
+
 def _plain_mapping(row: Mapping[Any, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in row.items()}
 
@@ -983,14 +1037,24 @@ async def test_pending_expiry_is_bounded_set_wise_and_preserves_attempts(
         await terminalization_schema.execute(
             text(
                 f"""
-                SELECT attempt_snapshot FROM {schema.sql}.history_aggregate
+                SELECT attempt_archive_version, attempt_snapshot_codec,
+                       attempt_snapshot, attempt_snapshot_digest
+                FROM {schema.sql}.history_aggregate
                 WHERE task_id = :task_id
                 """
             ),
             {'task_id': seeded[0]},
         )
-    ).scalar_one()
-    assert b'"will_retry": true' in bytes(archived_attempt)
+    ).one()
+    decoded_attempts = decode_attempts(
+        version=archived_attempt.attempt_archive_version,
+        codec=archived_attempt.attempt_snapshot_codec,
+        payload=bytes(archived_attempt.attempt_snapshot),
+        digest=bytes(archived_attempt.attempt_snapshot_digest),
+    )
+    assert isinstance(decoded_attempts, DecodedArchiveValue)
+    assert len(decoded_attempts.value) == 1
+    assert decoded_attempts.value[0].will_retry is True
 
     second = await _expire_pending(terminalization_schema, batch_size=2)
     assert [outcome.task_id for outcome in second] == [seeded[2]]

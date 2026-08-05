@@ -88,6 +88,8 @@ class AttemptStorageEvidence:
     workload: dict[str, int | str]
     aggregate: ArchiveCandidateMeasurement
     copartitioned: ArchiveCandidateMeasurement
+    aggregate_logical_payload_ratio: float
+    aggregate_logical_payload_passed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,9 +288,16 @@ async def collect_attempt_storage_evidence(
     result_bytes: int,
     attempts_per_task: int,
     payload_shape: PayloadShape,
+    detail_observations: int,
+    bootstrap_resamples: int,
     seed: int,
 ) -> AttemptStorageEvidence:
     _validate_storage_evidence_rows(run_kind, rows)
+    _validate_sample_authority(
+        run_kind,
+        observations=detail_observations,
+        bootstrap_resamples=bootstrap_resamples,
+    )
     conditions = await collect_conditions(
         connection,
         commit=commit,
@@ -298,7 +307,10 @@ async def collect_attempt_storage_evidence(
         storage_description=storage_description,
         demo_quiesced=demo_quiesced,
         cache_posture='steady-state after candidate-local truncate',
-        prepared_posture='one parameterized bulk insert per candidate',
+        prepared_posture=(
+            'one parameterized bulk insert per candidate; detail lookup '
+            'prepared by ten warm-up executions'
+        ),
     )
     schema = PrototypeSchema(f'history_evidence_{uuid4().hex[:12]}')
     await install_archive_candidates(connection, schema)
@@ -319,6 +331,13 @@ async def collect_attempt_storage_evidence(
             result=result,
             attempts=attempts,
             attempts_per_task=attempts_per_task,
+            detail_observations=detail_observations,
+            bootstrap_resamples=bootstrap_resamples,
+            seed=seed,
+        )
+        aggregate_logical_payload_ratio = (
+            aggregate.logical_attempt_bytes
+            / copartitioned.logical_attempt_bytes
         )
         return AttemptStorageEvidence(
             conditions=conditions,
@@ -327,11 +346,17 @@ async def collect_attempt_storage_evidence(
                 'result_bytes': result_bytes,
                 'attempts_per_task': attempts_per_task,
                 'attempt_snapshot_bytes': len(attempts.payload),
+                'detail_observations': detail_observations,
+                'bootstrap_resamples': bootstrap_resamples,
                 'payload_shape': payload_shape.value,
                 'seed': seed,
             },
             aggregate=aggregate,
             copartitioned=copartitioned,
+            aggregate_logical_payload_ratio=aggregate_logical_payload_ratio,
+            aggregate_logical_payload_passed=(
+                aggregate_logical_payload_ratio <= 1.2
+            ),
         )
     finally:
         await connection.rollback()
@@ -511,3 +536,19 @@ def _validate_storage_evidence_rows(
         raise ValueError('rows must be positive')
     if run_kind is EvidenceRunKind.GATE and rows < 1_000_000:
         raise ValueError('storage gate evidence requires at least 1,000,000 rows')
+
+
+def _validate_sample_authority(
+    run_kind: EvidenceRunKind,
+    *,
+    observations: int,
+    bootstrap_resamples: int,
+) -> None:
+    if observations <= 0:
+        raise ValueError('observations must be positive')
+    if bootstrap_resamples <= 0:
+        raise ValueError('bootstrap resamples must be positive')
+    if run_kind is EvidenceRunKind.GATE and observations < 10_000:
+        raise ValueError('latency gate evidence requires 10,000 observations')
+    if run_kind is EvidenceRunKind.GATE and bootstrap_resamples < 1_000:
+        raise ValueError('latency gate evidence requires 1,000 bootstrap resamples')

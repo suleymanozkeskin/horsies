@@ -518,12 +518,21 @@ async def test_storage_probe_measures_both_attempt_candidates(
     assert aggregate.attempts_per_task == copartitioned.attempts_per_task == 4
     assert aggregate.attempt_snapshot_bytes == len(attempts.payload)
     assert copartitioned.attempt_snapshot_bytes is None
+    assert aggregate.logical_attempt_bytes == len(attempts.payload) * 100
+    assert copartitioned.logical_attempt_bytes > 0
     assert aggregate.wal_bytes > 0
     assert copartitioned.wal_bytes > 0
     assert aggregate.footprint.heap_bytes > 0
     assert copartitioned.footprint.heap_bytes > 0
     assert aggregate.footprint.total_bytes >= aggregate.footprint.heap_bytes
     assert copartitioned.footprint.total_bytes >= copartitioned.footprint.heap_bytes
+    assert aggregate.detail_latency.observations == 100
+    assert copartitioned.detail_latency.observations == 100
+    assert aggregate.detail_latency.ci_low_ms <= aggregate.detail_latency.ci_high_ms
+    assert (
+        copartitioned.detail_latency.ci_low_ms
+        <= copartitioned.detail_latency.ci_high_ms
+    )
 
 
 @pytest.mark.parametrize('candidate', list(RerunStorageCandidate))

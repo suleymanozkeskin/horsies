@@ -115,6 +115,8 @@ async def _run(arguments: argparse.Namespace) -> object:
                         result_bytes=arguments.result_bytes,
                         attempts_per_task=arguments.attempts_per_task,
                         payload_shape=arguments.payload_shape,
+                        detail_observations=arguments.warm_observations,
+                        bootstrap_resamples=arguments.bootstrap_resamples,
                         seed=arguments.seed,
                     )
                 case 'rerun-storage':

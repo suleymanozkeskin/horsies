@@ -1196,47 +1196,41 @@ def _archive_value_validator(namespace: str) -> str:
                     SELECT value, ordinality
                     FROM jsonb_array_elements(v_json) WITH ORDINALITY
                 LOOP
-                    IF jsonb_typeof(v_item) <> 'object'
-                       OR (
-                            SELECT count(*)
-                            FROM jsonb_object_keys(v_item)
-                       ) <> 12
-                       OR NOT (
-                            v_item ?& ARRAY[
-                                'attempt', 'outcome', 'will_retry',
-                                'started_at', 'finished_at', 'error_code',
-                                'error_message', 'failed_reason', 'worker_id',
-                                'worker_hostname', 'worker_pid',
-                                'worker_process_name'
-                            ]::text[]
-                       )
-                       OR jsonb_typeof(v_item -> 'attempt') <> 'number'
-                       OR (v_item ->> 'attempt')::bigint <> v_ordinality
-                       OR jsonb_typeof(v_item -> 'outcome') <> 'string'
-                       OR jsonb_typeof(v_item -> 'will_retry') <> 'boolean'
-                       OR jsonb_typeof(v_item -> 'started_at') <> 'string'
-                       OR jsonb_typeof(v_item -> 'finished_at') <> 'string'
-                       OR jsonb_typeof(v_item -> 'error_code')
+                    IF jsonb_typeof(v_item) <> 'array'
+                       OR jsonb_array_length(v_item) <> 12
+                       OR jsonb_typeof(v_item -> 0) <> 'number'
+                       OR (v_item ->> 0)::bigint <> v_ordinality
+                       OR jsonb_typeof(v_item -> 1) <> 'string'
+                       OR jsonb_typeof(v_item -> 2) <> 'boolean'
+                       OR jsonb_typeof(v_item -> 3) <> 'number'
+                       OR (v_item ->> 3) !~ '^-?[0-9]+$'
+                       OR jsonb_typeof(v_item -> 4) <> 'number'
+                       OR (v_item ->> 4) !~ '^-?[0-9]+$'
+                       OR jsonb_typeof(v_item -> 5)
                             NOT IN ('string', 'null')
-                       OR jsonb_typeof(v_item -> 'error_message')
+                       OR jsonb_typeof(v_item -> 6)
                             NOT IN ('string', 'null')
-                       OR jsonb_typeof(v_item -> 'failed_reason')
+                       OR jsonb_typeof(v_item -> 7)
                             NOT IN ('string', 'null')
-                       OR jsonb_typeof(v_item -> 'worker_id')
+                       OR jsonb_typeof(v_item -> 8)
                             NOT IN ('string', 'null')
-                       OR jsonb_typeof(v_item -> 'worker_hostname')
+                       OR jsonb_typeof(v_item -> 9)
                             NOT IN ('string', 'null')
-                       OR jsonb_typeof(v_item -> 'worker_pid')
+                       OR jsonb_typeof(v_item -> 10)
                             NOT IN ('number', 'null')
-                       OR jsonb_typeof(v_item -> 'worker_process_name')
+                       OR jsonb_typeof(v_item -> 11)
                             NOT IN ('string', 'null') THEN
                         RETURN FALSE;
                     END IF;
-                    v_timestamp := (v_item ->> 'started_at')::timestamptz;
-                    v_timestamp := (v_item ->> 'finished_at')::timestamptz;
-                    IF jsonb_typeof(v_item -> 'worker_pid') = 'number' THEN
-                        v_worker_pid := (v_item ->> 'worker_pid')::integer;
-                        IF to_jsonb(v_worker_pid) <> v_item -> 'worker_pid' THEN
+                    v_timestamp := to_timestamp(
+                        (v_item ->> 3)::numeric / 1000000
+                    );
+                    v_timestamp := to_timestamp(
+                        (v_item ->> 4)::numeric / 1000000
+                    );
+                    IF jsonb_typeof(v_item -> 10) = 'number' THEN
+                        v_worker_pid := (v_item ->> 10)::integer;
+                        IF to_jsonb(v_worker_pid) <> v_item -> 10 THEN
                             RETURN FALSE;
                         END IF;
                     END IF;

@@ -1176,12 +1176,19 @@ async def test_verification_replays_after_uncertain_commit(
         )
 
 
+@pytest.mark.parametrize(
+    'malformed',
+    [
+        b'[{"attempt":1}]',
+        b'[[1,"FAILED",false,1.5,2,null,null,null,null,null,null,null]]',
+    ],
+)
 async def test_malformed_attempt_record_rejects_preflight(
     transcode_schema: AsyncConnection,
+    malformed: bytes,
 ) -> None:
     schema = _schema(transcode_schema)
     seeded = await _seed_history(transcode_schema, finite_rows=1, forever_rows=0)
-    malformed = b'[{"attempt":1}]'
     await transcode_schema.execute(
         text(
             f"""

@@ -17,6 +17,8 @@ from tests.task_history_prototypes import (
 from tests.task_history_prototypes.evidence import (
     EvidenceConditions,
     EvidenceRunKind,
+    PayloadShape,
+    collect_attempt_storage_evidence,
     collect_operational_conditions,
 )
 from tests.task_history_prototypes.identity_evidence import (
@@ -79,6 +81,32 @@ async def test_transcode_gate_rejects_subqualification_workload(
                 batch_size=10_000,
                 payload_bytes=200,
                 attempts_per_task=4,
+            )
+
+
+async def test_attempt_gate_rejects_subqualification_sample_count(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        with pytest.raises(
+            ValueError,
+            match='requires 10,000 observations',
+        ):
+            await collect_attempt_storage_evidence(
+                connection,
+                commit='test-head',
+                run_kind=EvidenceRunKind.GATE,
+                server_image='test-image',
+                host_description='test host',
+                storage_description='test storage',
+                demo_quiesced=True,
+                rows=1_000_000,
+                result_bytes=200,
+                attempts_per_task=4,
+                payload_shape=PayloadShape.COMPRESSIBLE,
+                detail_observations=9_999,
+                bootstrap_resamples=1_000,
+                seed=20260805,
             )
 
 
@@ -217,6 +245,37 @@ async def test_pending_locator_evidence_compares_wide_and_compact_shapes(
     assert evidence.compact_history_locator_bytes <= evidence.byte_budget
     assert evidence.compact_quarantine_locator_bytes <= evidence.byte_budget
     assert evidence.compact_candidate_passed is True
+
+
+async def test_attempt_evidence_applies_logical_payload_budget(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        'tests.task_history_prototypes.evidence.collect_conditions',
+        _test_conditions,
+    )
+    async with engine.connect() as connection:
+        evidence = await collect_attempt_storage_evidence(
+            connection,
+            commit='test-head',
+            run_kind=EvidenceRunKind.SMOKE,
+            server_image='test-image',
+            host_description='test host',
+            storage_description='test storage',
+            demo_quiesced=True,
+            rows=100,
+            result_bytes=200,
+            attempts_per_task=21,
+            payload_shape=PayloadShape.COMPRESSIBLE,
+            detail_observations=10,
+            bootstrap_resamples=20,
+            seed=20260805,
+        )
+
+    assert evidence.aggregate_logical_payload_ratio <= 1.2
+    assert evidence.aggregate_logical_payload_passed is True
 
 
 @pytest.mark.parametrize('component', tuple(ArchiveComponent))
