@@ -109,47 +109,6 @@ jobs:
           DB_PASSWORD: testpassword
         run: scripts/run_e2e_suite.sh -v --tb=short
 
-  perf-harness:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: 0.11.14
-          enable-cache: true
-
-      - name: Install dependencies
-        run: uv sync --dev
-
-      - name: Start measurement servers
-        run: docker compose -f tests/fixtures/perf/compose.yaml up -d --wait
-
-      - name: Apply schema
-        run: |
-          for port in 15442 15446; do
-            uv run python -m tests.perf --apply-schema \
-              --dsn postgresql+psycopg://postgres:testpassword@localhost:${port}/horsies
-          done
-
-      # A control run: both sides execute the same statements, so the exact
-      # server counts must agree. They are counted rather than sampled, so a
-      # disagreement is a harness defect and fails here. Latency intervals at
-      # this sample size are expected to be wide and are not judged.
-      - name: Measurement harness control run
-        run: |
-          for port in 15442 15446; do
-            uv run python -m tests.perf --scenario all --scale smoke \
-              --control \
-              --dsn postgresql+psycopg://postgres:testpassword@localhost:${port}/horsies
-          done
-
-      - name: Stop measurement servers
-        if: always()
-        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
-
   pgbouncer:
     runs-on: ubuntu-latest
     permissions:

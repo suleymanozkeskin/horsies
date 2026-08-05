@@ -372,61 +372,6 @@ SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
     FOR UPDATE OF t
 """)
 
-MARK_STALE_TASK_FAILED_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'FAILED',
-        failed_at = NOW(),
-        failed_reason = :failed_reason,
-        result = :result,
-        error_code = :error_code,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE t.id = :task_id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id AND h.role = 'runner'
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-    RETURNING t.id
-""")
-
-# Batched: a mass expiry as one statement is a single long transaction whose
-# commit flushes two NOTIFYs per row at once, overflowing listener queues.
-# SKIP LOCKED steps around rows a concurrent claim pass holds; the claim
-# itself re-checks good_until, so the race resolves consistently either way.
-EXPIRE_PENDING_TASKS_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'EXPIRED',
-        failed_at = NOW(),
-        result = :result,
-        error_code = :error_code,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM (
-        SELECT id FROM horsies_tasks
-        WHERE status = 'PENDING'
-          AND good_until IS NOT NULL
-          AND good_until <= NOW()
-        ORDER BY good_until ASC
-        LIMIT :batch_size
-        FOR UPDATE SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
-""")
-
 _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
@@ -502,43 +447,6 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
                   WHERE wt.task_id = t2.id
                     AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
               )
-          )
-        FOR UPDATE OF t2 SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
-""")
-
-
-# Cancel orphaned workflow tasks the reaper finds stuck non-terminal: a
-# workflow task (is_workflow_task) with no workflow_task row in a runnable
-# status (linkage missing or terminal). These can never progress — the child's
-# workflow_task->RUNNING transition always fails — so they are made terminal
-# (CANCELLED) and their claim released, which frees in-flight budget and lets
-# retention sweep them. RUNNING is excluded (handled by auto_fail_stale_running
-# and a real orphan never reaches RUNNING). FOR UPDATE SKIP LOCKED avoids racing
-# an in-flight dispatch transaction.
-TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = 'WORKFLOW_CHECK_FAILED',
-        failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM (
-        SELECT t2.id
-        FROM horsies_tasks t2
-        WHERE t2.is_workflow_task = TRUE
-          AND t2.status IN ('CLAIMED', 'PENDING', 'READY', 'ENQUEUED')
-          AND NOT EXISTS (
-              SELECT 1 FROM horsies_workflow_tasks wt
-              WHERE wt.task_id = t2.id
-                AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
           )
         FOR UPDATE OF t2 SKIP LOCKED
     ) s

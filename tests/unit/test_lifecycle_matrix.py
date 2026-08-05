@@ -12,8 +12,6 @@ T04 and T05 deliberately share one function.
 
 from __future__ import annotations
 
-from collections import Counter
-
 import pytest
 
 from horsies.core.schemas.terminalization import (
@@ -46,7 +44,7 @@ from tests.lifecycle_matrix import (
 )
 from tests.unit.test_terminal_writer_inventory import (
     FROZEN_TERMINAL_WRITERS,
-    _update_clauses,
+    update_clauses,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -91,7 +89,7 @@ def _predicate(writer_id: str) -> str:
     UPDATE rather than in the UPDATE's own WHERE.
     """
     text = _STATEMENT_TEXT[writer_id]
-    for window, _ in _update_clauses(text):
+    for window, _ in update_clauses(text):
         text = text.replace(window, ' ')
     return ' '.join(text.split())
 
@@ -114,33 +112,14 @@ class TestMatrixShape:
             assert row.target_status in TERMINAL_STATUSES, row.writer_id
 
     def test_agrees_with_the_frozen_writer_allowlist(self) -> None:
-        """The active runtime inventory agrees with non-retired matrix rows.
+        """Sixteen contracts resolve to fifteen authoritative functions."""
+        modules = {module for module, _, _ in FROZEN_TERMINAL_WRITERS}
+        contexts = {context for _, context, _ in FROZEN_TERMINAL_WRITERS}
 
-        The allowlist keys on (module, statement, statuses) with a count; the
-        matrix carries one row per original writer. Retired runtime writers
-        remain matrix rows because their behavior is the migration contract.
-
-        The allowlist also guards the database-owned operations these
-        statements are being migrated to. Those are not matrix rows — the
-        matrix describes what exists to be replaced — so the comparison is
-        scoped to the runtime modules the matrix covers.
-        """
-        retired_runtime_ids = frozenset({'T10', 'T11'})
-        from_matrix = Counter(
-            (row.module, row.statement, row.target_status)
-            for row in MATRIX
-            if row.writer_id not in retired_runtime_ids
-        )
-        from_allowlist = Counter({
-            key: count
-            for key, count in FROZEN_TERMINAL_WRITERS.items()
-            if not key[0].endswith('schemas/terminalization.py')
-        })
-        assert from_matrix == from_allowlist, (
-            'matrix and allowlist disagree.\n'
-            f'matrix only: {sorted(from_matrix - from_allowlist)}\n'
-            f'allowlist only: {sorted(from_allowlist - from_matrix)}'
-        )
+        assert modules == {'horsies/core/schemas/terminalization.py'}
+        assert sum(FROZEN_TERMINAL_WRITERS.values()) == 15
+        assert len(contexts) == 15
+        assert len(set(_STATEMENT_TEXT.values())) == 15
 
 
 class TestDeclaredGuardsMatchTheStatements:

@@ -663,27 +663,6 @@ def _update_workflow_task_running_with_retry(task_id: str) -> bool:
     return False
 
 
-_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL = """
-        UPDATE horsies_tasks
-        SET status = 'EXPIRED',
-            claimed = FALSE,
-            claim_expires_at = NULL,
-            finalizing_at = NULL,
-            finalizing_by_worker_id = NULL,
-            failed_at = NOW(),
-            result = %s,
-            error_code = %s,
-            terminal_at = NOW(),
-            updated_at = NOW()
-        WHERE id = %s
-          AND status = 'CLAIMED'
-          AND claimed_by_worker_id = %s
-          AND good_until IS NOT NULL
-          AND good_until <= NOW()
-        RETURNING id
-"""
-
-
 def _expire_claimed_task_before_start(
     cursor: Cursor[Any],
     conn: Connection[Any],

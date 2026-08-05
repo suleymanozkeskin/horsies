@@ -114,30 +114,6 @@ _LOCK_TASK_SQL = text("""
     FOR UPDATE
 """)
 
-# Terminal states are never overwritten by claim, finalize, auto-retry or the
-# reaper — each of those is itself a CAS on the status it expects — so a
-# committed CANCELLED here is final. ``failed_at`` is set so the row carries an
-# end timestamp; without one its queue span would be unmeasurable.
-_CANCEL_TASK_SQL = text("""
-    UPDATE horsies_tasks
-    SET status = 'CANCELLED',
-        error_code = 'TASK_CANCELLED',
-        failed_reason = 'Cancelled via monitoring API',
-        failed_at = NOW(),
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND is_workflow_task = FALSE
-      AND status = ANY(:allowed)
-    RETURNING id
-""")
-
 # retry_count is set to the highest attempt already recorded, because the next
 # run records attempt retry_count + 1 and the attempt table upserts on
 # (task_id, attempt): a lower value would silently overwrite history, a higher

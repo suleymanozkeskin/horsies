@@ -174,26 +174,6 @@ LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
     FOR UPDATE
 """)
 
-MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM horsies_workflow_tasks wt
-    JOIN horsies_workflows w ON w.id = wt.workflow_id
-    WHERE wt.workflow_id = :wf_id
-      AND wt.task_id = t.id
-      AND w.status = 'CANCELLED'
-      AND wt.status = 'ENQUEUED'
-      AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')
-""")
-
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'SKIPPED'
