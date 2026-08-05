@@ -506,8 +506,8 @@ _EXPIRY_RESULT = serialize_error_payload(
     )
 )
 
-_STALE_AFTER_SECONDS = 5
-_FINALIZING_STALE_AFTER_SECONDS = 5
+_STALE_AFTER_MS = 5_000
+_FINALIZING_STALE_AFTER_MS = 5_000
 _STALE_FAILURE_REASON = 'Worker process crashed (no runner heartbeat for 5000ms)'
 _STALE_FAILURE_RESULT = serialize_error_payload(
     TaskResult(
@@ -589,8 +589,8 @@ def _stale_failure_invocation(*, candidate: bool) -> InvocationFactory:
         if candidate:
             command = FailStaleTask(
                 task_id=task_id,
-                stale_after_seconds=_STALE_AFTER_SECONDS,
-                finalizing_stale_after_seconds=_FINALIZING_STALE_AFTER_SECONDS,
+                stale_after_ms=_STALE_AFTER_MS,
+                finalizing_stale_after_ms=_FINALIZING_STALE_AFTER_MS,
                 result_json=_STALE_FAILURE_RESULT,
                 error_code=OperationalErrorCode.WORKER_CRASHED.value,
                 failed_reason=_STALE_FAILURE_REASON,
@@ -610,8 +610,10 @@ def _stale_failure_invocation(*, candidate: bool) -> InvocationFactory:
                 'failed_reason': _STALE_FAILURE_REASON,
                 'result': _STALE_FAILURE_RESULT,
                 'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                'stale_threshold': _STALE_AFTER_SECONDS,
-                'finalizing_stale_threshold': _FINALIZING_STALE_AFTER_SECONDS,
+                'stale_threshold': _STALE_AFTER_MS / 1000.0,
+                'finalizing_stale_threshold': (
+                    _FINALIZING_STALE_AFTER_MS / 1000.0
+                ),
             },
             candidate=False,
             operation='stale terminal failure statement',
@@ -668,8 +670,10 @@ def _run_stale_failure(*, candidate: bool) -> Callable[[Connection, str], int]:
             SELECT_STALE_TASK_FOR_UPDATE_SQL,
             {
                 'id': task_id,
-                'stale_threshold': _STALE_AFTER_SECONDS,
-                'finalizing_stale_threshold': _FINALIZING_STALE_AFTER_SECONDS,
+                'stale_threshold': _STALE_AFTER_MS / 1000.0,
+                'finalizing_stale_threshold': (
+                    _FINALIZING_STALE_AFTER_MS / 1000.0
+                ),
             },
         ).fetchone()
         if context is None:

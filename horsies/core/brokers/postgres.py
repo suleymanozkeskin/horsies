@@ -29,7 +29,7 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
-from horsies.core.lifecycle.commands import ExpirePendingTasks
+from horsies.core.lifecycle.commands import ExpirePendingTasks, FailStaleTask
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
@@ -37,7 +37,7 @@ from horsies.core.lifecycle.outcomes import (
     SourceStateConflict,
     TaskAbsent,
 )
-from horsies.core.lifecycle.persistence import apply_batch_async
+from horsies.core.lifecycle.persistence import apply_async, apply_batch_async
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     DatabasePing,
@@ -2058,21 +2058,37 @@ class PostgresBroker:
                                     **attempt_worker,
                                 },
                             )
-                            mark_failed_res = await session.execute(
-                                MARK_STALE_TASK_FAILED_SQL,
-                                {
-                                    'task_id': task_id,
-                                    'failed_reason': failed_reason_str,
-                                    'result': result_json,
-                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                    'stale_threshold': stale_threshold_seconds,
-                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
-                                },
+                            terminalization = await apply_async(
+                                await session.connection(),
+                                FailStaleTask(
+                                    task_id=task_id,
+                                    stale_after_ms=stale_threshold_ms,
+                                    finalizing_stale_after_ms=(
+                                        finalizing_stale_threshold_ms
+                                    ),
+                                    result_json=result_json,
+                                    error_code=(
+                                        OperationalErrorCode.WORKER_CRASHED.value
+                                    ),
+                                    failed_reason=failed_reason_str,
+                                ),
                             )
-                            if mark_failed_res.fetchone() is None:
-                                await session.rollback()
-                                continue
-                            await session.commit()
+                            match terminalization:
+                                case Applied():
+                                    await session.commit()
+                                case (
+                                    AlreadyApplied()
+                                    | LostClaim()
+                                    | SourceStateConflict()
+                                    | TaskAbsent()
+                                ):
+                                    # The attempt and transition are one unit.
+                                    # A refusal must discard the attempt written
+                                    # immediately above as well.
+                                    await session.rollback()
+                                    continue
+                                case _ as unreachable:
+                                    assert_never(unreachable)
 
                         processed += 1
                 except Exception as task_exc:

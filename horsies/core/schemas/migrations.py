@@ -188,7 +188,10 @@ from sqlalchemy import text
 #      the guarded UPDATE's row lock rather than issuing SELECT FOR UPDATE
 #      first. Refusals still lock and capture every deadline observable before
 #      classification; eligible transitions no longer emit a separate
-#      tuple-lock WAL record. No schema change.
+#      tuple-lock WAL record. The stale-failure wire also carries the public
+#      millisecond thresholds without truncating fractional seconds; the
+#      function converts them only when constructing its intervals. No table
+#      schema or function argument-type change.
 
 SCHEMA_VERSION = 25
 

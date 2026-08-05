@@ -78,8 +78,8 @@ ONE_OF_EACH: tuple[TerminalizationCommand, ...] = (
     ),
     FailStaleTask(
         task_id='t1',
-        stale_after_seconds=60,
-        finalizing_stale_after_seconds=60,
+        stale_after_ms=60_000,
+        finalizing_stale_after_ms=60_000,
         result_json=_RESULT,
         error_code='WORKER_CRASHED',
         failed_reason='Worker process crashed',
@@ -220,7 +220,7 @@ class TestIllegalStatesAreUnrepresentable:
             'task_id', 'workflow_ids', 'batch_size',
             # what proves it may
             'fence', 'permitted_source_statuses', 'accepts_requeued_pending',
-            'stale_after_seconds', 'finalizing_stale_after_seconds',
+            'stale_after_ms', 'finalizing_stale_after_ms',
             # what it records
             'result_json', 'error_code', 'failed_reason',
             # what it wakes

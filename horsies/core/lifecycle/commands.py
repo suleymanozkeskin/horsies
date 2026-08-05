@@ -115,8 +115,8 @@ class FailStaleTask:
     """
 
     task_id: str
-    stale_after_seconds: int
-    finalizing_stale_after_seconds: int
+    stale_after_ms: int
+    finalizing_stale_after_ms: int
     result_json: str
     error_code: str
     failed_reason: str

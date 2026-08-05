@@ -62,8 +62,8 @@ EXPECTED_SIGNATURES = {
     ),
     (
         'horsies_fail_stale_task',
-        'p_task_id character varying, p_stale_after_seconds integer, '
-        'p_finalizing_stale_after_seconds integer, p_result text, '
+        'p_task_id character varying, p_stale_after_ms integer, '
+        'p_finalizing_stale_after_ms integer, p_result text, '
         'p_error_code text, p_failed_reason text',
     ),
     (

@@ -101,8 +101,8 @@ class ObservedStaleness:
     last_heartbeat_at: datetime | None
     started_at: datetime | None
     finalizing_at: datetime | None
-    stale_after_seconds: int
-    finalizing_stale_after_seconds: int
+    stale_after_ms: int
+    finalizing_stale_after_ms: int
     evaluated_at: datetime
 
 
@@ -241,8 +241,8 @@ _GUARD_PAYLOAD_KEYS: dict[GuardKind, frozenset[str]] = {
         'last_heartbeat_at',
         'started_at',
         'finalizing_at',
-        'stale_after_seconds',
-        'finalizing_stale_after_seconds',
+        'stale_after_ms',
+        'finalizing_stale_after_ms',
         'evaluated_at',
     }),
     GuardKind.WORKFLOW_STATUS: frozenset({'workflow_id', 'workflow_status'}),
@@ -339,9 +339,9 @@ def _decode_evidence(
                 last_heartbeat_at=_optional_datetime(payload, 'last_heartbeat_at'),
                 started_at=_optional_datetime(payload, 'started_at'),
                 finalizing_at=_optional_datetime(payload, 'finalizing_at'),
-                stale_after_seconds=_require_int(payload, 'stale_after_seconds'),
-                finalizing_stale_after_seconds=_require_int(
-                    payload, 'finalizing_stale_after_seconds',
+                stale_after_ms=_require_int(payload, 'stale_after_ms'),
+                finalizing_stale_after_ms=_require_int(
+                    payload, 'finalizing_stale_after_ms',
                 ),
                 evaluated_at=_require_datetime(payload, 'evaluated_at'),
             )

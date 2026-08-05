@@ -25,6 +25,14 @@ from horsies.core.models.tasks import (
     TaskInfo,
     TaskResult,
 )
+from horsies.core.lifecycle.commands import FailStaleTask
+from horsies.core.lifecycle.operations import TerminalizationKind
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    ObservedStaleness,
+    ObservedTaskState,
+    SourceStateConflict,
+)
 from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 
@@ -65,6 +73,20 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
         broker._initialized = True
 
     return broker
+
+
+def _stale_applied(task_id: str, terminal_at: datetime) -> Applied:
+    return Applied(
+        task_id=task_id,
+        ordinality=None,
+        terminal_at=terminal_at,
+        kind=TerminalizationKind.FAIL_STALE,
+        observed=ObservedTaskState(
+            status=TaskStatus.RUNNING,
+            worker_id='worker-1',
+            claimed_at=None,
+        ),
+    )
 
 
 def _make_result_session(row: Any) -> AsyncMock:
@@ -1489,7 +1511,8 @@ class TestMarkStaleTasksAsFailed:
         scan_session.__aexit__ = AsyncMock(return_value=None)
         scan_session.execute = AsyncMock(return_value=scan_result)
 
-        # Phase 2: per-task sessions — SELECT FOR UPDATE returns fresh row, then UPSERT + MARK_FAILED
+        # Phase 2: each task locks fresh state, writes the attempt, then invokes
+        # the database-owned terminalization operation.
         def _make_task_session(task_id: str, retry_count: int = 0) -> AsyncMock:
             ctx_row = SimpleNamespace(
                 id=task_id,
@@ -1510,12 +1533,7 @@ class TestMarkStaleTasksAsFailed:
             ts = AsyncMock()
             ts.__aenter__ = AsyncMock(return_value=ts)
             ts.__aexit__ = AsyncMock(return_value=None)
-            # 1st execute: SELECT FOR UPDATE, 2nd: UPSERT_ATTEMPT, 3rd: MARK_FAILED
-            mark_failed_result = MagicMock()
-            mark_failed_result.fetchone.return_value = SimpleNamespace(id=task_id)
-            ts.execute = AsyncMock(
-                side_effect=[ctx_result, MagicMock(), mark_failed_result]
-            )
+            ts.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
             return ts
 
         task_sessions = [
@@ -1524,7 +1542,16 @@ class TestMarkStaleTasksAsFailed:
         ]
         broker.session_factory = MagicMock(side_effect=[scan_session, *task_sessions])
 
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+        with patch(
+            'horsies.core.brokers.postgres.apply_async',
+            new=AsyncMock(side_effect=[
+                _stale_applied('task-1', db_now),
+                _stale_applied('task-2', db_now),
+            ]),
+        ):
+            result = await broker.mark_stale_tasks_as_failed(
+                stale_threshold_ms=300_000,
+            )
 
         assert is_ok(result)
         assert result.ok_value == 2
@@ -1565,17 +1592,16 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        mark_failed_result = MagicMock()
-        mark_failed_result.fetchone.return_value = SimpleNamespace(id='task-1')
-        task_session.execute = AsyncMock(
-            side_effect=[ctx_result, MagicMock(), mark_failed_result]
-        )
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
 
         broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
 
-        await broker.mark_stale_tasks_as_failed()
+        apply_mock = AsyncMock(return_value=_stale_applied('task-1', db_now))
+        with patch('horsies.core.brokers.postgres.apply_async', new=apply_mock):
+            await broker.mark_stale_tasks_as_failed()
 
-        # Per-task session: [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=MARK_FAILED
+        # Per-task SQL: [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT. The terminal
+        # transition itself crosses the typed operation boundary.
         attempt_call = task_session.execute.call_args_list[1]
         attempt_params = attempt_call[0][1]
         assert attempt_params['task_id'] == 'task-1'
@@ -1583,11 +1609,78 @@ class TestMarkStaleTasksAsFailed:
         assert attempt_params['error_code'] == 'WORKER_CRASHED'
         assert attempt_params['attempt'] == 1
 
-        update_call = task_session.execute.call_args_list[2]
-        params = update_call[0][1]
-        assert params['task_id'] == 'task-1'
-        assert 'WORKER_CRASHED' in params['result']
-        assert 'Worker process crashed' in params['failed_reason']
+        assert apply_mock.await_args is not None
+        command = apply_mock.await_args.args[1]
+        assert isinstance(command, FailStaleTask)
+        assert command.task_id == 'task-1'
+        assert command.stale_after_ms == 300_000
+        assert command.finalizing_stale_after_ms == 300_000
+        assert 'WORKER_CRASHED' in command.result_json
+        assert 'Worker process crashed' in command.failed_reason
+
+    @pytest.mark.asyncio
+    async def test_terminalization_refusal_rolls_back_the_attempt(self) -> None:
+        """The attempt cannot commit without its corresponding transition."""
+        broker = _make_broker()
+        db_now = datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc)
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = [SimpleNamespace(id='task-raced')]
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+
+        ctx_row = SimpleNamespace(
+            id='task-raced',
+            worker_pid=100,
+            worker_hostname='host',
+            claimed_by_worker_id='w-1',
+            started_at=datetime(2025, 1, 1, tzinfo=timezone.utc),
+            retry_count=0,
+            worker_process_name='proc-1',
+            max_retries=0,
+            task_options=None,
+            good_until=None,
+            db_now=db_now,
+            queue_name='default',
+        )
+        ctx_result = MagicMock()
+        ctx_result.fetchone.return_value = ctx_row
+        task_session = AsyncMock()
+        task_session.__aenter__ = AsyncMock(return_value=task_session)
+        task_session.__aexit__ = AsyncMock(return_value=None)
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
+        broker.session_factory = MagicMock(
+            side_effect=[scan_session, task_session],
+        )
+
+        refusal = SourceStateConflict(
+            task_id='task-raced',
+            ordinality=None,
+            observed=ObservedTaskState(
+                status=TaskStatus.RUNNING,
+                worker_id='w-1',
+                claimed_at=None,
+            ),
+            evidence=ObservedStaleness(
+                last_heartbeat_at=db_now,
+                started_at=ctx_row.started_at,
+                finalizing_at=None,
+                stale_after_ms=300_000,
+                finalizing_stale_after_ms=300_000,
+                evaluated_at=db_now,
+            ),
+        )
+        with patch(
+            'horsies.core.brokers.postgres.apply_async',
+            new=AsyncMock(return_value=refusal),
+        ):
+            result = await broker.mark_stale_tasks_as_failed()
+
+        assert is_ok(result)
+        assert result.ok_value == 0
+        task_session.rollback.assert_awaited_once()
+        task_session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_stale_task_with_retry_policy_schedules_retry(self) -> None:
@@ -1713,16 +1806,19 @@ class TestMarkStaleTasksAsFailed:
         task_session = AsyncMock()
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
-        # [0]=SELECT FOR UPDATE, [1]=UPSERT_ATTEMPT, [2]=MARK_FAILED
-        mark_failed_result = MagicMock()
-        mark_failed_result.fetchone.return_value = SimpleNamespace(id='task-exhausted')
-        task_session.execute = AsyncMock(
-            side_effect=[ctx_result, MagicMock(), mark_failed_result]
-        )
+        task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
 
         broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
 
-        result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
+        with patch(
+            'horsies.core.brokers.postgres.apply_async',
+            new=AsyncMock(
+                return_value=_stale_applied('task-exhausted', db_now),
+            ),
+        ):
+            result = await broker.mark_stale_tasks_as_failed(
+                stale_threshold_ms=300_000,
+            )
 
         assert is_ok(result)
         assert result.ok_value == 1

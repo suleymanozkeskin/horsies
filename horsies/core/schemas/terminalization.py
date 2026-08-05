@@ -532,8 +532,8 @@ DROP FUNCTION IF EXISTS horsies_fail_locked_task(
 CREATE_FAIL_STALE_TASK_SQL = text(f"""
 CREATE OR REPLACE FUNCTION horsies_fail_stale_task(
     p_task_id varchar,
-    p_stale_after_seconds integer,
-    p_finalizing_stale_after_seconds integer,
+    p_stale_after_ms integer,
+    p_finalizing_stale_after_ms integer,
     p_result text,
     p_error_code text,
     p_failed_reason text
@@ -578,10 +578,16 @@ BEGIN
                v_finalizing_at IS NULL
                OR v_finalizing_at
                   < v_evaluated_at
-                    - make_interval(secs => p_finalizing_stale_after_seconds)
+                    - make_interval(
+                        secs => p_finalizing_stale_after_ms::double precision
+                            / 1000.0
+                    )
            )
            AND COALESCE(v_last_heartbeat, v_started_at)
-               < v_evaluated_at - make_interval(secs => p_stale_after_seconds)
+               < v_evaluated_at
+                    - make_interval(
+                        secs => p_stale_after_ms::double precision / 1000.0
+                    )
         THEN
             UPDATE horsies_tasks t
             SET status = 'FAILED',
@@ -620,9 +626,8 @@ BEGIN
                 'last_heartbeat_at', v_last_heartbeat,
                 'started_at', v_started_at,
                 'finalizing_at', v_finalizing_at,
-                'stale_after_seconds', p_stale_after_seconds,
-                'finalizing_stale_after_seconds',
-                    p_finalizing_stale_after_seconds,
+                'stale_after_ms', p_stale_after_ms,
+                'finalizing_stale_after_ms', p_finalizing_stale_after_ms,
                 'evaluated_at', v_evaluated_at
             );
         RETURN;
