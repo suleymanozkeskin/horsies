@@ -171,6 +171,7 @@ async def begin_archive_maintenance(
     maintenance_id: str,
 ) -> ArchiveMaintenanceSession:
     await _lock_transcode_program(connection, schema)
+    await _lock_archive_access_gate(connection, schema)
     active = (
         await connection.execute(
             text(
@@ -204,6 +205,7 @@ async def finish_archive_maintenance(
     maintenance_id: str,
 ) -> None:
     await _lock_transcode_program(connection, schema)
+    await _lock_archive_access_gate(connection, schema)
     active_jobs = (
         await connection.execute(
             text(
@@ -885,6 +887,22 @@ async def _lock_transcode_program(
     )
 
 
+async def _lock_archive_access_gate(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+) -> None:
+    await connection.execute(
+        text(
+            f"""
+            SELECT singleton
+            FROM {schema.sql}.archive_access_gate
+            WHERE singleton IS TRUE
+            FOR UPDATE
+            """
+        )
+    )
+
+
 def _direction(source_version: int, target_version: int) -> str | None:
     match source_version, target_version:
         case 1, 2:
@@ -969,6 +987,14 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
 def _transcode_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
     namespace = schema.sql
     return (
+        f"""
+        CREATE TABLE {namespace}.archive_access_gate (
+            singleton boolean PRIMARY KEY CHECK (singleton IS TRUE)
+        )
+        """,
+        f"""
+        INSERT INTO {namespace}.archive_access_gate (singleton) VALUES (TRUE)
+        """,
         f"""
         CREATE TABLE {namespace}.archive_maintenance_sessions (
             maintenance_id varchar(36) PRIMARY KEY,

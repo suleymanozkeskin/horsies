@@ -58,11 +58,15 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         """,
         f"""
         CREATE TABLE {namespace}.phase2_nodes (
+            id bigserial NOT NULL UNIQUE,
             workflow_id varchar(36) NOT NULL,
             node_id text NOT NULL,
-            task_id varchar(36) NOT NULL UNIQUE,
+            task_id varchar(36) UNIQUE,
             status text NOT NULL CHECK (
-                status IN ('RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')
+                status IN (
+                    'ENQUEUED', 'READY', 'PENDING', 'RUNNING',
+                    'COMPLETED', 'FAILED', 'CANCELLED'
+                )
             ),
             result_payload bytea,
             result_digest bytea,
