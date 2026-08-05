@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 from collections import deque
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,15 @@ from typing import Final
 from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.lifecycle.commands import AbandonNodesOfPausedWorkflows
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.kwargs import (
     encode_kwargs,
     encode_subworkflow_kwargs,
@@ -57,7 +66,7 @@ from horsies.core.workflows.sql import (
     NOTIFY_WORKFLOW_DONE_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
+    RESET_ABANDONED_WORKFLOW_TASKS_SQL,
     RESUME_WORKFLOW_SQL,
     GET_PENDING_WORKFLOW_TASKS_SQL,
     GET_READY_WORKFLOW_TASKS_SQL,
@@ -856,10 +865,35 @@ async def pause_workflow(
             # Claimed-but-not-started task rows cannot safely remain claimable
             # after their workflow_task is reset to READY for resume. Cancel the
             # abandoned internal task rows and let resume enqueue fresh rows.
-            await session.execute(
-                CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-                {'workflow_ids': paused_workflow_ids},
+            abandon_outcomes = await apply_batch_async(
+                await session.connection(),
+                AbandonNodesOfPausedWorkflows(
+                    workflow_ids=tuple(paused_workflow_ids),
+                ),
             )
+            abandoned_task_ids: list[str] = []
+            for outcome in abandon_outcomes:
+                match outcome:
+                    case Applied(task_id=task_id):
+                        abandoned_task_ids.append(task_id)
+                    case (
+                        AlreadyApplied()
+                        | LostClaim()
+                        | SourceStateConflict()
+                        | TaskAbsent()
+                    ):
+                        raise RuntimeError(
+                            'paused-workflow abandonment returned '
+                            f'{type(outcome).__name__}; workflow-scoped '
+                            'batches report transitioned rows only'
+                        )
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            if abandoned_task_ids:
+                await session.execute(
+                    RESET_ABANDONED_WORKFLOW_TASKS_SQL,
+                    {'task_ids': abandoned_task_ids},
+                )
 
             # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
             await session.execute(

@@ -1102,6 +1102,93 @@ class TestWorkflowHandleCancel:
         assert is_ok(status_r)
         assert status_r.ok_value == WorkflowStatus.CANCELLED
 
+    async def test_descendant_cancel_uses_completion_lock_order(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        engine: AsyncEngine,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """Descendant cancellation locks its workflow row before its nodes."""
+        task_a = make_simple_task(app, 'descendant_cancel_lock_order_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        spec = make_workflow_spec(
+            broker=broker,
+            name='descendant_cancel_lock_order',
+            tasks=[node_a],
+        )
+        handle = await start_ok(spec, broker)
+
+        child_workflow_id = str(uuid.uuid4())
+        child_node_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, parent_workflow_id,
+                     root_workflow_id, sent_at, created_at, started_at,
+                     updated_at)
+                VALUES
+                    (:child_id, 'descendant_lock_child', 'RUNNING', 'FAIL', 1,
+                     :parent_id, :parent_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {
+                'child_id': child_workflow_id,
+                'parent_id': handle.workflow_id,
+            },
+        )
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflow_tasks
+                    (id, workflow_id, task_index, node_id, task_name,
+                     task_args, task_kwargs, queue_name, priority,
+                     dependencies, allow_failed_deps, join_type,
+                     is_subworkflow, status, created_at)
+                VALUES
+                    (:node_id, :child_id, 0, 'child_node',
+                     'descendant_cancel_lock_order_a', '[]', '{}',
+                     'default', 100, '{}', FALSE, 'all', FALSE,
+                     'PENDING', NOW())
+            """),
+            {'node_id': child_node_id, 'child_id': child_workflow_id},
+        )
+        await session.commit()
+
+        async with AsyncSession(engine, expire_on_commit=False) as peer:
+            await peer.execute(
+                text('SELECT id FROM horsies_workflows WHERE id = :id FOR UPDATE'),
+                {'id': child_workflow_id},
+            )
+
+            cancel_task = asyncio.ensure_future(handle.cancel_async())
+            await asyncio.sleep(0.5)
+            assert not cancel_task.done(), (
+                'cancel must be blocked on the descendant workflow row lock'
+            )
+
+            await asyncio.wait_for(
+                peer.execute(
+                    text("""
+                        SELECT id FROM horsies_workflow_tasks
+                        WHERE id = :id
+                        FOR UPDATE
+                    """),
+                    {'id': child_node_id},
+                ),
+                timeout=10.0,
+            )
+            await peer.commit()
+
+        cancel_result = await asyncio.wait_for(cancel_task, timeout=15.0)
+        assert is_ok(cancel_result)
+        child_status = (
+            await session.execute(
+                text('SELECT status FROM horsies_workflows WHERE id = :id'),
+                {'id': child_workflow_id},
+            )
+        ).scalar_one()
+        assert child_status == 'CANCELLED'
+
     async def test_cancel_leaves_no_pending_ready_enqueued_workflow_tasks(
         self,
         clean_workflow_tables: None,
@@ -1200,7 +1287,8 @@ class TestWorkflowHandleCancel:
         task_row = (
             await session.execute(
                 text("""
-                    SELECT status, claimed, claimed_at, claimed_by_worker_id, claim_expires_at
+                    SELECT status, claimed, claimed_at, claimed_by_worker_id,
+                           claim_expires_at, terminalization_kind
                     FROM horsies_tasks
                     WHERE id = :task_id
                 """),
@@ -1213,6 +1301,7 @@ class TestWorkflowHandleCancel:
         assert task_row[2] is None
         assert task_row[3] is None
         assert task_row[4] is None
+        assert task_row[5] == 'WORKFLOW_CANCEL_WORKFLOW'
 
         wf_task_row = (
             await session.execute(

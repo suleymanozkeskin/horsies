@@ -95,6 +95,15 @@ CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL = text("""
       AND wt.status IN ('ENQUEUED', 'RUNNING')
     RETURNING wt.workflow_id, wt.task_index
 """)
+
+RESET_ABANDONED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_workflow_tasks
+    SET status = 'READY',
+        task_id = NULL,
+        started_at = NULL
+    WHERE task_id = ANY(:task_ids)
+      AND status IN ('ENQUEUED', 'RUNNING')
+""")
 # -- SQL constants for resume_workflow --
 
 RESUME_WORKFLOW_SQL = text("""

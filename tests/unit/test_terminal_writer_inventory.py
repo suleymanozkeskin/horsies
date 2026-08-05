@@ -1,11 +1,9 @@
 """Frozen allowlist of terminal-status writers on ``horsies_tasks``.
 
-Sixteen SQL statements in the runtime package can move a task row to a
-terminal status. Until terminal writes are consolidated behind a single
-persistence module that can be enforced structurally, this inventory is the
-tripwire: a seventeenth terminal writer — or a removed, moved, or
-status-drifted one — fails here and must be reviewed before the allowlist
-changes.
+The runtime package contains both the legacy terminal writers still awaiting
+removal and the database-owned operations replacing them. This inventory is
+the tripwire: an added, removed, moved, or status-drifted writer fails here and
+must be reviewed before the allowlist changes.
 
 ``tests/lifecycle_matrix.py`` describes what each of these writers does, and
 is cross-checked against this allowlist.
@@ -69,7 +67,7 @@ _STATUS_PARAM_RE = re.compile(
 # parameter (terminal-capable regardless of literals).
 _InventoryKey = tuple[str, str, str]
 
-# The frozen sixteen. Keys are stable across line moves: module path plus
+# Keys are stable across line moves: module path plus
 # the assigned statement name (module-level ``NAME = text(...)``) or the
 # enclosing function name (raw SQL in child paths). The count catches a
 # writer being duplicated or removed within the same context.
@@ -104,12 +102,8 @@ FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
         'CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL',
         'CANCELLED',
     ): 1,
-    # T10 + T11: both branches live in the child pre-start handler.
-    (
-        'horsies/core/worker/child_runner.py',
-        '_handle_workflow_stop_before_start',
-        'CANCELLED',
-    ): 2,
+    # T10 + T11 are retired: the child pre-start handler calls the
+    # database-owned operations listed below.
     # T12
     (
         'horsies/core/worker/child_runner.py',
@@ -448,7 +442,7 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
 
 
 class TestTerminalWriterInventory:
-    """The frozen sixteen, and the scanner that enforces them."""
+    """The reviewed terminal-writer set and the scanner that enforces it."""
 
     def test_inventory_is_frozen(self) -> None:
         """Every terminal-capable writer is in the allowlist, exactly.
@@ -573,8 +567,9 @@ class TestTerminalWriterInventory:
         whichever path the tests exercise least.
         """
         windows = _scan_runtime_terminal_windows()
-        assert len(windows) == 31, (
-            f'Expected thirty-one terminal-assigning SET clauses, found '
+        expected = sum(FROZEN_TERMINAL_WRITERS.values())
+        assert len(windows) == expected, (
+            f'Expected {expected} terminal-assigning SET clauses, found '
             f'{len(windows)}; the inventory and this assertion disagree.'
         )
         missing = [

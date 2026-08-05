@@ -5,21 +5,18 @@ declaration nobody executes drifts from the code silently, so these tests read
 the statement text back and assert the declared guards, shape, and notification
 behavior are actually there.
 
-Statements defined as module-level SQL constants are checked directly. The
-child-process writers embed their SQL inside a function and are covered by
-characterization tests instead; they are asserted here only for the structural
-properties the matrix can know without the text.
+Statements defined as module-level SQL constants are checked directly. Retired
+inline child-process writers are checked against the database-owned functions
+that replaced them.
 
-The matrix and the frozen writer allowlist are independent declarations of the
-same sixteen statements. They are cross-checked against each other, so a change
-recorded in one but not the other fails rather than diverging quietly.
+The matrix preserves the contracts of the original sixteen writers. Active
+runtime writers are cross-checked against the inventory; retired writer rows
+are re-anchored to their database-owned replacements.
 """
 
 from __future__ import annotations
 
-import ast
 from collections import Counter
-from pathlib import Path
 
 import pytest
 
@@ -32,6 +29,10 @@ from horsies.core.brokers.postgres import (
 )
 from horsies.core.models.workflow.handle import (
     MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+)
+from horsies.core.schemas.terminalization import (
+    CREATE_ABANDON_OWNED_NODE_SQL,
+    CREATE_CANCEL_OWNED_NODE_SQL,
 )
 from horsies.core.worker.sql import (
     CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
@@ -59,33 +60,10 @@ from tests.lifecycle_matrix import (
 )
 from tests.unit.test_terminal_writer_inventory import (
     FROZEN_TERMINAL_WRITERS,
-    _statement_contexts,
-    _task_update_strings,
     _update_clauses,
 )
 
 pytestmark = [pytest.mark.unit]
-
-
-def _child_statement_texts() -> dict[str, str]:
-    """SQL for the two child cancellation writers without constants.
-
-    T10 and T11 are string literals in one function, so the text comes from
-    the same AST extraction the writer inventory uses. They are told apart by
-    source state, since only the cancelled-workflow branch also accepts
-    PENDING.
-    """
-    source = Path(child_runner.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(source)
-    contexts = _statement_contexts(tree)
-    found: dict[str, str] = {}
-    for lineno, text in _task_update_strings(tree):
-        match contexts.get(lineno):
-            case '_handle_workflow_stop_before_start':
-                found["T11" if "'PENDING'" in text else 'T10'] = text
-            case _:
-                continue
-    return found
 
 
 # Statement text for every writer the matrix describes as a SQL constant.
@@ -99,12 +77,13 @@ _STATEMENT_TEXT: dict[str, str] = {
     'T07': FINALIZE_TASK_COMPLETED_SQL.text,
     'T08': TERMINATE_ORPHANED_WORKFLOW_TASK_SQL.text,
     'T09': CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL.text,
+    'T10': CREATE_ABANDON_OWNED_NODE_SQL.text,
+    'T11': CREATE_CANCEL_OWNED_NODE_SQL.text,
     'T12': child_runner._EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
     'T13': MARK_STALE_TASK_FAILED_SQL.text,
     'T14': EXPIRE_PENDING_TASKS_SQL.text,
     'T15': TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL.text,
     'T16': MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL.text,
-    **_child_statement_texts(),
 }
 
 _TEXT_ROWS = [row for row in MATRIX if row.writer_id in _STATEMENT_TEXT]
@@ -149,19 +128,22 @@ class TestMatrixShape:
             assert row.target_status in TERMINAL_STATUSES, row.writer_id
 
     def test_agrees_with_the_frozen_writer_allowlist(self) -> None:
-        """Two independent declarations of the same sixteen statements.
+        """The active runtime inventory agrees with non-retired matrix rows.
 
         The allowlist keys on (module, statement, statuses) with a count; the
-        matrix carries one row per writer. T10 and T11 share a function, so
-        they collapse to a single allowlist entry with count 2.
+        matrix carries one row per original writer. Retired runtime writers
+        remain matrix rows because their behavior is the migration contract.
 
         The allowlist also guards the database-owned operations these
         statements are being migrated to. Those are not matrix rows — the
         matrix describes what exists to be replaced — so the comparison is
         scoped to the runtime modules the matrix covers.
         """
+        retired_runtime_ids = frozenset({'T10', 'T11'})
         from_matrix = Counter(
-            (row.module, row.statement, row.target_status) for row in MATRIX
+            (row.module, row.statement, row.target_status)
+            for row in MATRIX
+            if row.writer_id not in retired_runtime_ids
         )
         from_allowlist = Counter({
             key: count
@@ -351,7 +333,7 @@ class TestWriterVariantGrouping:
 
 
 class TestChildWritersAreDeclaredConsistently:
-    """The psycopg writers cannot be text-checked here; pin their shape."""
+    """The child call sites remain sync psycopg and single-row operations."""
 
     def test_child_writers_are_sync_psycopg_and_single_row(self) -> None:
         child = [row for row in MATRIX if row.driver is Driver.SYNC_PSYCOPG]
@@ -361,7 +343,7 @@ class TestChildWritersAreDeclaredConsistently:
             assert row.attempt is Attempt.NONE, row.writer_id
 
     def test_shared_function_writers_declare_the_same_statement(self) -> None:
-        """T10 and T11 are branches of one function, as the allowlist records."""
+        """T10 and T11 remain two branches of the child lifecycle handler."""
         assert (
             MATRIX[9].statement
             == MATRIX[10].statement

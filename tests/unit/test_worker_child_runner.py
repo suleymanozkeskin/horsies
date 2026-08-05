@@ -1608,6 +1608,8 @@ class TestOwnershipLostWorkflowBranch:
 
     def test_ownership_lost_workflow_paused_dispatches(self) -> None:
         """UPDATE returns None, workflow is PAUSED → handler called."""
+        from horsies.core.lifecycle.commands import AbandonOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
         )
@@ -1635,13 +1637,19 @@ class TestOwnershipLostWorkflowBranch:
             return_value=None,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ):
+        ), patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=Applied),
+        ) as apply:
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
         assert result is not None
         ok, _, reason = result
         assert ok is False
         assert reason == 'WORKFLOW_STOPPED'
+        command = apply.call_args.args[1]
+        assert isinstance(command, AbandonOwnedNode)
+        assert command.task_id == 'task-1'
 
     def test_ownership_lost_due_to_good_until_marks_expired(self) -> None:
         """UPDATE blocked by good_until at actual execution start marks EXPIRED."""

@@ -491,7 +491,8 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
                        wt.status AS workflow_task_status,
                        wt.task_id AS workflow_task_task_id,
                        t.status AS task_status,
-                       t.error_code
+                       t.error_code,
+                       t.terminalization_kind
                 FROM horsies_workflows w
                 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
                 JOIN horsies_tasks t ON t.id = :task_id
@@ -511,6 +512,7 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
     assert row.workflow_task_task_id is None
     assert row.task_status == 'CANCELLED'
     assert row.error_code == 'TASK_CANCELLED'
+    assert row.terminalization_kind == 'PAUSE_ABANDON_WORKFLOW'
 
 
 @pytest.mark.asyncio(loop_scope='function')
