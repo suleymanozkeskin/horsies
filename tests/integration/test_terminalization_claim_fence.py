@@ -157,6 +157,37 @@ async def _status_of(session: AsyncSession, task_id: str) -> str:
     return str(row[0])
 
 
+async def _terminalization_kind_of(
+    session: AsyncSession,
+    task_id: str,
+) -> str | None:
+    return (
+        await session.execute(
+            text(
+                'SELECT terminalization_kind FROM horsies_tasks '
+                'WHERE id = :id'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+
+
+async def _workflow_node_state(
+    session: AsyncSession,
+    workflow_id: str,
+) -> tuple[str, str | None]:
+    row = (
+        await session.execute(
+            text(
+                'SELECT status, task_id FROM horsies_workflow_tasks '
+                'WHERE workflow_id = :workflow_id'
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).one()
+    return str(row.status), row.task_id
+
+
 def _dispatch_rows(*pairs: tuple[str, datetime | None]) -> list[dict[str, Any]]:
     """Dispatch-shaped rows carrying an explicit claim generation."""
     return [
@@ -375,8 +406,29 @@ def _psycopg_dsn(db_url: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ('wf_status', 'terminal_expected'),
-    [('PAUSED', 'CANCELLED'), ('CANCELLED', 'CANCELLED')],
+    (
+        'wf_status',
+        'terminal_expected',
+        'kind_expected',
+        'stale_node_status',
+        'stale_node_detached',
+    ),
+    [
+        (
+            'PAUSED',
+            'CANCELLED',
+            'PAUSE_ABANDON_CLAIM',
+            'READY',
+            True,
+        ),
+        (
+            'CANCELLED',
+            'CANCELLED',
+            'WORKFLOW_CANCEL_CLAIM',
+            'SKIPPED',
+            False,
+        ),
+    ],
 )
 @pytest.mark.asyncio(loop_scope='function')
 async def test_child_prestart_fences_on_claim_generation(
@@ -385,12 +437,19 @@ async def test_child_prestart_fences_on_claim_generation(
     clean_workflow_tables: None,  # noqa: ARG001
     wf_status: str,
     terminal_expected: str,
+    kind_expected: str,
+    stale_node_status: str,
+    stale_node_detached: bool,
 ) -> None:
     """T10/T11 refuse a generation the child was not dispatched from."""
     dispatched, reclaimed = _generations()
     stale_id = await _insert_claimed_task(session, claimed_at=reclaimed)
     fresh_id = await _insert_claimed_task(session, claimed_at=dispatched)
-    await _link_to_workflow(session, stale_id, wf_status=wf_status)
+    stale_workflow_id = await _link_to_workflow(
+        session,
+        stale_id,
+        wf_status=wf_status,
+    )
     await _link_to_workflow(session, fresh_id, wf_status=wf_status)
     await session.commit()
 
@@ -406,6 +465,14 @@ async def test_child_prestart_fences_on_claim_generation(
     await session.commit()
     assert await _status_of(session, stale_id) == 'CLAIMED'
     assert await _status_of(session, fresh_id) == terminal_expected
+    assert await _terminalization_kind_of(session, stale_id) is None
+    assert await _terminalization_kind_of(session, fresh_id) == kind_expected
+    observed_node_status, observed_node_task_id = await _workflow_node_state(
+        session,
+        stale_workflow_id,
+    )
+    assert observed_node_status == stale_node_status
+    assert (observed_node_task_id is None) is stale_node_detached
 
 
 @pytest.mark.asyncio(loop_scope='function')

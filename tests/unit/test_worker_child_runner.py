@@ -657,30 +657,59 @@ class TestHandleWorkflowStopBeforeStart:
     """_handle_workflow_stop_before_start for all status branches."""
 
     def test_cancelled_marks_terminal(self) -> None:
+        from horsies.core.lifecycle.commands import CancelOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
-        )
+
+        def _after_node_update(*_args: Any) -> MagicMock:
+            assert len(cursor.queries) == 1
+            assert "SET status = 'SKIPPED'" in cursor.queries[0][0]
+            return MagicMock(spec=Applied)
+
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            side_effect=_after_node_update,
+        ) as apply:
+            result = _handle_workflow_stop_before_start(
+                cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
+            )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
         assert "SET status = 'SKIPPED'" in sql_blob
-        assert "SET status = 'CANCELLED'" in sql_blob
+        command = apply.call_args.args[1]
+        assert isinstance(command, CancelOwnedNode)
+        assert command.task_id == 'task-1'
+        assert command.accepts_requeued_pending is True
 
     def test_paused_cancels_claimed_task_and_resets_node(self) -> None:
+        from horsies.core.lifecycle.commands import AbandonOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
-        )
+
+        def _before_node_update(*_args: Any) -> MagicMock:
+            assert cursor.queries == []
+            return MagicMock(spec=Applied)
+
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            side_effect=_before_node_update,
+        ) as apply:
+            result = _handle_workflow_stop_before_start(
+                cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
+            )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
-        assert "SET status = 'CANCELLED'" in sql_blob
-        assert "error_code = 'TASK_CANCELLED'" in sql_blob
         assert "SET status = 'READY'" in sql_blob
         assert "status IN ('ENQUEUED', 'RUNNING')" in sql_blob
+        command = apply.call_args.args[1]
+        assert isinstance(command, AbandonOwnedNode)
+        assert command.task_id == 'task-2'
 
     def test_unknown_status_returns_workflow_check_failed(self) -> None:
         cursor = _FakeCursor()
@@ -704,19 +733,19 @@ class TestHandleWorkflowStopBeforeStart:
         for status in ('PAUSED', 'CANCELLED'):
             cursor = _FakeCursor()
             conn = _FakeConn(cursor)
-            _handle_workflow_stop_before_start(
-                cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
-                generation,
-            )
-            task_updates = [
-                q for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
-            ]
-            assert len(task_updates) == 1, status
-            sql, params = task_updates[0][0], task_updates[0][1]
-            assert 'claimed_by_worker_id = %s' in sql, status
-            assert 'claimed_at = %s::timestamptz' in sql, status
-            assert 'worker-7' in params, status
-            assert generation in params, status
+            from horsies.core.lifecycle.outcomes import Applied
+
+            with patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                return_value=MagicMock(spec=Applied),
+            ) as apply:
+                _handle_workflow_stop_before_start(
+                    cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
+                    generation,
+                )
+            command = apply.call_args.args[1]
+            assert command.fence.worker_id == 'worker-7', status
+            assert command.fence.claimed_at == generation, status
 
     def test_cancelled_branch_still_cancels_a_requeued_pending_row(self) -> None:
         """PENDING has no claim, so the generation fence must not gate it.
@@ -725,15 +754,21 @@ class TestHandleWorkflowStopBeforeStart:
         claimed_by_worker_id. Gating it on the worker would silently stop
         cancelling tasks whose workflow is already CANCELLED.
         """
+        from horsies.core.lifecycle.commands import CancelOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        _handle_workflow_stop_before_start(
-            cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
-        )
-        task_sql = next(
-            q[0] for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
-        )
-        assert "OR status = 'PENDING'" in task_sql
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=Applied),
+        ) as apply:
+            _handle_workflow_stop_before_start(
+                cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
+            )
+        command = apply.call_args.args[1]
+        assert isinstance(command, CancelOwnedNode)
+        assert command.accepts_requeued_pending is True
 
 
 # ===================================================================

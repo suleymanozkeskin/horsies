@@ -48,14 +48,19 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
 )
-from horsies.core.lifecycle.commands import ExpireOwnedClaim
-from horsies.core.lifecycle.fences import WorkerOwned
+from horsies.core.lifecycle.commands import (
+    AbandonOwnedNode,
+    CancelOwnedNode,
+    ExpireOwnedClaim,
+)
+from horsies.core.lifecycle.fences import OwnedClaim, WorkerOwned
 from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
     SourceStateConflict,
     TaskAbsent,
+    TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.types.result import is_err
@@ -536,27 +541,17 @@ def _handle_workflow_stop_before_start(
             # Pause is resumable at the workflow node level. The already
             # claimed task row is abandoned so resume can enqueue a fresh row
             # without leaving an orphan claim that can run outside the workflow.
-            cursor.execute(
-                """
-                UPDATE horsies_tasks
-                SET status = 'CANCELLED',
-                    claimed = FALSE,
-                    claimed_at = NULL,
-                    claimed_by_worker_id = NULL,
-                    claim_expires_at = NULL,
-                    finalizing_at = NULL,
-                    finalizing_by_worker_id = NULL,
-                    error_code = 'TASK_CANCELLED',
-                    failed_reason = 'Workflow paused before task start',
-                    terminal_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND status = 'CLAIMED'
-                  AND claimed_by_worker_id = %s
-                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
-                """,
-                (task_id, worker_id, claimed_at, claimed_at),
+            outcome = apply_sync(
+                cursor,
+                AbandonOwnedNode(
+                    task_id=task_id,
+                    fence=OwnedClaim(
+                        worker_id=worker_id,
+                        claimed_at=claimed_at,
+                    ),
+                ),
             )
+            _require_known_workflow_stop_outcome(outcome)
             cursor.execute(
                 """
                 UPDATE horsies_workflow_tasks
@@ -582,37 +577,39 @@ def _handle_workflow_stop_before_start(
                 """,
                 (task_id,),
             )
-            cursor.execute(
-                """
-                UPDATE horsies_tasks
-                SET status = 'CANCELLED',
-                    claimed = FALSE,
-                    claimed_at = NULL,
-                    claimed_by_worker_id = NULL,
-                    claim_expires_at = NULL,
-                    finalizing_at = NULL,
-                    finalizing_by_worker_id = NULL,
-                    terminal_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = %s
-                  AND (
-                      -- Claimed: fence to this child's claim generation.
-                      (status = 'CLAIMED'
-                       AND claimed_by_worker_id = %s
-                       AND (%s::timestamptz IS NULL
-                            OR claimed_at = %s::timestamptz))
-                      -- Requeued to PENDING: the claim is already gone, so
-                      -- there is no generation to fence. The workflow is
-                      -- CANCELLED either way, which is the operative guard.
-                      OR status = 'PENDING'
-                  )
-                """,
-                (task_id, worker_id, claimed_at, claimed_at),
+            outcome = apply_sync(
+                cursor,
+                CancelOwnedNode(
+                    task_id=task_id,
+                    fence=OwnedClaim(
+                        worker_id=worker_id,
+                        claimed_at=claimed_at,
+                    ),
+                    accepts_requeued_pending=True,
+                ),
             )
+            _require_known_workflow_stop_outcome(outcome)
             conn.commit()
             return (False, '', 'WORKFLOW_STOPPED')
         case _:
             return (False, '', 'WORKFLOW_CHECK_FAILED')
+
+
+def _require_known_workflow_stop_outcome(
+    outcome: TerminalizationOutcome,
+) -> None:
+    """Keep the legacy unconditional coupled writes while handling the union."""
+    match outcome:
+        case (
+            Applied()
+            | AlreadyApplied()
+            | LostClaim()
+            | SourceStateConflict()
+            | TaskAbsent()
+        ):
+            return
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _update_workflow_task_running_with_retry(task_id: str) -> bool:
