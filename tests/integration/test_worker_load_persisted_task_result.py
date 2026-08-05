@@ -8,7 +8,6 @@ invalid TaskResult structure, and valid success/error results.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,7 +27,7 @@ from horsies.core.models.tasks import (
 )
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
-from horsies.core.worker.worker import Worker, _FINALIZE_STAGE_PHASE2
+from horsies.core.worker.worker import _FINALIZE_STAGE_PHASE2, Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
@@ -51,9 +50,11 @@ def _test_app() -> Horsies:
     """
     global _TEST_APP
     if _TEST_APP is None:
-        cfg = AppConfig(broker=PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db',
-        ))
+        cfg = AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db',
+            )
+        )
         _TEST_APP = Horsies(cfg)
 
         @_TEST_APP.task(task_name='load_result_test')
@@ -100,7 +101,13 @@ async def _insert_task(
                           IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
                       THEN NOW() ELSE NULL END)
         """),
-        {'id': task_id, 'status': status, 'result': result, 'sent_at': sent_at, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'status': status,
+            'result': result,
+            'sent_at': sent_at,
+            'enqueue_sha': sha,
+        },
     )
     await session.commit()
     return task_id
@@ -212,7 +219,9 @@ async def test_corrupt_json_returns_err(
 ) -> None:
     """COMPLETED task with corrupt JSON in result → Err with 'corrupt' message."""
     task_id = await _insert_task(
-        session, status='COMPLETED', result='not json {',
+        session,
+        status='COMPLETED',
+        result='not json {',
     )
     worker = _make_worker(engine)
 
@@ -237,7 +246,9 @@ async def test_invalid_task_result_structure_returns_err(
     """Valid JSON but missing ``__h_task_result__`` marker → Err carrying
     the strict-serde envelope-shape rejection."""
     task_id = await _insert_task(
-        session, status='COMPLETED', result='{"random": 1}',
+        session,
+        status='COMPLETED',
+        result='{"random": 1}',
     )
     worker = _make_worker(engine)
 
@@ -246,7 +257,7 @@ async def test_invalid_task_result_structure_returns_err(
     assert is_err(result)
     err = result.err_value
     assert 'stored result envelope invalid' in err.message
-    assert "__h_task_result__" in err.message
+    assert '__h_task_result__' in err.message
 
 
 # ---------------------------------------------------------------------------
@@ -263,17 +274,21 @@ async def test_completed_ok_result_returns_task_result(
     """COMPLETED task with valid ok result → Ok(TaskResult(ok='hello'))."""
     result_json = _serialize_ok('hello')
     task_id = await _insert_task(
-        session, status='COMPLETED', result=result_json,
+        session,
+        status='COMPLETED',
+        result=result_json,
     )
     worker = _make_worker(engine)
 
     result = await worker._load_persisted_task_result(task_id)
 
     assert is_ok(result)
-    tr, loaded_task_name = result.ok_value
-    assert tr.is_ok()
-    assert tr.unwrap() == 'hello'
-    assert loaded_task_name == 'load_result_test'
+    persisted = result.ok_value
+    assert persisted.result.is_ok()
+    assert persisted.result.unwrap() == 'hello'
+    assert persisted.task_name == 'load_result_test'
+    assert persisted.queue_name == 'default'
+    assert persisted.is_workflow_task is False
 
 
 # ---------------------------------------------------------------------------
@@ -290,16 +305,18 @@ async def test_failed_err_result_returns_task_result(
     """FAILED task with valid error result → Ok(TaskResult(err=TaskError(...)))."""
     result_json = _serialize_err('DELIBERATE_FAIL', 'test failure')
     task_id = await _insert_task(
-        session, status='FAILED', result=result_json,
+        session,
+        status='FAILED',
+        result=result_json,
     )
     worker = _make_worker(engine)
 
     result = await worker._load_persisted_task_result(task_id)
 
     assert is_ok(result)
-    tr, loaded_task_name = result.ok_value
-    assert tr.is_err()
-    task_error = tr.unwrap_err()
+    persisted = result.ok_value
+    assert persisted.result.is_err()
+    task_error = persisted.result.unwrap_err()
     assert task_error.error_code == 'DELIBERATE_FAIL'
     assert task_error.message == 'test failure'
 
@@ -333,10 +350,12 @@ async def test_unknown_task_err_result_uses_fast_path(
     # Insert a row pretending the worker terminalized 'unknown_task_xyz'
     # with WORKER_RESOLUTION_ERROR — using the strict envelope shape.
     envelope = encode_task_result(
-        TaskResult(err=TaskError(
-            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
-            message='task not found in registry',
-        )),
+        TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+                message='task not found in registry',
+            )
+        ),
         JsonValue,
     )
     err_result_json = dumps_json(envelope).unwrap()
@@ -352,7 +371,12 @@ async def test_unknown_task_err_result_uses_fast_path(
                  'FAILED', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :result, :enqueue_sha, NOW())
         """),
-        {'id': task_id, 'sent_at': sent_at, 'result': err_result_json, 'enqueue_sha': sha},
+        {
+            'id': task_id,
+            'sent_at': sent_at,
+            'result': err_result_json,
+            'enqueue_sha': sha,
+        },
     )
     await session.commit()
 
@@ -364,10 +388,10 @@ async def test_unknown_task_err_result_uses_fast_path(
         f'expected Ok(TaskResult(err)) via err-fast-path, got Err: '
         f'{result.err_value if not is_ok(result) else None}'
     )
-    tr, loaded_task_name = result.ok_value
-    assert tr.is_err()
-    task_error = tr.unwrap_err()
-    assert loaded_task_name == 'unknown_task_xyz'
+    persisted = result.ok_value
+    assert persisted.result.is_err()
+    task_error = persisted.result.unwrap_err()
+    assert persisted.task_name == 'unknown_task_xyz'
     assert task_error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
     assert task_error.message == 'task not found in registry'
 
@@ -394,7 +418,9 @@ async def test_expired_err_result_returns_task_result(
         'Task expired: good_until deadline passed before execution started',
     )
     task_id = await _insert_task(
-        session, status='EXPIRED', result=result_json,
+        session,
+        status='EXPIRED',
+        result=result_json,
     )
     worker = _make_worker(engine)
 
@@ -404,8 +430,8 @@ async def test_expired_err_result_returns_task_result(
         f'expected Ok(TaskResult(err)) for EXPIRED row, got Err: '
         f'{result.err_value if not is_ok(result) else None}'
     )
-    tr, loaded_task_name = result.ok_value
-    assert tr.is_err()
-    task_error = tr.unwrap_err()
+    persisted = result.ok_value
+    assert persisted.result.is_err()
+    task_error = persisted.result.unwrap_err()
     assert task_error.error_code == OutcomeCode.TASK_EXPIRED
-    assert loaded_task_name == 'load_result_test'
+    assert persisted.task_name == 'load_result_test'

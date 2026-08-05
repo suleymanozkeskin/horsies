@@ -10,6 +10,7 @@ Full pipeline (phase-1 → phase-2) is tested in test_worker_finalize_two_phase.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -22,7 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
-from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskError, TaskResult
@@ -58,9 +58,11 @@ def _test_app() -> Horsies:
     """
     global _TEST_APP
     if _TEST_APP is None:
-        cfg = AppConfig(broker=PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db',
-        ))
+        cfg = AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db',
+            )
+        )
         _TEST_APP = Horsies(cfg)
 
         @_TEST_APP.task(task_name='persist_terminal_test')
@@ -93,7 +95,12 @@ def _make_worker(engine: AsyncEngine) -> Worker:
     return worker
 
 
-async def _insert_running_task(session: AsyncSession) -> str:
+async def _insert_running_task(
+    session: AsyncSession,
+    *,
+    is_workflow_task: bool = False,
+    claimed_at: datetime | None = None,
+) -> str:
     """Insert a minimal horsies_tasks row in RUNNING state."""
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='persist_terminal_test')
@@ -102,17 +109,21 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 is_workflow_task, claimed_at)
             VALUES
                 (:id, 'persist_terminal_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha, :claimed_by_worker_id)
+                 0, NOW(), :enqueue_sha, :claimed_by_worker_id,
+                 :is_workflow_task, :claimed_at)
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
             'enqueue_sha': sha,
             'claimed_by_worker_id': TEST_WORKER_ID,
+            'is_workflow_task': is_workflow_task,
+            'claimed_at': claimed_at,
         },
     )
     await session.commit()
@@ -135,16 +146,18 @@ async def _insert_running_task_with_retry(
         auto_retry_for = ['TRANSIENT']
 
     task_id = str(uuid.uuid4())
-    task_options = json.dumps({
-        'retry_policy': {
-            'max_retries': max_retries,
-            'intervals': intervals,
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-            'auto_retry_for': auto_retry_for,
-        },
-        'good_until': good_until.isoformat(),
-    })
+    task_options = json.dumps(
+        {
+            'retry_policy': {
+                'max_retries': max_retries,
+                'intervals': intervals,
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': auto_retry_for,
+            },
+            'good_until': good_until.isoformat(),
+        }
+    )
 
     sent_at, sha = compute_test_enqueue_sha(
         task_name='persist_retry_test',
@@ -387,7 +400,7 @@ async def test_worker_failure_marks_failed(
 
     assert is_ok(result)
     assert result.ok_value is not None
-    assert result.ok_value.is_err()
+    assert result.ok_value.result.is_err()
     status, _, failed_reason, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert failed_reason == 'Worker crash'
@@ -450,7 +463,7 @@ async def test_corrupt_json_marks_serialization_error(
 
     assert is_ok(result)
     assert result.ok_value is not None
-    assert result.ok_value.is_err()
+    assert result.ok_value.result.is_err()
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -480,7 +493,7 @@ async def test_invalid_task_result_structure_marks_error(
 
     assert is_ok(result)
     assert result.ok_value is not None
-    assert result.ok_value.is_err()
+    assert result.ok_value.result.is_err()
     status, result_json, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert result_json is not None
@@ -550,9 +563,9 @@ async def test_err_no_retry_marks_failed(
     )
 
     assert is_ok(result)
-    tr = result.ok_value
-    assert tr is not None
-    assert tr.is_err()
+    persisted = result.ok_value
+    assert persisted is not None
+    assert persisted.result.is_err()
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
@@ -627,9 +640,9 @@ async def test_err_retry_expired_falls_through_to_failed(
     )
 
     assert is_ok(result)
-    tr = result.ok_value
-    assert tr is not None
-    assert tr.is_err()
+    persisted = result.ok_value
+    assert persisted is not None
+    assert persisted.result.is_err()
     status, db_result, _, _ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
     assert db_result == result_json
@@ -702,3 +715,191 @@ async def test_success_reaper_reclaimed_no_mutation(
     assert result.ok_value is None
     status, *_ = await _get_task_row(session, task_id)
     assert status == 'FAILED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_workflow_phase1_replay_loads_the_persisted_result(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A committed locked completion replays phase 2, not phase 1."""
+    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _insert_running_task(
+        session,
+        is_workflow_task=True,
+        claimed_at=generation,
+    )
+    worker = _make_worker(engine)
+    result_json = _serialize_ok('persisted')
+
+    first = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=True,
+        claimed_at=generation,
+    )
+    replay = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=True,
+        claimed_at=generation,
+    )
+
+    assert is_ok(first) and first.ok_value is not None
+    assert is_ok(replay) and replay.ok_value is not None
+    assert replay.ok_value.result.unwrap() == 'persisted'
+    summary = (
+        await session.execute(
+            text("""
+                SELECT terminalization_kind,
+                       (SELECT COUNT(*) FROM horsies_task_attempts a
+                        WHERE a.task_id = t.id) AS attempt_count
+                FROM horsies_tasks t WHERE t.id = :id
+            """),
+            {'id': task_id},
+        )
+    ).one()
+    assert summary.terminalization_kind == 'COMPLETE_LOCKED'
+    assert summary.attempt_count == 1
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_phase1_replay_holds_row_lock_through_persisted_result_read(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A concurrent in-place revival cannot race the replay result read."""
+    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
+    task_id = await _insert_running_task(
+        session,
+        is_workflow_task=True,
+        claimed_at=generation,
+    )
+    worker = _make_worker(engine)
+    result_json = _serialize_ok('persisted-before-revival')
+    first = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=True,
+        claimed_at=generation,
+    )
+    assert is_ok(first) and first.ok_value is not None
+
+    read_complete = asyncio.Event()
+    release_replay = asyncio.Event()
+    original_reader = worker._read_persisted_task_result
+
+    async def hold_after_read(
+        held_task_id: str,
+        locked_session: AsyncSession,
+    ):
+        loaded = await original_reader(held_task_id, locked_session)
+        read_complete.set()
+        await release_replay.wait()
+        return loaded
+
+    worker._read_persisted_task_result = hold_after_read  # type: ignore[method-assign]
+    replay_task = asyncio.create_task(
+        worker._persist_task_terminal_state(
+            task_id=task_id,
+            now=NOW,
+            ok=True,
+            result_json_str=result_json,
+            failed_reason=None,
+            task_name='persist_terminal_test',
+            queue_name='default',
+            is_workflow_task=True,
+            claimed_at=generation,
+        )
+    )
+    await asyncio.wait_for(read_complete.wait(), timeout=2)
+
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def revive() -> None:
+        async with sf() as revival_session:
+            await revival_session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = 'PENDING', terminal_at = NULL, result = NULL
+                    WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+            await revival_session.commit()
+
+    revival_task = asyncio.create_task(revive())
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(revival_task), timeout=0.1)
+    finally:
+        release_replay.set()
+
+    replay = await replay_task
+    await asyncio.wait_for(revival_task, timeout=2)
+    assert is_ok(replay) and replay.ok_value is not None
+    assert replay.ok_value.result.unwrap() == 'persisted-before-revival'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_locked_completion_miss_does_not_touch_a_newer_generation(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """The miss classifier retains the generation absent from T06's write."""
+    current_generation = datetime.now(timezone.utc)
+    stale_generation = current_generation - timedelta(minutes=1)
+    task_id = await _insert_running_task(
+        session,
+        is_workflow_task=True,
+        claimed_at=current_generation,
+    )
+    worker = _make_worker(engine)
+
+    result = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=_serialize_ok('stale'),
+        failed_reason=None,
+        task_name='persist_terminal_test',
+        queue_name='default',
+        is_workflow_task=True,
+        claimed_at=stale_generation,
+    )
+
+    assert is_ok(result)
+    assert result.ok_value is None
+    summary = (
+        await session.execute(
+            text("""
+                SELECT status, result, terminalization_kind,
+                       (SELECT COUNT(*) FROM horsies_task_attempts a
+                        WHERE a.task_id = t.id) AS attempt_count
+                FROM horsies_tasks t WHERE t.id = :id
+            """),
+            {'id': task_id},
+        )
+    ).one()
+    assert summary.status == 'RUNNING'
+    assert summary.result is None
+    assert summary.terminalization_kind is None
+    assert summary.attempt_count == 0

@@ -14,13 +14,25 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, cast
+from typing import TYPE_CHECKING, Any, Optional, assert_never, cast
 
 from horsies.core.codec.error_payload import serialize_error_payload
+from horsies.core.lifecycle.commands import FailLockedTask
+from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import (
+    apply_async,
+    classify_locked_read_miss_async,
+)
 from horsies.core.logging import get_logger
-from concurrent.futures.process import BrokenProcessPool
-
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -28,15 +40,14 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
+from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker.child_runner import _run_task_entry
 from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome, _RetryError
 from horsies.core.worker.sql import (
-    MARK_TASK_FAILED_SQL,
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
-from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -46,6 +57,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from horsies.core.worker.config import WorkerConfig
+    from horsies.core.worker.finalize import _PersistedTaskOutcome
 
 logger = get_logger('worker')
 
@@ -82,6 +94,12 @@ class DispatchMixin:
             is_workflow_task: bool = True,
             task_name: str,
         ) -> Result[None, _FinalizeError]: ...
+        async def _load_persisted_task_result(
+            self,
+            task_id: str,
+            *,
+            session: AsyncSession | None = None,
+        ) -> Result[_PersistedTaskOutcome, _FinalizeError]: ...
         async def _handle_finalize_error(self, err: Any) -> None: ...
         async def _restart_executor(
             self,
@@ -200,6 +218,24 @@ class DispatchMixin:
         generation (C10); None disables the fence.
         """
         try:
+            task_error = TaskError(
+                error_code=OperationalErrorCode.WORKER_CRASHED,
+                message=reason,
+                data={
+                    'task_id': task_id,
+                    'worker_id': self.worker_instance_id,
+                },
+            )
+            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+            failure_command = FailLockedTask(
+                task_id=task_id,
+                fence=PriorLockedRead(worker_id=self.worker_instance_id),
+                result_json=serialize_error_payload(task_result),
+                error_code=OperationalErrorCode.WORKER_CRASHED.value,
+                # T05 leaves the task summary reason unchanged. The attempt row
+                # owns this failure's reason.
+                failed_reason=None,
+            )
             async with self.sf() as s:
                 ctx_result = await s.execute(
                     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -211,8 +247,28 @@ class DispatchMixin:
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
-                    await s.rollback()
-                    return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                    miss_outcome = await classify_locked_read_miss_async(
+                        await s.connection(),
+                        failure_command,
+                        claimed_at=claimed_at,
+                    )
+                    match miss_outcome:
+                        case AlreadyApplied():
+                            await self._replay_committed_terminalization(
+                                task_id,
+                                s,
+                            )
+                            return _RequeueOutcome.TERMINAL_REPLAYED
+                        case LostClaim() | SourceStateConflict() | TaskAbsent():
+                            await s.rollback()
+                            return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                        case Applied():
+                            await s.rollback()
+                            raise RuntimeError(
+                                'locked-read miss classifier returned APPLIED'
+                            )
+                        case _ as unreachable:
+                            assert_never(unreachable)
 
                 status_value = (
                     ctx_row.status.value
@@ -235,14 +291,6 @@ class DispatchMixin:
                         else _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
                     )
 
-                task_error = TaskError(
-                    error_code=OperationalErrorCode.WORKER_CRASHED,
-                    message=reason,
-                    data={
-                        'task_id': task_id,
-                        'worker_id': self.worker_instance_id,
-                    },
-                )
                 attempt_num = (ctx_row.retry_count or 0) + 1
                 db_now = ctx_row.db_now or datetime.now(timezone.utc)
                 attempt_started_at = ctx_row.started_at or db_now
@@ -254,7 +302,9 @@ class DispatchMixin:
                 }
 
                 should_retry_r = await self._should_retry_task(
-                    task_id, task_error, s,
+                    task_id,
+                    task_error,
+                    s,
                 )
                 if is_err(should_retry_r):
                     logger.error(
@@ -266,7 +316,9 @@ class DispatchMixin:
                     return _RequeueOutcome.DB_ERROR
                 if should_retry_r.ok_value:
                     retry_r = await self._schedule_retry(
-                        task_id, s, queue_name=ctx_row.queue_name or 'default',
+                        task_id,
+                        s,
+                        queue_name=ctx_row.queue_name or 'default',
                     )
                     if is_err(retry_r):
                         logger.error(
@@ -298,8 +350,6 @@ class DispatchMixin:
                         case 'expired' | 'reaper_reclaimed':
                             pass
 
-                task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
-                result_json = serialize_error_payload(task_result)
                 await s.execute(
                     UPSERT_TASK_ATTEMPT_SQL,
                     {
@@ -315,19 +365,21 @@ class DispatchMixin:
                         **attempt_worker,
                     },
                 )
-                mark_failed_res = await s.execute(
-                    MARK_TASK_FAILED_SQL,
-                    {
-                        'result_json': result_json,
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                    },
+                terminalization = await apply_async(
+                    await s.connection(),
+                    failure_command,
                 )
-                if mark_failed_res.fetchone() is None:
-                    await s.rollback()
-                    return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
-                await s.commit()
+                match terminalization:
+                    case Applied():
+                        await s.commit()
+                    case AlreadyApplied():
+                        await self._replay_committed_terminalization(task_id, s)
+                        return _RequeueOutcome.TERMINAL_REPLAYED
+                    case LostClaim() | SourceStateConflict() | TaskAbsent():
+                        await s.rollback()
+                        return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
+                    case _ as unreachable:
+                        assert_never(unreachable)
                 phase2_r = await self._finalize_workflow_phase(
                     task_id,
                     task_result,
@@ -346,6 +398,31 @@ class DispatchMixin:
                 exc,
             )
             return _RequeueOutcome.DB_ERROR
+
+    async def _replay_committed_terminalization(
+        self,
+        task_id: str,
+        session: AsyncSession,
+    ) -> None:
+        """Replay phase 2 from the terminal row while its lock is still held."""
+        load_r = await self._load_persisted_task_result(
+            task_id,
+            session=session,
+        )
+        await session.rollback()
+        if is_err(load_r):
+            await self._handle_finalize_error(load_r.err_value)
+            return
+        persisted = load_r.ok_value
+        phase2_r = await self._finalize_workflow_phase(
+            task_id,
+            persisted.result,
+            queue_name=persisted.queue_name,
+            is_workflow_task=persisted.is_workflow_task,
+            task_name=persisted.task_name,
+        )
+        if is_err(phase2_r):
+            await self._handle_finalize_error(phase2_r.err_value)
 
     async def _dispatch_one(
         self,
@@ -391,8 +468,6 @@ class DispatchMixin:
                     )
                 return
         executor = self._executor
-        if executor is None:
-            return
         loop = asyncio.get_running_loop()
 
         # Get heartbeat interval from recovery config (milliseconds)
@@ -420,7 +495,9 @@ class DispatchMixin:
                 claimed_at,
             )
         except BrokenProcessPool as exc:
-            await self._handle_broken_pool(task_id, exc, executor, claimed_at=claimed_at)
+            await self._handle_broken_pool(
+                task_id, exc, executor, claimed_at=claimed_at
+            )
             return
         except Exception as exc:
             outcome = await self._recover_worker_future_failure(
@@ -478,6 +555,21 @@ class DispatchMixin:
         """
         kill_pid: int | None = None
         try:
+            task_error = TaskError(
+                error_code=OutcomeCode.TASK_TIMEOUT,
+                message=f'Task exceeded timeout_ms={timeout_ms}',
+                data={'task_id': task_id, 'timeout_ms': timeout_ms},
+            )
+            task_result: TaskResult[None, TaskError] = TaskResult(err=task_error)
+            failure_command = FailLockedTask(
+                task_id=task_id,
+                fence=PriorLockedRead(worker_id=self.worker_instance_id),
+                result_json=serialize_error_payload(task_result),
+                error_code=OutcomeCode.TASK_TIMEOUT.value,
+                # T05 leaves the task summary reason unchanged. The attempt row
+                # owns this failure's reason.
+                failed_reason=None,
+            )
             async with self.sf() as s:
                 ctx_result = await s.execute(
                     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -489,7 +581,28 @@ class DispatchMixin:
                 )
                 ctx_row = ctx_result.fetchone()
                 if ctx_row is None:
-                    return
+                    miss_outcome = await classify_locked_read_miss_async(
+                        await s.connection(),
+                        failure_command,
+                        claimed_at=claimed_at,
+                    )
+                    match miss_outcome:
+                        case AlreadyApplied():
+                            await self._replay_committed_terminalization(
+                                task_id,
+                                s,
+                            )
+                            return
+                        case LostClaim() | SourceStateConflict() | TaskAbsent():
+                            await s.rollback()
+                            return
+                        case Applied():
+                            await s.rollback()
+                            raise RuntimeError(
+                                'locked-read miss classifier returned APPLIED'
+                            )
+                        case _ as unreachable:
+                            assert_never(unreachable)
 
                 status_value = (
                     ctx_row.status.value
@@ -515,11 +628,6 @@ class DispatchMixin:
                     return
 
                 kill_pid = ctx_row.worker_pid
-                task_error = TaskError(
-                    error_code=OutcomeCode.TASK_TIMEOUT,
-                    message=f'Task exceeded timeout_ms={timeout_ms}',
-                    data={'task_id': task_id, 'timeout_ms': timeout_ms},
-                )
                 attempt_num = (ctx_row.retry_count or 0) + 1
                 db_now = ctx_row.db_now or datetime.now(timezone.utc)
                 attempt_started_at = ctx_row.started_at or db_now
@@ -532,7 +640,9 @@ class DispatchMixin:
 
                 retry_scheduled = False
                 should_retry_r = await self._should_retry_task(
-                    task_id, task_error, s,
+                    task_id,
+                    task_error,
+                    s,
                 )
                 if is_err(should_retry_r):
                     logger.error(
@@ -545,7 +655,9 @@ class DispatchMixin:
                     return
                 if should_retry_r.ok_value:
                     retry_r = await self._schedule_retry(
-                        task_id, s, queue_name=ctx_row.queue_name or 'default',
+                        task_id,
+                        s,
+                        queue_name=ctx_row.queue_name or 'default',
                     )
                     if is_err(retry_r):
                         logger.error(
@@ -577,22 +689,21 @@ class DispatchMixin:
                     await s.commit()
                     return
 
-                task_result: TaskResult[None, TaskError] = TaskResult(
-                    err=task_error,
+                terminalization = await apply_async(
+                    await s.connection(),
+                    failure_command,
                 )
-                mark_result = await s.execute(
-                    MARK_TASK_FAILED_SQL,
-                    {
-                        'result_json': serialize_error_payload(task_result),
-                        'id': task_id,
-                        'wid': self.worker_instance_id,
-                        'error_code': OutcomeCode.TASK_TIMEOUT.value,
-                    },
-                )
-                if mark_result.fetchone() is None:
-                    await s.rollback()
-                    return
-                await s.commit()
+                match terminalization:
+                    case Applied():
+                        await s.commit()
+                    case AlreadyApplied():
+                        await self._replay_committed_terminalization(task_id, s)
+                        return
+                    case LostClaim() | SourceStateConflict() | TaskAbsent():
+                        await s.rollback()
+                        return
+                    case _ as unreachable:
+                        assert_never(unreachable)
                 phase2_r = await self._finalize_workflow_phase(
                     task_id,
                     task_result,
@@ -613,9 +724,7 @@ class DispatchMixin:
             if kill_pid:
                 self._kill_owned_child(kill_pid, task_id, timeout_ms)
 
-    def _kill_owned_child(
-        self, kill_pid: int, task_id: str, timeout_ms: int
-    ) -> None:
+    def _kill_owned_child(self, kill_pid: int, task_id: str, timeout_ms: int) -> None:
         """SIGKILL a timed-out child only if it is a live child of ours.
 
         The pid comes from the task row and can be stale: a concurrent

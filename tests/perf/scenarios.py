@@ -30,8 +30,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.brokers.postgres import (
-    EXPIRE_PENDING_TASKS_SQL,
     _EXPIRE_BATCH_SIZE,
+    EXPIRE_PENDING_TASKS_SQL,
 )
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import dumps_json
@@ -40,10 +40,14 @@ from horsies.core.lifecycle.commands import (
     CompleteLockedTask,
     CompleteTaskFused,
     FailLockedTask,
+    TerminalizationCommand,
 )
 from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
 from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
-from horsies.core.lifecycle.persistence import call_for
+from horsies.core.lifecycle.persistence import (
+    _log_outcome,
+    call_for,
+)
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.worker.sql import (
     FINALIZE_TASK_COMPLETED_SQL,
@@ -154,6 +158,7 @@ class Invocation:
     parameters: dict[str, Any]
     candidate: bool
     operation: str
+    command: TerminalizationCommand | None = None
 
 
 type InvocationFactory = Callable[[str], Invocation]
@@ -311,7 +316,12 @@ def _baseline_applied(result: Any, *, operation: str) -> int:
     return 1
 
 
-def _candidate_applied(result: Any, *, operation: str) -> int:
+def _candidate_applied(
+    result: Any,
+    *,
+    operation: str,
+    command: TerminalizationCommand,
+) -> int:
     rows = result.mappings().all()
     if len(rows) != 1:
         raise RuntimeError(f'{operation} returned {len(rows)} rows; expected one')
@@ -321,13 +331,22 @@ def _candidate_applied(result: Any, *, operation: str) -> int:
             f'{operation} returned {type(outcome).__name__} '
             'for a seeded eligible task'
         )
+    _log_outcome(command, outcome)
     return 1
 
 
 def _execute_invocation(connection: Connection, invocation: Invocation) -> int:
     result = connection.execute(invocation.statement, invocation.parameters)
     if invocation.candidate:
-        return _candidate_applied(result, operation=invocation.operation)
+        if invocation.command is None:
+            raise RuntimeError(
+                f'{invocation.operation} has no command for outcome handling'
+            )
+        return _candidate_applied(
+            result,
+            operation=invocation.operation,
+            command=invocation.command,
+        )
     return _baseline_applied(result, operation=invocation.operation)
 
 
@@ -338,23 +357,23 @@ def _fused_invocation(
 ) -> InvocationFactory:
     def build(task_id: str) -> Invocation:
         if candidate:
-            statement, parameters = call_for(
-                CompleteTaskFused(
-                    task_id=task_id,
-                    fence=OwnedClaim(
-                        worker_id=WORKER_ID,
-                        claimed_at=CLAIMED_AT,
-                    ),
-                    result_json=payload,
-                    notify_channel='task_queue_default',
-                    notify_payload=f'capacity:{task_id}',
+            command = CompleteTaskFused(
+                task_id=task_id,
+                fence=OwnedClaim(
+                    worker_id=WORKER_ID,
+                    claimed_at=CLAIMED_AT,
                 ),
+                result_json=payload,
+                notify_channel='task_queue_default',
+                notify_payload=f'capacity:{task_id}',
             )
+            statement, parameters = call_for(command)
             return Invocation(
                 statement=statement,
                 parameters=dict(parameters),
                 candidate=True,
                 operation='fused completion operation',
+                command=command,
             )
         return Invocation(
             statement=FINALIZE_TASK_COMPLETED_SQL,
@@ -380,18 +399,18 @@ def _locked_completion_invocation(
 ) -> InvocationFactory:
     def build(task_id: str) -> Invocation:
         if candidate:
-            statement, parameters = call_for(
-                CompleteLockedTask(
-                    task_id=task_id,
-                    fence=PriorLockedRead(worker_id=WORKER_ID),
-                    result_json=payload,
-                ),
+            command = CompleteLockedTask(
+                task_id=task_id,
+                fence=PriorLockedRead(worker_id=WORKER_ID),
+                result_json=payload,
             )
+            statement, parameters = call_for(command)
             return Invocation(
                 statement=statement,
                 parameters=dict(parameters),
                 candidate=True,
                 operation='locked completion operation',
+                command=command,
             )
         return Invocation(
             statement=MARK_TASK_COMPLETED_SQL,
@@ -416,20 +435,20 @@ _FAILURE_RESULT = serialize_error_payload(
 def _failure_invocation(*, candidate: bool) -> InvocationFactory:
     def build(task_id: str) -> Invocation:
         if candidate:
-            statement, parameters = call_for(
-                FailLockedTask(
-                    task_id=task_id,
-                    fence=PriorLockedRead(worker_id=WORKER_ID),
-                    result_json=_FAILURE_RESULT,
-                    error_code='PERF_FAILURE',
-                    failed_reason=None,
-                ),
+            command = FailLockedTask(
+                task_id=task_id,
+                fence=PriorLockedRead(worker_id=WORKER_ID),
+                result_json=_FAILURE_RESULT,
+                error_code='PERF_FAILURE',
+                failed_reason=None,
             )
+            statement, parameters = call_for(command)
             return Invocation(
                 statement=statement,
                 parameters=dict(parameters),
                 candidate=True,
                 operation='terminal application failure operation',
+                command=command,
             )
         return Invocation(
             statement=MARK_TASK_FAILED_SQL,

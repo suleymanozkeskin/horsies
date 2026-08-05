@@ -3,8 +3,8 @@
 
 from __future__ import annotations
 
-import uuid
 import asyncio
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict, cast
 from unittest.mock import AsyncMock, MagicMock
@@ -22,12 +22,11 @@ from horsies.core.models.tasks import (
     TaskOptions,
     TaskResult,
 )
-from horsies.core.types.result import is_ok
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import (
-    Worker,
     _FINALIZE_STAGE_PHASE2,
+    Worker,
     _RequeueOutcome,
 )
 from horsies.core.workflows.lifecycle import pause_workflow
@@ -44,6 +43,7 @@ class _TaskRow(TypedDict):
     next_retry_at: datetime | None
     finalizing_at: datetime | None
     finalizing_by_worker_id: str | None
+    terminalization_kind: str | None
 
 
 def _make_worker(engine: AsyncEngine) -> Worker:
@@ -116,7 +116,8 @@ async def _task_row(session: AsyncSession, task_id: str) -> _TaskRow:
         await session.execute(
             text("""
                 SELECT status, retry_count, error_code, result, next_retry_at,
-                       finalizing_at, finalizing_by_worker_id
+                       finalizing_at, finalizing_by_worker_id,
+                       terminalization_kind
                 FROM horsies_tasks
                 WHERE id = :id
             """),
@@ -135,6 +136,10 @@ async def _task_row(session: AsyncSession, task_id: str) -> _TaskRow:
         'finalizing_by_worker_id': cast(
             str | None,
             mapping['finalizing_by_worker_id'],
+        ),
+        'terminalization_kind': cast(
+            str | None,
+            mapping['terminalization_kind'],
         ),
     }
 
@@ -224,6 +229,7 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
     assert row['retry_count'] == 0
     assert row['error_code'] == OperationalErrorCode.WORKER_CRASHED.value
     assert row['result'] is not None
+    assert row['terminalization_kind'] == 'FAIL_RUNNING'
     attempts = (
         await session.execute(
             text("""
@@ -234,9 +240,42 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
             {'id': task_id},
         )
     ).fetchall()
-    assert attempts == [
-        ('FAILED', False, OperationalErrorCode.WORKER_CRASHED.value)
-    ]
+    assert attempts == [('FAILED', False, OperationalErrorCode.WORKER_CRASHED.value)]
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_future_failure_retry_replays_committed_terminal_phase(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A lost commit response replays phase 2 without another attempt."""
+    worker = _make_worker(engine)
+    task_id = await _insert_owned_running_task(
+        session,
+        worker_id=worker.worker_instance_id,
+        max_retries=0,
+    )
+
+    first = await worker._recover_worker_future_failure(task_id, 'process died')
+    worker._finalize_workflow_phase.reset_mock()  # type: ignore[attr-defined]
+    replay = await worker._recover_worker_future_failure(task_id, 'process died')
+
+    assert first is _RequeueOutcome.REQUEUED
+    assert replay is _RequeueOutcome.TERMINAL_REPLAYED
+    worker._finalize_workflow_phase.assert_awaited_once()  # type: ignore[attr-defined]
+    persisted_result = worker._finalize_workflow_phase.await_args.args[1]  # type: ignore[attr-defined]
+    assert persisted_result.is_err()
+    assert (
+        persisted_result.unwrap_err().error_code == OperationalErrorCode.WORKER_CRASHED
+    )
+    attempt_count = (
+        await session.execute(
+            text('SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = :id'),
+            {'id': task_id},
+        )
+    ).scalar_one()
+    assert attempt_count == 1
 
 
 @pytest.mark.asyncio(loop_scope='function')
