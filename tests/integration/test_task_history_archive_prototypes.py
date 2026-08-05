@@ -36,7 +36,11 @@ from tests.task_history_prototypes.schema import (
     remove_archive_candidates,
 )
 from tests.task_history_prototypes.measurements import (
+    AdministrativeResultCandidate,
+    RerunStorageCandidate,
+    measure_administrative_result_candidate,
     measure_attempt_storage_candidates,
+    measure_rerun_storage_candidate,
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -520,3 +524,108 @@ async def test_storage_probe_measures_both_attempt_candidates(
     assert copartitioned.footprint.heap_bytes > 0
     assert aggregate.footprint.total_bytes >= aggregate.footprint.heap_bytes
     assert copartitioned.footprint.total_bytes >= copartitioned.footprint.heap_bytes
+
+
+@pytest.mark.parametrize('candidate', list(RerunStorageCandidate))
+async def test_storage_probe_measures_each_rerun_input_form(
+    archive_schema: AsyncConnection,
+    candidate: RerunStorageCandidate,
+) -> None:
+    measurement = await measure_rerun_storage_candidate(
+        archive_schema,
+        _schema(archive_schema),
+        rows=10,
+        result=b'{"ok":true}',
+        rerun_input=b'{"args":[],"kwargs":{"value":1}}',
+        candidate=candidate,
+    )
+    assert measurement.candidate is candidate
+    assert measurement.rows == 10
+    assert measurement.payload_bytes == 32
+    assert measurement.wal_bytes > 0
+    assert measurement.footprint.total_bytes > 0
+
+
+@pytest.mark.parametrize('candidate', list(AdministrativeResultCandidate))
+async def test_storage_probe_measures_administrative_result_choices(
+    archive_schema: AsyncConnection,
+    candidate: AdministrativeResultCandidate,
+) -> None:
+    measurement = await measure_administrative_result_candidate(
+        archive_schema,
+        _schema(archive_schema),
+        rows=10,
+        prior_result=b'{"ok":{"prior":true}}',
+        candidate=candidate,
+    )
+    assert measurement.candidate is candidate
+    assert measurement.rows == 10
+    assert measurement.prior_result_bytes == 21
+    assert measurement.wal_bytes > 0
+    assert measurement.footprint.total_bytes > 0
+
+
+@pytest.mark.parametrize(
+    ('measurement', 'message'),
+    [
+        ('rerun_rows', 'rows must be positive'),
+        ('rerun_result', 'result must be non-empty'),
+        ('rerun_input', 'rerun input must be non-empty'),
+        ('admin_rows', 'rows must be positive'),
+        ('admin_result', 'prior result must be non-empty'),
+    ],
+)
+async def test_storage_probes_reject_invalid_workloads_before_mutation(
+    archive_schema: AsyncConnection,
+    measurement: str,
+    message: str,
+) -> None:
+    schema = _schema(archive_schema)
+    match measurement:
+        case 'rerun_rows':
+            operation = measure_rerun_storage_candidate(
+                archive_schema,
+                schema,
+                rows=0,
+                result=b'{}',
+                rerun_input=b'{}',
+                candidate=RerunStorageCandidate.INLINE,
+            )
+        case 'rerun_result':
+            operation = measure_rerun_storage_candidate(
+                archive_schema,
+                schema,
+                rows=1,
+                result=b'',
+                rerun_input=b'{}',
+                candidate=RerunStorageCandidate.INLINE,
+            )
+        case 'rerun_input':
+            operation = measure_rerun_storage_candidate(
+                archive_schema,
+                schema,
+                rows=1,
+                result=b'{}',
+                rerun_input=b'',
+                candidate=RerunStorageCandidate.INLINE,
+            )
+        case 'admin_rows':
+            operation = measure_administrative_result_candidate(
+                archive_schema,
+                schema,
+                rows=0,
+                prior_result=b'{}',
+                candidate=AdministrativeResultCandidate.EXCLUDE,
+            )
+        case 'admin_result':
+            operation = measure_administrative_result_candidate(
+                archive_schema,
+                schema,
+                rows=1,
+                prior_result=b'',
+                candidate=AdministrativeResultCandidate.EXCLUDE,
+            )
+        case _:
+            pytest.fail(f'unrecognized measurement case: {measurement}')
+    with pytest.raises(ValueError, match=message):
+        await operation

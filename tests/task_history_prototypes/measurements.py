@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from enum import StrEnum
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.task_history_prototypes.archive import StoredArchiveValue
+from tests.task_history_prototypes.archive import archive_digest
 from tests.task_history_prototypes.schema import PrototypeSchema
 
 
@@ -42,6 +44,38 @@ class ArchiveCandidateMeasurement:
     footprint: RelationFootprint
 
 
+class RerunStorageCandidate(StrEnum):
+    UNAVAILABLE = 'unavailable'
+    INLINE = 'inline'
+    REFERENCE = 'reference'
+
+
+@dataclass(frozen=True, slots=True)
+class RerunStorageMeasurement:
+    candidate: RerunStorageCandidate
+    rows: int
+    payload_bytes: int
+    result_bytes: int
+    load_seconds: float
+    wal_bytes: int
+    footprint: RelationFootprint
+
+
+class AdministrativeResultCandidate(StrEnum):
+    EXCLUDE = 'exclude'
+    NAMED_PRIOR_RESULT = 'named_prior_result'
+
+
+@dataclass(frozen=True, slots=True)
+class AdministrativeResultMeasurement:
+    candidate: AdministrativeResultCandidate
+    rows: int
+    prior_result_bytes: int
+    load_seconds: float
+    wal_bytes: int
+    footprint: RelationFootprint
+
+
 async def measure_attempt_storage_candidates(
     connection: AsyncConnection,
     schema: PrototypeSchema,
@@ -64,6 +98,8 @@ async def measure_attempt_storage_candidates(
         attempts=attempts,
         attempts_per_task=attempts_per_task,
     )
+    await connection.execute(text(f'TRUNCATE {schema.sql}.history_aggregate'))
+    await connection.commit()
     copartitioned = await _measure_copartitioned(
         connection,
         schema,
@@ -73,6 +109,187 @@ async def measure_attempt_storage_candidates(
         attempts_per_task=attempts_per_task,
     )
     return aggregate, copartitioned
+
+
+async def measure_rerun_storage_candidate(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    rows: int,
+    result: bytes,
+    rerun_input: bytes,
+    candidate: RerunStorageCandidate,
+) -> RerunStorageMeasurement:
+    if rows <= 0:
+        raise ValueError('rows must be positive')
+    if not result:
+        raise ValueError('result must be non-empty')
+    if not rerun_input:
+        raise ValueError('rerun input must be non-empty')
+
+    match candidate:
+        case RerunStorageCandidate.UNAVAILABLE:
+            rerun_parameters: dict[str, object] = {
+                'rerun_version': None,
+                'rerun_codec': None,
+                'rerun_form': None,
+                'rerun_digest': None,
+                'rerun_inline': None,
+                'rerun_reference': None,
+            }
+        case RerunStorageCandidate.INLINE:
+            rerun_parameters = {
+                'rerun_version': 1,
+                'rerun_codec': 'json-utf8',
+                'rerun_form': 'INLINE',
+                'rerun_digest': archive_digest(rerun_input),
+                'rerun_inline': rerun_input,
+                'rerun_reference': None,
+            }
+        case RerunStorageCandidate.REFERENCE:
+            digest = archive_digest(rerun_input)
+            rerun_parameters = {
+                'rerun_version': 1,
+                'rerun_codec': 'json-utf8',
+                'rerun_form': 'REFERENCE',
+                'rerun_digest': digest,
+                'rerun_inline': None,
+                'rerun_reference': f'sha256:{digest.hex()}',
+            }
+
+    await connection.execute(text(f'TRUNCATE {schema.sql}.history_aggregate'))
+    await connection.commit()
+    wal_start = await _wal_lsn(connection)
+    started = time.perf_counter()
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.history_aggregate (
+                task_id, task_name, queue_name, priority, status,
+                terminalization_kind, terminal_at, retention_anchor_at,
+                retention_class_key, enqueued_at, created_at,
+                result_envelope_version, result_codec, result_payload,
+                result_digest, retry_count, is_workflow_task,
+                history_schema_version, attempt_archive_version,
+                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_digest, input_digest,
+                rerun_input_version, rerun_input_codec, rerun_input_form,
+                rerun_input_digest, rerun_input_inline,
+                rerun_input_reference
+            )
+            SELECT
+                md5('rerun-' || series::text)::uuid::text,
+                'prototype.task', 'default', 100, 'FAILED',
+                'FAIL_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
+                '2026-08-05T12:00:00Z'::timestamptz,
+                'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
+                '2026-08-05T11:58:00Z'::timestamptz,
+                1, 'json-utf8', :result, :result_digest,
+                0, FALSE, 1, 1, 'json-utf8', '[]'::bytea,
+                :empty_attempt_digest, :input_digest,
+                :rerun_version, :rerun_codec, :rerun_form,
+                :rerun_digest, :rerun_inline, :rerun_reference
+            FROM generate_series(1, :rows) AS series
+            """
+        ),
+        {
+            'rows': rows,
+            'result': result,
+            'result_digest': archive_digest(result),
+            'empty_attempt_digest': archive_digest(b'[]'),
+            'input_digest': archive_digest(rerun_input),
+            **rerun_parameters,
+        },
+    )
+    await connection.commit()
+    elapsed = time.perf_counter() - started
+    wal_bytes = await _wal_bytes_since(connection, wal_start)
+    footprint = await partition_tree_footprint(
+        connection, f'{schema.name}.history_aggregate'
+    )
+    return RerunStorageMeasurement(
+        candidate=candidate,
+        rows=rows,
+        payload_bytes=len(rerun_input),
+        result_bytes=len(result),
+        load_seconds=elapsed,
+        wal_bytes=wal_bytes,
+        footprint=footprint,
+    )
+
+
+async def measure_administrative_result_candidate(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    rows: int,
+    prior_result: bytes,
+    candidate: AdministrativeResultCandidate,
+) -> AdministrativeResultMeasurement:
+    if rows <= 0:
+        raise ValueError('rows must be positive')
+    if not prior_result:
+        raise ValueError('prior result must be non-empty')
+
+    match candidate:
+        case AdministrativeResultCandidate.EXCLUDE:
+            prior_payload = None
+            result_digest = None
+        case AdministrativeResultCandidate.NAMED_PRIOR_RESULT:
+            prior_payload = prior_result
+            result_digest = archive_digest(prior_result)
+
+    await connection.execute(text(f'TRUNCATE {schema.sql}.history_aggregate'))
+    await connection.commit()
+    wal_start = await _wal_lsn(connection)
+    started = time.perf_counter()
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.history_aggregate (
+                task_id, task_name, queue_name, priority, status,
+                terminalization_kind, terminal_at, retention_anchor_at,
+                retention_class_key, enqueued_at, created_at,
+                result_envelope_version, result_codec, result_payload,
+                result_digest, prior_result_payload, retry_count,
+                is_workflow_task, history_schema_version,
+                attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot, attempt_snapshot_digest
+            )
+            SELECT
+                md5('admin-' || series::text)::uuid::text,
+                'prototype.task', 'default', 100, 'CANCELLED',
+                'CANCEL_ADMIN', '2026-08-05T12:00:00Z'::timestamptz,
+                '2026-08-05T12:00:00Z'::timestamptz,
+                'finite_30d_v1', '2026-08-05T11:59:00Z'::timestamptz,
+                '2026-08-05T11:58:00Z'::timestamptz,
+                1, 'json-utf8', NULL, :result_digest, :prior_result,
+                0, FALSE, 1, 1, 'json-utf8', '[]'::bytea,
+                :empty_attempt_digest
+            FROM generate_series(1, :rows) AS series
+            """
+        ),
+        {
+            'rows': rows,
+            'result_digest': result_digest,
+            'prior_result': prior_payload,
+            'empty_attempt_digest': archive_digest(b'[]'),
+        },
+    )
+    await connection.commit()
+    elapsed = time.perf_counter() - started
+    wal_bytes = await _wal_bytes_since(connection, wal_start)
+    footprint = await partition_tree_footprint(
+        connection, f'{schema.name}.history_aggregate'
+    )
+    return AdministrativeResultMeasurement(
+        candidate=candidate,
+        rows=rows,
+        prior_result_bytes=len(prior_result),
+        load_seconds=elapsed,
+        wal_bytes=wal_bytes,
+        footprint=footprint,
+    )
 
 
 async def _measure_aggregate(
@@ -131,7 +348,7 @@ async def _measure_aggregate(
     await connection.commit()
     elapsed = time.perf_counter() - started
     wal_bytes = await _wal_bytes_since(connection, wal_start)
-    footprint = await _partition_tree_footprint(
+    footprint = await partition_tree_footprint(
         connection, f'{schema.name}.history_aggregate'
     )
     return ArchiveCandidateMeasurement(
@@ -240,10 +457,10 @@ async def _measure_copartitioned(
     await connection.commit()
     elapsed = time.perf_counter() - started
     wal_bytes = await _wal_bytes_since(connection, wal_start)
-    history = await _partition_tree_footprint(
+    history = await partition_tree_footprint(
         connection, f'{schema.name}.history_copartitioned'
     )
-    attempt_rows = await _partition_tree_footprint(
+    attempt_rows = await partition_tree_footprint(
         connection, f'{schema.name}.attempts_copartitioned'
     )
     return ArchiveCandidateMeasurement(
@@ -258,7 +475,7 @@ async def _measure_copartitioned(
     )
 
 
-async def _partition_tree_footprint(
+async def partition_tree_footprint(
     connection: AsyncConnection,
     relation: str,
 ) -> RelationFootprint:
@@ -281,6 +498,38 @@ async def _partition_tree_footprint(
                     ), 0)::bigint AS toast_and_overhead,
                     COALESCE(SUM(pg_total_relation_size(relid)), 0)::bigint AS total
                 FROM leaves
+                """
+            ),
+            {'relation': relation},
+        )
+    ).one()
+    return RelationFootprint(
+        heap_bytes=row.heap,
+        index_bytes=row.indexes,
+        toast_and_overhead_bytes=row.toast_and_overhead,
+        total_bytes=row.total,
+    )
+
+
+async def relation_footprint(
+    connection: AsyncConnection,
+    relation: str,
+) -> RelationFootprint:
+    row = (
+        await connection.execute(
+            text(
+                """
+                SELECT pg_relation_size(CAST(:relation AS regclass))::bigint
+                           AS heap,
+                       pg_indexes_size(CAST(:relation AS regclass))::bigint
+                           AS indexes,
+                       (
+                           pg_total_relation_size(CAST(:relation AS regclass))
+                           - pg_relation_size(CAST(:relation AS regclass))
+                           - pg_indexes_size(CAST(:relation AS regclass))
+                       )::bigint AS toast_and_overhead,
+                       pg_total_relation_size(CAST(:relation AS regclass))::bigint
+                           AS total
                 """
             ),
             {'relation': relation},
