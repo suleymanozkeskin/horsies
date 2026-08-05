@@ -175,7 +175,9 @@ Retention and payload-path performance release. Schema v15
   to override windows (hours) for plain (non-workflow) tasks. Queues not
   listed use the global window; overrides apply even when the global
   window is `None`; workflow-backing task rows always age under the
-  global window so a workflow and its task rows are retained as a unit.
+  global window and are protected while their workflow is non-terminal.
+  After workflow termination, each task row ages from its own terminal
+  timestamp.
   Override keys must name declared queues — an unknown key fails config
   construction (and therefore `horsies check`) with HRS-200. Override
   deletes are served by the new queue-leading composite partial index

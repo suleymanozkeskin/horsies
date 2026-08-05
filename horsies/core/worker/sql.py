@@ -561,11 +561,11 @@ DELETE_EXPIRED_TASKS_SQL = text(f"""
 # expression index cannot serve an override window efficiently because
 # the override cutoff is far more recent than the global one, making
 # every other queue's retained terminal rows heap-filter misses.
-# Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows
-# age under the global window so a workflow and its task rows are
-# retained as a unit. The NOT EXISTS guard is kept as defense in depth
-# (plain tasks have no workflow_task linkage). Same purged_attempts
-# mechanism as the global delete.
+# Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows use
+# the global window and are protected separately while their workflow remains
+# non-terminal. The NOT EXISTS guard is kept as defense in depth (plain tasks
+# have no workflow_task linkage). Same purged_attempts mechanism as the global
+# delete.
 DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL = text(f"""
     WITH doomed AS (
         SELECT t.id

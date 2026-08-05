@@ -347,8 +347,8 @@ Controls stale task detection, automatic recovery, and data retention.
 Override keys must name declared queues (`custom_queues` in CUSTOM mode,
 `"default"` in DEFAULT mode) — an unknown key fails config construction
 (and therefore `horsies check`) with HRS-200. Workflow-backing task rows
-always age under the global window so a workflow and its task rows are
-retained as a unit.
+always use the global window; once their workflow is terminal, they age from
+their own terminal timestamp.
 
 ### Constraints (HRS-204)
 
