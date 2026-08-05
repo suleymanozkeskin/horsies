@@ -85,6 +85,8 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         _expire_owned_function(namespace),
         _expire_pending_function(namespace),
         _cancel_admin_function(namespace),
+        _cancel_owned_orphan_function(namespace),
+        _cancel_orphaned_batch_function(namespace),
     )
 
 
@@ -205,6 +207,14 @@ def _move_function(namespace: str) -> str:
                    OR p_error_code <> 'TASK_CANCELLED'
                    OR p_failed_reason <> 'Cancelled via monitoring API' THEN
                     RAISE EXCEPTION 'administrative-cancel projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := FALSE;
+            WHEN '{TerminalizationKind.CANCEL_ORPHAN.value}' THEN
+                IF p_terminal_status <> 'CANCELLED'
+                   OR p_error_code <> 'WORKFLOW_CHECK_FAILED'
+                   OR p_failed_reason <>
+                        'Workflow task orphaned: no live workflow_task linkage' THEN
+                    RAISE EXCEPTION 'orphan-cancel projection disagrees';
                 END IF;
                 v_requires_deferred_phase2 := FALSE;
             ELSE
@@ -969,6 +979,222 @@ def _cancel_admin_function(namespace: str) -> str:
             ARRAY['{TerminalizationKind.CANCEL_ADMIN.value}']::text[],
             NULL::text, NULL::timestamptz
         );
+    END
+    $function$
+    """
+
+
+def _cancel_owned_orphan_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_cancel_owned_orphan(
+        p_task_id varchar,
+        p_worker_id text,
+        p_claimed_at timestamptz
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_is_workflow_task boolean;
+        v_node_status text;
+        v_result text;
+        v_terminal_at timestamptz;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT task.status::text, task.claimed_by_worker_id,
+               task.claimed_at, task.is_workflow_task, task.result,
+               (
+                   SELECT node.status
+                   FROM {namespace}.phase2_nodes AS node
+                   WHERE node.task_id = task.id
+                     AND node.status IN (
+                         'ENQUEUED', 'READY', 'PENDING', 'RUNNING'
+                     )
+                   ORDER BY node.id
+                   LIMIT 1
+               )
+        INTO v_status, v_worker, v_claimed_at,
+             v_is_workflow_task, v_result, v_node_status
+        FROM {namespace}.live_tasks AS task
+        WHERE task.id = p_task_id
+        FOR UPDATE;
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS varchar)
+           AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+           AND v_is_workflow_task
+           AND v_node_status IS NULL THEN
+            v_terminal_at := NOW();
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'CANCELLED',
+                '{TerminalizationKind.CANCEL_ORPHAN.value}',
+                v_terminal_at, v_result,
+                'WORKFLOW_CHECK_FAILED',
+                'Workflow task orphaned: no live workflow_task linkage'
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at,
+                '{TerminalizationKind.CANCEL_ORPHAN.value}'::text,
+                v_status, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS varchar)
+           AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+           AND v_is_workflow_task
+           AND v_node_status IS NOT NULL THEN
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+                NULL::timestamptz, NULL::text,
+                v_status, v_worker, v_claimed_at,
+                'WORKFLOW_LINK_STATE'::text,
+                jsonb_build_object('node_status', v_node_status);
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY[
+                '{TerminalizationKind.CANCEL_ORPHAN.value}',
+                '{TerminalizationKind.CANCEL_ORPHAN_SWEEP.value}'
+            ]::text[],
+            p_worker_id, p_claimed_at
+        );
+    END
+    $function$
+    """
+
+
+def _cancel_orphaned_batch_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_cancel_orphaned_tasks(
+        p_batch_size integer
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    BEGIN
+        IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+            RAISE EXCEPTION
+                'p_batch_size must be a positive integer, got %', p_batch_size
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM duplicate.id
+        FROM {namespace}.live_tasks AS duplicate
+        WHERE duplicate.is_workflow_task
+          AND duplicate.status::text IN ('CLAIMED', 'PENDING')
+          AND NOT EXISTS (
+              SELECT 1 FROM {namespace}.phase2_nodes AS runnable
+              WHERE runnable.task_id = duplicate.id
+                AND runnable.status IN (
+                    'ENQUEUED', 'READY', 'PENDING', 'RUNNING'
+                )
+          )
+          AND EXISTS (
+              SELECT 1 FROM {namespace}.history_aggregate AS history
+              WHERE history.task_id = duplicate.id
+          )
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED;
+        IF FOUND THEN
+            RAISE EXCEPTION 'task identity exists in multiple locations';
+        END IF;
+
+        RETURN QUERY
+        WITH targets AS MATERIALIZED (
+            SELECT task.*,
+                   (
+                       SELECT node.workflow_id
+                       FROM {namespace}.phase2_nodes AS node
+                       WHERE node.task_id = task.id
+                       ORDER BY node.id
+                       LIMIT 1
+                   ) AS workflow_id,
+                   NOW() AS assigned_terminal_at,
+                   {namespace}.encode_live_attempts(task.id)
+                       AS encoded_attempts,
+                   CASE WHEN task.result IS NULL THEN NULL::bytea
+                        ELSE convert_to(task.result, 'UTF8') END
+                       AS encoded_result
+            FROM {namespace}.live_tasks AS task
+            WHERE task.is_workflow_task
+              AND task.status::text IN ('CLAIMED', 'PENDING')
+              AND NOT EXISTS (
+                  SELECT 1 FROM {namespace}.phase2_nodes AS runnable
+                  WHERE runnable.task_id = task.id
+                    AND runnable.status IN (
+                        'ENQUEUED', 'READY', 'PENDING', 'RUNNING'
+                    )
+              )
+            LIMIT p_batch_size
+            FOR UPDATE OF task SKIP LOCKED
+        ),
+        history_rows AS (
+            INSERT INTO {namespace}.history_aggregate (
+                task_id, task_name, queue_name, priority, status,
+                terminalization_kind, terminal_at, retention_anchor_at,
+                retention_class_key, sent_at, enqueued_at, claimed_at,
+                started_at, created_at,
+                result_envelope_version, result_codec, result_payload,
+                result_digest, error_code, final_failed_reason,
+                retry_count, rerun_of_task_id, rerun_root_task_id,
+                input_digest, workflow_id, is_workflow_task,
+                history_schema_version, attempt_archive_version,
+                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_digest
+            )
+            SELECT target.id, target.task_name, target.queue_name,
+                   target.priority, 'CANCELLED',
+                   '{TerminalizationKind.CANCEL_ORPHAN_SWEEP.value}',
+                   target.assigned_terminal_at, target.assigned_terminal_at,
+                   target.retention_class_key, target.sent_at,
+                   target.enqueued_at, target.claimed_at, target.started_at,
+                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   CASE WHEN target.encoded_result IS NULL THEN NULL
+                        ELSE sha256(target.encoded_result) END,
+                   'WORKFLOW_CHECK_FAILED',
+                   'Workflow task orphaned: no live workflow_task linkage',
+                   target.retry_count, target.rerun_of_task_id,
+                   target.rerun_root_task_id, target.input_digest,
+                   target.workflow_id, TRUE,
+                   1, 1, 'json-utf8', target.encoded_attempts,
+                   sha256(target.encoded_attempts)
+            FROM targets AS target
+            RETURNING task_id, terminal_at, terminalization_kind
+        ),
+        purged_attempts AS (
+            DELETE FROM {namespace}.live_attempts AS attempt
+            WHERE attempt.task_id IN (
+                SELECT task_id FROM history_rows
+            )
+            RETURNING attempt.task_id
+        ),
+        deleted_tasks AS (
+            DELETE FROM {namespace}.live_tasks AS task
+            WHERE task.id IN (SELECT task_id FROM history_rows)
+              AND (SELECT count(*) FROM purged_attempts) >= 0
+            RETURNING task.id
+        ),
+        notifications AS MATERIALIZED (
+            SELECT history.task_id,
+                   pg_notify('task_done', history.task_id) AS emitted
+            FROM history_rows AS history
+            JOIN deleted_tasks AS deleted ON deleted.id = history.task_id
+        )
+        SELECT history.task_id, NULL::bigint, 'APPLIED'::text,
+               history.terminal_at, history.terminalization_kind,
+               target.status::text, target.claimed_by_worker_id,
+               target.claimed_at, NULL::text, NULL::jsonb
+        FROM history_rows AS history
+        JOIN targets AS target ON target.id = history.task_id
+        JOIN deleted_tasks AS deleted ON deleted.id = history.task_id
+        JOIN notifications AS notification
+            ON notification.task_id = history.task_id;
     END
     $function$
     """

@@ -25,6 +25,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedForeignTerminalization,
     ObservedDeadline,
     ObservedStaleness,
+    ObservedWorkflowLink,
     SourceStateConflict,
     TaskAbsent,
     decode_outcome_row,
@@ -354,6 +355,63 @@ async def _cancel_admin(
         .one()
     )
     return decode_outcome_row(_plain_mapping(row))
+
+
+async def _cancel_owned_orphan(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker_id: str = _WORKER,
+    claimed_at: datetime | None = _GENERATION,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_cancel_owned_orphan(
+                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:claimed_at AS timestamptz)
+                )
+                """
+                ),
+                {
+                    'task_id': task_id,
+                    'worker_id': worker_id,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
+async def _cancel_orphaned_batch(
+    connection: AsyncConnection,
+    *,
+    batch_size: int | None,
+) -> list[Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent]:
+    schema = _schema(connection)
+    rows = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_cancel_orphaned_tasks(
+                    :batch_size
+                )
+                """
+                ),
+                {'batch_size': batch_size},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [decode_outcome_row(_plain_mapping(row)) for row in rows]
 
 
 async def _seed_attempt(
@@ -918,6 +976,169 @@ async def test_admin_cancel_refuses_workflow_backing_task(
         permitted_statuses=['RUNNING'],
     )
     assert isinstance(outcome, SourceStateConflict)
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_owned_orphan_moves_task_without_creating_deferred_phase2(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+    )
+    assert workflow_id is not None
+    await _seed_attempt(
+        terminalization_schema,
+        task_id,
+        outcome='FAILED',
+        will_retry=False,
+    )
+    await terminalization_schema.execute(
+        text(
+            f"""
+            DELETE FROM {schema.sql}.phase2_nodes
+            WHERE workflow_id = :workflow_id
+            """
+        ),
+        {'workflow_id': workflow_id},
+    )
+    await terminalization_schema.commit()
+
+    outcome = await _cancel_owned_orphan(terminalization_schema, task_id)
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.CANCEL_ORPHAN
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+    history = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, error_code, final_failed_reason,
+                       workflow_id, is_workflow_task
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(history) == (
+        'CANCELLED',
+        'WORKFLOW_CHECK_FAILED',
+        'Workflow task orphaned: no live workflow_task linkage',
+        None,
+        True,
+    )
+
+
+async def test_owned_orphan_reports_runnable_link_after_fence_matches(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+    )
+
+    outcome = await _cancel_owned_orphan(terminalization_schema, task_id)
+    assert isinstance(outcome, SourceStateConflict)
+    assert isinstance(outcome.evidence, ObservedWorkflowLink)
+    assert outcome.evidence.node_status == 'RUNNING'
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_owned_orphan_classifies_stale_generation_before_link_guard(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+    )
+
+    outcome = await _cancel_owned_orphan(
+        terminalization_schema,
+        task_id,
+        claimed_at=_GENERATION + timedelta(seconds=1),
+    )
+    assert isinstance(outcome, LostClaim)
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_orphan_sweep_is_bounded_and_replays_through_single_variant(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    orphan_ids: list[str] = []
+    for status in ('CLAIMED', 'PENDING'):
+        task_id, workflow_id = await _seed_live_task(
+            terminalization_schema,
+            is_workflow_task=True,
+            status=status,
+            worker_id=_WORKER if status == 'CLAIMED' else None,
+            claimed_at=_GENERATION if status == 'CLAIMED' else None,
+        )
+        assert workflow_id is not None
+        await terminalization_schema.execute(
+            text(
+                f"""
+                DELETE FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+        await terminalization_schema.commit()
+        orphan_ids.append(task_id)
+    live_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+    )
+
+    first = await _cancel_orphaned_batch(terminalization_schema, batch_size=1)
+    assert len(first) == 1
+    swept_id = first[0].task_id
+    assert swept_id in orphan_ids
+    assert await _relation_counts(terminalization_schema, live_id) == (1, 0, 0, 0)
+    second = await _cancel_orphaned_batch(terminalization_schema, batch_size=1)
+    assert {first[0].task_id, second[0].task_id} == set(orphan_ids)
+    assert await _cancel_orphaned_batch(terminalization_schema, batch_size=1) == []
+
+    replay = await _cancel_owned_orphan(terminalization_schema, swept_id)
+    assert isinstance(replay, AlreadyApplied)
+    assert replay.kind is TerminalizationKind.CANCEL_ORPHAN_SWEEP
+
+
+@pytest.mark.parametrize('batch_size', [None, 0, -1])
+async def test_orphan_sweep_rejects_invalid_bound_before_mutation(
+    terminalization_schema: AsyncConnection,
+    batch_size: int | None,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='PENDING',
+        worker_id=None,
+        claimed_at=None,
+    )
+    assert workflow_id is not None
+    await terminalization_schema.execute(
+        text(
+            f"""
+            DELETE FROM {schema.sql}.phase2_nodes
+            WHERE workflow_id = :workflow_id
+            """
+        ),
+        {'workflow_id': workflow_id},
+    )
+    await terminalization_schema.commit()
+
+    with pytest.raises(DBAPIError, match='positive integer'):
+        await _cancel_orphaned_batch(terminalization_schema, batch_size=batch_size)
+    await terminalization_schema.rollback()
     assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
 
 
