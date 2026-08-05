@@ -35,7 +35,7 @@ from horsies.core.lifecycle.operations import (
 from tests.lifecycle_matrix import MATRIX
 from tests.unit.test_lifecycle_commands import ONE_OF_EACH
 from tests.unit.test_lifecycle_matrix import _STATEMENT_TEXT
-from tests.unit.test_terminal_writer_inventory import _update_clauses
+from tests.unit.test_terminal_writer_inventory import update_clauses
 
 pytestmark = [pytest.mark.unit]
 
@@ -105,7 +105,7 @@ def _caller_supplied_payload_columns(writer_id: str) -> set[str]:
     is something the caller chose and a command therefore has to carry.
     """
     assignments = ' '.join(
-        ' '.join(window.split()) for window, _ in _update_clauses(_STATEMENT_TEXT[writer_id])
+        ' '.join(window.split()) for window, _ in update_clauses(_STATEMENT_TEXT[writer_id])
     )
     supplied: set[str] = set()
     for column in ('result', 'error_code', 'failed_reason'):
