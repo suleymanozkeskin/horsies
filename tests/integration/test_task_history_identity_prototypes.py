@@ -412,6 +412,99 @@ async def test_concurrent_same_key_commits_exactly_one_request(
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
+async def test_uncertain_commit_replay_returns_the_committed_request(
+    identity_schema: AsyncConnection,
+    db_url: str,
+    candidate: str,
+) -> None:
+    schema = _schema(identity_schema)
+    command = _command()
+    key = ScopedIdempotencyKey(command.task_name, 'uncertain-commit')
+    first_id = str(uuid4())
+    replay_id = str(uuid4())
+    isolated_engine = create_async_engine(db_url)
+    try:
+        await _enqueue_committed(
+            isolated_engine,
+            schema,
+            candidate,
+            task_id=first_id,
+            command=command,
+            key=key,
+        )
+        replay = await _enqueue_committed(
+            isolated_engine,
+            schema,
+            candidate,
+            task_id=replay_id,
+            command=command,
+            key=key,
+        )
+    finally:
+        await isolated_engine.dispose()
+    assert replay == ('REPLAY', first_id, 1)
+
+
+@pytest.mark.parametrize(
+    ('candidate', 'expected_outcome'),
+    [
+        ('no_directory', 'APPLIED'),
+        ('key_registry', 'REPLAY'),
+        ('combined_registry', 'REPLAY'),
+    ],
+)
+async def test_post_history_removal_follows_reservation_storage_lifetime(
+    identity_schema: AsyncConnection,
+    candidate: str,
+    expected_outcome: str,
+) -> None:
+    schema = _schema(identity_schema)
+    command = _command()
+    key = ScopedIdempotencyKey(command.task_name, 'history-removed')
+    first_id = str(uuid4())
+    second_id = str(uuid4())
+    await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=first_id,
+        command=command,
+        key=key,
+        key_window='60 days',
+    )
+    terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    history_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    await identity_schema.execute(
+        text(
+            f"""
+            SELECT {schema.sql}.terminalize_{terminal_prefix}(
+                CAST(:task_id AS varchar(36)), statement_timestamp()
+            )
+            """
+        ),
+        {'task_id': first_id},
+    )
+    await identity_schema.execute(
+        text(
+            f"""
+            DELETE FROM {schema.sql}.{history_prefix}_history
+            WHERE task_id = :task_id
+            """
+        ),
+        {'task_id': first_id},
+    )
+
+    outcome = await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=second_id,
+        command=command,
+        key=key,
+    )
+    assert outcome[0] == expected_outcome
+    assert outcome[1] == (second_id if expected_outcome == 'APPLIED' else first_id)
+
+
+@pytest.mark.parametrize('candidate', _CANDIDATES)
 async def test_expired_key_can_be_reused_without_removing_old_task_identity(
     identity_schema: AsyncConnection,
     candidate: str,
