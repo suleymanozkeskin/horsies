@@ -65,7 +65,7 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             status text NOT NULL CHECK (
                 status IN (
                     'ENQUEUED', 'READY', 'PENDING', 'RUNNING',
-                    'COMPLETED', 'FAILED', 'CANCELLED'
+                    'COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED'
                 )
             ),
             result_payload bytea,

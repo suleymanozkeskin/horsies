@@ -100,6 +100,7 @@ async def _seed_live_task(
     worker_id: str | None = _WORKER,
     claimed_at: datetime | None = _GENERATION,
     good_until: datetime | None = None,
+    node_status: str = 'RUNNING',
 ) -> tuple[str, str | None]:
     schema = _schema(connection)
     task_id = str(uuid4())
@@ -147,11 +148,15 @@ async def _seed_live_task(
                     workflow_id, node_id, task_id, status,
                     requires_parent_propagation
                 ) VALUES (
-                    :workflow_id, 'node-1', :task_id, 'RUNNING', FALSE
+                    :workflow_id, 'node-1', :task_id, :node_status, FALSE
                 )
                 """
             ),
-            {'workflow_id': workflow_id, 'task_id': task_id},
+            {
+                'workflow_id': workflow_id,
+                'task_id': task_id,
+                'node_status': node_status,
+            },
         )
     await connection.commit()
     return task_id, workflow_id
@@ -412,6 +417,73 @@ async def _cancel_orphaned_batch(
         .all()
     )
     return [decode_outcome_row(_plain_mapping(row)) for row in rows]
+
+
+async def _abandon_owned_node(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker_id: str = _WORKER,
+    claimed_at: datetime | None = _GENERATION,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_abandon_owned_node(
+                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:claimed_at AS timestamptz)
+                )
+                """
+                ),
+                {
+                    'task_id': task_id,
+                    'worker_id': worker_id,
+                    'claimed_at': claimed_at,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
+async def _cancel_owned_node(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    accepts_requeued_pending: bool,
+    worker_id: str = _WORKER,
+    claimed_at: datetime | None = _GENERATION,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_cancel_owned_node(
+                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:claimed_at AS timestamptz),
+                    :accepts_requeued_pending
+                )
+                """
+                ),
+                {
+                    'task_id': task_id,
+                    'worker_id': worker_id,
+                    'claimed_at': claimed_at,
+                    'accepts_requeued_pending': accepts_requeued_pending,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
 
 
 async def _seed_attempt(
@@ -1140,6 +1212,173 @@ async def test_orphan_sweep_rejects_invalid_bound_before_mutation(
         await _cancel_orphaned_batch(terminalization_schema, batch_size=batch_size)
     await terminalization_schema.rollback()
     assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_pause_abandon_moves_task_and_resets_node_atomically(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    assert workflow_id is not None
+
+    outcome = await _abandon_owned_node(terminalization_schema, task_id)
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.PAUSE_ABANDON_CLAIM
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+    node = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, task_id
+                FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).one()
+    assert tuple(node) == ('READY', None)
+    history = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT error_code, final_failed_reason, workflow_id
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(history) == (
+        'TASK_CANCELLED',
+        'Workflow paused before task start',
+        workflow_id,
+    )
+
+
+async def test_workflow_cancel_preserves_coherent_prior_attempt_summary(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='ENQUEUED',
+    )
+    assert workflow_id is not None
+    summary = {
+        'result': '{"err":{"message":"attempt failed"}}',
+        'error_code': 'TASK_EXCEPTION',
+        'failed_reason': 'attempt failed',
+    }
+    await terminalization_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.live_tasks
+            SET result = :result, error_code = :error_code,
+                failed_reason = :failed_reason
+            WHERE id = :task_id
+            """
+        ),
+        {'task_id': task_id, **summary},
+    )
+    await terminalization_schema.commit()
+
+    outcome = await _cancel_owned_node(
+        terminalization_schema,
+        task_id,
+        accepts_requeued_pending=False,
+    )
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.WORKFLOW_CANCEL_CLAIM
+    node_status = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).scalar_one()
+    assert node_status == 'SKIPPED'
+    history = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT convert_from(result_payload, 'UTF8'),
+                       error_code, final_failed_reason
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(history) == (
+        summary['result'],
+        summary['error_code'],
+        summary['failed_reason'],
+    )
+
+
+async def test_workflow_cancel_typed_variant_accepts_requeued_pending(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='PENDING',
+        worker_id=None,
+        claimed_at=None,
+        node_status='ENQUEUED',
+    )
+
+    outcome = await _cancel_owned_node(
+        terminalization_schema,
+        task_id,
+        accepts_requeued_pending=True,
+    )
+    assert isinstance(outcome, Applied)
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+
+
+async def test_coupled_node_failure_rolls_back_history_and_live_delete(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        node_status='COMPLETED',
+    )
+    assert workflow_id is not None
+
+    with pytest.raises(DBAPIError, match='disposition did not affect one row'):
+        await _abandon_owned_node(terminalization_schema, task_id)
+    await terminalization_schema.rollback()
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+    node = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, task_id FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).one()
+    assert tuple(node) == ('COMPLETED', task_id)
 
 
 @pytest.mark.parametrize('first', ['fused', 'locked'])

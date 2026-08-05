@@ -87,6 +87,8 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         _cancel_admin_function(namespace),
         _cancel_owned_orphan_function(namespace),
         _cancel_orphaned_batch_function(namespace),
+        _abandon_owned_node_function(namespace),
+        _cancel_owned_node_function(namespace),
     )
 
 
@@ -215,6 +217,18 @@ def _move_function(namespace: str) -> str:
                    OR p_failed_reason <>
                         'Workflow task orphaned: no live workflow_task linkage' THEN
                     RAISE EXCEPTION 'orphan-cancel projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := FALSE;
+            WHEN '{TerminalizationKind.PAUSE_ABANDON_CLAIM.value}' THEN
+                IF p_terminal_status <> 'CANCELLED'
+                   OR p_error_code <> 'TASK_CANCELLED'
+                   OR p_failed_reason <> 'Workflow paused before task start' THEN
+                    RAISE EXCEPTION 'pause-abandon projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := FALSE;
+            WHEN '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value}' THEN
+                IF p_terminal_status <> 'CANCELLED' THEN
+                    RAISE EXCEPTION 'workflow-cancel projection disagrees';
                 END IF;
                 v_requires_deferred_phase2 := FALSE;
             ELSE
@@ -1195,6 +1209,146 @@ def _cancel_orphaned_batch_function(namespace: str) -> str:
         JOIN deleted_tasks AS deleted ON deleted.id = history.task_id
         JOIN notifications AS notification
             ON notification.task_id = history.task_id;
+    END
+    $function$
+    """
+
+
+def _abandon_owned_node_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_abandon_owned_node(
+        p_task_id varchar,
+        p_worker_id text,
+        p_claimed_at timestamptz
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_result text;
+        v_terminal_at timestamptz;
+        v_node_rows bigint;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT status::text, claimed_by_worker_id, claimed_at, result
+        INTO v_status, v_worker, v_claimed_at, v_result
+        FROM {namespace}.live_tasks
+        WHERE id = p_task_id
+        FOR UPDATE;
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS varchar)
+           AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at) THEN
+            v_terminal_at := NOW();
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'CANCELLED',
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM.value}',
+                v_terminal_at, v_result,
+                'TASK_CANCELLED', 'Workflow paused before task start'
+            );
+            UPDATE {namespace}.phase2_nodes
+            SET status = 'READY', task_id = NULL
+            WHERE task_id = p_task_id
+              AND status IN ('ENQUEUED', 'RUNNING');
+            GET DIAGNOSTICS v_node_rows = ROW_COUNT;
+            IF v_node_rows <> 1 THEN
+                RAISE EXCEPTION
+                    'pause node disposition did not affect one row';
+            END IF;
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at,
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM.value}'::text,
+                v_status, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY[
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM.value}',
+                '{TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH.value}',
+                '{TerminalizationKind.PAUSE_ABANDON_WORKFLOW.value}'
+            ]::text[],
+            p_worker_id, p_claimed_at
+        );
+    END
+    $function$
+    """
+
+
+def _cancel_owned_node_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_cancel_owned_node(
+        p_task_id varchar,
+        p_worker_id text,
+        p_claimed_at timestamptz,
+        p_accepts_requeued_pending boolean
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_result text;
+        v_error_code text;
+        v_failed_reason text;
+        v_terminal_at timestamptz;
+        v_node_rows bigint;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT status::text, claimed_by_worker_id, claimed_at,
+               result, error_code, failed_reason
+        INTO v_status, v_worker, v_claimed_at,
+             v_result, v_error_code, v_failed_reason
+        FROM {namespace}.live_tasks
+        WHERE id = p_task_id
+        FOR UPDATE;
+        IF FOUND AND (
+            (
+                v_status = 'CLAIMED'
+                AND v_worker = CAST(p_worker_id AS varchar)
+                AND (p_claimed_at IS NULL OR v_claimed_at = p_claimed_at)
+            )
+            OR (p_accepts_requeued_pending AND v_status = 'PENDING')
+        ) THEN
+            v_terminal_at := NOW();
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'CANCELLED',
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value}',
+                v_terminal_at, v_result, v_error_code, v_failed_reason
+            );
+            UPDATE {namespace}.phase2_nodes
+            SET status = 'SKIPPED'
+            WHERE task_id = p_task_id
+              AND status IN ('PENDING', 'READY', 'ENQUEUED');
+            GET DIAGNOSTICS v_node_rows = ROW_COUNT;
+            IF v_node_rows <> 1 THEN
+                RAISE EXCEPTION
+                    'cancel node disposition did not affect one row';
+            END IF;
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at,
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value}'::text,
+                v_status, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY[
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value}',
+                '{TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH.value}',
+                '{TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW.value}'
+            ]::text[],
+            p_worker_id, p_claimed_at
+        );
     END
     $function$
     """
