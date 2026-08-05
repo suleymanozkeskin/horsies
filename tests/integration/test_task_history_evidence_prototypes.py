@@ -7,7 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
-from tests.task_history_prototypes import identity_evidence
+from tests.task_history_prototypes import identity_evidence, recovery_evidence
 from tests.task_history_prototypes.evidence import EvidenceConditions, EvidenceRunKind
 from tests.task_history_prototypes.identity_evidence import (
     IdentityCandidate,
@@ -16,6 +16,9 @@ from tests.task_history_prototypes.identity_evidence import (
     collect_identity_evidence,
 )
 from tests.task_history_prototypes.measurements import relation_footprint
+from tests.task_history_prototypes.recovery_evidence import (
+    collect_pending_locator_evidence,
+)
 from tests.task_history_prototypes.schema import PrototypeSchema
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -117,3 +120,26 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
         assert candidate.live_footprint.total_bytes > 0
         assert candidate.history_footprint.total_bytes > 0
     assert evidence.conditions.demo_quiesced is True
+
+
+async def test_pending_locator_evidence_compares_wide_and_compact_shapes(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(recovery_evidence, 'collect_conditions', _test_conditions)
+    async with engine.connect() as connection:
+        evidence = await collect_pending_locator_evidence(
+            connection,
+            commit='test-head',
+            run_kind=EvidenceRunKind.SMOKE,
+            server_image='test-image',
+            host_description='test host',
+            storage_description='test storage',
+            demo_quiesced=True,
+        )
+
+    assert evidence.wide_locator_bytes > evidence.byte_budget
+    assert evidence.compact_history_locator_bytes <= evidence.byte_budget
+    assert evidence.compact_quarantine_locator_bytes <= evidence.byte_budget
+    assert evidence.compact_candidate_passed is True

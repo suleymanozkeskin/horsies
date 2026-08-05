@@ -124,14 +124,39 @@ async def _seed_pending_locator(connection: AsyncConnection) -> str:
     await connection.execute(
         text(
             f"""
+            INSERT INTO {schema.sql}.phase2_workflows (workflow_id, status)
+            VALUES (:workflow_id, 'RUNNING')
+            """
+        ),
+        {'workflow_id': workflow_id},
+    )
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.phase2_nodes (
+                workflow_id, node_id, task_id, status,
+                requires_parent_propagation
+            ) VALUES (
+                :workflow_id, 'node-1', :task_id, 'RUNNING', FALSE
+            )
+            """
+        ),
+        {'workflow_id': workflow_id, 'task_id': task_id},
+    )
+    await connection.execute(
+        text(
+            f"""
             INSERT INTO {schema.sql}.workflow_phase2_pending (
-                task_id, workflow_id, node_id, task_name, terminal_status,
+                task_id, workflow_id, workflow_node_row_id, terminal_status,
                 terminal_at, terminalization_kind, recovery_source,
                 history_class, history_anchor, history_schema_version,
                 result_digest, phase2_generation, created_at
             ) VALUES (
-                :task_id, :workflow_id, 'node-1',
-                'prototype.workflow_task', 'COMPLETED', :terminal_at,
+                CAST(:task_id AS varchar(36)),
+                :workflow_id,
+                (SELECT id FROM {schema.sql}.phase2_nodes
+                 WHERE task_id = CAST(:task_id AS varchar(36))),
+                'COMPLETED', :terminal_at,
                 'COMPLETE_LOCKED', 'HISTORY', :class_key, :terminal_at,
                 :version, :result_digest, :generation,
                 statement_timestamp() - interval '90 days'

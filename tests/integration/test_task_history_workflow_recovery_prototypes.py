@@ -148,13 +148,16 @@ async def _seed_recovery(
         text(
             f"""
             INSERT INTO {schema.sql}.workflow_phase2_pending (
-                task_id, workflow_id, node_id, task_name, terminal_status,
+                task_id, workflow_id, workflow_node_row_id, terminal_status,
                 terminal_at, terminalization_kind, recovery_source,
                 history_class, history_anchor, history_schema_version,
                 result_digest, phase2_generation, created_at
             ) VALUES (
-                :task_id, :workflow_id, 'node-1',
-                'prototype.workflow_task', 'COMPLETED', :terminal_at,
+                CAST(:task_id AS varchar(36)),
+                :workflow_id,
+                (SELECT id FROM {schema.sql}.phase2_nodes
+                 WHERE task_id = CAST(:task_id AS varchar(36))),
+                'COMPLETED', :terminal_at,
                 'COMPLETE_LOCKED', 'HISTORY', 'finite_30d_v1', :terminal_at,
                 :version, :pending_digest, :generation,
                 statement_timestamp() - CAST(:pending_age AS interval)
@@ -592,6 +595,19 @@ async def test_pending_fixed_projection_stays_within_declared_bound(
 ) -> None:
     schema = _schema(recovery_schema)
     task_id, *_ = await _seed_recovery(recovery_schema)
+    await recovery_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.workflow_phase2_pending
+            SET history_class = repeat('h', 64),
+                last_failure_class = repeat('f', 64),
+                last_attempt_at = statement_timestamp(),
+                attempt_count = 2147483647
+            WHERE task_id = :task_id
+            """
+        ),
+        {'task_id': task_id},
+    )
     size = (
         await recovery_schema.execute(
             text(
@@ -605,3 +621,65 @@ async def test_pending_fixed_projection_stays_within_declared_bound(
         )
     ).scalar_one()
     assert size <= 512
+
+
+async def test_pending_locator_structurally_pins_node_to_workflow(
+    recovery_schema: AsyncConnection,
+) -> None:
+    schema = _schema(recovery_schema)
+    task_id, *_ = await _seed_recovery(recovery_schema)
+    replacement_workflow_id = str(uuid4())
+    await recovery_schema.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.phase2_workflows (workflow_id, status)
+            VALUES (:workflow_id, 'RUNNING')
+            """
+        ),
+        {'workflow_id': replacement_workflow_id},
+    )
+    with pytest.raises(DBAPIError, match='foreign key constraint'):
+        await recovery_schema.execute(
+            text(
+                f"""
+                UPDATE {schema.sql}.phase2_nodes
+                SET workflow_id = :replacement_workflow_id
+                WHERE task_id = :task_id
+                """
+            ),
+            {
+                'replacement_workflow_id': replacement_workflow_id,
+                'task_id': task_id,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ('column', 'value'),
+    [
+        ('history_class', 'h' * 65),
+        ('history_class', 'é' * 33),
+        ('terminalization_kind', 't' * 33),
+        ('terminalization_kind', 'é' * 17),
+        ('last_failure_class', 'f' * 65),
+        ('last_failure_class', 'é' * 33),
+    ],
+)
+async def test_pending_bounded_fields_reject_oversized_utf8_values(
+    recovery_schema: AsyncConnection,
+    column: str,
+    value: str,
+) -> None:
+    schema = _schema(recovery_schema)
+    task_id, *_ = await _seed_recovery(recovery_schema)
+    with pytest.raises(DBAPIError, match='check constraint|value too long'):
+        await recovery_schema.execute(
+            text(
+                f"""
+                UPDATE {schema.sql}.workflow_phase2_pending
+                SET {column} = :value
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id, 'value': value},
+        )

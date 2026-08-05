@@ -729,11 +729,14 @@ async def test_workflow_completion_creates_precise_pending_and_phase2_applies(
         await terminalization_schema.execute(
             text(
                 f"""
-                SELECT workflow_id, node_id, recovery_source::text,
-                       history_class, history_anchor, result_digest,
-                       phase2_generation
-                FROM {schema.sql}.workflow_phase2_pending
-                WHERE task_id = :task_id
+                SELECT node.workflow_id, node.node_id,
+                       pending.recovery_source::text,
+                       pending.history_class, pending.history_anchor,
+                       pending.result_digest, pending.phase2_generation
+                FROM {schema.sql}.workflow_phase2_pending AS pending
+                JOIN {schema.sql}.phase2_nodes AS node
+                  ON node.id = pending.workflow_node_row_id
+                WHERE pending.task_id = :task_id
                 """
             ),
             {'task_id': task_id},

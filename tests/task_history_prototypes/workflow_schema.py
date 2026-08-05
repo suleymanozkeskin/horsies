@@ -73,6 +73,7 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             phase2_generation varchar(36),
             requires_parent_propagation boolean NOT NULL,
             PRIMARY KEY (workflow_id, node_id),
+            UNIQUE (id, workflow_id),
             FOREIGN KEY (workflow_id)
                 REFERENCES {namespace}.phase2_workflows(workflow_id),
             CHECK (result_digest IS NULL OR octet_length(result_digest) = 32)
@@ -114,27 +115,31 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         CREATE TABLE {namespace}.workflow_phase2_pending (
             task_id varchar(36) PRIMARY KEY,
             workflow_id varchar(36) NOT NULL,
-            node_id text NOT NULL,
-            task_name text NOT NULL,
+            workflow_node_row_id bigint NOT NULL,
             terminal_status text NOT NULL CHECK (
                 terminal_status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
             ),
             terminal_at timestamptz NOT NULL,
-            terminalization_kind text NOT NULL,
+            terminalization_kind varchar(32) NOT NULL
+                CHECK (octet_length(terminalization_kind) <= 32),
             recovery_source {namespace}.recovery_source_kind NOT NULL,
-            history_class text,
+            history_class varchar(64)
+                CHECK (octet_length(history_class) <= 64),
             history_anchor timestamptz,
             history_schema_version smallint NOT NULL,
             result_digest bytea NOT NULL,
             quarantine_task_id varchar(36)
                 REFERENCES {namespace}.workflow_phase2_quarantine(task_id),
-            phase2_generation varchar(36) NOT NULL,
+            phase2_generation varchar(36) NOT NULL
+                CHECK (octet_length(phase2_generation) = 36),
             created_at timestamptz NOT NULL,
             attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
             last_attempt_at timestamptz,
-            last_failure_class text,
-            last_failure_detail text,
+            last_failure_class varchar(64)
+                CHECK (octet_length(last_failure_class) <= 64),
             CHECK (octet_length(result_digest) = 32),
+            FOREIGN KEY (workflow_node_row_id, workflow_id)
+                REFERENCES {namespace}.phase2_nodes(id, workflow_id),
             CHECK (
                 (recovery_source = 'HISTORY'
                     AND history_class IS NOT NULL
@@ -153,7 +158,7 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         """,
         f"""
         CREATE INDEX phase2_pending_workflow_node_idx
-            ON {namespace}.workflow_phase2_pending (workflow_id, node_id)
+            ON {namespace}.workflow_phase2_pending (workflow_node_row_id)
         """,
         f"""
         CREATE INDEX phase2_pending_history_locator_idx
@@ -217,6 +222,7 @@ def _quarantine_function(namespace: str) -> str:
     DECLARE
         v_pending {namespace}.workflow_phase2_pending%ROWTYPE;
         v_history {namespace}.history_aggregate%ROWTYPE;
+        v_node_id text;
         v_duration interval;
     BEGIN
         IF p_leaf_lower IS NULL OR p_leaf_upper IS NULL
@@ -242,6 +248,13 @@ def _quarantine_function(namespace: str) -> str:
         END IF;
         IF v_pending.recovery_source = 'QUARANTINE' THEN
             RETURN 'ALREADY_QUARANTINED';
+        END IF;
+        SELECT node_id INTO v_node_id
+        FROM {namespace}.phase2_nodes
+        WHERE id = v_pending.workflow_node_row_id
+          AND workflow_id = v_pending.workflow_id;
+        IF NOT FOUND THEN
+            RETURN 'SOURCE_ABSENT';
         END IF;
         IF v_pending.created_at + p_detach_horizon > statement_timestamp() THEN
             RETURN 'TOO_YOUNG';
@@ -281,9 +294,7 @@ def _quarantine_function(namespace: str) -> str:
             UPDATE {namespace}.workflow_phase2_pending
             SET attempt_count = attempt_count + 1,
                 last_attempt_at = statement_timestamp(),
-                last_failure_class = 'SOURCE_INTEGRITY',
-                last_failure_detail =
-                    'source archive version, codec, payload, or digest is invalid'
+                last_failure_class = 'SOURCE_INTEGRITY'
             WHERE task_id = p_task_id;
             RETURN 'INTEGRITY_CONFLICT';
         END IF;
@@ -295,7 +306,7 @@ def _quarantine_function(namespace: str) -> str:
             result_digest, source_history_class, source_history_anchor,
             quarantine_reason, quarantined_at
         ) VALUES (
-            v_pending.task_id, v_pending.workflow_id, v_pending.node_id,
+            v_pending.task_id, v_pending.workflow_id, v_node_id,
             v_history.task_name, v_history.status,
             v_history.terminalization_kind, v_history.terminal_at,
             v_history.history_schema_version,
@@ -369,8 +380,8 @@ def _phase2_function(namespace: str) -> str:
         END IF;
         SELECT * INTO v_node
         FROM {namespace}.phase2_nodes
-        WHERE workflow_id = v_pending.workflow_id
-          AND node_id = v_pending.node_id
+        WHERE id = v_pending.workflow_node_row_id
+          AND workflow_id = v_pending.workflow_id
         FOR UPDATE;
         IF NOT FOUND THEN
             RETURN 'SOURCE_STATE_CONFLICT';
@@ -379,7 +390,9 @@ def _phase2_function(namespace: str) -> str:
         FROM {namespace}.workflow_phase2_pending
         WHERE task_id = p_task_id
         FOR UPDATE;
-        IF NOT FOUND OR v_pending.phase2_generation <> p_phase2_generation THEN
+        IF NOT FOUND
+           OR v_pending.phase2_generation <> p_phase2_generation
+           OR v_pending.workflow_id <> v_node.workflow_id THEN
             RETURN 'SOURCE_STATE_CONFLICT';
         END IF;
 
@@ -419,9 +432,7 @@ def _phase2_function(namespace: str) -> str:
             UPDATE {namespace}.workflow_phase2_pending
             SET attempt_count = attempt_count + 1,
                 last_attempt_at = statement_timestamp(),
-                last_failure_class = 'SOURCE_INTEGRITY',
-                last_failure_detail =
-                    'source absent or archive version, codec, payload, or digest invalid'
+                last_failure_class = 'SOURCE_INTEGRITY'
             WHERE task_id = p_task_id;
             RETURN 'SOURCE_STATE_CONFLICT';
         END IF;
@@ -457,13 +468,12 @@ def _phase2_function(namespace: str) -> str:
             result_payload = v_result_payload,
             result_digest = v_result_digest,
             phase2_generation = p_phase2_generation
-        WHERE workflow_id = v_pending.workflow_id
-          AND node_id = v_pending.node_id;
+        WHERE id = v_pending.workflow_node_row_id;
         IF v_node.requires_parent_propagation THEN
             INSERT INTO {namespace}.phase2_parent_responsibilities (
                 workflow_id, node_id, phase2_generation, created_at
             ) VALUES (
-                v_pending.workflow_id, v_pending.node_id,
+                v_node.workflow_id, v_node.node_id,
                 p_phase2_generation, statement_timestamp()
             ) ON CONFLICT DO NOTHING;
         END IF;

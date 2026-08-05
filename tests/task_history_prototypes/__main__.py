@@ -17,6 +17,9 @@ from tests.task_history_prototypes.evidence import (
     evidence_json,
 )
 from tests.task_history_prototypes.identity_evidence import collect_identity_evidence
+from tests.task_history_prototypes.recovery_evidence import (
+    collect_pending_locator_evidence,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
             'rerun-storage',
             'administrative-result',
             'identity-lookup',
+            'pending-locator',
         ),
     )
     parser.add_argument('--rows', type=int, default=100)
@@ -152,6 +156,16 @@ async def _run(arguments: argparse.Namespace) -> object:
                         ),
                         bootstrap_resamples=arguments.bootstrap_resamples,
                         seed=arguments.seed,
+                    )
+                case 'pending-locator':
+                    return await collect_pending_locator_evidence(
+                        connection,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
                     )
                 case _:
                     raise AssertionError('argparse accepted an unknown scenario')

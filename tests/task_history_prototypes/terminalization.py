@@ -188,7 +188,7 @@ def _move_function(namespace: str) -> str:
         v_result_payload bytea;
         v_prior_result_payload bytea;
         v_workflow_id varchar(36);
-        v_node_id text;
+        v_workflow_node_row_id bigint;
         v_history_rows bigint;
         v_deleted_rows bigint;
         v_requires_deferred_phase2 boolean;
@@ -281,8 +281,8 @@ def _move_function(namespace: str) -> str:
                     'operation cannot terminalize a workflow task'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
-            SELECT n.workflow_id, n.node_id
-            INTO v_workflow_id, v_node_id
+            SELECT n.id, n.workflow_id
+            INTO v_workflow_node_row_id, v_workflow_id
             FROM {namespace}.phase2_nodes AS n
             WHERE n.task_id = p_task_id
             FOR UPDATE;
@@ -352,13 +352,13 @@ def _move_function(namespace: str) -> str:
 
         IF v_requires_deferred_phase2 AND v_task.is_workflow_task THEN
             INSERT INTO {namespace}.workflow_phase2_pending (
-                task_id, workflow_id, node_id, task_name,
+                task_id, workflow_id, workflow_node_row_id,
                 terminal_status, terminal_at, terminalization_kind,
                 recovery_source, history_class, history_anchor,
                 history_schema_version, result_digest,
                 phase2_generation, created_at
             ) VALUES (
-                v_task.id, v_workflow_id, v_node_id, v_task.task_name,
+                v_task.id, v_workflow_id, v_workflow_node_row_id,
                 p_terminal_status, p_terminal_at, p_terminalization_kind,
                 'HISTORY', v_task.retention_class_key, p_terminal_at,
                 1, sha256(v_result_payload),
@@ -855,7 +855,8 @@ def _expire_pending_function(namespace: str) -> str:
 
         RETURN QUERY
         WITH targets AS MATERIALIZED (
-            SELECT task.*, node.workflow_id, node.node_id,
+            SELECT task.*, node.id AS workflow_node_row_id,
+                   node.workflow_id,
                    NOW() AS assigned_terminal_at,
                    {namespace}.encode_live_attempts(task.id)
                        AS encoded_attempts,
@@ -906,14 +907,14 @@ def _expire_pending_function(namespace: str) -> str:
         ),
         pending_rows AS (
             INSERT INTO {namespace}.workflow_phase2_pending (
-                task_id, workflow_id, node_id, task_name,
+                task_id, workflow_id, workflow_node_row_id,
                 terminal_status, terminal_at, terminalization_kind,
                 recovery_source, history_class, history_anchor,
                 history_schema_version, result_digest,
                 phase2_generation, created_at
             )
-            SELECT target.id, target.workflow_id, target.node_id,
-                   target.task_name, 'EXPIRED', history.terminal_at,
+            SELECT target.id, target.workflow_id, target.workflow_node_row_id,
+                   'EXPIRED', history.terminal_at,
                    history.terminalization_kind, 'HISTORY',
                    target.retention_class_key, history.terminal_at,
                    1, sha256(target.encoded_result),
