@@ -13,6 +13,7 @@ from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC_V2,
     ARCHIVE_FRAME_V2,
     ARCHIVE_VERSION,
+    CANDIDATE_RERUN_INLINE_MAX_BYTES,
     ArchiveDigestMismatch,
     ArchiveDomain,
     AttemptRecord,
@@ -196,6 +197,14 @@ def test_rerun_input_decoder_rejects_invalid_discriminant_and_digest() -> None:
     assert isinstance(decoded, DecodedArchiveValue)
     assert isinstance(decoded.value, InlineRerunInput)
     assert decoded.value.payload == b'payload'
+
+
+def test_inline_rerun_input_enforces_proposed_byte_bound() -> None:
+    accepted = b'x' * CANDIDATE_RERUN_INLINE_MAX_BYTES
+    assert store_inline_rerun_input(accepted).inline_payload == accepted
+
+    with pytest.raises(ValueError, match='must be at most 65536 bytes'):
+        store_inline_rerun_input(accepted + b'x')
 
 
 @pytest.mark.parametrize(

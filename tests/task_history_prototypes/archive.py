@@ -16,6 +16,7 @@ ARCHIVE_CODEC = 'json-utf8'
 ARCHIVE_VERSION = 1
 ARCHIVE_CODEC_V2 = 'framed-json-v2'
 ARCHIVE_FRAME_V2 = b'H2'
+CANDIDATE_RERUN_INLINE_MAX_BYTES = 64 * 1024
 _UTC_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -334,6 +335,11 @@ def _epoch_us_to_datetime(value: int) -> datetime:
 
 
 def store_inline_rerun_input(payload: bytes) -> StoredRerunInput:
+    if len(payload) > CANDIDATE_RERUN_INLINE_MAX_BYTES:
+        raise ValueError(
+            'inline rerun input must be at most '
+            f'{CANDIDATE_RERUN_INLINE_MAX_BYTES} bytes'
+        )
     return StoredRerunInput(
         version=ARCHIVE_VERSION,
         codec=ARCHIVE_CODEC,
