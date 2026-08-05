@@ -17,8 +17,8 @@ and read off the matrix row: the eligible case reaches the declared target
 status and records `terminal_at`; the ineligible case changes neither.
 
 These are the executable transition matrix. They pin the behavior the typed
-commands and database functions must preserve, including the asymmetric
-failure payloads.
+commands and database functions must preserve, including both failure payload
+shapes.
 
 Revert-proofing a refusal test: disable the guard, confirm the test fails,
 restore. Before concluding from a still-passing result, check that the disable
