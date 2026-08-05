@@ -302,6 +302,7 @@ BEGIN
         completed_at = NOW(),
         result = p_result,
         error_code = NULL,
+        failed_reason = NULL,
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
         terminal_at = NOW(),
@@ -404,6 +405,7 @@ BEGIN
             completed_at = NOW(),
             result = p_result,
             error_code = NULL,
+            failed_reason = NULL,
             finalizing_at = NULL,
             finalizing_by_worker_id = NULL,
             terminal_at = NOW(),
@@ -454,11 +456,12 @@ DROP FUNCTION IF EXISTS horsies_complete_task_fused(
 # ---------------------------------------------------------------------------
 
 # One function for the two locked-failure writers: application failure and
-# worker-level failure differ only in whether a failure reason is carried,
-# and the COALESCE below is the single asymmetric assignment that difference
-# requires. A NULL p_failed_reason means "leave the column as it is", not
-# "clear it" — no requeue path clears failed_reason, so a row can carry one
-# from an earlier attempt that this transition never owned.
+# worker-level failure differ only in whether a failure reason is carried.
+# The assignment is unconditional: the terminal writer owns the complete
+# final-attempt summary, so a NULL p_failed_reason means this final attempt
+# has no failure reason, and any reason a requeued earlier attempt left on
+# the row is cleared rather than carried into the terminal record. Earlier
+# attempts keep their reasons in horsies_task_attempts.
 CREATE_FAIL_LOCKED_TASK_SQL = text(f"""
 CREATE OR REPLACE FUNCTION horsies_fail_locked_task(
     p_task_id varchar,
@@ -480,7 +483,7 @@ BEGIN
         failed_at = NOW(),
         result = p_result,
         error_code = p_error_code,
-        failed_reason = COALESCE(p_failed_reason, failed_reason),
+        failed_reason = p_failed_reason,
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
         terminal_at = NOW(),
@@ -697,6 +700,7 @@ BEGIN
             failed_at = NOW(),
             result = p_result,
             error_code = p_error_code,
+            failed_reason = NULL,
             terminal_at = NOW(),
             terminalization_kind =
                 '{TerminalizationKind.EXPIRE_CLAIMED.value}',
@@ -815,6 +819,7 @@ BEGIN
         failed_at = NOW(),
         result = p_result,
         error_code = p_error_code,
+        failed_reason = NULL,
         terminal_at = NOW(),
         terminalization_kind = '{TerminalizationKind.EXPIRE_PENDING.value}',
         updated_at = NOW()

@@ -160,9 +160,11 @@ RecoveryConfig(
 High-volume queues can carry their own terminal window via
 `queue_terminal_record_retention_hours`. Overrides govern **plain
 (non-workflow) tasks** on the listed queues — workflow-backing task rows
-always age under the global window, so a workflow and its task rows are
-retained as a unit. Queues not listed use the global window; overrides
-apply even when the global window is `None`.
+always use the global window. While a workflow is non-terminal, its backing
+task rows are protected from retention; after the workflow terminates, each
+task row ages from its own terminal timestamp and may expire before the
+workflow record. Queues not listed use the global window; overrides apply even
+when the global window is `None`.
 
 ```python
 RecoveryConfig(

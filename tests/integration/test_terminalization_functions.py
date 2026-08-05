@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 import pytest
 import pytest_asyncio
@@ -121,6 +122,54 @@ async def _seed(
     )
     await session.commit()
     return task_id
+
+
+async def _requeued_after_failed_attempt(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    failed_reason: str,
+) -> None:
+    """Leave the row and history where an automatic retry leaves them.
+
+    The retry path records attempt 1 as FAILED with will_retry and advances
+    retry_count. The requeue statements clear error_code but not
+    failed_reason — that residue is what the terminal writers must not carry
+    into the terminal record.
+    """
+    await session.execute(
+        text("""
+            INSERT INTO horsies_task_attempts (
+                task_id, attempt, outcome, will_retry,
+                started_at, finished_at,
+                error_code, error_message, failed_reason, worker_id
+            )
+            VALUES (
+                :id, 1, 'FAILED', TRUE,
+                NOW() - INTERVAL '2 minutes', NOW() - INTERVAL '1 minute',
+                'TASK_EXCEPTION', 'attempt one raised', :reason, :worker
+            )
+        """),
+        {'id': task_id, 'reason': failed_reason, 'worker': WORKER},
+    )
+    await session.execute(
+        text("""
+            UPDATE horsies_tasks
+            SET retry_count = 1,
+                failed_reason = :reason
+            WHERE id = :id
+        """),
+        {'id': task_id, 'reason': failed_reason},
+    )
+    await session.commit()
+
+
+_ATTEMPT_HISTORY_SQL = text("""
+    SELECT attempt, outcome, failed_reason
+    FROM horsies_task_attempts
+    WHERE task_id = :id
+    ORDER BY attempt
+""")
 
 
 async def _force_terminal(
@@ -289,6 +338,67 @@ class TestAppliedTransitions:
         assert row.terminal_at is not None
         assert row.terminalization_kind == 'COMPLETE_LOCKED'
         assert row.result == '{"ok": 1}'
+
+    @pytest.mark.parametrize(
+        ('command', 'expected_attempts'),
+        [
+            pytest.param(
+                _locked,
+                [(1, 'FAILED', 'attempt one crashed')],
+                id='locked',
+            ),
+            pytest.param(
+                _fused,
+                [
+                    (1, 'FAILED', 'attempt one crashed'),
+                    (2, 'COMPLETED', None),
+                ],
+                id='fused',
+            ),
+        ],
+    )
+    async def test_completion_clears_an_earlier_attempts_failure_summary(
+        self,
+        session: AsyncSession,
+        command: Callable[[str], CompleteLockedTask | CompleteTaskFused],
+        expected_attempts: list[tuple[int, str, str | None]],
+    ) -> None:
+        """Attempt one failed and requeued; attempt two completes.
+
+        Both halves of the invariant: the terminal row contains only the
+        final disposition — the failed_reason the automatic requeue left on
+        the row is cleared beside COMPLETED — and attempt one's history row
+        keeps its reason untouched. The fused operation records the
+        completion as attempt two after attempt one's failure; the locked
+        operation writes no attempt row of its own, so history stays exactly
+        the failed attempt.
+        """
+        task_id = await _seed(session)
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
+        )
+
+        outcome = await apply_async(await session.connection(), command(task_id))
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, error_code, failed_reason
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'COMPLETED'
+        assert row.error_code is None
+        assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == expected_attempts
 
 
 class TestAlreadyApplied:
@@ -585,24 +695,21 @@ class TestFailLocked:
         assert row.error_code == 'TASK_EXCEPTION'
         assert row.result == '{"err": 1}'
 
-    async def test_a_null_reason_leaves_an_earlier_attempts_reason(
+    async def test_a_null_reason_clears_an_earlier_attempts_reason(
         self,
         session: AsyncSession,
     ) -> None:
-        """NULL means "leave the column as it is", not "clear it".
+        """The terminal writer owns the complete final-attempt summary.
 
-        No requeue path clears failed_reason, so a row can carry one from an
-        earlier attempt that this transition never owned.
+        Attempt one failed with a reason and requeued; the final attempt
+        fails with none. A NULL reason means this final attempt has no
+        failure reason: the requeued attempt's residue on the row is cleared,
+        while attempt one's history row keeps its reason untouched.
         """
         task_id = await _seed(session)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks SET failed_reason = 'attempt one crashed'
-                WHERE id = :id
-            """),
-            {'id': task_id},
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
         )
-        await session.commit()
 
         outcome = await apply_async(
             await session.connection(), _fail_locked(task_id, None),
@@ -616,7 +723,14 @@ class TestFailLocked:
                 {'id': task_id},
             )
         ).scalar_one()
-        assert reason == 'attempt one crashed'
+        assert reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
 
     async def test_a_supplied_reason_overwrites(
         self,
@@ -1021,6 +1135,46 @@ class TestExpireOwnedClaim:
         assert row.failed_at is not None
         assert row.error_code == 'TASK_EXPIRED'
 
+    async def test_expiry_clears_an_earlier_attempts_reason(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """A requeued row's stale reason does not sit beside TASK_EXPIRED.
+
+        Attempt one failed with a reason and requeued; the reclaimed row then
+        expires. Expiry has no failure reason of its own, so the requeued
+        attempt's residue on the row is cleared with the transition, while
+        attempt one's history row keeps its reason untouched.
+        """
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=60)
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
+        )
+
+        outcome = await apply_async(await session.connection(), _expire_claim(task_id))
+        await session.commit()
+        assert isinstance(outcome, Applied)
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT error_code, failed_reason
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.error_code == 'TASK_EXPIRED'
+        assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
+
     async def test_deadline_change_while_waiting_on_the_row_is_rechecked(
         self,
         engine: AsyncEngine,
@@ -1254,6 +1408,50 @@ class TestExpirePendingTasks:
         assert all(statuses[task_id] == 'EXPIRED' for task_id in eligible)
         assert statuses[fresh] == 'PENDING'
         assert statuses[undated] == 'PENDING'
+
+    async def test_the_sweep_clears_an_earlier_attempts_reason(
+        self,
+        session: AsyncSession,
+        clean_workflow_tables: None,
+    ) -> None:
+        """A pending row that failed and requeued expires without its old reason.
+
+        Attempt one failed with a reason and the task requeued to PENDING —
+        exactly the state the sweep discovers. The sweep writes TASK_EXPIRED
+        and clears the requeued attempt's residue, while attempt one's
+        history row keeps its reason untouched.
+        """
+        task_id = await _seed(session, status='PENDING')
+        await _deadline(session, task_id, seconds_ago=60)
+        await _requeued_after_failed_attempt(
+            session, task_id, failed_reason='attempt one crashed',
+        )
+
+        outcomes = await apply_batch_async(
+            await session.connection(), _expire_pending(),
+        )
+        await session.commit()
+        assert [o.task_id for o in outcomes] == [task_id]
+
+        row = (
+            await session.execute(
+                text("""
+                    SELECT status, error_code, failed_reason
+                    FROM horsies_tasks WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'EXPIRED'
+        assert row.error_code == 'TASK_EXPIRED'
+        assert row.failed_reason is None
+
+        attempts = (
+            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
+        ).all()
+        assert [tuple(attempt) for attempt in attempts] == [
+            (1, 'FAILED', 'attempt one crashed'),
+        ]
 
     async def test_the_batch_size_bounds_one_pass(
         self,

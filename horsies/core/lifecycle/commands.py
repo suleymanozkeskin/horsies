@@ -91,10 +91,10 @@ class FailLockedTask:
     Covers both application failure and worker-level failure; they differ only
     in whether a failure reason is carried.
 
-    `failed_reason` of None means "leave the column as it is", not "clear it".
-    Only the worker-level path supplies a reason, and no requeue clears the
-    column, so a row can be carrying one from an earlier attempt — assigning
-    NULL over it would erase history this transition never owned.
+    `failed_reason` is assigned unconditionally: the terminal writer owns the
+    complete final-attempt summary. None means this final attempt has no
+    failure reason, and clears any value a requeued earlier attempt left on
+    the row. Per-attempt history lives in `horsies_task_attempts`.
     """
 
     task_id: str

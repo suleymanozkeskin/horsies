@@ -193,7 +193,17 @@ from sqlalchemy import text
 #      function converts them only when constructing its intervals. No table
 #      schema or function argument-type change.
 
-SCHEMA_VERSION = 25
+# v26: the terminal writer owns the complete final-attempt summary. No requeue
+#      path clears failed_reason, so a row that failed, requeued, and then
+#      reached a different terminal outcome carried the earlier attempt's
+#      reason beside that outcome. Five body changes: horsies_fail_locked_task
+#      assigns p_failed_reason unconditionally (the COALESCE preserved a value
+#      this transition never owned), and the completion pair plus the expiry
+#      pair clear failed_reason the way completion already cleared error_code.
+#      Earlier attempts keep their reasons in horsies_task_attempts. No table
+#      schema or function argument-type change.
+
+SCHEMA_VERSION = 26
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

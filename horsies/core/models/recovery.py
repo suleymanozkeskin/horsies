@@ -155,8 +155,8 @@ class RecoveryConfig(BaseModel):
             'Per-queue overrides of terminal_record_retention_hours for plain '
             '(non-workflow) tasks; queues not listed use the global window. '
             'Overrides apply even when the global window is None. '
-            'Workflow-backing task rows always age under the global window so '
-            'a workflow and its task rows are retained as a unit'
+            'Workflow-backing task rows always use the global window; once their '
+            'workflow is terminal, they age from their own terminal timestamp'
         ),
     )
 
