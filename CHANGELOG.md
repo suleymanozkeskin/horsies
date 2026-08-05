@@ -8,6 +8,49 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-05
+
+Task terminalization consolidation. Schema v25.
+
+> **Rolling-upgrade prerequisite:** complete the 0.4.5 rollout on every worker
+> in a deployment before installing 0.4.6. This release adds a constraint that
+> requires terminal tasks to carry a terminal timestamp. The first upgraded
+> process enforces it on new writes as soon as it migrates the shared schema;
+> workers older than 0.4.5 do not set that timestamp, so their terminal
+> transitions would fail. This ordering is per deployment, not a calendar
+> delay. A full-stop deployment may upgrade directly from an earlier version
+> because no older worker remains active when the migration begins.
+
+### Added
+
+- `horsies_tasks.terminalization_kind` records which operation ended each
+  task. Replays are recognized only when the committed operation is equivalent
+  to the requested transition; a terminal row produced by another operation is
+  reported as a conflict rather than inferred from its status alone.
+
+### Changed
+
+- Terminal task transitions are owned by fifteen database functions behind one
+  typed boundary. Callers receive explicit applied, replay, lost-claim,
+  source-conflict, or absent outcomes instead of inferring them from row counts.
+  Refusal diagnostics carry the locked values used to evaluate claim,
+  staleness, deadline, and workflow-link guards.
+- The schema program advances from v17 to v25 in one startup migration,
+  including a one-time backfill of `terminal_at` for existing terminal rows
+  before the terminal-status/timestamp constraint is validated. Installations
+  may upgrade directly from v17 through every intermediate schema step.
+- The measured completion, failure, workflow-success, and expiry paths remained
+  within their declared statement-count, transaction, latency, and WAL budgets;
+  the evidence and conditions are committed under `tests/perf/results`. The
+  orphan, workflow-scoped, child-stop, and administrative-cancellation paths
+  ship under correctness-only verification; their measurements remain
+  available through the manual performance workflow.
+
+### Fixed
+
+- Sub-second task-staleness thresholds are honored at millisecond precision
+  instead of being truncated to whole seconds.
+
 ## [0.4.5] - 2026-08-03
 
 Task lifecycle release. Schema v17 (additive).
