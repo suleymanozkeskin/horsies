@@ -45,6 +45,12 @@ _MICRO_SETTINGS = {
     'full_page_writes': 'off',
     'synchronous_commit': 'off',
 }
+_OPERATIONAL_SETTINGS = {
+    'autovacuum': 'on',
+    'fsync': 'on',
+    'full_page_writes': 'on',
+    'synchronous_commit': 'on',
+}
 
 
 class PayloadShape(StrEnum):
@@ -115,6 +121,62 @@ async def collect_conditions(
     cache_posture: str,
     prepared_posture: str,
 ) -> EvidenceConditions:
+    return await _collect_conditions(
+        connection,
+        commit=commit,
+        run_kind=run_kind,
+        server_image=server_image,
+        host_description=host_description,
+        storage_description=storage_description,
+        demo_quiesced=demo_quiesced,
+        cache_posture=cache_posture,
+        prepared_posture=prepared_posture,
+        expected_settings=_MICRO_SETTINGS,
+        durability_mode='paired-micro',
+    )
+
+
+async def collect_operational_conditions(
+    connection: AsyncConnection,
+    *,
+    commit: str,
+    run_kind: EvidenceRunKind,
+    server_image: str,
+    host_description: str,
+    storage_description: str,
+    demo_quiesced: bool,
+    cache_posture: str,
+    prepared_posture: str,
+) -> EvidenceConditions:
+    return await _collect_conditions(
+        connection,
+        commit=commit,
+        run_kind=run_kind,
+        server_image=server_image,
+        host_description=host_description,
+        storage_description=storage_description,
+        demo_quiesced=demo_quiesced,
+        cache_posture=cache_posture,
+        prepared_posture=prepared_posture,
+        expected_settings=_OPERATIONAL_SETTINGS,
+        durability_mode='operational',
+    )
+
+
+async def _collect_conditions(
+    connection: AsyncConnection,
+    *,
+    commit: str,
+    run_kind: EvidenceRunKind,
+    server_image: str,
+    host_description: str,
+    storage_description: str,
+    demo_quiesced: bool,
+    cache_posture: str,
+    prepared_posture: str,
+    expected_settings: dict[str, str],
+    durability_mode: str,
+) -> EvidenceConditions:
     for label, value in (
         ('commit', commit),
         ('server image', server_image),
@@ -139,7 +201,22 @@ async def collect_conditions(
                            AS synchronous_commit,
                        current_setting('shared_buffers') AS shared_buffers,
                        current_setting('effective_cache_size')
-                           AS effective_cache_size
+                           AS effective_cache_size,
+                       current_setting('autovacuum_vacuum_threshold')
+                           AS autovacuum_vacuum_threshold,
+                       current_setting('autovacuum_vacuum_scale_factor')
+                           AS autovacuum_vacuum_scale_factor,
+                       current_setting('autovacuum_analyze_threshold')
+                           AS autovacuum_analyze_threshold,
+                       current_setting('autovacuum_analyze_scale_factor')
+                           AS autovacuum_analyze_scale_factor,
+                       current_setting('autovacuum_naptime')
+                           AS autovacuum_naptime,
+                       current_setting('autovacuum_max_workers')
+                           AS autovacuum_max_workers,
+                       current_setting('checkpoint_timeout')
+                           AS checkpoint_timeout,
+                       current_setting('max_wal_size') AS max_wal_size
                 """
             )
         )
@@ -151,10 +228,18 @@ async def collect_conditions(
         'synchronous_commit': row.synchronous_commit,
         'shared_buffers': row.shared_buffers,
         'effective_cache_size': row.effective_cache_size,
+        'autovacuum_vacuum_threshold': row.autovacuum_vacuum_threshold,
+        'autovacuum_vacuum_scale_factor': row.autovacuum_vacuum_scale_factor,
+        'autovacuum_analyze_threshold': row.autovacuum_analyze_threshold,
+        'autovacuum_analyze_scale_factor': row.autovacuum_analyze_scale_factor,
+        'autovacuum_naptime': row.autovacuum_naptime,
+        'autovacuum_max_workers': row.autovacuum_max_workers,
+        'checkpoint_timeout': row.checkpoint_timeout,
+        'max_wal_size': row.max_wal_size,
     }
     violations = {
         name: (expected, settings[name])
-        for name, expected in _MICRO_SETTINGS.items()
+        for name, expected in expected_settings.items()
         if settings[name] != expected
     }
     if violations:
@@ -162,9 +247,13 @@ async def collect_conditions(
             f'{name} expected {expected}, got {observed}'
             for name, (expected, observed) in sorted(violations.items())
         )
-        raise RuntimeError(f'micro evidence conditions do not match: {detail}')
+        raise RuntimeError(
+            f'{durability_mode} evidence conditions do not match: {detail}'
+        )
     if not demo_quiesced:
-        raise RuntimeError('micro evidence requires an explicitly quiesced host')
+        raise RuntimeError(
+            f'{durability_mode} evidence requires an explicitly quiesced host'
+        )
     return EvidenceConditions(
         commit=commit,
         run_kind=run_kind,
@@ -178,7 +267,7 @@ async def collect_conditions(
         host_description=host_description,
         storage_description=storage_description,
         demo_quiesced=demo_quiesced,
-        durability_mode='paired-micro',
+        durability_mode=durability_mode,
         cache_posture=cache_posture,
         prepared_posture=prepared_posture,
     )
