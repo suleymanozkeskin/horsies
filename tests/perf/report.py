@@ -22,7 +22,7 @@ from tests.perf.runner import (
     Measurement,
     RunResult,
 )
-from tests.perf.statistics import Comparison
+from tests.perf.statistics import Comparison, ThroughputComparison
 
 
 def render_summary(result: RunResult) -> str:
@@ -57,13 +57,18 @@ def render_summary(result: RunResult) -> str:
         f'| bootstrap resamples | {conditions.resamples} |',
         f'| bootstrap seed | {conditions.seed} |',
         f'| demo units quiesced | {_yes_no(conditions.demo_quiesced)} |',
-        '',
-        '## Latency',
-        '',
-        '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
-        '|---|---|---|---|---|---|---|',
     ]
-    lines += [_latency_row(c) for c in result.comparisons]
+    if result.throughput is None:
+        lines += [
+            '',
+            '## Latency',
+            '',
+            '| percentile | baseline | candidate | delta | 95% interval | budget | verdict |',
+            '|---|---|---|---|---|---|---|',
+            *[_latency_row(c) for c in result.comparisons],
+        ]
+    else:
+        lines += _batch_performance(result.throughput, result.comparisons)
     if result.plans is not None:
         lines += [
             '',
@@ -126,6 +131,14 @@ def render_raw(result: RunResult) -> str:
             'comparisons': [
                 {**asdict(c), 'verdict': c.verdict.value} for c in result.comparisons
             ],
+            'throughput': (
+                {
+                    **asdict(result.throughput),
+                    'verdict': result.throughput.verdict.value,
+                }
+                if result.throughput is not None
+                else None
+            ),
             'plans': asdict(result.plans) if result.plans is not None else None,
             'contract_violations': list(result.contract_violations),
             'verdict': result.verdict.value,
@@ -152,6 +165,41 @@ def _latency_row(comparison: Comparison) -> str:
         f'| {comparison.limit_ms:.3f} ms '
         f'| {comparison.verdict.value} |'
     )
+
+
+def _batch_performance(
+    throughput: ThroughputComparison,
+    durations: list[Comparison],
+) -> list[str]:
+    if len(durations) != 1 or durations[0].percentile != 95.0:
+        raise RuntimeError('a batch result requires exactly one p95 duration')
+    duration = durations[0]
+    return [
+        '',
+        '## Batch performance',
+        '',
+        '| metric | baseline | candidate | comparison | 95% interval | budget | verdict |',
+        '|---|---|---|---|---|---|---|',
+        '| throughput '
+        f'| {throughput.baseline_rows_per_second:.0f} rows/s '
+        f'| {throughput.candidate_rows_per_second:.0f} rows/s '
+        f'| {throughput.ratio:.3f}x '
+        f'| {throughput.ci_low_ratio:.3f}x to '
+        f'{throughput.ci_high_ratio:.3f}x '
+        f'| >= {throughput.minimum_ratio:.2f}x '
+        f'| {throughput.verdict.value} |',
+        '| p95 statement-to-commit duration '
+        f'| {duration.baseline_ms:.3f} ms '
+        f'| {duration.candidate_ms:.3f} ms '
+        f'| {duration.delta_ms:+.3f} ms '
+        f'| {duration.ci_low_ms:+.3f} to {duration.ci_high_ms:+.3f} ms '
+        f'| {duration.limit_ms:.3f} ms '
+        f'| {duration.verdict.value} |',
+        '',
+        'The duration envelope starts before the statement can acquire its '
+        'first row lock and ends after commit releases every lock. It includes '
+        'result decoding and outcome logging performed before commit.',
+    ]
 
 
 def _counts_rows(baseline: Measurement, candidate: Measurement) -> list[str]:

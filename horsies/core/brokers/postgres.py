@@ -1,7 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, uuid
-from typing import Any, Optional, TYPE_CHECKING, cast
+from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -29,6 +29,19 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.lifecycle.commands import (
+    CancelOrphanedTasks,
+    ExpirePendingTasks,
+    FailStaleTask,
+)
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import apply_async, apply_batch_async
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     DatabasePing,
@@ -359,64 +372,13 @@ SELECT_STALE_TASK_FOR_UPDATE_SQL = text("""
     FOR UPDATE OF t
 """)
 
-MARK_STALE_TASK_FAILED_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'FAILED',
-        failed_at = NOW(),
-        failed_reason = :failed_reason,
-        result = :result,
-        error_code = :error_code,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE t.id = :task_id
-      AND t.status = 'RUNNING'
-      AND t.started_at IS NOT NULL
-      AND (
-          t.finalizing_at IS NULL
-          OR t.finalizing_at < NOW() - CAST(:finalizing_stale_threshold || ' seconds' AS INTERVAL)
-      )
-      AND COALESCE(
-          (
-              SELECT h.sent_at
-              FROM horsies_heartbeats h
-              WHERE h.task_id = t.id AND h.role = 'runner'
-              ORDER BY h.sent_at DESC
-              LIMIT 1
-          ),
-          t.started_at
-      ) < NOW() - CAST(:stale_threshold || ' seconds' AS INTERVAL)
-    RETURNING t.id
-""")
-
-# Batched: a mass expiry as one statement is a single long transaction whose
-# commit flushes two NOTIFYs per row at once, overflowing listener queues.
-# SKIP LOCKED steps around rows a concurrent claim pass holds; the claim
-# itself re-checks good_until, so the race resolves consistently either way.
-EXPIRE_PENDING_TASKS_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'EXPIRED',
-        failed_at = NOW(),
-        result = :result,
-        error_code = :error_code,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM (
-        SELECT id FROM horsies_tasks
-        WHERE status = 'PENDING'
-          AND good_until IS NOT NULL
-          AND good_until <= NOW()
-        ORDER BY good_until ASC
-        LIMIT :batch_size
-        FOR UPDATE SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
-""")
-
 _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
+_ORPHAN_BATCH_SIZE = 500
+# Match expiry's bounded drain: each transaction is small and one reaper pass
+# cannot run forever if orphan production remains above its drain rate.
+_ORPHAN_MAX_BATCHES_PER_PASS = 200
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     SELECT task_id, attempt, outcome, will_retry,
@@ -485,43 +447,6 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
                   WHERE wt.task_id = t2.id
                     AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
               )
-          )
-        FOR UPDATE OF t2 SKIP LOCKED
-    ) s
-    WHERE t.id = s.id
-""")
-
-
-# Cancel orphaned workflow tasks the reaper finds stuck non-terminal: a
-# workflow task (is_workflow_task) with no workflow_task row in a runnable
-# status (linkage missing or terminal). These can never progress — the child's
-# workflow_task->RUNNING transition always fails — so they are made terminal
-# (CANCELLED) and their claim released, which frees in-flight budget and lets
-# retention sweep them. RUNNING is excluded (handled by auto_fail_stale_running
-# and a real orphan never reaches RUNNING). FOR UPDATE SKIP LOCKED avoids racing
-# an in-flight dispatch transaction.
-TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL = text("""
-    UPDATE horsies_tasks AS t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = 'WORKFLOW_CHECK_FAILED',
-        failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM (
-        SELECT t2.id
-        FROM horsies_tasks t2
-        WHERE t2.is_workflow_task = TRUE
-          AND t2.status IN ('CLAIMED', 'PENDING', 'READY', 'ENQUEUED')
-          AND NOT EXISTS (
-              SELECT 1 FROM horsies_workflow_tasks wt
-              WHERE wt.task_id = t2.id
-                AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
           )
         FOR UPDATE OF t2 SKIP LOCKED
     ) s
@@ -2049,21 +1974,37 @@ class PostgresBroker:
                                     **attempt_worker,
                                 },
                             )
-                            mark_failed_res = await session.execute(
-                                MARK_STALE_TASK_FAILED_SQL,
-                                {
-                                    'task_id': task_id,
-                                    'failed_reason': failed_reason_str,
-                                    'result': result_json,
-                                    'error_code': OperationalErrorCode.WORKER_CRASHED.value,
-                                    'stale_threshold': stale_threshold_seconds,
-                                    'finalizing_stale_threshold': finalizing_stale_threshold_seconds,
-                                },
+                            terminalization = await apply_async(
+                                await session.connection(),
+                                FailStaleTask(
+                                    task_id=task_id,
+                                    stale_after_ms=stale_threshold_ms,
+                                    finalizing_stale_after_ms=(
+                                        finalizing_stale_threshold_ms
+                                    ),
+                                    result_json=result_json,
+                                    error_code=(
+                                        OperationalErrorCode.WORKER_CRASHED.value
+                                    ),
+                                    failed_reason=failed_reason_str,
+                                ),
                             )
-                            if mark_failed_res.fetchone() is None:
-                                await session.rollback()
-                                continue
-                            await session.commit()
+                            match terminalization:
+                                case Applied():
+                                    await session.commit()
+                                case (
+                                    AlreadyApplied()
+                                    | LostClaim()
+                                    | SourceStateConflict()
+                                    | TaskAbsent()
+                                ):
+                                    # The attempt and transition are one unit.
+                                    # A refusal must discard the attempt written
+                                    # immediately above as well.
+                                    await session.rollback()
+                                    continue
+                                case _ as unreachable:
+                                    assert_never(unreachable)
 
                         processed += 1
                 except Exception as task_exc:
@@ -2114,16 +2055,33 @@ class PostgresBroker:
             total_expired = 0
             for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
                 async with self.session_factory() as session:
-                    res = await session.execute(
-                        EXPIRE_PENDING_TASKS_SQL,
-                        {
-                            'result': result_json,
-                            'error_code': OutcomeCode.TASK_EXPIRED.value,
-                            'batch_size': _EXPIRE_BATCH_SIZE,
-                        },
+                    outcomes = await apply_batch_async(
+                        await session.connection(),
+                        ExpirePendingTasks(
+                            batch_size=_EXPIRE_BATCH_SIZE,
+                            result_json=result_json,
+                            error_code=OutcomeCode.TASK_EXPIRED.value,
+                        ),
                     )
+                    for outcome in outcomes:
+                        match outcome:
+                            case Applied():
+                                continue
+                            case (
+                                AlreadyApplied()
+                                | LostClaim()
+                                | SourceStateConflict()
+                                | TaskAbsent()
+                            ):
+                                raise RuntimeError(
+                                    'pending expiry operation returned '
+                                    f'{type(outcome).__name__}; discovery batches '
+                                    'report transitioned rows only'
+                                )
+                            case _ as unreachable:
+                                assert_never(unreachable)
                     await session.commit()
-                batch_expired = int(getattr(res, 'rowcount', 0) or 0)
+                batch_expired = len(outcomes)
                 total_expired += batch_expired
                 if batch_expired < _EXPIRE_BATCH_SIZE:
                     return Ok(total_expired)
@@ -2169,12 +2127,42 @@ class PostgresBroker:
         them CANCELLED releases the claim and lets retention sweep them.
         """
         try:
-            async with self.session_factory() as session:
-                result = await session.execute(
-                    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
-                )
-                await session.commit()
-                return Ok(getattr(result, 'rowcount', 0))
+            total_terminated = 0
+            for _ in range(_ORPHAN_MAX_BATCHES_PER_PASS):
+                async with self.session_factory() as session:
+                    outcomes = await apply_batch_async(
+                        await session.connection(),
+                        CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
+                    )
+                    for outcome in outcomes:
+                        match outcome:
+                            case Applied():
+                                continue
+                            case (
+                                AlreadyApplied()
+                                | LostClaim()
+                                | SourceStateConflict()
+                                | TaskAbsent()
+                            ):
+                                raise RuntimeError(
+                                    'orphan sweep returned '
+                                    f'{type(outcome).__name__}; discovery '
+                                    'batches report transitioned rows only'
+                                )
+                            case _ as unreachable:
+                                assert_never(unreachable)
+                    await session.commit()
+                batch_terminated = len(outcomes)
+                total_terminated += batch_terminated
+                if batch_terminated < _ORPHAN_BATCH_SIZE:
+                    return Ok(total_terminated)
+            self.logger.warning(
+                'terminate_orphaned_workflow_tasks reached the per-pass '
+                'batch cap after terminating %s task(s); the remainder '
+                'will be handled next interval',
+                total_terminated,
+            )
+            return Ok(total_terminated)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,

@@ -112,8 +112,8 @@ _FAIL_LOCKED_TASK_SQL = text("""
 _FAIL_STALE_TASK_SQL = text("""
     SELECT * FROM horsies_fail_stale_task(
         CAST(:task_id AS VARCHAR),
-        CAST(:stale_after_seconds AS INTEGER),
-        CAST(:finalizing_stale_after_seconds AS INTEGER),
+        CAST(:stale_after_ms AS INTEGER),
+        CAST(:finalizing_stale_after_ms AS INTEGER),
         :result, :error_code, :failed_reason
     )
 """)
@@ -245,16 +245,16 @@ def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
             }
         case FailStaleTask(
             task_id=task_id,
-            stale_after_seconds=stale_after_seconds,
-            finalizing_stale_after_seconds=finalizing_stale_after_seconds,
+            stale_after_ms=stale_after_ms,
+            finalizing_stale_after_ms=finalizing_stale_after_ms,
             result_json=result,
             error_code=error_code,
             failed_reason=failed_reason,
         ):
             return _FAIL_STALE_TASK_SQL, {
                 'task_id': task_id,
-                'stale_after_seconds': stale_after_seconds,
-                'finalizing_stale_after_seconds': finalizing_stale_after_seconds,
+                'stale_after_ms': stale_after_ms,
+                'finalizing_stale_after_ms': finalizing_stale_after_ms,
                 'result': result,
                 'error_code': error_code,
                 'failed_reason': failed_reason,

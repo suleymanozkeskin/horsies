@@ -59,6 +59,19 @@ class Comparison:
     verdict: Verdict
 
 
+@dataclass(frozen=True, slots=True)
+class ThroughputComparison:
+    """Rows per second and the candidate/baseline ratio for a batch path."""
+
+    baseline_rows_per_second: float
+    candidate_rows_per_second: float
+    ratio: float
+    ci_low_ratio: float
+    ci_high_ratio: float
+    minimum_ratio: float
+    verdict: Verdict
+
+
 def percentile_ms(samples: list[float], percentile: float) -> float:
     """Nearest-rank percentile of already-collected samples.
 
@@ -118,6 +131,87 @@ def compare(
         limit_ms=limit_ms,
         verdict=_verdict(ci_low_ms, ci_high_ms, limit_ms),
     )
+
+
+def compare_throughput(
+    *,
+    baseline_ms: list[float],
+    candidate_ms: list[float],
+    rows_per_operation: int,
+    minimum_ratio: float,
+    resamples: int,
+    seed: int,
+) -> ThroughputComparison:
+    """Bootstrap candidate/baseline batch throughput without normality.
+
+    Every sample is one fixed-size batch's statement-through-commit envelope.
+    Throughput is therefore total semantic rows divided by total envelope time;
+    resampling those durations preserves the workload while estimating the
+    uncertainty of the ratio.
+    """
+    if resamples < 1:
+        raise ValueError('bootstrap needs at least one resample')
+    if rows_per_operation < 1:
+        raise ValueError('throughput needs at least one row per operation')
+    if minimum_ratio <= 0:
+        raise ValueError('minimum throughput ratio must be positive')
+    _require_positive_durations(baseline_ms)
+    _require_positive_durations(candidate_ms)
+
+    baseline_rows_per_second = _throughput(
+        baseline_ms,
+        rows_per_operation=rows_per_operation,
+    )
+    candidate_rows_per_second = _throughput(
+        candidate_ms,
+        rows_per_operation=rows_per_operation,
+    )
+    ratio = candidate_rows_per_second / baseline_rows_per_second
+
+    rng = random.Random(seed)
+    ratios: list[float] = []
+    for _ in range(resamples):
+        drawn_baseline = rng.choices(baseline_ms, k=len(baseline_ms))
+        drawn_candidate = rng.choices(candidate_ms, k=len(candidate_ms))
+        baseline_rate = _throughput(
+            drawn_baseline,
+            rows_per_operation=rows_per_operation,
+        )
+        candidate_rate = _throughput(
+            drawn_candidate,
+            rows_per_operation=rows_per_operation,
+        )
+        ratios.append(candidate_rate / baseline_rate)
+    ratios.sort()
+    ci_low_ratio = ratios[max(0, round(0.025 * len(ratios)) - 1)]
+    ci_high_ratio = ratios[min(len(ratios) - 1, round(0.975 * len(ratios)) - 1)]
+
+    if ci_low_ratio >= minimum_ratio:
+        verdict = Verdict.PASS
+    elif ci_high_ratio < minimum_ratio:
+        verdict = Verdict.FAIL
+    else:
+        verdict = Verdict.INCONCLUSIVE
+    return ThroughputComparison(
+        baseline_rows_per_second=baseline_rows_per_second,
+        candidate_rows_per_second=candidate_rows_per_second,
+        ratio=ratio,
+        ci_low_ratio=ci_low_ratio,
+        ci_high_ratio=ci_high_ratio,
+        minimum_ratio=minimum_ratio,
+        verdict=verdict,
+    )
+
+
+def _throughput(samples_ms: list[float], *, rows_per_operation: int) -> float:
+    return rows_per_operation * len(samples_ms) * 1_000 / sum(samples_ms)
+
+
+def _require_positive_durations(samples_ms: list[float]) -> None:
+    if not samples_ms:
+        raise ValueError('throughput of no samples')
+    if any(sample <= 0 for sample in samples_ms):
+        raise ValueError('throughput durations must be positive')
 
 
 def _verdict(ci_low_ms: float, ci_high_ms: float, limit_ms: float) -> Verdict:

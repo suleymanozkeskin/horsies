@@ -657,30 +657,59 @@ class TestHandleWorkflowStopBeforeStart:
     """_handle_workflow_stop_before_start for all status branches."""
 
     def test_cancelled_marks_terminal(self) -> None:
+        from horsies.core.lifecycle.commands import CancelOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
-        )
+
+        def _after_node_update(*_args: Any) -> MagicMock:
+            assert len(cursor.queries) == 1
+            assert "SET status = 'SKIPPED'" in cursor.queries[0][0]
+            return MagicMock(spec=Applied)
+
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            side_effect=_after_node_update,
+        ) as apply:
+            result = _handle_workflow_stop_before_start(
+                cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]
+            )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
         assert "SET status = 'SKIPPED'" in sql_blob
-        assert "SET status = 'CANCELLED'" in sql_blob
+        command = apply.call_args.args[1]
+        assert isinstance(command, CancelOwnedNode)
+        assert command.task_id == 'task-1'
+        assert command.accepts_requeued_pending is True
 
     def test_paused_cancels_claimed_task_and_resets_node(self) -> None:
+        from horsies.core.lifecycle.commands import AbandonOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        result = _handle_workflow_stop_before_start(
-            cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
-        )
+
+        def _before_node_update(*_args: Any) -> MagicMock:
+            assert cursor.queries == []
+            return MagicMock(spec=Applied)
+
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            side_effect=_before_node_update,
+        ) as apply:
+            result = _handle_workflow_stop_before_start(
+                cursor, conn, 'task-2', 'PAUSED', 'worker-1',  # type: ignore[arg-type]
+            )
         assert result == (False, '', 'WORKFLOW_STOPPED')
         assert conn.commits == 1
         sql_blob = '\n'.join(q[0] for q in cursor.queries)
-        assert "SET status = 'CANCELLED'" in sql_blob
-        assert "error_code = 'TASK_CANCELLED'" in sql_blob
         assert "SET status = 'READY'" in sql_blob
         assert "status IN ('ENQUEUED', 'RUNNING')" in sql_blob
+        command = apply.call_args.args[1]
+        assert isinstance(command, AbandonOwnedNode)
+        assert command.task_id == 'task-2'
 
     def test_unknown_status_returns_workflow_check_failed(self) -> None:
         cursor = _FakeCursor()
@@ -704,19 +733,19 @@ class TestHandleWorkflowStopBeforeStart:
         for status in ('PAUSED', 'CANCELLED'):
             cursor = _FakeCursor()
             conn = _FakeConn(cursor)
-            _handle_workflow_stop_before_start(
-                cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
-                generation,
-            )
-            task_updates = [
-                q for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
-            ]
-            assert len(task_updates) == 1, status
-            sql, params = task_updates[0][0], task_updates[0][1]
-            assert 'claimed_by_worker_id = %s' in sql, status
-            assert 'claimed_at = %s::timestamptz' in sql, status
-            assert 'worker-7' in params, status
-            assert generation in params, status
+            from horsies.core.lifecycle.outcomes import Applied
+
+            with patch(
+                'horsies.core.worker.child_runner.apply_sync',
+                return_value=MagicMock(spec=Applied),
+            ) as apply:
+                _handle_workflow_stop_before_start(
+                    cursor, conn, 'task-4', status, 'worker-7',  # type: ignore[arg-type]
+                    generation,
+                )
+            command = apply.call_args.args[1]
+            assert command.fence.worker_id == 'worker-7', status
+            assert command.fence.claimed_at == generation, status
 
     def test_cancelled_branch_still_cancels_a_requeued_pending_row(self) -> None:
         """PENDING has no claim, so the generation fence must not gate it.
@@ -725,15 +754,21 @@ class TestHandleWorkflowStopBeforeStart:
         claimed_by_worker_id. Gating it on the worker would silently stop
         cancelling tasks whose workflow is already CANCELLED.
         """
+        from horsies.core.lifecycle.commands import CancelOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
+
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
-        _handle_workflow_stop_before_start(
-            cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
-        )
-        task_sql = next(
-            q[0] for q in cursor.queries if 'UPDATE horsies_tasks' in q[0]
-        )
-        assert "OR status = 'PENDING'" in task_sql
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=Applied),
+        ) as apply:
+            _handle_workflow_stop_before_start(
+                cursor, conn, 'task-5', 'CANCELLED', 'worker-7',  # type: ignore[arg-type]
+            )
+        command = apply.call_args.args[1]
+        assert isinstance(command, CancelOwnedNode)
+        assert command.accepts_requeued_pending is True
 
 
 # ===================================================================
@@ -1481,6 +1516,88 @@ class TestDedupeAndBuildSysPath:
 
 
 # ===================================================================
+# L. Pre-start expiry operation boundary
+# ===================================================================
+
+
+@pytest.mark.unit
+class TestExpireClaimedBeforeStart:
+    """The child maps typed expiry outcomes to its existing return contract."""
+
+    @pytest.mark.parametrize('outcome_type', ['Applied', 'AlreadyApplied'])
+    def test_applied_or_replayed_expiry_commits_and_returns_expired(
+        self,
+        outcome_type: str,
+    ) -> None:
+        from horsies.core.lifecycle.commands import ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import AlreadyApplied, Applied
+        from horsies.core.worker.child_runner import (
+            _expire_claimed_task_before_start,
+        )
+
+        outcomes = {'Applied': Applied, 'AlreadyApplied': AlreadyApplied}
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=outcomes[outcome_type]),
+        ) as apply:
+            result = _expire_claimed_task_before_start(
+                cursor,
+                conn,
+                'task-1',
+                'worker-A',
+            )
+
+        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert conn.commits == 1
+        command = apply.call_args.args[1]
+        assert isinstance(command, ExpireOwnedClaim)
+        assert command.task_id == 'task-1'
+        assert command.fence.worker_id == 'worker-A'
+        assert command.error_code == OutcomeCode.TASK_EXPIRED.value
+        assert OutcomeCode.TASK_EXPIRED.value in command.result_json
+
+    @pytest.mark.parametrize(
+        'outcome_type',
+        ['LostClaim', 'SourceStateConflict', 'TaskAbsent'],
+    )
+    def test_refusal_or_absence_falls_through_to_existing_classification(
+        self,
+        outcome_type: str,
+    ) -> None:
+        from horsies.core.lifecycle.outcomes import (
+            LostClaim,
+            SourceStateConflict,
+            TaskAbsent,
+        )
+        from horsies.core.worker.child_runner import (
+            _expire_claimed_task_before_start,
+        )
+
+        outcomes = {
+            'LostClaim': LostClaim,
+            'SourceStateConflict': SourceStateConflict,
+            'TaskAbsent': TaskAbsent,
+        }
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=outcomes[outcome_type]),
+        ):
+            result = _expire_claimed_task_before_start(
+                cursor,
+                conn,
+                'task-1',
+                'worker-A',
+            )
+
+        assert result is None
+        assert conn.commits == 0
+
+
+# ===================================================================
 # M. Ownership lost → workflow PAUSED/CANCELLED sub-branch
 # ===================================================================
 
@@ -1491,6 +1608,8 @@ class TestOwnershipLostWorkflowBranch:
 
     def test_ownership_lost_workflow_paused_dispatches(self) -> None:
         """UPDATE returns None, workflow is PAUSED → handler called."""
+        from horsies.core.lifecycle.commands import AbandonOwnedNode
+        from horsies.core.lifecycle.outcomes import Applied
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
         )
@@ -1503,8 +1622,6 @@ class TestOwnershipLostWorkflowBranch:
                 call_count += 1
                 if call_count == 1:
                     return None  # UPDATE RETURNING → None (ownership lost)
-                if call_count == 2:
-                    return None  # expire-before-start UPDATE → no match
                 # Workflow status check → PAUSED
                 return _FakeRow(status='PAUSED')
 
@@ -1516,14 +1633,23 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
+        ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ):
+        ), patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=Applied),
+        ) as apply:
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
         assert result is not None
         ok, _, reason = result
         assert ok is False
         assert reason == 'WORKFLOW_STOPPED'
+        command = apply.call_args.args[1]
+        assert isinstance(command, AbandonOwnedNode)
+        assert command.task_id == 'task-1'
 
     def test_ownership_lost_due_to_good_until_marks_expired(self) -> None:
         """UPDATE blocked by good_until at actual execution start marks EXPIRED."""
@@ -1531,25 +1657,21 @@ class TestOwnershipLostWorkflowBranch:
             _confirm_ownership_and_set_running,
         )
 
-        class _MultiReturnCursor(_FakeCursor):
-            def __init__(self) -> None:
-                super().__init__()
-                self._returns = [
-                    None,  # RUNNING UPDATE rejected
-                    _FakeRow(id='task-1'),  # EXPIRED UPDATE succeeded
-                ]
-
-            def fetchone(self) -> Any:
-                assert self._returns, 'unexpected extra fetchone() call'
-                return self._returns.pop(0)
-
-        cursor = _MultiReturnCursor()
+        cursor = _FakeCursor(fetchone_return=None)
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
+        expired = (False, '', OutcomeCode.TASK_EXPIRED.value)
+
+        def expire_and_commit(*args: Any) -> tuple[bool, str, str]:  # noqa: ARG001
+            conn.commit()
+            return expired
 
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            side_effect=expire_and_commit,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as update_workflow_task:
@@ -1561,8 +1683,6 @@ class TestOwnershipLostWorkflowBranch:
         update_workflow_task.assert_not_called()
         executed_sql = '\n'.join(sql for sql, _ in cursor.queries)
         assert 'good_until IS NULL OR good_until > now()' in executed_sql
-        assert "SET status = 'EXPIRED'" in executed_sql
-        assert 'claimed_by_worker_id = NULL' not in executed_sql
 
     def test_expire_race_falls_back_to_claim_lost(self) -> None:
         """If the expiry UPDATE matches no row, ownership loss is still reported."""
@@ -1575,7 +1695,6 @@ class TestOwnershipLostWorkflowBranch:
                 super().__init__()
                 self._returns = [
                     None,  # RUNNING UPDATE rejected
-                    None,  # EXPIRED UPDATE matched no row
                     None,  # workflow status check: not PAUSED/CANCELLED
                 ]
 
@@ -1590,6 +1709,9 @@ class TestOwnershipLostWorkflowBranch:
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as update_workflow_task:

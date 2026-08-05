@@ -37,15 +37,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from horsies.core.models.workflow.handle import (
-    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+from horsies.core.lifecycle.commands import (
+    AbandonNodesOfPausedWorkflows,
+    CancelNodesOfCancelledWorkflow,
 )
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.worker.child_runner import _handle_workflow_stop_before_start
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
-from horsies.core.workflows.sql import (
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-)
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
@@ -155,6 +154,37 @@ async def _status_of(session: AsyncSession, task_id: str) -> str:
     ).fetchone()
     assert row is not None, f'task {task_id} vanished'
     return str(row[0])
+
+
+async def _terminalization_kind_of(
+    session: AsyncSession,
+    task_id: str,
+) -> str | None:
+    return (
+        await session.execute(
+            text(
+                'SELECT terminalization_kind FROM horsies_tasks '
+                'WHERE id = :id'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+
+
+async def _workflow_node_state(
+    session: AsyncSession,
+    workflow_id: str,
+) -> tuple[str, str | None]:
+    row = (
+        await session.execute(
+            text(
+                'SELECT status, task_id FROM horsies_workflow_tasks '
+                'WHERE workflow_id = :workflow_id'
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).one()
+    return str(row.status), row.task_id
 
 
 def _dispatch_rows(*pairs: tuple[str, datetime | None]) -> list[dict[str, Any]]:
@@ -375,8 +405,29 @@ def _psycopg_dsn(db_url: str) -> str:
 
 
 @pytest.mark.parametrize(
-    ('wf_status', 'terminal_expected'),
-    [('PAUSED', 'CANCELLED'), ('CANCELLED', 'CANCELLED')],
+    (
+        'wf_status',
+        'terminal_expected',
+        'kind_expected',
+        'stale_node_status',
+        'stale_node_detached',
+    ),
+    [
+        (
+            'PAUSED',
+            'CANCELLED',
+            'PAUSE_ABANDON_CLAIM',
+            'READY',
+            True,
+        ),
+        (
+            'CANCELLED',
+            'CANCELLED',
+            'WORKFLOW_CANCEL_CLAIM',
+            'SKIPPED',
+            False,
+        ),
+    ],
 )
 @pytest.mark.asyncio(loop_scope='function')
 async def test_child_prestart_fences_on_claim_generation(
@@ -385,12 +436,19 @@ async def test_child_prestart_fences_on_claim_generation(
     clean_workflow_tables: None,  # noqa: ARG001
     wf_status: str,
     terminal_expected: str,
+    kind_expected: str,
+    stale_node_status: str,
+    stale_node_detached: bool,
 ) -> None:
     """T10/T11 refuse a generation the child was not dispatched from."""
     dispatched, reclaimed = _generations()
     stale_id = await _insert_claimed_task(session, claimed_at=reclaimed)
     fresh_id = await _insert_claimed_task(session, claimed_at=dispatched)
-    await _link_to_workflow(session, stale_id, wf_status=wf_status)
+    stale_workflow_id = await _link_to_workflow(
+        session,
+        stale_id,
+        wf_status=wf_status,
+    )
     await _link_to_workflow(session, fresh_id, wf_status=wf_status)
     await session.commit()
 
@@ -406,6 +464,14 @@ async def test_child_prestart_fences_on_claim_generation(
     await session.commit()
     assert await _status_of(session, stale_id) == 'CLAIMED'
     assert await _status_of(session, fresh_id) == terminal_expected
+    assert await _terminalization_kind_of(session, stale_id) is None
+    assert await _terminalization_kind_of(session, fresh_id) == kind_expected
+    observed_node_status, observed_node_task_id = await _workflow_node_state(
+        session,
+        stale_workflow_id,
+    )
+    assert observed_node_status == stale_node_status
+    assert (observed_node_task_id is None) is stale_node_detached
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -457,9 +523,9 @@ async def test_t09_skips_tasks_whose_workflow_resumed(
         text("UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = :id"),
         {'id': wf_id},
     )
-    await session.execute(
-        CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-        {'workflow_ids': [wf_id]},
+    await apply_batch_async(
+        await session.connection(),
+        AbandonNodesOfPausedWorkflows(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -482,9 +548,9 @@ async def test_t09_abandons_a_claim_taken_while_still_paused(
     wf_id = await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()
 
-    await session.execute(
-        CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-        {'workflow_ids': [wf_id]},
+    await apply_batch_async(
+        await session.connection(),
+        AbandonNodesOfPausedWorkflows(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -502,9 +568,9 @@ async def test_t16_skips_tasks_whose_workflow_is_not_cancelled(
     wf_id = await _link_to_workflow(session, task_id, wf_status='RUNNING')
     await session.commit()
 
-    await session.execute(
-        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-        {'wf_id': wf_id},
+    await apply_batch_async(
+        await session.connection(),
+        CancelNodesOfCancelledWorkflow(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -521,9 +587,9 @@ async def test_t16_cancels_whatever_claim_exists_under_a_cancelled_workflow(
     wf_id = await _link_to_workflow(session, task_id, wf_status='CANCELLED')
     await session.commit()
 
-    await session.execute(
-        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-        {'wf_id': wf_id},
+    await apply_batch_async(
+        await session.connection(),
+        CancelNodesOfCancelledWorkflow(workflow_ids=(wf_id,)),
     )
     await session.commit()
 

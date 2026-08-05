@@ -313,7 +313,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
     TerminalWriter(
         writer_id='T12',
         module='horsies/core/worker/child_runner.py',
-        statement='_expire_claimed_task_before_start',
+        statement='_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL',
         source_statuses=('CLAIMED',),
         target_status='EXPIRED',
         fence=Fence.WORKER,

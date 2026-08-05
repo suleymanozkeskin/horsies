@@ -5,47 +5,32 @@ declaration nobody executes drifts from the code silently, so these tests read
 the statement text back and assert the declared guards, shape, and notification
 behavior are actually there.
 
-Statements defined as module-level SQL constants are checked directly. The
-child-process writers embed their SQL inside a function and are covered by
-characterization tests instead; they are asserted here only for the structural
-properties the matrix can know without the text.
-
-The matrix and the frozen writer allowlist are independent declarations of the
-same sixteen statements. They are cross-checked against each other, so a change
-recorded in one but not the other fails rather than diverging quietly.
+The matrix preserves the contracts of the original sixteen writers. Every row
+is anchored to the database-owned operation that now implements that contract;
+T04 and T05 deliberately share one function.
 """
 
 from __future__ import annotations
 
-import ast
-from collections import Counter
-from pathlib import Path
-
 import pytest
 
-from horsies.core.worker import child_runner
-
-from horsies.core.brokers.postgres import (
-    EXPIRE_PENDING_TASKS_SQL,
-    MARK_STALE_TASK_FAILED_SQL,
-    TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL,
+from horsies.core.schemas.terminalization import (
+    CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL,
+    CREATE_ABANDON_OWNED_NODE_SQL,
+    CREATE_ABANDON_OWNED_NODES_SQL,
+    CREATE_CANCEL_LOCKED_TASK_SQL,
+    CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL,
+    CREATE_CANCEL_ORPHANED_TASKS_SQL,
+    CREATE_CANCEL_OWNED_NODE_SQL,
+    CREATE_CANCEL_OWNED_NODES_SQL,
+    CREATE_CANCEL_OWNED_ORPHAN_SQL,
+    CREATE_COMPLETE_LOCKED_TASK_SQL,
+    CREATE_COMPLETE_TASK_FUSED_SQL,
+    CREATE_EXPIRE_OWNED_CLAIM_SQL,
+    CREATE_EXPIRE_PENDING_TASKS_SQL,
+    CREATE_FAIL_LOCKED_TASK_SQL,
+    CREATE_FAIL_STALE_TASK_SQL,
 )
-from horsies.core.models.workflow.handle import (
-    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-)
-from horsies.core.worker.sql import (
-    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-    FINALIZE_TASK_COMPLETED_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
-    MARK_TASK_FAILED_WORKER_SQL,
-    TERMINATE_ORPHANED_WORKFLOW_TASK_SQL,
-    UNCLAIM_PAUSED_TASKS_SQL,
-)
-from horsies.core.workflows.sql import (
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-)
-from horsies.monitoring.task_actions import _CANCEL_TASK_SQL
 from tests.lifecycle_matrix import (
     MATRIX,
     Attempt,
@@ -59,53 +44,30 @@ from tests.lifecycle_matrix import (
 )
 from tests.unit.test_terminal_writer_inventory import (
     FROZEN_TERMINAL_WRITERS,
-    _statement_contexts,
-    _task_update_strings,
-    _update_clauses,
+    update_clauses,
 )
 
 pytestmark = [pytest.mark.unit]
 
 
-def _child_statement_texts() -> dict[str, str]:
-    """SQL for the child writers, which have no importable constant.
-
-    Their statements are string literals inside functions, so the text comes
-    from the same AST extraction the writer inventory uses. T10 and T11 share
-    a function and both target CANCELLED; they are told apart by source state,
-    since only the cancelled-workflow branch also accepts PENDING.
-    """
-    source = Path(child_runner.__file__).read_text(encoding='utf-8')
-    tree = ast.parse(source)
-    contexts = _statement_contexts(tree)
-    found: dict[str, str] = {}
-    for lineno, text in _task_update_strings(tree):
-        match contexts.get(lineno):
-            case '_expire_claimed_task_before_start':
-                found['T12'] = text
-            case '_handle_workflow_stop_before_start':
-                found["T11" if "'PENDING'" in text else 'T10'] = text
-            case _:
-                continue
-    return found
-
-
-# Statement text for every writer the matrix describes as a SQL constant.
+# Database function text for every original writer contract.
 _STATEMENT_TEXT: dict[str, str] = {
-    'T01': _CANCEL_TASK_SQL.text,
-    'T02': UNCLAIM_PAUSED_TASKS_SQL.text,
-    'T03': CANCEL_CANCELLED_WORKFLOW_TASKS_SQL.text,
-    'T04': MARK_TASK_FAILED_WORKER_SQL.text,
-    'T05': MARK_TASK_FAILED_SQL.text,
-    'T06': MARK_TASK_COMPLETED_SQL.text,
-    'T07': FINALIZE_TASK_COMPLETED_SQL.text,
-    'T08': TERMINATE_ORPHANED_WORKFLOW_TASK_SQL.text,
-    'T09': CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL.text,
-    'T13': MARK_STALE_TASK_FAILED_SQL.text,
-    'T14': EXPIRE_PENDING_TASKS_SQL.text,
-    'T15': TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL.text,
-    'T16': MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL.text,
-    **_child_statement_texts(),
+    'T01': CREATE_CANCEL_LOCKED_TASK_SQL.text,
+    'T02': CREATE_ABANDON_OWNED_NODES_SQL.text,
+    'T03': CREATE_CANCEL_OWNED_NODES_SQL.text,
+    'T04': CREATE_FAIL_LOCKED_TASK_SQL.text,
+    'T05': CREATE_FAIL_LOCKED_TASK_SQL.text,
+    'T06': CREATE_COMPLETE_LOCKED_TASK_SQL.text,
+    'T07': CREATE_COMPLETE_TASK_FUSED_SQL.text,
+    'T08': CREATE_CANCEL_OWNED_ORPHAN_SQL.text,
+    'T09': CREATE_ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL.text,
+    'T10': CREATE_ABANDON_OWNED_NODE_SQL.text,
+    'T11': CREATE_CANCEL_OWNED_NODE_SQL.text,
+    'T12': CREATE_EXPIRE_OWNED_CLAIM_SQL.text,
+    'T13': CREATE_FAIL_STALE_TASK_SQL.text,
+    'T14': CREATE_EXPIRE_PENDING_TASKS_SQL.text,
+    'T15': CREATE_CANCEL_ORPHANED_TASKS_SQL.text,
+    'T16': CREATE_CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL.text,
 }
 
 _TEXT_ROWS = [row for row in MATRIX if row.writer_id in _STATEMENT_TEXT]
@@ -127,7 +89,7 @@ def _predicate(writer_id: str) -> str:
     UPDATE rather than in the UPDATE's own WHERE.
     """
     text = _STATEMENT_TEXT[writer_id]
-    for window, _ in _update_clauses(text):
+    for window, _ in update_clauses(text):
         text = text.replace(window, ' ')
     return ' '.join(text.split())
 
@@ -150,30 +112,14 @@ class TestMatrixShape:
             assert row.target_status in TERMINAL_STATUSES, row.writer_id
 
     def test_agrees_with_the_frozen_writer_allowlist(self) -> None:
-        """Two independent declarations of the same sixteen statements.
+        """Sixteen contracts resolve to fifteen authoritative functions."""
+        modules = {module for module, _, _ in FROZEN_TERMINAL_WRITERS}
+        contexts = {context for _, context, _ in FROZEN_TERMINAL_WRITERS}
 
-        The allowlist keys on (module, statement, statuses) with a count; the
-        matrix carries one row per writer. T10 and T11 share a function, so
-        they collapse to a single allowlist entry with count 2.
-
-        The allowlist also guards the database-owned operations these
-        statements are being migrated to. Those are not matrix rows — the
-        matrix describes what exists to be replaced — so the comparison is
-        scoped to the runtime modules the matrix covers.
-        """
-        from_matrix = Counter(
-            (row.module, row.statement, row.target_status) for row in MATRIX
-        )
-        from_allowlist = Counter({
-            key: count
-            for key, count in FROZEN_TERMINAL_WRITERS.items()
-            if not key[0].endswith('schemas/terminalization.py')
-        })
-        assert from_matrix == from_allowlist, (
-            'matrix and allowlist disagree.\n'
-            f'matrix only: {sorted(from_matrix - from_allowlist)}\n'
-            f'allowlist only: {sorted(from_allowlist - from_matrix)}'
-        )
+        assert modules == {'horsies/core/schemas/terminalization.py'}
+        assert sum(FROZEN_TERMINAL_WRITERS.values()) == 15
+        assert len(contexts) == 15
+        assert len(set(_STATEMENT_TEXT.values())) == 15
 
 
 class TestDeclaredGuardsMatchTheStatements:
@@ -203,7 +149,7 @@ class TestDeclaredGuardsMatchTheStatements:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
                 # Deliberately generation-free: the deadline guard makes the
                 # outcome correct for whichever generation holds the row.
-                assert 'claimed_at' not in sql, row.writer_id
+                assert 'p_claimed_at' not in sql, row.writer_id
             case Fence.PRIOR_LOCKED_SELECT:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
             case Fence.WORKER_AND_GENERATION:
@@ -212,7 +158,7 @@ class TestDeclaredGuardsMatchTheStatements:
             case Fence.WORKER_AND_GENERATION_PAIRWISE:
                 assert 'claimed_by_worker_id =' in sql, row.writer_id
                 assert 'unnest(' in sql, row.writer_id
-                assert 'g.claimed_at' in sql, row.writer_id
+                assert 'input.claimed_at' in sql, row.writer_id
 
     @pytest.mark.parametrize('row', _TEXT_ROWS, ids=_ids(_TEXT_ROWS))
     def test_guard_markers(self, row: TerminalWriter) -> None:
@@ -223,11 +169,13 @@ class TestDeclaredGuardsMatchTheStatements:
                     assert 'good_until' in sql, row.writer_id
                 case Guard.STALENESS:
                     assert 'finalizing_at' in sql, row.writer_id
-                    assert 'stale_threshold' in sql, row.writer_id
+                    assert 'p_stale_after_ms' in sql, row.writer_id
                 case Guard.WORKFLOW_STATUS:
                     assert 'w.status =' in sql, row.writer_id
                 case Guard.WORKFLOW_LINK_ABSENT:
-                    assert 'NOT EXISTS' in sql, row.writer_id
+                    assert (
+                        'NOT EXISTS' in sql or 'ctx.node_status IS NULL' in sql
+                    ), row.writer_id
                 case Guard.WORKFLOW_LINK_STATE:
                     assert 'wt.status' in sql, row.writer_id
                 case Guard.NONE:
@@ -240,7 +188,7 @@ class TestDeclaredGuardsMatchTheStatements:
             case Shape.SET_WISE_SKIP_LOCKED:
                 assert 'SKIP LOCKED' in sql, row.writer_id
             case Shape.FUSED_CTE:
-                assert sql.lstrip().upper().startswith('WITH'), row.writer_id
+                assert 'WITH ctx AS (' in sql, row.writer_id
             case Shape.SINGLE | Shape.SET_WISE:
                 assert 'SKIP LOCKED' not in sql, row.writer_id
 
@@ -352,7 +300,7 @@ class TestWriterVariantGrouping:
 
 
 class TestChildWritersAreDeclaredConsistently:
-    """The psycopg writers cannot be text-checked here; pin their shape."""
+    """The child call sites remain sync psycopg and single-row operations."""
 
     def test_child_writers_are_sync_psycopg_and_single_row(self) -> None:
         child = [row for row in MATRIX if row.driver is Driver.SYNC_PSYCOPG]
@@ -362,7 +310,7 @@ class TestChildWritersAreDeclaredConsistently:
             assert row.attempt is Attempt.NONE, row.writer_id
 
     def test_shared_function_writers_declare_the_same_statement(self) -> None:
-        """T10 and T11 are branches of one function, as the allowlist records."""
+        """T10 and T11 remain two branches of the child lifecycle handler."""
         assert (
             MATRIX[9].statement
             == MATRIX[10].statement

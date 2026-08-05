@@ -15,13 +15,15 @@ the coupled write that should have accompanied it.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 
@@ -161,6 +163,59 @@ def _fused(task_id: str, claimed_at: datetime | None = GENERATION) -> CompleteTa
         notify_channel='task_queue_default',
         notify_payload=f'capacity:{task_id}',
     )
+
+
+class TestTerminalAtInvariant:
+    @pytest.mark.parametrize(
+        ('status', 'terminal_at'),
+        [
+            pytest.param('CANCELLED', None, id='terminal-requires-timestamp'),
+            pytest.param('PENDING', GENERATION, id='live-rejects-timestamp'),
+        ],
+    )
+    async def test_status_and_terminal_at_must_agree(
+        self,
+        session: AsyncSession,
+        status: str,
+        terminal_at: datetime | None,
+    ) -> None:
+        task_id = await _seed(
+            session,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+        )
+
+        with pytest.raises(
+            IntegrityError,
+            match='ck_horsies_tasks_terminal_at_terminal_only',
+        ):
+            await session.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET status = :status, terminal_at = :terminal_at
+                    WHERE id = :id
+                """),
+                {
+                    'id': task_id,
+                    'status': status,
+                    'terminal_at': terminal_at,
+                },
+            )
+            await session.commit()
+        await session.rollback()
+
+        row = (
+            await session.execute(
+                text(
+                    'SELECT status, terminal_at FROM horsies_tasks '
+                    'WHERE id = :id'
+                ),
+                {'id': task_id},
+            )
+        ).one()
+        assert row.status == 'PENDING'
+        assert row.terminal_at is None
 
 
 class TestAppliedTransitions:
@@ -428,8 +483,10 @@ class TestKindVocabularyIsEnforced:
         await session.commit()
 
 
-STALE_AFTER = 60
-FINALIZING_STALE_AFTER = 30
+STALE_AFTER_MS = 60_000
+FINALIZING_STALE_AFTER_MS = 30_000
+STALE_AFTER_SECONDS = STALE_AFTER_MS // 1000
+FINALIZING_STALE_AFTER_SECONDS = FINALIZING_STALE_AFTER_MS // 1000
 
 
 def _fail_locked(task_id: str, failed_reason: str | None = None) -> FailLockedTask:
@@ -445,8 +502,8 @@ def _fail_locked(task_id: str, failed_reason: str | None = None) -> FailLockedTa
 def _fail_stale(task_id: str) -> FailStaleTask:
     return FailStaleTask(
         task_id=task_id,
-        stale_after_seconds=STALE_AFTER,
-        finalizing_stale_after_seconds=FINALIZING_STALE_AFTER,
+        stale_after_ms=STALE_AFTER_MS,
+        finalizing_stale_after_ms=FINALIZING_STALE_AFTER_MS,
         result_json='{"err": 2}',
         error_code='WORKER_CRASHED',
         failed_reason='Worker crashed',
@@ -662,7 +719,7 @@ class TestFailStale:
     ) -> None:
         """No heartbeat at all: staleness is judged from started_at."""
         task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
 
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
         await session.commit()
@@ -676,8 +733,8 @@ class TestFailStale:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 4)
-        await _heartbeat(session, task_id, seconds_ago=STALE_AFTER * 2)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 4)
+        await _heartbeat(session, task_id, seconds_ago=STALE_AFTER_SECONDS * 2)
 
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
         await session.commit()
@@ -689,7 +746,7 @@ class TestFailStale:
     ) -> None:
         """The refusal carries what the guard judged, not just that it refused."""
         task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
         await _heartbeat(session, task_id, seconds_ago=1)
 
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
@@ -702,12 +759,61 @@ class TestFailStale:
         assert evidence.last_heartbeat_at is not None
         assert evidence.started_at is not None
         assert evidence.finalizing_at is None
-        assert evidence.stale_after_seconds == STALE_AFTER
-        assert evidence.finalizing_stale_after_seconds == FINALIZING_STALE_AFTER
+        assert evidence.stale_after_ms == STALE_AFTER_MS
+        assert evidence.finalizing_stale_after_ms == FINALIZING_STALE_AFTER_MS
         # The refusal is reconstructible from its own evidence: the heartbeat
         # sits inside the freshness window the guard judged it against.
         assert evidence.last_heartbeat_at >= evidence.evaluated_at - timedelta(
-            seconds=STALE_AFTER,
+            milliseconds=STALE_AFTER_MS,
+        )
+
+    async def test_fractional_second_threshold_is_not_truncated(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        """The public millisecond contract reaches the SQL guard unchanged."""
+        task_id = await _seed(session)
+        await session.execute(
+            text("""
+                UPDATE horsies_tasks
+                SET started_at = NOW() - INTERVAL '10 seconds'
+                WHERE id = :id
+            """),
+            {'id': task_id},
+        )
+        await session.execute(
+            text("""
+                INSERT INTO horsies_heartbeats (
+                    task_id, sender_id, role, sent_at
+                ) VALUES (
+                    :id, 'fractional-threshold-test', 'runner',
+                    NOW() - INTERVAL '1.25 seconds'
+                )
+            """),
+            {'id': task_id},
+        )
+
+        outcome = await apply_async(
+            await session.connection(),
+            FailStaleTask(
+                task_id=task_id,
+                stale_after_ms=1_500,
+                finalizing_stale_after_ms=2_750,
+                result_json='{"err": 2}',
+                error_code='WORKER_CRASHED',
+                failed_reason='Worker crashed',
+            ),
+        )
+        await session.commit()
+
+        assert isinstance(outcome, SourceStateConflict)
+        evidence = outcome.evidence
+        assert isinstance(evidence, ObservedStaleness)
+        assert evidence.stale_after_ms == 1_500
+        assert evidence.finalizing_stale_after_ms == 2_750
+        assert evidence.last_heartbeat_at is not None
+        assert evidence.last_heartbeat_at == (
+            evidence.evaluated_at - timedelta(milliseconds=1_250)
         )
 
     async def test_a_heartbeat_from_another_role_does_not_count(
@@ -716,7 +822,7 @@ class TestFailStale:
     ) -> None:
         """Only the runner's heartbeats prove the runner is alive."""
         task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
         await _heartbeat(session, task_id, seconds_ago=1, role='worker')
 
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
@@ -760,7 +866,7 @@ class TestFailStale:
         await _age(
             session,
             task_id,
-            started_seconds_ago=STALE_AFTER * 2,
+            started_seconds_ago=STALE_AFTER_SECONDS * 2,
             finalizing_seconds_ago=1,
         )
 
@@ -771,11 +877,11 @@ class TestFailStale:
         assert isinstance(evidence, ObservedStaleness)
         assert evidence.finalizing_at is not None
         assert evidence.finalizing_at >= evidence.evaluated_at - timedelta(
-            seconds=FINALIZING_STALE_AFTER,
+            milliseconds=FINALIZING_STALE_AFTER_MS,
         )
         assert evidence.started_at is not None
         assert evidence.started_at < evidence.evaluated_at - timedelta(
-            seconds=STALE_AFTER,
+            milliseconds=STALE_AFTER_MS,
         )
         assert evidence.last_heartbeat_at is None
 
@@ -787,8 +893,8 @@ class TestFailStale:
         await _age(
             session,
             task_id,
-            started_seconds_ago=STALE_AFTER * 2,
-            finalizing_seconds_ago=FINALIZING_STALE_AFTER * 2,
+            started_seconds_ago=STALE_AFTER_SECONDS * 2,
+            finalizing_seconds_ago=FINALIZING_STALE_AFTER_SECONDS * 2,
         )
 
         outcome = await apply_async(await session.connection(), _fail_stale(task_id))
@@ -800,7 +906,7 @@ class TestFailStale:
         session: AsyncSession,
     ) -> None:
         task_id = await _seed(session)
-        await _age(session, task_id, started_seconds_ago=STALE_AFTER * 2)
+        await _age(session, task_id, started_seconds_ago=STALE_AFTER_SECONDS * 2)
         await apply_async(await session.connection(), _fail_stale(task_id))
         await session.commit()
 
@@ -914,6 +1020,71 @@ class TestExpireOwnedClaim:
         assert row.claim_expires_at is None
         assert row.failed_at is not None
         assert row.error_code == 'TASK_EXPIRED'
+
+    async def test_deadline_change_while_waiting_on_the_row_is_rechecked(
+        self,
+        engine: AsyncEngine,
+        session: AsyncSession,
+    ) -> None:
+        """A newly eligible row is not misclassified after lock contention.
+
+        The operation's first guarded update sees the committed future
+        deadline. A concurrent transaction already holds the row with a past
+        deadline; the refusal capture waits for that transaction, then the
+        operation must apply from the locked post-commit image.
+        """
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=-3600)
+
+        async with (
+            AsyncSession(engine, expire_on_commit=False) as mutator,
+            AsyncSession(engine, expire_on_commit=False) as applier,
+            AsyncSession(engine, expire_on_commit=False) as observer,
+        ):
+            mutator_pid = int(
+                (await mutator.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+            )
+            await mutator.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET good_until = NOW() - INTERVAL '1 hour'
+                    WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+
+            applier_pid = int(
+                (await applier.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+            )
+            application = asyncio.create_task(
+                apply_async(await applier.connection(), _expire_claim(task_id))
+            )
+            for _ in range(100):
+                blocked_by_mutator = bool(
+                    (
+                        await observer.execute(
+                            text(
+                                'SELECT :mutator = ANY('
+                                'pg_blocking_pids(:applier))'
+                            ),
+                            {'mutator': mutator_pid, 'applier': applier_pid},
+                        )
+                    ).scalar_one()
+                )
+                if blocked_by_mutator:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                await mutator.rollback()
+                await asyncio.wait_for(application, timeout=5)
+                raise AssertionError('expiry operation never waited on the row lock')
+
+            await mutator.commit()
+            outcome = await asyncio.wait_for(application, timeout=5)
+            await applier.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.EXPIRE_CLAIMED
 
     async def test_a_live_deadline_refuses_with_the_evidence(
         self,

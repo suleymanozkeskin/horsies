@@ -15,6 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.lifecycle.commands import CompleteLockedTask
+from horsies.core.lifecycle.fences import PriorLockedRead
+from horsies.core.lifecycle.outcomes import Applied
+from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     RetryPolicy,
@@ -420,6 +424,51 @@ async def test_reaper_skips_recent_finalizing_task(
 
 
 @pytest.mark.asyncio(loop_scope='function')
+async def test_finalizer_row_lock_wins_reaper_race(
+    engine: AsyncEngine,
+    broker: PostgresBroker,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A finalizer holding the task row makes the stale scan step around it."""
+    worker_id = f'finalizer-race-{uuid.uuid4().hex}'
+    task_id = await _insert_owned_running_task(
+        session,
+        worker_id=worker_id,
+        started_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+    )
+
+    async with AsyncSession(engine, expire_on_commit=False) as finalizer:
+        locked = await finalizer.execute(
+            text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+            {'id': task_id},
+        )
+        assert locked.scalar_one() == task_id
+
+        reaper_result = await asyncio.wait_for(
+            broker.mark_stale_tasks_as_failed(stale_threshold_ms=1_000),
+            timeout=2,
+        )
+        assert is_ok(reaper_result)
+        assert reaper_result.ok_value == 0
+
+        outcome = await apply_async(
+            await finalizer.connection(),
+            CompleteLockedTask(
+                task_id=task_id,
+                fence=PriorLockedRead(worker_id=worker_id),
+                result_json='{"ok": "finalizer won"}',
+            ),
+        )
+        assert isinstance(outcome, Applied)
+        await finalizer.commit()
+
+    row = await _task_row(session, task_id)
+    assert row['status'] == 'COMPLETED'
+    assert row['terminalization_kind'] == 'COMPLETE_LOCKED'
+
+
+@pytest.mark.asyncio(loop_scope='function')
 async def test_pause_resets_retry_window_claimed_workflow_task(
     broker: PostgresBroker,
     session: AsyncSession,
@@ -442,7 +491,8 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
                        wt.status AS workflow_task_status,
                        wt.task_id AS workflow_task_task_id,
                        t.status AS task_status,
-                       t.error_code
+                       t.error_code,
+                       t.terminalization_kind
                 FROM horsies_workflows w
                 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
                 JOIN horsies_tasks t ON t.id = :task_id
@@ -462,6 +512,7 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
     assert row.workflow_task_task_id is None
     assert row.task_status == 'CANCELLED'
     assert row.error_code == 'TASK_CANCELLED'
+    assert row.terminalization_kind == 'PAUSE_ABANDON_WORKFLOW'
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -504,6 +555,7 @@ async def test_reaper_recovers_stale_runner_when_owner_worker_state_is_fresh(
     assert row['status'] == 'FAILED'
     assert row['error_code'] == OperationalErrorCode.WORKER_CRASHED.value
     assert row['result'] is not None
+    assert row['terminalization_kind'] == 'FAIL_STALE'
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -533,3 +585,4 @@ async def test_reaper_recovers_old_finalizing_task_and_clears_marker(
     assert row['error_code'] == OperationalErrorCode.WORKER_CRASHED.value
     assert row['finalizing_at'] is None
     assert row['finalizing_by_worker_id'] is None
+    assert row['terminalization_kind'] == 'FAIL_STALE'

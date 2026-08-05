@@ -17,6 +17,7 @@ from tests.perf.statistics import (
     Budget,
     Verdict,
     compare,
+    compare_throughput,
     percentile_ms,
     worst,
 )
@@ -149,3 +150,63 @@ class TestOverallVerdict:
 
     def test_all_passing_passes(self) -> None:
         assert worst([Verdict.PASS, Verdict.PASS]) is Verdict.PASS
+
+
+class TestThroughputVerdicts:
+    def test_equal_batch_throughput_passes(self) -> None:
+        samples = _steady(10.0)
+        result = compare_throughput(
+            baseline_ms=samples,
+            candidate_ms=list(samples),
+            rows_per_operation=500,
+            minimum_ratio=0.90,
+            resamples=200,
+            seed=7,
+        )
+        assert result.verdict is Verdict.PASS
+        assert result.ci_low_ratio <= 1.0 <= result.ci_high_ratio
+
+    def test_clear_batch_throughput_regression_fails(self) -> None:
+        result = compare_throughput(
+            baseline_ms=_steady(10.0),
+            candidate_ms=_steady(20.0),
+            rows_per_operation=500,
+            minimum_ratio=0.90,
+            resamples=200,
+            seed=7,
+        )
+        assert result.verdict is Verdict.FAIL
+        assert result.ci_high_ratio < result.minimum_ratio
+
+    def test_crossing_batch_throughput_interval_is_inconclusive(self) -> None:
+        baseline = _steady(10.0)
+        candidate = [10.0 if index % 2 else 12.4 for index in range(400)]
+        result = compare_throughput(
+            baseline_ms=baseline,
+            candidate_ms=candidate,
+            rows_per_operation=500,
+            minimum_ratio=0.90,
+            resamples=200,
+            seed=7,
+        )
+        assert result.verdict is Verdict.INCONCLUSIVE
+        assert result.ci_low_ratio < 0.90 <= result.ci_high_ratio
+
+    @pytest.mark.parametrize(
+        ('samples', 'message'),
+        [([], 'no samples'), ([1.0, 0.0], 'must be positive')],
+    )
+    def test_invalid_durations_are_rejected(
+        self,
+        samples: list[float],
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            compare_throughput(
+                baseline_ms=samples,
+                candidate_ms=[1.0],
+                rows_per_operation=500,
+                minimum_ratio=0.90,
+                resamples=200,
+                seed=7,
+            )

@@ -64,36 +64,13 @@ PAUSE_CHILD_WORKFLOW_SQL = text("""
     SET status = 'PAUSED', updated_at = NOW()
     WHERE id = :wf_id AND status = 'RUNNING'
 """)
-CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL = text("""
-    WITH cancelled AS (
-        UPDATE horsies_tasks t
-        SET status = 'CANCELLED',
-            claimed = FALSE,
-            claimed_at = NULL,
-            claimed_by_worker_id = NULL,
-            claim_expires_at = NULL,
-            finalizing_at = NULL,
-            finalizing_by_worker_id = NULL,
-            error_code = 'TASK_CANCELLED',
-            failed_reason = 'Workflow paused before task start',
-            terminal_at = NOW(),
-            updated_at = NOW()
-        FROM horsies_workflow_tasks wt
-        JOIN horsies_workflows w ON w.id = wt.workflow_id
-        WHERE wt.task_id = t.id
-          AND wt.workflow_id = ANY(:workflow_ids)
-          AND w.status = 'PAUSED'
-          AND wt.status IN ('ENQUEUED', 'RUNNING')
-          AND t.status = 'CLAIMED'
-        RETURNING t.id
-    )
-    UPDATE horsies_workflow_tasks wt
+RESET_ABANDONED_WORKFLOW_TASKS_SQL = text("""
+    UPDATE horsies_workflow_tasks
     SET status = 'READY',
         task_id = NULL,
         started_at = NULL
-    WHERE wt.task_id IN (SELECT id FROM cancelled)
-      AND wt.status IN ('ENQUEUED', 'RUNNING')
-    RETURNING wt.workflow_id, wt.task_index
+    WHERE task_id = ANY(:task_ids)
+      AND status IN ('ENQUEUED', 'RUNNING')
 """)
 # -- SQL constants for resume_workflow --
 

@@ -66,6 +66,22 @@ async def _task_status(session: AsyncSession, task_id: str) -> str:
     return str(row.status)
 
 
+async def _terminalization_kind(
+    session: AsyncSession,
+    task_id: str,
+) -> str | None:
+    row = (
+        await session.execute(
+            text(
+                'SELECT terminalization_kind FROM horsies_tasks WHERE id = :id'
+            ),
+            {'id': task_id},
+        )
+    ).one()
+    value = row.terminalization_kind
+    return str(value) if value is not None else None
+
+
 async def _in_flight_for_worker(session: AsyncSession, worker_id: str) -> int:
     row = (
         await session.execute(
@@ -74,6 +90,43 @@ async def _in_flight_for_worker(session: AsyncSession, worker_id: str) -> int:
         )
     ).one()
     return int(row.cnt or 0)
+
+
+async def _link_runnable_workflow_node(
+    session: AsyncSession,
+    task_id: str,
+) -> None:
+    workflow_id = str(uuid4())
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflows
+                (id, name, status, on_error, depth, root_workflow_id,
+                 sent_at, created_at, started_at, updated_at)
+            VALUES
+                (:id, 'orphan_guard_workflow', 'RUNNING', 'FAIL', 0, :id,
+                 NOW(), NOW(), NOW(), NOW())
+        """),
+        {'id': workflow_id},
+    )
+    await session.execute(
+        text("""
+            INSERT INTO horsies_workflow_tasks
+                (id, workflow_id, task_index, node_id, task_name, task_args,
+                 task_kwargs, queue_name, priority, dependencies,
+                 allow_failed_deps, join_type, is_subworkflow, status,
+                 task_id, created_at)
+            VALUES
+                (:id, :workflow_id, 0, 'orphan_guard_node',
+                 'workflow_join_barrier', '[]', '{}', 'default', 100, '{}',
+                 FALSE, 'all', FALSE, 'RUNNING', :task_id, NOW())
+        """),
+        {
+            'id': str(uuid4()),
+            'workflow_id': workflow_id,
+            'task_id': task_id,
+        },
+    )
+    await session.commit()
 
 
 @pytest.mark.integration
@@ -124,6 +177,7 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
 
     assert is_ok(result)
     assert await _task_status(session, task_id) == 'CANCELLED'
+    assert await _terminalization_kind(session, task_id) == 'CANCEL_ORPHAN'
     assert await _in_flight_for_worker(session, worker_id) == 0
 
 
@@ -176,6 +230,51 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
 
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
+async def test_finalize_does_not_cancel_a_task_with_a_runnable_node_link(
+    clean_workflow_tables: None,
+    session: AsyncSession,
+    broker: PostgresBroker,
+    db_url: str,
+) -> None:
+    """The live-link guard refusal remains a successful finalize no-op."""
+    _ = clean_workflow_tables
+    worker_id = 'worker-orphan-live-link'
+    task_id = await _seed_orphaned_claimed_workflow_task(
+        session,
+        worker_id=worker_id,
+    )
+    await _link_runnable_workflow_node(session, task_id)
+    worker = Worker(
+        session_factory=broker.session_factory,
+        listener=MagicMock(),
+        cfg=WorkerConfig(
+            dsn=db_url,
+            psycopg_dsn=db_url.replace('+psycopg', ''),
+            queues=['default'],
+            recovery_config=RecoveryConfig(),
+        ),
+    )
+    worker.worker_instance_id = worker_id
+
+    result = await worker._persist_task_terminal_state(
+        task_id=task_id,
+        now=datetime.now(timezone.utc),
+        ok=False,
+        result_json_str='',
+        failed_reason='WORKFLOW_CHECK_FAILED',
+        task_name='workflow_join_barrier',
+        queue_name='default',
+        is_workflow_task=True,
+    )
+
+    assert is_ok(result)
+    assert await _task_status(session, task_id) == 'CLAIMED'
+    assert await _terminalization_kind(session, task_id) is None
+    assert await _in_flight_for_worker(session, worker_id) == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
 async def test_reaper_terminates_orphaned_workflow_task(
     clean_workflow_tables: None,
     session: AsyncSession,
@@ -191,6 +290,7 @@ async def test_reaper_terminates_orphaned_workflow_task(
     assert is_ok(result)
     assert result.ok_value == 1
     assert await _task_status(session, task_id) == 'CANCELLED'
+    assert await _terminalization_kind(session, task_id) == 'CANCEL_ORPHAN_SWEEP'
     assert await _in_flight_for_worker(session, worker_id) == 0
 
 

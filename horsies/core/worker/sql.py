@@ -229,38 +229,6 @@ GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
       AND w.status IN ('PAUSED', 'CANCELLED')
 """)
 
-# Claim-generation fence (C10), pairwise: this guard runs in a transaction of
-# its own after the claim committed, so a lease can lapse, the reaper can
-# requeue, and this same worker can re-claim before the abandon lands. The
-# (status, worker) pair cannot reject that — the row is CLAIMED by this worker
-# again. Tasks in one batch may come from different claim transactions, so the
-# generation travels alongside each id rather than as one scalar. A NULL entry
-# disables the fence for that task, matching UNCLAIM_CLAIMED_TASK_SQL, so a
-# claim path that does not report claimed_at still abandons rather than skips.
-UNCLAIM_PAUSED_TASKS_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = 'TASK_CANCELLED',
-        failed_reason = 'Workflow paused before task start',
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM unnest(
-        CAST(:ids AS VARCHAR[]),
-        CAST(:claimed_ats AS TIMESTAMPTZ[])
-    ) AS g(id, claimed_at)
-    WHERE t.id = g.id
-      AND t.status = 'CLAIMED'
-      AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND (g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)
-    RETURNING t.id
-""")
-
 # The optional :claimed_at fence scopes the release to a specific claim
 # generation (C10); NULL disables it. Callers inside a transaction that
 # already fence-locked the row via SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL
@@ -294,30 +262,6 @@ RESET_PAUSED_WORKFLOW_TASKS_SQL = text("""
       AND status IN ('ENQUEUED', 'RUNNING')
 """)
 
-# Same pairwise claim-generation fence as UNCLAIM_PAUSED_TASKS_SQL; both run
-# from the post-claim guard and share its staleness window.
-CANCEL_CANCELLED_WORKFLOW_TASKS_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM unnest(
-        CAST(:ids AS VARCHAR[]),
-        CAST(:claimed_ats AS TIMESTAMPTZ[])
-    ) AS g(id, claimed_at)
-    WHERE t.id = g.id
-      AND t.status = 'CLAIMED'
-      AND t.claimed_by_worker_id = CAST(:wid AS VARCHAR)
-      AND (g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)
-    RETURNING t.id
-""")
-
 SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
     UPDATE horsies_workflow_tasks
     SET status = 'SKIPPED',
@@ -326,131 +270,8 @@ SKIP_CANCELLED_WORKFLOW_TASKS_SQL = text("""
       AND status IN ('PENDING', 'READY', 'ENQUEUED')
 """)
 
-MARK_TASK_FAILED_WORKER_SQL = text("""
-    UPDATE horsies_tasks
-    SET status='FAILED',
-        failed_at = NOW(),
-        failed_reason = :reason,
-        result = :result_json,
-        error_code = :error_code,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-    RETURNING id
-""")
-
-MARK_TASK_FAILED_SQL = text("""
-    UPDATE horsies_tasks
-    SET status='FAILED',
-        failed_at = NOW(),
-        result = :result_json,
-        error_code = :error_code,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-    RETURNING id
-""")
-
-MARK_TASK_COMPLETED_SQL = text("""
-    UPDATE horsies_tasks
-    SET status='COMPLETED',
-        completed_at = NOW(),
-        result = :result_json,
-        error_code = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-    RETURNING id
-""")
-
 NOTIFY_TASK_QUEUE_SQL = text("""
     SELECT pg_notify(:c2, :p)
-""")
-
-# Fused ok-path finalization for plain (non-workflow) tasks: lock the
-# RUNNING row, upsert the COMPLETED attempt from the locked row's own
-# context, CAS the task to COMPLETED, and fire the capacity wake — one
-# statement, one transaction. Empty result = status/ownership changed
-# (reaper reclaim or re-claim); nothing is written in that case.
-#
-# Claim-generation fence (C10): a (status, worker_id) fence alone cannot
-# reject a stale finalize when the SAME worker re-claimed its own
-# reaper-requeued task — worker_id matches and the row is RUNNING again.
-# :claimed_at scopes the CAS to the claim generation the dispatch was born
-# from (set by the claim, cleared by every requeue); NULL disables the
-# fence for callers without a dispatch context. The same fence guards
-# SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
-# SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL, UNCLAIM_CLAIMED_TASK_SQL,
-# TERMINATE_ORPHANED_WORKFLOW_TASK_SQL, and the child's CLAIMED->RUNNING
-# ownership confirm (child_runner._confirm_ownership_and_set_running) —
-# every statement that acts on a row this worker believes it owns.
-FINALIZE_TASK_COMPLETED_SQL = text("""
-    WITH ctx AS (
-        SELECT id, retry_count, started_at, claimed_by_worker_id,
-               worker_hostname, worker_pid, worker_process_name,
-               clock_timestamp() AS db_now
-        FROM horsies_tasks
-        WHERE id = :id
-          AND status = 'RUNNING'
-          AND claimed_by_worker_id = CAST(:wid AS VARCHAR)
-          AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
-               OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
-        FOR UPDATE
-    ),
-    attempt AS (
-        INSERT INTO horsies_task_attempts (
-            task_id, attempt, outcome, will_retry,
-            started_at, finished_at,
-            error_code, error_message, failed_reason,
-            worker_id, worker_hostname, worker_pid, worker_process_name
-        )
-        SELECT ctx.id, COALESCE(ctx.retry_count, 0) + 1, 'COMPLETED', FALSE,
-               COALESCE(ctx.started_at, ctx.db_now), ctx.db_now,
-               NULL, NULL, NULL,
-               ctx.claimed_by_worker_id, ctx.worker_hostname, ctx.worker_pid,
-               ctx.worker_process_name
-        FROM ctx
-        ON CONFLICT (task_id, attempt) DO UPDATE SET
-            outcome = EXCLUDED.outcome,
-            will_retry = EXCLUDED.will_retry,
-            started_at = EXCLUDED.started_at,
-            finished_at = EXCLUDED.finished_at,
-            error_code = EXCLUDED.error_code,
-            error_message = EXCLUDED.error_message,
-            failed_reason = EXCLUDED.failed_reason,
-            worker_id = EXCLUDED.worker_id,
-            worker_hostname = EXCLUDED.worker_hostname,
-            worker_pid = EXCLUDED.worker_pid,
-            worker_process_name = EXCLUDED.worker_process_name
-    ),
-    upd AS (
-        UPDATE horsies_tasks t
-        SET status = 'COMPLETED',
-            completed_at = NOW(),
-            result = :result_json,
-            error_code = NULL,
-            finalizing_at = NULL,
-            finalizing_by_worker_id = NULL,
-            terminal_at = NOW(),
-            updated_at = NOW()
-        FROM ctx
-        WHERE t.id = ctx.id
-        RETURNING t.id
-    )
-    SELECT upd.id, pg_notify(:notify_channel, :notify_payload)
-    FROM upd
 """)
 
 GET_TASK_RETRY_INFO_SQL = text("""
@@ -770,41 +591,6 @@ DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL = text(f"""
     DELETE FROM horsies_tasks
     WHERE id IN (SELECT id FROM doomed)
 """)
-
-# Terminate a single orphaned workflow task this worker still holds CLAIMED.
-# An orphan is a workflow task with no workflow_task row in a runnable status
-# (linkage missing or already terminal) — the exact condition that makes the
-# child's workflow_task->RUNNING transition fail with WORKFLOW_CHECK_FAILED.
-# Scoped to this worker's own claim and re-checked here so a concurrent
-# legitimate transition (TOCTOU) leaves the row untouched (0 rows -> caller
-# keeps its prior skip behavior).
-TERMINATE_ORPHANED_WORKFLOW_TASK_SQL = text("""
-    UPDATE horsies_tasks
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = 'WORKFLOW_CHECK_FAILED',
-        failed_reason = 'Workflow task orphaned: no live workflow_task linkage',
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND claimed_by_worker_id = :wid
-      AND status = 'CLAIMED'
-      AND (CAST(:claimed_at AS TIMESTAMPTZ) IS NULL
-           OR claimed_at = CAST(:claimed_at AS TIMESTAMPTZ))
-      AND is_workflow_task = TRUE
-      AND NOT EXISTS (
-          SELECT 1 FROM horsies_workflow_tasks wt
-          WHERE wt.task_id = horsies_tasks.id
-            AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-      )
-    RETURNING id
-""")
-
 
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,

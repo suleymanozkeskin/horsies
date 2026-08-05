@@ -18,11 +18,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import assert_never
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.lifecycle.commands import CancelLockedTask
+from horsies.core.lifecycle.fences import CallerHoldsRowLock
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import is_retryable_connection_error
@@ -101,30 +112,6 @@ _LOCK_TASK_SQL = text("""
     FROM horsies_tasks
     WHERE id = :id
     FOR UPDATE
-""")
-
-# Terminal states are never overwritten by claim, finalize, auto-retry or the
-# reaper — each of those is itself a CAS on the status it expects — so a
-# committed CANCELLED here is final. ``failed_at`` is set so the row carries an
-# end timestamp; without one its queue span would be unmeasurable.
-_CANCEL_TASK_SQL = text("""
-    UPDATE horsies_tasks
-    SET status = 'CANCELLED',
-        error_code = 'TASK_CANCELLED',
-        failed_reason = 'Cancelled via monitoring API',
-        failed_at = NOW(),
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    WHERE id = :id
-      AND is_workflow_task = FALSE
-      AND status = ANY(:allowed)
-    RETURNING id
 """)
 
 # retry_count is set to the highest attempt already recorded, because the next
@@ -251,9 +238,9 @@ async def cancel_task(
     fires ``task_done`` and a CANCELLED row is reported as TASK_CANCELLED,
     so no result payload is written here.
     """
-    allowed = [TaskStatus.PENDING.value, TaskStatus.CLAIMED.value]
+    permitted_statuses = (TaskStatus.PENDING, TaskStatus.CLAIMED)
     if include_running:
-        allowed.append(TaskStatus.RUNNING.value)
+        permitted_statuses += (TaskStatus.RUNNING,)
 
     try:
         async with broker.session_factory() as session:
@@ -263,23 +250,39 @@ async def cancel_task(
             status_value, is_workflow_task, _expiry_passed = locked
             current_status = _STATUS_BY_VALUE.get(status_value)
 
-            cancelled = (
-                await session.execute(
-                    _CANCEL_TASK_SQL, {'id': task_id, 'allowed': allowed}
-                )
-            ).first()
-            if cancelled is None or current_status is None:
-                if is_workflow_task:
-                    return _workflow_bound(task_id)
-                return _state_conflict(
-                    TaskActionErrorCode.TASK_NOT_CANCELLABLE,
-                    f'Task {task_id} cannot be cancelled from status '
-                    f'{status_value}.',
-                    task_id,
-                    current_status,
-                )
-
-            await session.commit()
+            outcome = await apply_async(
+                await session.connection(),
+                CancelLockedTask(
+                    task_id=task_id,
+                    fence=CallerHoldsRowLock(),
+                    permitted_source_statuses=permitted_statuses,
+                ),
+            )
+            match outcome:
+                case Applied() if current_status is not None:
+                    await session.commit()
+                case AlreadyApplied() | SourceStateConflict():
+                    if is_workflow_task:
+                        return _workflow_bound(task_id)
+                    return _state_conflict(
+                        TaskActionErrorCode.TASK_NOT_CANCELLABLE,
+                        f'Task {task_id} cannot be cancelled from status '
+                        f'{status_value}.',
+                        task_id,
+                        current_status,
+                    )
+                case Applied():
+                    raise RuntimeError(
+                        'administrative cancellation applied from an '
+                        f'unrecognized status {status_value}'
+                    )
+                case LostClaim() | TaskAbsent():
+                    raise RuntimeError(
+                        'administrative cancellation contradicted the '
+                        'caller-held row lock'
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
     except SQLAlchemyError as exc:
         return _db_err('Task cancel', task_id, exc)
 

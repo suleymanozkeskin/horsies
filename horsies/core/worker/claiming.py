@@ -14,13 +14,23 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, assert_never
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
+from horsies.core.lifecycle.commands import AbandonOwnedNodes, CancelOwnedNodes
+from horsies.core.lifecycle.fences import OwnedClaimBatch
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+    TerminalizationOutcome,
+)
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.logging import get_logger
 from horsies.core.worker.runtime import _parse_timeout_ms
 from horsies.core.worker.sql import (
-    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
@@ -29,7 +39,6 @@ from horsies.core.worker.sql import (
     HORSIES_CLAIM_SQL,
     RESET_PAUSED_WORKFLOW_TASKS_SQL,
     SKIP_CANCELLED_WORKFLOW_TASKS_SQL,
-    UNCLAIM_PAUSED_TASKS_SQL,
 )
 
 if TYPE_CHECKING:
@@ -38,6 +47,27 @@ if TYPE_CHECKING:
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
+
+
+def _newly_terminalized_task_ids(
+    outcomes: list[TerminalizationOutcome],
+) -> list[str]:
+    """Rows whose coupled workflow-task write belongs to this transaction."""
+    task_ids: list[str] = []
+    for outcome in outcomes:
+        match outcome:
+            case Applied(task_id=task_id):
+                task_ids.append(task_id)
+            case (
+                AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ):
+                continue
+            case _ as unreachable:
+                assert_never(unreachable)
+    return task_ids
 
 
 class ClaimMixin:
@@ -203,20 +233,24 @@ class ClaimMixin:
             if paused_task_ids:
                 # Unclaim paused-workflow tasks so they can be picked up on resume.
                 paused_ids = list(paused_task_ids)
-                paused_res = await s.execute(
-                    UNCLAIM_PAUSED_TASKS_SQL,
-                    {
-                        'ids': paused_ids,
-                        'claimed_ats': [
-                            claimed_at_by_task_id.get(task_id)
-                            for task_id in paused_ids
-                        ],
-                        'wid': self.worker_instance_id,
-                    },
+                paused_outcomes = await apply_batch_async(
+                    await s.connection(),
+                    AbandonOwnedNodes(
+                        fence=OwnedClaimBatch(
+                            worker_id=self.worker_instance_id,
+                            claim_generations=tuple(
+                                (
+                                    task_id,
+                                    claimed_at_by_task_id.get(task_id),
+                                )
+                                for task_id in paused_ids
+                            ),
+                        ),
+                    ),
                 )
-                unclaimed_paused_task_ids = [
-                    str(task_id) for task_id in paused_res.scalars().all()
-                ]
+                unclaimed_paused_task_ids = _newly_terminalized_task_ids(
+                    paused_outcomes,
+                )
                 # Keep workflow_task metadata consistent with unclaimed tasks.
                 if unclaimed_paused_task_ids:
                     await s.execute(
@@ -227,20 +261,24 @@ class ClaimMixin:
             if cancelled_task_ids:
                 # Cancel this worker's claimed task rows so they are no longer claimable.
                 cancelled_ids = list(cancelled_task_ids)
-                cancelled_res = await s.execute(
-                    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
-                    {
-                        'ids': cancelled_ids,
-                        'claimed_ats': [
-                            claimed_at_by_task_id.get(task_id)
-                            for task_id in cancelled_ids
-                        ],
-                        'wid': self.worker_instance_id,
-                    },
+                cancelled_outcomes = await apply_batch_async(
+                    await s.connection(),
+                    CancelOwnedNodes(
+                        fence=OwnedClaimBatch(
+                            worker_id=self.worker_instance_id,
+                            claim_generations=tuple(
+                                (
+                                    task_id,
+                                    claimed_at_by_task_id.get(task_id),
+                                )
+                                for task_id in cancelled_ids
+                            ),
+                        ),
+                    ),
                 )
-                cancelled_owned_task_ids = [
-                    str(task_id) for task_id in cancelled_res.scalars().all()
-                ]
+                cancelled_owned_task_ids = _newly_terminalized_task_ids(
+                    cancelled_outcomes,
+                )
                 # Ensure workflow_task rows no longer sit in enqueueable states.
                 if cancelled_owned_task_ids:
                     await s.execute(

@@ -1,11 +1,9 @@
-"""Frozen allowlist of terminal-status writers on ``horsies_tasks``.
+"""Frozen inventory of database-owned terminal writes on ``horsies_tasks``.
 
-Sixteen SQL statements in the runtime package can move a task row to a
-terminal status. Until terminal writes are consolidated behind a single
-persistence module that can be enforced structurally, this inventory is the
-tripwire: a seventeenth terminal writer — or a removed, moved, or
-status-drifted one — fails here and must be reviewed before the allowlist
-changes.
+Every terminal status update belongs to the database program in
+``horsies/core/schemas/terminalization.py``. This inventory is the tripwire: an
+added, removed, moved, or status-drifted writer fails here and must be reviewed
+before the inventory changes.
 
 ``tests/lifecycle_matrix.py`` describes what each of these writers does, and
 is cross-checked against this allowlist.
@@ -15,14 +13,14 @@ string literal of the runtime package — SQLAlchemy ``text()`` statements,
 raw psycopg SQL, and DDL function bodies alike. Writers assigning only
 live statuses (PENDING/CLAIMED/RUNNING) are out of scope. A parameterized
 ``status = :param`` assignment is terminal-capable and must be listed.
-INSERT-shaped terminal writes are out of scope (none exist; a structural
-module boundary closes that door for good).
+INSERT-shaped terminal writes are out of scope; no runtime SQL inserts a task
+in a terminal state.
 
 Known limit of static per-string scanning: SQL assembled across separate
 string constants (``HEAD + TAIL`` concatenation, ``.join`` of fragments)
 is not reassembled, so a writer split that way evades this test. No
-runtime SQL is built that way today, and routing terminal writes through a
-single persistence module closes this class structurally.
+runtime SQL is built that way today. The authoritative-module assertion below
+also prevents a detected terminal update from being approved in a caller.
 """
 
 from __future__ import annotations
@@ -37,6 +35,7 @@ import pytest
 pytestmark = [pytest.mark.unit]
 
 _RUNTIME_ROOT = Path(__file__).resolve().parents[2] / 'horsies'
+_AUTHORITATIVE_MODULE = 'horsies/core/schemas/terminalization.py'
 
 _TERMINAL_STATUSES = frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'})
 
@@ -69,73 +68,13 @@ _STATUS_PARAM_RE = re.compile(
 # parameter (terminal-capable regardless of literals).
 _InventoryKey = tuple[str, str, str]
 
-# The frozen sixteen. Keys are stable across line moves: module path plus
+# Keys are stable across line moves: module path plus
 # the assigned statement name (module-level ``NAME = text(...)``) or the
 # enclosing function name (raw SQL in child paths). The count catches a
 # writer being duplicated or removed within the same context.
 FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
-    # T01
-    ('horsies/monitoring/task_actions.py', '_CANCEL_TASK_SQL', 'CANCELLED'): 1,
-    # T02
-    ('horsies/core/worker/sql.py', 'UNCLAIM_PAUSED_TASKS_SQL', 'CANCELLED'): 1,
-    # T03
-    (
-        'horsies/core/worker/sql.py',
-        'CANCEL_CANCELLED_WORKFLOW_TASKS_SQL',
-        'CANCELLED',
-    ): 1,
-    # T04
-    ('horsies/core/worker/sql.py', 'MARK_TASK_FAILED_WORKER_SQL', 'FAILED'): 1,
-    # T05
-    ('horsies/core/worker/sql.py', 'MARK_TASK_FAILED_SQL', 'FAILED'): 1,
-    # T06
-    ('horsies/core/worker/sql.py', 'MARK_TASK_COMPLETED_SQL', 'COMPLETED'): 1,
-    # T07
-    ('horsies/core/worker/sql.py', 'FINALIZE_TASK_COMPLETED_SQL', 'COMPLETED'): 1,
-    # T08
-    (
-        'horsies/core/worker/sql.py',
-        'TERMINATE_ORPHANED_WORKFLOW_TASK_SQL',
-        'CANCELLED',
-    ): 1,
-    # T09
-    (
-        'horsies/core/workflows/sql.py',
-        'CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL',
-        'CANCELLED',
-    ): 1,
-    # T10 + T11: both branches live in the child pre-start handler.
-    (
-        'horsies/core/worker/child_runner.py',
-        '_handle_workflow_stop_before_start',
-        'CANCELLED',
-    ): 2,
-    # T12
-    (
-        'horsies/core/worker/child_runner.py',
-        '_expire_claimed_task_before_start',
-        'EXPIRED',
-    ): 1,
-    # T13
-    ('horsies/core/brokers/postgres.py', 'MARK_STALE_TASK_FAILED_SQL', 'FAILED'): 1,
-    # T14
-    ('horsies/core/brokers/postgres.py', 'EXPIRE_PENDING_TASKS_SQL', 'EXPIRED'): 1,
-    # T15
-    (
-        'horsies/core/brokers/postgres.py',
-        'TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL',
-        'CANCELLED',
-    ): 1,
-    # T16
-    (
-        'horsies/core/models/workflow/handle.py',
-        'MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL',
-        'CANCELLED',
-    ): 1,
-    # The database-owned operations. Not new legacy writers: these are what the
-    # statements above are being migrated to, and they live in a migration
-    # rather than a runtime module. Each was verified against a real server for
-    # every outcome its contract defines before it was added here.
+    # The fifteen typed operations implement the original sixteen writer
+    # contracts; T04 and T05 share CREATE_FAIL_LOCKED_TASK_SQL.
     (
         'horsies/core/schemas/terminalization.py',
         'CREATE_COMPLETE_LOCKED_TASK_SQL',
@@ -228,7 +167,7 @@ def _constant_text(node: ast.expr) -> str:
     return '\n'.join(parts)
 
 
-def _update_clauses(sql: str) -> list[tuple[str, str]]:
+def update_clauses(sql: str) -> list[tuple[str, str]]:
     """(SET window, remainder) for every UPDATE horsies_tasks in a statement.
 
     The window runs from SET to the first WHERE, RETURNING or FROM, so it
@@ -274,7 +213,7 @@ def _clause_end(segment: str) -> int | None:
 
 def _set_clause_windows(sql: str) -> list[str]:
     """SET-clause text of every UPDATE horsies_tasks in one statement."""
-    return [window for window, _ in _update_clauses(sql)]
+    return [window for window, _ in update_clauses(sql)]
 
 
 def _set_clause_statuses(sql: str) -> tuple[frozenset[str], bool]:
@@ -425,7 +364,7 @@ def _revival_set_windows(
     windows: list[tuple[str, str, str]] = []
     for lineno, text in _task_update_strings(tree):
         context = contexts.get(lineno, '<module>')
-        for window, predicate in _update_clauses(text):
+        for window, predicate in update_clauses(text):
             assigned = {
                 m.group(1).upper() for m in _STATUS_LITERAL_RE.finditer(window)
             }
@@ -448,7 +387,7 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
 
 
 class TestTerminalWriterInventory:
-    """The frozen sixteen, and the scanner that enforces them."""
+    """The reviewed terminal-writer set and the scanner that enforces it."""
 
     def test_inventory_is_frozen(self) -> None:
         """Every terminal-capable writer is in the allowlist, exactly.
@@ -464,6 +403,19 @@ class TestTerminalWriterInventory:
             'Terminal-status writer inventory drifted.\n'
             f'Unexpected: {sorted(discovered - Counter(FROZEN_TERMINAL_WRITERS))}\n'
             f'Missing: {sorted(Counter(FROZEN_TERMINAL_WRITERS) - discovered)}'
+        )
+
+    def test_terminal_writes_are_owned_by_the_database_program(self) -> None:
+        """Callers cannot grow a second terminalization implementation."""
+        discovered = _scan_runtime_package()
+        outside_boundary = sorted(
+            (module, context, statuses)
+            for module, context, statuses in discovered
+            if module != _AUTHORITATIVE_MODULE
+        )
+        assert not outside_boundary, (
+            'Terminal task updates must be defined in '
+            f'{_AUTHORITATIVE_MODULE}: {outside_boundary}'
         )
 
     def test_scanner_detects_terminal_literal(self) -> None:
@@ -573,8 +525,9 @@ class TestTerminalWriterInventory:
         whichever path the tests exercise least.
         """
         windows = _scan_runtime_terminal_windows()
-        assert len(windows) == 31, (
-            f'Expected thirty-one terminal-assigning SET clauses, found '
+        expected = sum(FROZEN_TERMINAL_WRITERS.values())
+        assert len(windows) == expected, (
+            f'Expected {expected} terminal-assigning SET clauses, found '
             f'{len(windows)}; the inventory and this assertion disagree.'
         )
         missing = [

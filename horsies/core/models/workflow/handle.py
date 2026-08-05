@@ -13,6 +13,7 @@ from typing import (
     Callable,
     Generic,
     TypeVar,
+    assert_never,
     cast,
 )
 
@@ -24,6 +25,16 @@ from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
 from pydantic import ValidationError
 from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.lifecycle.commands import CancelNodesOfCancelledWorkflow
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+    TerminalizationOutcome,
+)
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.typed import (
     Json,
@@ -58,6 +69,29 @@ logger = get_logger('workflow.handle')
 
 _T = TypeVar('_T')
 _TASK_TERMINAL_VALUES: list[str] = [status.value for status in TASK_TERMINAL_STATES]
+
+
+def _require_transition_only_batch(
+    outcomes: list[TerminalizationOutcome],
+) -> None:
+    """Workflow-scoped batches may report only rows they transitioned."""
+    for outcome in outcomes:
+        match outcome:
+            case Applied():
+                continue
+            case (
+                AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ):
+                raise RuntimeError(
+                    'cancelled-workflow terminalization returned '
+                    f'{type(outcome).__name__}; workflow-scoped batches '
+                    'report transitioned rows only'
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
 
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
@@ -138,26 +172,6 @@ LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL = text("""
     WHERE workflow_id = :wf_id
       AND NOT (status = ANY(:wf_task_terminal_states))
     FOR UPDATE
-""")
-
-MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL = text("""
-    UPDATE horsies_tasks t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM horsies_workflow_tasks wt
-    JOIN horsies_workflows w ON w.id = wt.workflow_id
-    WHERE wt.workflow_id = :wf_id
-      AND wt.task_id = t.id
-      AND w.status = 'CANCELLED'
-      AND wt.status = 'ENQUEUED'
-      AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')
 """)
 
 SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
@@ -1183,10 +1197,13 @@ class WorkflowHandle(Generic[OutT]):
                 # A backing task may briefly be RUNNING while workflow_task is
                 # still ENQUEUED; user code starts only after the workflow_task
                 # RUNNING handoff, so that state is still cancellable.
-                await session.execute(
-                    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-                    {'wf_id': self.workflow_id},
+                parent_outcomes = await apply_batch_async(
+                    await session.connection(),
+                    CancelNodesOfCancelledWorkflow(
+                        workflow_ids=(self.workflow_id,),
+                    ),
                 )
+                _require_transition_only_batch(parent_outcomes)
 
                 # Skip pending/ready tasks
                 await session.execute(
@@ -1244,10 +1261,13 @@ class WorkflowHandle(Generic[OutT]):
                         CANCEL_WORKFLOW_SQL,
                         {'wf_id': child_workflow_id},
                     )
-                    await session.execute(
-                        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-                        {'wf_id': child_workflow_id},
+                    child_outcomes = await apply_batch_async(
+                        await session.connection(),
+                        CancelNodesOfCancelledWorkflow(
+                            workflow_ids=(child_workflow_id,),
+                        ),
                     )
+                    _require_transition_only_batch(child_outcomes)
                     await session.execute(
                         SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
                         {'wf_id': child_workflow_id},

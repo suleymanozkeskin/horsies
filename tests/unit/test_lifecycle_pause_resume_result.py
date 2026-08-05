@@ -105,13 +105,24 @@ class TestPauseWorkflowResult:
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_running_returns_ok_true(self) -> None:
         """Workflow in RUNNING state -> Ok(True)."""
+        from horsies.core.lifecycle.commands import (
+            AbandonNodesOfPausedWorkflows,
+        )
         from horsies.core.workflows.lifecycle import pause_workflow
 
         broker = _mock_broker(transition_row=('some-id',))
-        result = await pause_workflow(broker, 'wf-1')
+        with patch(
+            'horsies.core.workflows.lifecycle.apply_batch_async',
+            new=AsyncMock(return_value=[]),
+        ) as apply:
+            result = await pause_workflow(broker, 'wf-1')
 
         assert is_ok(result)
         assert result.ok_value is True
+        assert apply.await_args is not None
+        command = apply.await_args.args[1]
+        assert isinstance(command, AbandonNodesOfPausedWorkflows)
+        assert command.workflow_ids == ('wf-1',)
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_wrong_state_returns_ok_false(self) -> None:

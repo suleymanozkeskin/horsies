@@ -24,15 +24,17 @@ from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.schemas.terminalization import (
+    CREATE_ABANDON_OWNED_NODES_SQL,
+    CREATE_CANCEL_OWNED_NODES_SQL,
+)
 from horsies.core.worker.sql import (
-    CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
     CLAIM_SQL,
     COUNT_CLAIMED_FOR_WORKER_SQL,
     COUNT_GLOBAL_IN_FLIGHT_SQL,
     COUNT_IN_FLIGHT_FOR_WORKER_SQL,
     COUNT_QUEUE_IN_FLIGHT_HARD_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
-    UNCLAIM_PAUSED_TASKS_SQL,
 )
 
 BROKER = PostgresConfig(
@@ -325,6 +327,9 @@ class TestOwnershipGateBehavioral:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
+        ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as mock_wf_update:
             from horsies.core.worker.child_runner import (
@@ -416,7 +421,7 @@ class TestUnclaimSqlClearsLeaseExpiry:
 
     def test_paused_task_cleanup_clears_claim_expires_at(self) -> None:
         """Paused-task cleanup must SET claim_expires_at = NULL."""
-        sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
+        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
         normalised = ' '.join(sql_text.split())
         assert 'claim_expires_at = NULL' in normalised
         assert "status = 'CANCELLED'" in normalised
@@ -438,18 +443,24 @@ class TestUnclaimSqlClearsLeaseExpiry:
 
     def test_paused_task_cleanup_matches_only_current_worker_claims(self) -> None:
         """Paused workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = UNCLAIM_PAUSED_TASKS_SQL.text
+        sql_text = CREATE_ABANDON_OWNED_NODES_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert "t.status = 'CLAIMED'" in normalised
-        assert 't.claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert "ctx.status = 'CLAIMED'" in normalised
+        assert (
+            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            in normalised
+        )
         assert 'RETURNING t.id' in normalised
 
     def test_cancel_cancelled_workflow_tasks_matches_only_current_worker_claims(self) -> None:
         """Cancelled workflow cleanup must only cancel rows owned by this worker."""
-        sql_text = CANCEL_CANCELLED_WORKFLOW_TASKS_SQL.text
+        sql_text = CREATE_CANCEL_OWNED_NODES_SQL.text
         normalised = ' '.join(sql_text.split())
-        assert "t.status = 'CLAIMED'" in normalised
-        assert 't.claimed_by_worker_id = CAST(:wid AS VARCHAR)' in normalised
+        assert "ctx.status = 'CLAIMED'" in normalised
+        assert (
+            'ctx.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)'
+            in normalised
+        )
         assert 'RETURNING t.id' in normalised
 
     def test_post_claim_guards_fence_on_the_claim_generation(self) -> None:
@@ -461,15 +472,16 @@ class TestUnclaimSqlClearsLeaseExpiry:
         alongside ids because one batch can span claim transactions.
         """
         for statement in (
-            UNCLAIM_PAUSED_TASKS_SQL,
-            CANCEL_CANCELLED_WORKFLOW_TASKS_SQL,
+            CREATE_ABANDON_OWNED_NODES_SQL,
+            CREATE_CANCEL_OWNED_NODES_SQL,
         ):
             normalised = ' '.join(statement.text.split())
             assert 'unnest(' in normalised
-            assert 'CAST(:claimed_ats AS TIMESTAMPTZ[])' in normalised
-            assert 'AS g(id, claimed_at)' in normalised
+            assert 'unnest(p_ids, p_claimed_ats) WITH ORDINALITY' in normalised
+            assert 'AS g(task_id, claimed_at, ordinality)' in normalised
             assert (
-                '(g.claimed_at IS NULL OR t.claimed_at = g.claimed_at)'
+                'ctx.expected_claimed_at IS NULL '
+                'OR ctx.claimed_at = ctx.expected_claimed_at'
                 in normalised
             )
 
