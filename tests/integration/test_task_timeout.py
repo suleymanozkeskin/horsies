@@ -14,7 +14,7 @@ import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import Row, text
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _parse_timeout_ms
 from tests.integration.conftest import compute_test_enqueue_sha
@@ -74,7 +74,8 @@ async def _insert_task(
 ) -> str:
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(
-        task_name='timeout_test', task_options=task_options,
+        task_name='timeout_test',
+        task_options=task_options,
     )
     await session.execute(
         text("""
@@ -109,7 +110,8 @@ async def _get_row(session: AsyncSession, task_id: str) -> Row[Any]:
     row = (
         await session.execute(
             text("""
-                SELECT status, error_code, retry_count, claimed_by_worker_id
+                SELECT status, error_code, retry_count, claimed_by_worker_id,
+                       terminalization_kind
                 FROM horsies_tasks WHERE id = :id
             """),
             {'id': task_id},
@@ -135,6 +137,7 @@ async def test_timeout_marks_running_task_failed(
     row = await _get_row(session, task_id)
     assert row.status == 'FAILED'
     assert row.error_code == OutcomeCode.TASK_TIMEOUT.value
+    assert row.terminalization_kind == 'FAIL_RUNNING'
 
     attempt = (
         await session.execute(
@@ -149,6 +152,36 @@ async def test_timeout_marks_running_task_failed(
     assert attempt.outcome == 'FAILED'
     assert attempt.will_retry is False
     assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
+    engine: AsyncEngine,
+    session: AsyncSession,
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A repeated timeout handler replays phase 2 from the terminal row."""
+    task_id = await _insert_task(session)
+    worker = _make_worker(engine)
+    worker._finalize_workflow_phase = AsyncMock(  # type: ignore[method-assign]
+        return_value=Ok(None),
+    )
+
+    await worker._handle_task_timeout(task_id, 5_000)
+    worker._finalize_workflow_phase.reset_mock()
+    await worker._handle_task_timeout(task_id, 5_000)
+
+    worker._finalize_workflow_phase.assert_awaited_once()
+    persisted_result = worker._finalize_workflow_phase.await_args.args[1]
+    assert persisted_result.is_err()
+    assert persisted_result.unwrap_err().error_code == OutcomeCode.TASK_TIMEOUT
+    attempt_count = (
+        await session.execute(
+            text('SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = :id'),
+            {'id': task_id},
+        )
+    ).scalar_one()
+    assert attempt_count == 1
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -194,18 +227,22 @@ async def test_timeout_retries_when_opted_in(
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
     """TASK_TIMEOUT in auto_retry_for → retry scheduled, not terminal."""
-    options = json.dumps({
-        'retry_policy': {
-            'max_retries': 3,
-            'intervals': [1],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-            'auto_retry_for': ['TASK_TIMEOUT'],
-        },
-        'timeout_ms': 5_000,
-    })
+    options = json.dumps(
+        {
+            'retry_policy': {
+                'max_retries': 3,
+                'intervals': [1],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': ['TASK_TIMEOUT'],
+            },
+            'timeout_ms': 5_000,
+        }
+    )
     task_id = await _insert_task(
-        session, max_retries=3, task_options=options,
+        session,
+        max_retries=3,
+        task_options=options,
     )
     worker = _make_worker(engine)
 
@@ -275,9 +312,7 @@ class TestKillContainment:
 
         assert killed == []
 
-    def test_no_executor_skips_kill(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_no_executor_skips_kill(self, monkeypatch: pytest.MonkeyPatch) -> None:
         killed = self._kill_recorder(monkeypatch)
         worker = _make_worker_without_engine()
 

@@ -65,9 +65,11 @@ def _test_app() -> Horsies:
     """
     global _TEST_APP
     if _TEST_APP is None:
-        cfg = AppConfig(broker=PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db',
-        ))
+        cfg = AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db',
+            )
+        )
         _TEST_APP = Horsies(cfg)
 
         @_TEST_APP.task(task_name='attempt_history_test')
@@ -178,16 +180,18 @@ async def _insert_running_task_with_retry(
     if auto_retry_for is None:
         auto_retry_for = ['TRANSIENT']
 
-    task_options = json.dumps({
-        'retry_policy': {
-            'max_retries': max_retries,
-            'intervals': intervals,
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-            'auto_retry_for': auto_retry_for,
-        },
-        'good_until': good_until.isoformat(),
-    })
+    task_options = json.dumps(
+        {
+            'retry_policy': {
+                'max_retries': max_retries,
+                'intervals': intervals,
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': auto_retry_for,
+            },
+            'good_until': good_until.isoformat(),
+        }
+    )
 
     return await _insert_running_task(
         session,
@@ -218,10 +222,19 @@ async def _get_attempts(
     )
     rows = result.fetchall()
     cols = [
-        'task_id', 'attempt', 'outcome', 'will_retry',
-        'started_at', 'finished_at',
-        'error_code', 'error_message', 'failed_reason',
-        'worker_id', 'worker_hostname', 'worker_pid', 'worker_process_name',
+        'task_id',
+        'attempt',
+        'outcome',
+        'will_retry',
+        'started_at',
+        'finished_at',
+        'error_code',
+        'error_message',
+        'failed_reason',
+        'worker_id',
+        'worker_hostname',
+        'worker_pid',
+        'worker_process_name',
     ]
     return [dict(zip(cols, row)) for row in rows]
 
@@ -278,8 +291,11 @@ async def test_success_writes_completed_attempt(
     result_json = _serialize_ok(42)
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -321,16 +337,19 @@ async def test_terminal_failure_writes_failed_attempt_and_error_code(
     result_json = _serialize_err('DOMAIN_ERROR', 'something broke')
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
     )
 
     assert is_ok(result)
-    tr = result.ok_value
-    assert tr is not None and tr.is_err()
+    persisted = result.ok_value
+    assert persisted is not None and persisted.result.is_err()
 
     attempts = await _get_attempts(session, task_id)
     assert len(attempts) == 1
@@ -363,16 +382,22 @@ async def test_retryable_failure_writes_attempt_with_will_retry(
     and leaves horsies_tasks.error_code as NULL."""
     good_until = datetime.now(timezone.utc) + timedelta(hours=1)
     task_id = await _insert_running_task_with_retry(
-        session, good_until=good_until,
-        retry_count=0, max_retries=3,
-        intervals=[1, 1, 1], auto_retry_for=['TRANSIENT'],
+        session,
+        good_until=good_until,
+        retry_count=0,
+        max_retries=3,
+        intervals=[1, 1, 1],
+        auto_retry_for=['TRANSIENT'],
     )
     worker = _make_worker(engine)
     result_json = _serialize_err('TRANSIENT', 'retryable error')
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_retry_test',
         queue_name='default',
         is_workflow_task=False,
@@ -412,8 +437,11 @@ async def test_worker_failure_writes_worker_failure_attempt(
     worker = _make_worker(engine)
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=False,
-        result_json_str='', failed_reason='Segfault in child',
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='Segfault in child',
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -421,7 +449,7 @@ async def test_worker_failure_writes_worker_failure_attempt(
 
     assert is_ok(result)
     assert result.ok_value is not None
-    assert result.ok_value.is_err()
+    assert result.ok_value.result.is_err()
 
     attempts = await _get_attempts(session, task_id)
     assert len(attempts) == 1
@@ -520,16 +548,18 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='stale_retry_test')
     stale_started_at = datetime.now(timezone.utc) - timedelta(minutes=30)
-    task_options = json.dumps({
-        'task_name': 'stale_retry_test',
-        'retry_policy': {
-            'max_retries': 3,
-            'intervals': [60, 300, 900],
-            'backoff_strategy': 'fixed',
-            'jitter': False,
-            'auto_retry_for': ['WORKER_CRASHED'],
-        },
-    })
+    task_options = json.dumps(
+        {
+            'task_name': 'stale_retry_test',
+            'retry_policy': {
+                'max_retries': 3,
+                'intervals': [60, 300, 900],
+                'backoff_strategy': 'fixed',
+                'jitter': False,
+                'auto_retry_for': ['WORKER_CRASHED'],
+            },
+        }
+    )
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
@@ -562,7 +592,9 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     # Task should now be PENDING (retried), not FAILED
     row = (
         await session.execute(
-            text('SELECT status, retry_count, next_retry_at, error_code FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status, retry_count, next_retry_at, error_code FROM horsies_tasks WHERE id = :id'
+            ),
             {'id': task_id},
         )
     ).fetchone()
@@ -602,8 +634,11 @@ async def test_replay_does_not_create_duplicate_attempt(
 
     # First finalization: succeeds
     r1 = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -616,8 +651,11 @@ async def test_replay_does_not_create_duplicate_attempt(
     # Second finalization: task is no longer RUNNING → SELECT FOR UPDATE
     # returns no row → early exit with Ok(None), no attempt written.
     r2 = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -645,8 +683,11 @@ async def test_claim_lost_writes_no_attempt(
     worker = _make_worker(engine)
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=False,
-        result_json_str='', failed_reason='CLAIM_LOST',
+        task_id=task_id,
+        now=NOW,
+        ok=False,
+        result_json_str='',
+        failed_reason='CLAIM_LOST',
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -670,8 +711,11 @@ async def test_workflow_stopped_error_code_writes_no_attempt(
     result_json = _serialize_err('WORKFLOW_STOPPED', 'workflow was stopped')
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -699,8 +743,11 @@ async def test_corrupt_json_writes_serialization_error_attempt(
     worker = _make_worker(engine)
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str='not json {', failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str='not json {',
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,
@@ -739,8 +786,11 @@ async def test_attempt_number_reflects_retry_count(
     result_json = _serialize_ok('after retries')
 
     result = await worker._persist_task_terminal_state(
-        task_id=task_id, now=NOW, ok=True,
-        result_json_str=result_json, failed_reason=None,
+        task_id=task_id,
+        now=NOW,
+        ok=True,
+        result_json_str=result_json,
+        failed_reason=None,
         task_name='attempt_history_test',
         queue_name='default',
         is_workflow_task=False,

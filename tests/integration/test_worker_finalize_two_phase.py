@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +21,6 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
 
-
 _TEST_APP: Horsies | None = None
 
 
@@ -36,9 +34,11 @@ def _test_app() -> Horsies:
     """
     global _TEST_APP
     if _TEST_APP is None:
-        cfg = AppConfig(broker=PostgresConfig(
-            database_url='postgresql+psycopg://u:p@localhost/db',
-        ))
+        cfg = AppConfig(
+            broker=PostgresConfig(
+                database_url='postgresql+psycopg://u:p@localhost/db',
+            )
+        )
         _TEST_APP = Horsies(cfg)
 
         @_TEST_APP.task(task_name='two_phase_finalize_test')
@@ -46,6 +46,7 @@ def _test_app() -> Horsies:
             return TaskResult(ok=None)
 
     return _TEST_APP
+
 
 pytestmark = [pytest.mark.integration]
 
@@ -63,11 +64,12 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 is_workflow_task)
             VALUES
                 (:id, 'two_phase_finalize_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 3, NOW(), :enqueue_sha, :claimed_by_worker_id)
+                 3, NOW(), :enqueue_sha, :claimed_by_worker_id, TRUE)
         """),
         {
             'id': task_id,
@@ -105,7 +107,8 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     )  # type: ignore[method-assign]
 
     envelope = encode_task_result(
-        TaskResult(ok='phase-1-result'), JsonValue,
+        TaskResult(ok='phase-1-result'),
+        JsonValue,
     )
     serialized = dumps_json(envelope)
     assert not is_err(serialized)
@@ -116,13 +119,16 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
 
     # Should return Err (for callback-driven handling) but keep phase-1 durability.
     finalize_r = await worker._finalize_after(
-        fut, task_id, task_name='two_phase_finalize_test', executor=MagicMock(),
+        fut,
+        task_id,
+        task_name='two_phase_finalize_test',
+        executor=MagicMock(),
     )
     assert is_err(finalize_r)
 
     row = (
         await session.execute(
-            text("SELECT status, result FROM horsies_tasks WHERE id = :id"),
+            text('SELECT status, result FROM horsies_tasks WHERE id = :id'),
             {'id': task_id},
         )
     ).fetchone()

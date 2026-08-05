@@ -14,13 +14,16 @@ type checker says so at the call site rather than at run time.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from typing import Any, assert_never
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..logging import get_logger
 from .commands import (
     AbandonNodesOfPausedWorkflows,
     AbandonOwnedNode,
@@ -37,8 +40,29 @@ from .commands import (
     ExpirePendingTasks,
     FailLockedTask,
     FailStaleTask,
+    TerminalizationCommand,
+    fence_of,
 )
-from .outcomes import TerminalizationOutcome, decode_outcome_row
+from .fences import (
+    CallerHoldsRowLock,
+    OwnedClaim,
+    OwnedClaimBatch,
+    PriorLockedRead,
+    TerminalFence,
+    WorkerOwned,
+)
+from .operations import equivalence_class_of, function_name_of, kind_of
+from .outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+    TerminalizationOutcome,
+    decode_outcome_row,
+)
+
+logger = get_logger('lifecycle')
 
 type ExecutableCommand = (
     CompleteLockedTask
@@ -166,6 +190,15 @@ _CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
         CAST(:workflow_ids AS VARCHAR[])
     )
 """)
+
+_LOCKED_READ_MISS_SQL = text("""
+    SELECT * FROM horsies_terminalization_miss(
+        CAST(:task_id AS VARCHAR), CAST(:equivalent_kinds AS TEXT[]),
+        :worker_id, CAST(:claimed_at AS TIMESTAMPTZ)
+    )
+""")
+
+type LockedReadCommand = CompleteLockedTask | FailLockedTask
 
 
 def call_for(command: ExecutableCommand) -> tuple[Any, dict[str, Any]]:
@@ -336,7 +369,7 @@ async def apply_batch_async(
     ]
     match command:
         case AbandonOwnedNodes(fence=fence) | CancelOwnedNodes(fence=fence):
-            return _reconstruct_id_keyed_batch(
+            ordered_outcomes = _reconstruct_id_keyed_batch(
                 outcomes,
                 expected_count=len(fence.claim_generations),
                 command=command,
@@ -347,9 +380,12 @@ async def apply_batch_async(
             | AbandonNodesOfPausedWorkflows()
             | CancelNodesOfCancelledWorkflow()
         ):
-            return outcomes
+            ordered_outcomes = outcomes
         case _ as unreachable:
             assert_never(unreachable)
+    for outcome in ordered_outcomes:
+        _log_outcome(command, outcome)
+    return ordered_outcomes
 
 
 def _reconstruct_id_keyed_batch(
@@ -398,7 +434,52 @@ async def apply_async(
     """
     statement, parameters = call_for(command)
     result = await connection.execute(statement, parameters)
-    return decode_outcome_row(_single_row(result.mappings().all(), command))
+    outcome = decode_outcome_row(_single_row(result.mappings().all(), command))
+    _log_outcome(command, outcome)
+    return outcome
+
+
+async def classify_locked_read_miss_async(
+    connection: AsyncConnection,
+    command: LockedReadCommand,
+    *,
+    claimed_at: datetime | None,
+) -> TerminalizationOutcome:
+    """Classify a failed generation-fenced locking read without mutating.
+
+    ``CompleteLockedTask`` and ``FailLockedTask`` intentionally carry only the
+    worker half of their fence: their generation was already checked by the
+    caller's ``SELECT ... FOR UPDATE``. If that read matched nothing, invoking
+    the operation function would be unsafe — the same worker may already own a
+    newer generation. The database's shared miss classifier accepts the full
+    dispatched generation and distinguishes an idempotent replay from that
+    lost claim while keeping terminal-before-fence ordering identical to every
+    operation function.
+    """
+    requested_kind = kind_of(command)
+    parameters = {
+        'task_id': command.task_id,
+        'equivalent_kinds': [
+            kind.value
+            for kind in sorted(
+                equivalence_class_of(requested_kind),
+                key=lambda member: member.value,
+            )
+        ],
+        'worker_id': command.fence.worker_id,
+        'claimed_at': claimed_at,
+    }
+    result = await connection.execute(_LOCKED_READ_MISS_SQL, parameters)
+    outcome = decode_outcome_row(_single_row(result.mappings().all(), command))
+    _log_outcome(
+        command,
+        outcome,
+        expected_fence=OwnedClaim(
+            worker_id=command.fence.worker_id,
+            claimed_at=claimed_at,
+        ),
+    )
+    return outcome
 
 
 def apply_sync(
@@ -415,7 +496,105 @@ def apply_sync(
     cursor.execute(_as_psycopg(statement), parameters)
     columns = [description.name for description in cursor.description]
     rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
-    return decode_outcome_row(_single_row(rows, command))
+    outcome = decode_outcome_row(_single_row(rows, command))
+    _log_outcome(command, outcome)
+    return outcome
+
+
+def _log_outcome(
+    command: TerminalizationCommand,
+    outcome: TerminalizationOutcome,
+    *,
+    expected_fence: TerminalFence | None = None,
+) -> None:
+    """Emit the operation, expected fence, and locked observation together.
+
+    Applied transitions are debug-level steady-state traffic. Every refusal or
+    replay is warning-level because its evidence is the only race diagnosis
+    that cannot be reconstructed by reading the row later.
+    """
+    level = logging.DEBUG if isinstance(outcome, Applied) else logging.WARNING
+    if not logger.isEnabledFor(level):
+        return
+    match outcome:
+        case (
+            Applied(
+                observed=observed,
+                terminal_at=terminal_at,
+                kind=committed_kind,
+            )
+            | AlreadyApplied(
+                observed=observed,
+                terminal_at=terminal_at,
+                kind=committed_kind,
+            )
+        ):
+            evidence: object | None = None
+        case LostClaim(observed=observed):
+            terminal_at = None
+            committed_kind = None
+            evidence = None
+        case SourceStateConflict(observed=observed, evidence=guard_evidence):
+            terminal_at = None
+            committed_kind = None
+            evidence = guard_evidence
+        case TaskAbsent():
+            observed = None
+            terminal_at = None
+            committed_kind = None
+            evidence = None
+        case _ as unreachable:
+            assert_never(unreachable)
+    command_fence = fence_of(command)
+    match expected_fence:
+        case (
+            CallerHoldsRowLock()
+            | PriorLockedRead()
+            | WorkerOwned()
+            | OwnedClaim()
+            | OwnedClaimBatch()
+        ):
+            fence_type = type(expected_fence).__name__
+            logged_expected_fence = expected_fence
+        case None:
+            match command_fence:
+                case OwnedClaimBatch(
+                    worker_id=worker_id,
+                    claim_generations=claims,
+                ):
+                    generation_by_task = dict(claims)
+                    fence_type = OwnedClaimBatch.__name__
+                    logged_expected_fence: object | None = {
+                        'worker_id': worker_id,
+                        'claimed_at': generation_by_task.get(outcome.task_id),
+                    }
+                case None:
+                    fence_type = None
+                    logged_expected_fence = None
+                case (
+                    CallerHoldsRowLock()
+                    | PriorLockedRead()
+                    | WorkerOwned()
+                    | OwnedClaim()
+                ):
+                    fence_type = type(command_fence).__name__
+                    logged_expected_fence = command_fence
+    logger.log(
+        level,
+        'terminalization operation=%s function=%s outcome=%s task_id=%s '
+        'terminal_at=%r committed_kind=%s fence_type=%s expected_fence=%r '
+        'observed=%r evidence=%r',
+        type(command).__name__,
+        function_name_of(command),
+        type(outcome).__name__,
+        outcome.task_id,
+        terminal_at,
+        committed_kind.value if committed_kind is not None else None,
+        fence_type,
+        logged_expected_fence,
+        observed,
+        evidence,
+    )
 
 
 def _single_row(

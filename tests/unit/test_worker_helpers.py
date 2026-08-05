@@ -8,7 +8,7 @@ import time
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from psycopg import InterfaceError, OperationalError
@@ -18,6 +18,8 @@ from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
+
+from horsies.core.worker.finalize import _PersistedTaskOutcome
 
 from horsies.core.worker.worker import (
     Worker,
@@ -62,8 +64,8 @@ from horsies.core.models.tasks import OperationalErrorCode
 
 
 def _make_worker(
-    dsn: str = "postgresql+psycopg://u:p@localhost/db",
-    psycopg_dsn: str = "postgresql://u:p@localhost/db",
+    dsn: str = 'postgresql+psycopg://u:p@localhost/db',
+    psycopg_dsn: str = 'postgresql://u:p@localhost/db',
     queues: list[str] | None = None,
     claim_lease_ms: int | None = None,
     cluster_wide_cap: int | None = None,
@@ -74,7 +76,7 @@ def _make_worker(
     cfg = WorkerConfig(
         dsn=dsn,
         psycopg_dsn=psycopg_dsn,
-        queues=queues or ["default"],
+        queues=queues or ['default'],
         claim_lease_ms=claim_lease_ms,
         cluster_wide_cap=cluster_wide_cap,
         queue_priorities=queue_priorities or {},
@@ -97,19 +99,19 @@ class TestDedupePaths:
     """Tests for _dedupe_paths: order-preserving dedup, skip empties."""
 
     def test_preserves_order_and_deduplicates(self) -> None:
-        assert _dedupe_paths(["a", "b", "a", "c"]) == ["a", "b", "c"]
+        assert _dedupe_paths(['a', 'b', 'a', 'c']) == ['a', 'b', 'c']
 
     def test_filters_empty_strings(self) -> None:
-        assert _dedupe_paths(["a", "", "b", "", "c"]) == ["a", "b", "c"]
+        assert _dedupe_paths(['a', '', 'b', '', 'c']) == ['a', 'b', 'c']
 
     def test_empty_input(self) -> None:
         assert _dedupe_paths([]) == []
 
     def test_all_empty_strings(self) -> None:
-        assert _dedupe_paths(["", "", ""]) == []
+        assert _dedupe_paths(['', '', '']) == []
 
     def test_single_element(self) -> None:
-        assert _dedupe_paths(["x"]) == ["x"]
+        assert _dedupe_paths(['x']) == ['x']
 
 
 # ---------------------------------------------------------------------------
@@ -153,17 +155,17 @@ class TestDeriveSysPathRootsFromFile:
     """Tests for _derive_sys_path_roots_from_file: parent dir extraction."""
 
     def test_normal_file_path(self) -> None:
-        result = _derive_sys_path_roots_from_file("/foo/bar/baz.py")
-        assert result == [os.path.realpath("/foo/bar")]
+        result = _derive_sys_path_roots_from_file('/foo/bar/baz.py')
+        assert result == [os.path.realpath('/foo/bar')]
 
     def test_relative_file_path(self) -> None:
-        result = _derive_sys_path_roots_from_file("some/module.py")
+        result = _derive_sys_path_roots_from_file('some/module.py')
         assert len(result) == 1
         assert os.path.isabs(result[0])
 
     def test_root_level_file(self) -> None:
-        result = _derive_sys_path_roots_from_file("/file.py")
-        assert result == ["/"]
+        result = _derive_sys_path_roots_from_file('/file.py')
+        assert result == ['/']
 
 
 # ---------------------------------------------------------------------------
@@ -177,23 +179,23 @@ class TestBuildSysPathRoots:
 
     def test_extra_roots_included_and_made_absolute(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="",
+            app_locator='',
             imports=[],
-            extra_roots=["./src"],
+            extra_roots=['./src'],
         )
-        assert os.path.abspath("./src") in result
+        assert os.path.abspath('./src') in result
 
     def test_file_based_app_locator_adds_parent(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="/x/app.py:app",
+            app_locator='/x/app.py:app',
             imports=[],
             extra_roots=[],
         )
-        assert os.path.realpath("/x") in result
+        assert os.path.realpath('/x') in result
 
     def test_module_path_app_locator_skipped(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="my.mod:app",
+            app_locator='my.mod:app',
             imports=[],
             extra_roots=[],
         )
@@ -201,25 +203,25 @@ class TestBuildSysPathRoots:
 
     def test_import_with_py_suffix_adds_parent(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="",
-            imports=["/y/tasks.py"],
+            app_locator='',
+            imports=['/y/tasks.py'],
             extra_roots=[],
         )
-        assert os.path.realpath("/y") in result
+        assert os.path.realpath('/y') in result
 
     def test_import_without_py_or_sep_skipped(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="",
-            imports=["my.tasks"],
+            app_locator='',
+            imports=['my.tasks'],
             extra_roots=[],
         )
         assert result == []
 
     def test_duplicates_removed(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="/x/app.py:app",
-            imports=["/x/tasks.py"],
-            extra_roots=[os.path.realpath("/x")],
+            app_locator='/x/app.py:app',
+            imports=['/x/tasks.py'],
+            extra_roots=[os.path.realpath('/x')],
         )
         # /x appears from extra_roots, app_locator, and import — all resolve
         # to the same realpath, so the list must contain no duplicates.
@@ -227,7 +229,7 @@ class TestBuildSysPathRoots:
 
     def test_empty_inputs(self) -> None:
         result = _build_sys_path_roots(
-            app_locator="",
+            app_locator='',
             imports=[],
             extra_roots=[],
         )
@@ -257,13 +259,13 @@ class TestAdvisoryKeyGlobal:
         assert w._advisory_key_global() == w._advisory_key_global()
 
     def test_different_dsn_spellings_share_one_key(self) -> None:
-        w1 = _make_worker(psycopg_dsn="postgresql://a@db.internal/db1")
-        w2 = _make_worker(psycopg_dsn="postgresql://a@10.0.0.5/db1")
+        w1 = _make_worker(psycopg_dsn='postgresql://a@db.internal/db1')
+        w2 = _make_worker(psycopg_dsn='postgresql://a@10.0.0.5/db1')
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
     def test_key_is_dsn_independent(self) -> None:
-        w1 = _make_worker(psycopg_dsn="", dsn="postgresql+psycopg://u:p@h/mydb")
-        w2 = _make_worker(psycopg_dsn="postgresql://other@elsewhere/db")
+        w1 = _make_worker(psycopg_dsn='', dsn='postgresql+psycopg://u:p@h/mydb')
+        w2 = _make_worker(psycopg_dsn='postgresql://other@elsewhere/db')
         assert w1._advisory_key_global() == w2._advisory_key_global()
 
 
@@ -288,36 +290,36 @@ class TestClaimLockKeys:
     def test_cluster_wide_cap_takes_only_the_global_key(self) -> None:
         w = _make_worker(
             cluster_wide_cap=10,
-            queues=["q1"],
-            queue_priorities={"q1": 1},
-            queue_max_concurrency={"q1": 5},
+            queues=['q1'],
+            queue_priorities={'q1': 1},
+            queue_max_concurrency={'q1': 5},
         )
         assert self._keys(w) == [w._advisory_key_global()]
 
     def test_capped_queues_get_one_sorted_key_each(self) -> None:
         w = _make_worker(
-            queues=["q1", "q2", "q3"],
-            queue_priorities={"q1": 1, "q2": 2, "q3": 3},
-            queue_max_concurrency={"q1": 5, "q3": 2},
+            queues=['q1', 'q2', 'q3'],
+            queue_priorities={'q1': 1, 'q2': 2, 'q3': 3},
+            queue_max_concurrency={'q1': 5, 'q3': 2},
         )
         keys = self._keys(w)
-        expected = {w._advisory_key_for_queue("q1"), w._advisory_key_for_queue("q3")}
+        expected = {w._advisory_key_for_queue('q1'), w._advisory_key_for_queue('q3')}
         assert set(keys) == expected
         assert keys == sorted(keys)  # deadlock prevention: stable order
         assert w._advisory_key_global() not in keys
 
     def test_priorities_without_concurrency_caps_take_no_locks(self) -> None:
         w = _make_worker(
-            queues=["q1"],
-            queue_priorities={"q1": 1},
+            queues=['q1'],
+            queue_priorities={'q1': 1},
         )
         assert self._keys(w) == []
 
     def test_cap_on_foreign_queue_takes_no_locks(self) -> None:
         w = _make_worker(
-            queues=["q1"],
-            queue_priorities={"q1": 1},
-            queue_max_concurrency={"other_queue": 5},
+            queues=['q1'],
+            queue_priorities={'q1': 1},
+            queue_max_concurrency={'other_queue': 5},
         )
         assert self._keys(w) == []
 
@@ -327,12 +329,12 @@ class TestClaimLockKeys:
         fix, an empty queue_priorities map disabled cap enforcement and the
         lock entirely, so concurrent workers over-claimed the queue."""
         w = _make_worker(
-            queues=["fast"],
+            queues=['fast'],
             queue_priorities={},
-            queue_max_concurrency={"fast": 5},
+            queue_max_concurrency={'fast': 5},
         )
-        assert w._ordered_claim_queues() == ["fast"]
-        assert self._keys(w) == [w._advisory_key_for_queue("fast")]
+        assert w._ordered_claim_queues() == ['fast']
+        assert self._keys(w) == [w._advisory_key_for_queue('fast')]
 
     def test_cap_only_queue_in_mixed_config_is_claimed_and_locked(self) -> None:
         """C7: the lock list mirrors the claimed list. A capped queue absent
@@ -341,22 +343,24 @@ class TestClaimLockKeys:
         queue_max_concurrency, not queue_priorities. Before the fix this
         queue was silently dropped from the claim pass and never serviced."""
         w = _make_worker(
-            queues=["q1", "unprioritized"],
-            queue_priorities={"q1": 1},
-            queue_max_concurrency={"q1": 5, "unprioritized": 5},
+            queues=['q1', 'unprioritized'],
+            queue_priorities={'q1': 1},
+            queue_max_concurrency={'q1': 5, 'unprioritized': 5},
         )
         # q1 (priority 1) sorts ahead of unprioritized (default bucket 100).
-        assert w._ordered_claim_queues() == ["q1", "unprioritized"]
-        assert self._keys(w) == sorted([
-            w._advisory_key_for_queue("q1"),
-            w._advisory_key_for_queue("unprioritized"),
-        ])
+        assert w._ordered_claim_queues() == ['q1', 'unprioritized']
+        assert self._keys(w) == sorted(
+            [
+                w._advisory_key_for_queue('q1'),
+                w._advisory_key_for_queue('unprioritized'),
+            ]
+        )
 
     def test_queue_keys_stable_and_distinct(self) -> None:
         w = _make_worker()
-        k1 = w._advisory_key_for_queue("alpha")
-        assert k1 == w._advisory_key_for_queue("alpha")
-        assert k1 != w._advisory_key_for_queue("beta")
+        k1 = w._advisory_key_for_queue('alpha')
+        assert k1 == w._advisory_key_for_queue('alpha')
+        assert k1 != w._advisory_key_for_queue('beta')
         assert k1 != w._advisory_key_global()
         # fits signed BIGINT (pg_advisory_xact_lock takes int8)
         assert -(2**63) <= k1 < 2**63
@@ -512,7 +516,9 @@ class TestServiceLoopFailFatal:
             raise ValueError('loop defect')
 
         task = worker._spawn_background(
-            _dying_loop(), name='claimer-heartbeat', service=True,
+            _dying_loop(),
+            name='claimer-heartbeat',
+            service=True,
         )
         with pytest.raises(ValueError):
             await task
@@ -534,7 +540,9 @@ class TestServiceLoopFailFatal:
             return None
 
         task = worker._spawn_background(
-            _returning_loop(), name='reaper', service=True,
+            _returning_loop(),
+            name='reaper',
+            service=True,
         )
         await task
         await asyncio.sleep(0.01)
@@ -549,7 +557,9 @@ class TestServiceLoopFailFatal:
         worker = _make_worker()
 
         task = worker._spawn_background(
-            asyncio.sleep(999), name='ping-responder', service=True,
+            asyncio.sleep(999),
+            name='ping-responder',
+            service=True,
         )
         await asyncio.sleep(0)
         task.cancel()
@@ -574,7 +584,9 @@ class TestServiceLoopFailFatal:
                 return
 
         task = worker._spawn_background(
-            _absorbing_loop(), name='worker-state-heartbeat', service=True,
+            _absorbing_loop(),
+            name='worker-state-heartbeat',
+            service=True,
         )
         await asyncio.sleep(0)
         task.cancel()
@@ -593,7 +605,9 @@ class TestServiceLoopFailFatal:
             return None
 
         task = worker._spawn_background(
-            _stopping_loop(), name='reaper', service=True,
+            _stopping_loop(),
+            name='reaper',
+            service=True,
         )
         await task
         await asyncio.sleep(0.01)
@@ -644,7 +658,9 @@ class TestReaperHeartbeatRetention:
     """Tests for heartbeat retention cleanup in the reaper loop."""
 
     @pytest.mark.asyncio
-    async def test_reaper_prunes_expired_heartbeats(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_reaper_prunes_expired_heartbeats(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         worker = _make_worker()
         worker.cfg.recovery_config = RecoveryConfig(
             auto_requeue_stale_claimed=False,
@@ -681,9 +697,7 @@ class TestReaperHeartbeatRetention:
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=0)
-        monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
-        )
+        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
@@ -736,7 +750,9 @@ class TestReaperHeartbeatRetention:
 
         class _UnexpectedBroker:
             def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                raise AssertionError('Reaper should reuse worker broker, not create temp broker')
+                raise AssertionError(
+                    'Reaper should reuse worker broker, not create temp broker'
+                )
 
         recover_mock = AsyncMock(return_value=0)
         monkeypatch.setattr(
@@ -808,9 +824,7 @@ class TestReaperHeartbeatRetention:
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=0)
-        monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
-        )
+        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
@@ -819,9 +833,7 @@ class TestReaperHeartbeatRetention:
         await worker._reaper_loop()
 
         executed_statements = [
-            call.args[0]
-            for call in session.execute.await_args_list
-            if call.args
+            call.args[0] for call in session.execute.await_args_list if call.args
         ]
         for statement in expected_rowcounts:
             assert statement in executed_statements
@@ -882,9 +894,7 @@ class TestReaperHeartbeatRetention:
             return 0
 
         recover_mock = AsyncMock(side_effect=_recover_and_stop)
-        monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
-        )
+        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
@@ -893,19 +903,20 @@ class TestReaperHeartbeatRetention:
         await worker._reaper_loop()
 
         global_task_params = [
-            params for stmt, params in executed
-            if stmt is DELETE_EXPIRED_TASKS_SQL
+            params for stmt, params in executed if stmt is DELETE_EXPIRED_TASKS_SQL
         ]
         assert global_task_params, 'global tasks delete ran'
         assert global_task_params[0]['excluded_queues'] == ['bulk', 'metrics']
 
         override_params = [
-            params for stmt, params in executed
+            params
+            for stmt, params in executed
             if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
         ]
-        assert [
-            (p['queue_name'], p['retention_hours']) for p in override_params
-        ] == [('bulk', 6), ('metrics', 2)]
+        assert [(p['queue_name'], p['retention_hours']) for p in override_params] == [
+            ('bulk', 6),
+            ('metrics', 2),
+        ]
 
     @pytest.mark.asyncio
     async def test_reaper_runs_queue_overrides_with_global_window_disabled(
@@ -954,9 +965,7 @@ class TestReaperHeartbeatRetention:
             return 0
 
         recover_mock = AsyncMock(side_effect=_recover_and_stop)
-        monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
-        )
+        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
         )
@@ -968,12 +977,13 @@ class TestReaperHeartbeatRetention:
         assert DELETE_EXPIRED_TASKS_SQL not in executed_statements
         assert DELETE_EXPIRED_WORKFLOWS_SQL not in executed_statements
         override_params = [
-            params for stmt, params in executed
+            params
+            for stmt, params in executed
             if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
         ]
-        assert [
-            (p['queue_name'], p['retention_hours']) for p in override_params
-        ] == [('metrics', 2)]
+        assert [(p['queue_name'], p['retention_hours']) for p in override_params] == [
+            ('metrics', 2)
+        ]
 
 
 @pytest.mark.unit
@@ -1186,7 +1196,8 @@ class TestClaimerHeartbeatRenewsLease:
 
         # Verify renewal params contain a finite lease duration.
         renewal_calls = [
-            c for c in session.execute.call_args_list
+            c
+            for c in session.execute.call_args_list
             if c[0][0] is RENEW_CLAIM_LEASE_SQL
         ]
         assert len(renewal_calls) >= 1
@@ -1256,7 +1267,9 @@ class TestRequeueClaimedTask:
     async def test_requeue_db_error_returns_db_error(self) -> None:
         """When session.execute raises, outcome is DB_ERROR — exception does NOT propagate."""
         worker = _make_worker()
-        session = _make_session_mock(execute_side_effect=OperationalError('connection lost'))
+        session = _make_session_mock(
+            execute_side_effect=OperationalError('connection lost')
+        )
         worker.sf = MagicMock(return_value=session)
 
         outcome = await worker._requeue_claimed_task('task-3', 'db failure')
@@ -1291,7 +1304,8 @@ class TestFinalizeResultPayloadWarn:
 
     @pytest.mark.asyncio
     async def test_oversized_result_warns(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         import logging
 
@@ -1302,7 +1316,8 @@ class TestFinalizeResultPayloadWarn:
         worker = _make_worker()
         worker._app = MagicMock()
         worker._app.config.payload = PayloadPolicy(
-            warn_bytes=64, reject_bytes=None,
+            warn_bytes=64,
+            reject_bytes=None,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
             return_value=Err(MagicMock()),
@@ -1313,13 +1328,14 @@ class TestFinalizeResultPayloadWarn:
 
         with caplog.at_level(logging.WARNING):
             await worker._finalize_after(
-                fut, 'task-w', task_name='big_result_task',
+                fut,
+                'task-w',
+                task_name='big_result_task',
                 executor=MagicMock(),
             )
 
         guard_records = [
-            r for r in caplog.records
-            if 'Payload size guardrail' in r.getMessage()
+            r for r in caplog.records if 'Payload size guardrail' in r.getMessage()
         ]
         assert len(guard_records) == 1
         assert "'big_result_task'" in guard_records[0].getMessage()
@@ -1348,7 +1364,10 @@ class TestFinalizeAfterRequeueOutcome:
         fut.set_exception(OperationalError('connection reset'))
 
         result = await worker._finalize_after(
-            fut, 'task-10', task_name='helper_task', executor=MagicMock(),
+            fut,
+            'task-10',
+            task_name='helper_task',
+            executor=MagicMock(),
         )
 
         assert isinstance(result, Err)
@@ -1373,7 +1392,10 @@ class TestFinalizeAfterRequeueOutcome:
         fut.set_exception(OperationalError('original connection error'))
 
         result = await worker._finalize_after(
-            fut, 'task-11', task_name='helper_task', executor=MagicMock(),
+            fut,
+            'task-11',
+            task_name='helper_task',
+            executor=MagicMock(),
         )
 
         assert isinstance(result, Err)
@@ -1398,7 +1420,10 @@ class TestFinalizeAfterRequeueOutcome:
         fut.set_exception(OperationalError('transient'))
 
         result = await worker._finalize_after(
-            fut, 'task-12', task_name='helper_task', executor=MagicMock(),
+            fut,
+            'task-12',
+            task_name='helper_task',
+            executor=MagicMock(),
         )
 
         assert isinstance(result, Err)
@@ -1420,7 +1445,10 @@ class TestFinalizeAfterRequeueOutcome:
         fut.set_exception(ValueError('bad data'))
 
         result = await worker._finalize_after(
-            fut, 'task-13', task_name='helper_task', executor=MagicMock(),
+            fut,
+            'task-13',
+            task_name='helper_task',
+            executor=MagicMock(),
         )
 
         assert isinstance(result, Err)
@@ -1441,7 +1469,8 @@ class TestRequeueDbErrorContainment:
 
     @pytest.mark.asyncio
     async def test_handle_broken_pool_db_error_logs_critical(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """_handle_broken_pool logs CRITICAL on DB_ERROR and still restarts executor."""
         worker = _make_worker()
@@ -1453,7 +1482,9 @@ class TestRequeueDbErrorContainment:
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
             await worker._handle_broken_pool(
-                'task-20', BrokenProcessPool('pool died'), MagicMock(),
+                'task-20',
+                BrokenProcessPool('pool died'),
+                MagicMock(),
             )
 
         worker._restart_executor.assert_awaited_once()
@@ -1464,7 +1495,8 @@ class TestRequeueDbErrorContainment:
 
     @pytest.mark.asyncio
     async def test_dispatch_one_executor_unavailable_db_error_logs_critical(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """_dispatch_one (executor unavailable path) logs CRITICAL on DB_ERROR."""
         worker = _make_worker()
@@ -1488,7 +1520,8 @@ class TestRequeueDbErrorContainment:
 
     @pytest.mark.asyncio
     async def test_dispatch_one_submit_exception_db_error_logs_critical(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """_dispatch_one (run_in_executor exception path) logs CRITICAL on DB_ERROR."""
         worker = _make_worker()
@@ -1520,7 +1553,8 @@ class TestRequeueDbErrorContainment:
 
     @pytest.mark.asyncio
     async def test_handle_broken_pool_requeue_success_no_critical(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """No CRITICAL log when requeue succeeds in _handle_broken_pool."""
         worker = _make_worker()
@@ -1532,7 +1566,9 @@ class TestRequeueDbErrorContainment:
 
         with caplog.at_level(logging.CRITICAL, logger='horsies.worker'):
             await worker._handle_broken_pool(
-                'task-23', BrokenProcessPool('pool died'), MagicMock(),
+                'task-23',
+                BrokenProcessPool('pool died'),
+                MagicMock(),
             )
 
         critical_messages = [r for r in caplog.records if r.levelno == logging.CRITICAL]
@@ -1601,7 +1637,8 @@ class TestLeaseRenewalAgeGuard:
 
         # Find the RENEW_CLAIM_LEASE_SQL call params
         renewal_calls = [
-            c for c in session.execute.call_args_list
+            c
+            for c in session.execute.call_args_list
             if c[0][0] is RENEW_CLAIM_LEASE_SQL
         ]
         assert len(renewal_calls) >= 1
@@ -1647,7 +1684,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_non_finalize_error_payload_logs_and_returns(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Non-_FinalizeError payload → logs error, no attempts touched."""
         worker = _make_worker()
@@ -1663,7 +1701,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_unknown_stage_logs_and_returns(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Unknown stage value → logs error with stage info, returns."""
         worker = _make_worker()
@@ -1679,7 +1718,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_non_retryable_clears_attempts_no_spawn(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Non-retryable error → logs, clears attempts, no retry spawned."""
         worker = _make_worker()
@@ -1725,7 +1765,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_retryable_at_max_attempts_logs_critical_no_spawn(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Retryable at max attempts → logs CRITICAL, clears attempts, no spawn."""
         worker = _make_worker()
@@ -1742,7 +1783,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_phase2_at_max_attempts_uses_phase2_limit(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Phase2 uses its own max retries (5), not phase1's (3)."""
         worker = _make_worker()
@@ -1767,7 +1809,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_future_at_max_attempts_uses_future_limit(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Future-stage errors use their own bounded retry limit."""
         worker = _make_worker()
@@ -1878,7 +1921,8 @@ class TestHandleFinalizeError:
 
     @pytest.mark.asyncio
     async def test_backoff_delay_doubles_per_attempt(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Delay doubles per attempt: 0.5, 1.0, 2.0, 4.0, ... capped at 15s."""
         worker = _make_worker()
@@ -1899,7 +1943,10 @@ class TestHandleFinalizeError:
                 await worker._handle_finalize_error(err)
 
             for record in caplog.records:
-                if 'Finalize retry scheduled' in record.message and err.task_id in record.message:
+                if (
+                    'Finalize retry scheduled' in record.message
+                    and err.task_id in record.message
+                ):
                     parts = record.message.split(' in ')
                     if len(parts) >= 2:
                         delay_str = parts[-1].split('s:')[0]
@@ -1915,9 +1962,9 @@ class TestHandleFinalizeError:
                 _FINALIZE_RETRY_MAX_DELAY_S,
                 _FINALIZE_RETRY_BASE_DELAY_S * (2 ** (attempt_no - 1)),
             )
-            assert delay == expected, (
-                f'attempt {attempt_no}: expected {expected}s, got {delay}s'
-            )
+            assert (
+                delay == expected
+            ), f'attempt {attempt_no}: expected {expected}s, got {delay}s'
 
 
 # ---------------------------------------------------------------------------
@@ -1934,6 +1981,19 @@ _SENTINEL_FINALIZE_ERR = _FinalizeError(
 )
 
 _SENTINEL_TASK_RESULT = MagicMock(name='TaskResult')
+
+
+def _persisted_outcome(
+    *,
+    queue_name: str = 'default',
+    is_workflow_task: bool = True,
+) -> _PersistedTaskOutcome:
+    return _PersistedTaskOutcome(
+        result=_SENTINEL_TASK_RESULT,
+        task_name='loaded_task',
+        queue_name=queue_name,
+        is_workflow_task=is_workflow_task,
+    )
 
 
 @pytest.mark.unit
@@ -1962,12 +2022,22 @@ class TestRetryFinalizeFuture:
         worker._recover_worker_future_failure.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_requeue_success_clears_future_attempts(self) -> None:
-        """Successful requeue clears future-stage retry attempts."""
+    @pytest.mark.parametrize(
+        'recovery_outcome',
+        [
+            _RequeueOutcome.REQUEUED,
+            _RequeueOutcome.TERMINAL_REPLAYED,
+        ],
+    )
+    async def test_recovery_success_clears_future_attempts(
+        self,
+        recovery_outcome: _RequeueOutcome,
+    ) -> None:
+        """A live requeue or terminal replay clears future-stage attempts."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._recover_worker_future_failure = AsyncMock(  # type: ignore[assignment]
-            return_value=_RequeueOutcome.REQUEUED,
+            return_value=recovery_outcome,
         )
         err = self._make_err()
         key = (err.task_id, _FINALIZE_STAGE_FUTURE)
@@ -2057,7 +2127,8 @@ class TestRetryFinalizePhase1:
 
     @pytest.mark.asyncio
     async def test_missing_outcome_logs_error_clears_attempts(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Missing outcome dict → logs error, clears phase1 attempts."""
         worker = _make_worker()
@@ -2076,7 +2147,8 @@ class TestRetryFinalizePhase1:
 
     @pytest.mark.asyncio
     async def test_missing_result_json_str_logs_error_clears_attempts(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Outcome present but result_json_str not a string → logs error, clears."""
         worker = _make_worker()
@@ -2099,16 +2171,18 @@ class TestRetryFinalizePhase1:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok(_persisted_outcome()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
         )
-        err = self._make_err(outcome={
-            'ok': True,
-            'result_json_str': '{"value": 1}',
-            'failed_reason': None,
-        })
+        err = self._make_err(
+            outcome={
+                'ok': True,
+                'result_json_str': '{"value": 1}',
+                'failed_reason': None,
+            }
+        )
         key_p1 = (err.task_id, _FINALIZE_STAGE_PHASE1)
         key_p2 = (err.task_id, _FINALIZE_STAGE_PHASE2)
         worker._finalize_retry_attempts[key_p1] = 2
@@ -2122,18 +2196,23 @@ class TestRetryFinalizePhase1:
             _SENTINEL_TASK_RESULT,
             queue_name='default',
             is_workflow_task=True,
-            task_name='',
+            task_name='loaded_task',
         )
         assert key_p1 not in worker._finalize_retry_attempts
         assert key_p2 not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
-    async def test_happy_path_preserves_finalize_context(self) -> None:
-        """Phase-1 replay forwards queue/workflow metadata to phase 2."""
+    async def test_happy_path_uses_persisted_routing_context(self) -> None:
+        """Phase-1 replay routes from the same row as its terminal result."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok(
+                _persisted_outcome(
+                    queue_name='persisted-queue',
+                    is_workflow_task=True,
+                )
+            ),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2161,9 +2240,9 @@ class TestRetryFinalizePhase1:
         worker._finalize_workflow_phase.assert_awaited_once_with(
             err.task_id,
             _SENTINEL_TASK_RESULT,
-            queue_name='critical',
-            is_workflow_task=False,
-            task_name='ctx_task',
+            queue_name='persisted-queue',
+            is_workflow_task=True,
+            task_name='loaded_task',
         )
 
     # --- U-3e: _persist fails → delegates ---
@@ -2177,10 +2256,12 @@ class TestRetryFinalizePhase1:
             return_value=Err(_SENTINEL_FINALIZE_ERR),
         )
         worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
-        err = self._make_err(outcome={
-            'ok': True,
-            'result_json_str': '{}',
-        })
+        err = self._make_err(
+            outcome={
+                'ok': True,
+                'result_json_str': '{}',
+            }
+        )
 
         await worker._retry_finalize_phase1(err, 0.0)
 
@@ -2207,10 +2288,12 @@ class TestRetryFinalizePhase1:
             return_value=Ok(None),
         )
         worker._finalize_workflow_phase = AsyncMock()  # type: ignore[assignment]
-        err = self._make_err(outcome={
-            'ok': True,
-            'result_json_str': '{}',
-        })
+        err = self._make_err(
+            outcome={
+                'ok': True,
+                'result_json_str': '{}',
+            }
+        )
         key_p1 = (err.task_id, _FINALIZE_STAGE_PHASE1)
         key_p2 = (err.task_id, _FINALIZE_STAGE_PHASE2)
         worker._finalize_retry_attempts[key_p1] = 2
@@ -2237,16 +2320,18 @@ class TestRetryFinalizePhase1:
             retryable=True,
         )
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok(_SENTINEL_TASK_RESULT),
+            return_value=Ok(_persisted_outcome()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Err(phase2_err),
         )
         worker._handle_finalize_error = AsyncMock()  # type: ignore[assignment]
-        err = self._make_err(outcome={
-            'ok': True,
-            'result_json_str': '{}',
-        })
+        err = self._make_err(
+            outcome={
+                'ok': True,
+                'result_json_str': '{}',
+            }
+        )
 
         await worker._retry_finalize_phase1(err, 0.0)
 
@@ -2313,7 +2398,7 @@ class TestRetryFinalizePhase2:
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
+            return_value=Ok(_persisted_outcome()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2334,12 +2419,17 @@ class TestRetryFinalizePhase2:
         assert key not in worker._finalize_retry_attempts
 
     @pytest.mark.asyncio
-    async def test_happy_path_preserves_finalize_context(self) -> None:
-        """Phase-2 replay forwards queue/workflow metadata."""
+    async def test_happy_path_uses_persisted_routing_context(self) -> None:
+        """Phase-2 replay routes from the same row as its terminal result."""
         worker = _make_worker()
         worker._sleep_with_stop = AsyncMock()  # type: ignore[assignment]
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
+            return_value=Ok(
+                _persisted_outcome(
+                    queue_name='critical',
+                    is_workflow_task=False,
+                )
+            ),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Ok(None),
@@ -2379,7 +2469,7 @@ class TestRetryFinalizePhase2:
             retryable=True,
         )
         worker._load_persisted_task_result = AsyncMock(  # type: ignore[assignment]
-            return_value=Ok((_SENTINEL_TASK_RESULT, 'loaded_task')),
+            return_value=Ok(_persisted_outcome()),
         )
         worker._finalize_workflow_phase = AsyncMock(  # type: ignore[assignment]
             return_value=Err(wf_err),
@@ -2562,7 +2652,9 @@ class TestRestartExecutor:
         assert worker._executor is replacements[0]
 
     @pytest.mark.asyncio
-    async def test_stale_restart_request_does_not_replace_current_executor(self) -> None:
+    async def test_stale_restart_request_does_not_replace_current_executor(
+        self,
+    ) -> None:
         """A late handler for an old broken executor should not restart its replacement."""
         worker = _make_worker()
         old_executor = MagicMock()
@@ -2574,7 +2666,9 @@ class TestRestartExecutor:
         )
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
-        await worker._restart_executor('first broken pool', failed_executor=old_executor)
+        await worker._restart_executor(
+            'first broken pool', failed_executor=old_executor
+        )
         await worker._restart_executor('late broken pool', failed_executor=old_executor)
 
         old_executor.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
@@ -2679,7 +2773,10 @@ class TestRestartExecutor:
 
         with pytest.raises(ExecutorRestartFailedError):
             await worker._finalize_after(
-                fut, 'task-1', task_name='helper_task', executor=MagicMock(),
+                fut,
+                'task-1',
+                task_name='helper_task',
+                executor=MagicMock(),
             )
 
 
@@ -2885,9 +2982,7 @@ class TestWarmupRetry:
 
         assert worker._executor is replacements[1]
         assert worker._create_executor.call_count == 2
-        replacements[0].shutdown.assert_called_once_with(
-            wait=True, cancel_futures=True
-        )
+        replacements[0].shutdown.assert_called_once_with(wait=True, cancel_futures=True)
         worker._sleep_with_stop.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -2946,9 +3041,7 @@ class TestWarmupRetry:
         with pytest.raises(ExecutorRestartFailedError) as excinfo:
             await worker._restart_executor('broken pool', failed_executor=old_executor)
 
-        assert isinstance(
-            excinfo.value.__cause__, MemoryBaselineExceedsThresholdError
-        )
+        assert isinstance(excinfo.value.__cause__, MemoryBaselineExceedsThresholdError)
         worker._create_executor.assert_called_once()
 
     @pytest.mark.asyncio
@@ -3080,7 +3173,8 @@ class TestCleanupAfterFailedStart:
 
     @pytest.mark.asyncio
     async def test_listener_close_error_logged(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Listener close error is logged, does not propagate."""
         worker = _make_worker()
@@ -3097,7 +3191,8 @@ class TestCleanupAfterFailedStart:
 
     @pytest.mark.asyncio
     async def test_executor_shutdown_error_logged(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Executor shutdown error is logged, does not propagate."""
         worker = _make_worker()
@@ -3186,7 +3281,8 @@ class TestStartWithResilienceConfig:
 
     @pytest.mark.asyncio
     async def test_retryable_connection_error_triggers_retry(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Retryable connection error triggers retry."""
         worker = _make_worker()
@@ -3214,7 +3310,8 @@ class TestStartWithResilienceConfig:
 
     @pytest.mark.asyncio
     async def test_non_retryable_error_raises(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Non-retryable error propagates immediately."""
         worker = _make_worker()
@@ -3375,7 +3472,8 @@ def _make_reaper_worker(
             self.app: Any = None
 
     monkeypatch.setattr(
-        'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker,
+        'horsies.core.brokers.postgres.PostgresBroker',
+        _FakeBroker,
     )
     monkeypatch.setattr(
         'horsies.core.workflows.recovery.recover_stuck_workflows',
@@ -3387,12 +3485,16 @@ def _make_reaper_worker(
     return worker
 
 
-def _broker_err(*, retryable: bool = False, message: str = 'test error') -> Err[BrokerOperationError]:
-    return Err(BrokerOperationError(
-        code=BrokerErrorCode.CLEANUP_FAILED,
-        message=message,
-        retryable=retryable,
-    ))
+def _broker_err(
+    *, retryable: bool = False, message: str = 'test error'
+) -> Err[BrokerOperationError]:
+    return Err(
+        BrokerOperationError(
+            code=BrokerErrorCode.CLEANUP_FAILED,
+            message=message,
+            retryable=retryable,
+        )
+    )
 
 
 @pytest.mark.unit
@@ -3553,7 +3655,9 @@ class TestReaperMatchArms:
         worker = _make_reaper_worker(
             monkeypatch,
             auto_terminate=True,
-            terminate_results=[_broker_err(retryable=True, message='transient terminate')],
+            terminate_results=[
+                _broker_err(retryable=True, message='transient terminate')
+            ],
         )
 
         with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
@@ -3655,7 +3759,8 @@ class TestReaperMatchArms:
                 self.app: Any = None
 
         monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _BoomBroker,
+            'horsies.core.brokers.postgres.PostgresBroker',
+            _BoomBroker,
         )
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows',
@@ -3702,7 +3807,8 @@ class TestReaperMatchArms:
                 self.app: Any = None
 
         monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _CancelBroker,
+            'horsies.core.brokers.postgres.PostgresBroker',
+            _CancelBroker,
         )
         monkeypatch.setattr(
             'horsies.core.workflows.recovery.recover_stuck_workflows',
@@ -3723,11 +3829,13 @@ class TestReaperMatchArms:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """When temp broker close returns Err, it's logged."""
-        close_err = Err(BrokerOperationError(
-            code=BrokerErrorCode.CLOSE_FAILED,
-            message='close failed',
-            retryable=False,
-        ))
+        close_err = Err(
+            BrokerOperationError(
+                code=BrokerErrorCode.CLOSE_FAILED,
+                message='close failed',
+                retryable=False,
+            )
+        )
         worker = _make_reaper_worker(
             monkeypatch,
             auto_requeue=True,
@@ -3771,26 +3879,32 @@ class TestPreloadModulesMain:
         }
 
         monkeypatch.setattr(
-            'horsies.core.worker.worker._locate_app', mocks['locate_app'],
+            'horsies.core.worker.worker._locate_app',
+            mocks['locate_app'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.set_current_app', mocks['set_current_app'],
+            'horsies.core.worker.worker.set_current_app',
+            mocks['set_current_app'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.import_by_path', mocks['import_by_path'],
+            'horsies.core.worker.worker.import_by_path',
+            mocks['import_by_path'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker.import_module', mocks['import_module'],
+            'horsies.core.worker.worker.import_module',
+            mocks['import_module'],
         )
         monkeypatch.setattr(
-            'horsies.core.worker.worker._build_sys_path_roots', mocks['build_sys_path_roots'],
+            'horsies.core.worker.worker._build_sys_path_roots',
+            mocks['build_sys_path_roots'],
         )
         return mocks
 
     # --- U-5a: locates app, sets current_app and self._app ---
 
     def test_locates_app_and_sets_current(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Calls _locate_app, set_current_app, and assigns self._app."""
         worker = _make_worker()
@@ -3805,7 +3919,8 @@ class TestPreloadModulesMain:
     # --- U-5b: suppress_sends(True) before imports, False after ---
 
     def test_suppress_sends_bracket(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """suppress_sends(True) called before imports, suppress_sends(False) after."""
         worker = _make_worker()
@@ -3829,7 +3944,8 @@ class TestPreloadModulesMain:
     # --- U-5c: .py paths via import_by_path, dotted via import_module ---
 
     def test_py_file_uses_import_by_path_dotted_uses_import_module(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """.py paths routed to import_by_path, dotted names to import_module."""
         worker = _make_worker()
@@ -3851,7 +3967,8 @@ class TestPreloadModulesMain:
     # --- U-5d: includes app.get_discovered_task_modules() ---
 
     def test_includes_discovered_task_modules(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Discovered modules from app are included in imports."""
         worker = _make_worker()
@@ -3886,7 +4003,8 @@ class TestPreloadModulesMain:
     # --- U-5f: suppress_sends exception → swallowed ---
 
     def test_suppress_sends_exception_stops_startup(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Exception in suppress_sends is fatal — importing without suppression
         could fire tasks accidentally, so startup must abort."""
@@ -4021,7 +4139,8 @@ class TestUpdateWorkerState:
 
     @pytest.mark.asyncio
     async def test_inserts_row_with_correct_params(
-        self, monkeypatch: pytest.MonkeyPatch,
+        self,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Executes INSERT_WORKER_STATE_SQL with expected parameters."""
         worker = _make_worker()
@@ -4132,7 +4251,8 @@ class TestClaimerHeartbeatLoopErrorPaths:
 
     @pytest.mark.asyncio
     async def test_error_logged_loop_continues(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Exception in heartbeat body is logged, loop continues."""
         worker = _make_worker()
@@ -4234,7 +4354,8 @@ class TestRunForever:
 
     @pytest.mark.asyncio
     async def test_retryable_error_backoff_and_retry(
-        self, caplog: pytest.LogCaptureFixture,
+        self,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         """Retryable connection error triggers backoff then retry."""
         worker = _make_worker()
@@ -4401,9 +4522,9 @@ def _make_claim_worker(
 ) -> Worker:
     """Build a Worker pre-configured for claim-and-dispatch testing."""
     cfg = WorkerConfig(
-        dsn="postgresql+psycopg://u:p@localhost/db",
-        psycopg_dsn="postgresql://u:p@localhost/db",
-        queues=queues or ["default"],
+        dsn='postgresql+psycopg://u:p@localhost/db',
+        psycopg_dsn='postgresql://u:p@localhost/db',
+        queues=queues or ['default'],
         prefetch_buffer=prefetch_buffer,
         max_claim_per_worker=max_claim_per_worker,
         processes=processes,
@@ -4579,9 +4700,9 @@ class TestReaperGatePoolCapacity:
     @staticmethod
     def _capacity_worker(pool_size: int, max_overflow: int) -> Worker:
         cfg = WorkerConfig(
-            dsn="postgresql+psycopg://u:p@localhost/db",
-            psycopg_dsn="postgresql://u:p@localhost/db",
-            queues=["default"],
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
             parent_pool_size=pool_size,
             parent_max_overflow=max_overflow,
             recovery_config=RecoveryConfig(check_interval_ms=1_000),
@@ -4810,13 +4931,16 @@ class TestRetryErrPhase1Replay:
 
 
 # ---------------------------------------------------------------------------
-# _persist_task_terminal_state: fused ok-path (FINALIZE_TASK_COMPLETED_SQL)
+# _persist_task_terminal_state: typed normal-finalization operations
 # ---------------------------------------------------------------------------
 
-from horsies.core.worker.sql import (
-    FINALIZE_TASK_COMPLETED_SQL,
-    MARK_TASK_COMPLETED_SQL,
+from horsies.core.lifecycle.commands import (
+    CompleteLockedTask,
+    CompleteTaskFused,
 )
+from horsies.core.lifecycle.operations import TerminalizationKind
+from horsies.core.lifecycle.outcomes import Applied, LostClaim, ObservedTaskState
+from horsies.core.types.status import TaskStatus
 
 _OK_WIRE = '{"__h_task_result__":true,"ok":"hello","err":null}'
 _STOPPED_WIRE = (
@@ -4828,7 +4952,7 @@ _STOPPED_WIRE = (
 
 def _make_session_worker(
     fetchone_results: list[Any],
-) -> tuple[Worker, AsyncMock, MagicMock]:
+) -> tuple[Worker, MagicMock]:
     """Worker whose sf() yields a session with scripted fetchone results."""
     worker = _make_worker()
 
@@ -4838,6 +4962,8 @@ def _make_session_worker(
     ]
     session.execute = AsyncMock(side_effect=execute_results)
     session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    session.connection = AsyncMock(return_value=MagicMock())
 
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=session)
@@ -4848,7 +4974,33 @@ def _make_session_worker(
     app = MagicMock()
     app.tasks.get = MagicMock(return_value=registry_task)
     worker._app = app
-    return worker, session.execute, session.commit
+    return worker, session
+
+
+def _applied(kind: TerminalizationKind) -> Applied:
+    return Applied(
+        task_id='task-1',
+        ordinality=None,
+        terminal_at=datetime.now(timezone.utc),
+        kind=kind,
+        observed=ObservedTaskState(
+            status=TaskStatus.RUNNING,
+            worker_id='w-1',
+            claimed_at=None,
+        ),
+    )
+
+
+def _lost_claim() -> LostClaim:
+    return LostClaim(
+        task_id='task-1',
+        ordinality=None,
+        observed=ObservedTaskState(
+            status=TaskStatus.PENDING,
+            worker_id=None,
+            claimed_at=None,
+        ),
+    )
 
 
 @pytest.mark.unit
@@ -4858,95 +5010,107 @@ class TestPersistTerminalStateFusedPath:
     @pytest.mark.asyncio
     async def test_plain_ok_result_uses_fused_statement(self) -> None:
         """Plain task + ok result → single fused statement, Ok(None)."""
-        worker, execute, commit = _make_session_worker(
-            fetchone_results=[MagicMock(id='task-1')],
-        )
+        worker, session = _make_session_worker(fetchone_results=[])
 
-        result = await worker._persist_task_terminal_state(
-            task_id='task-1',
-            now=datetime.now(timezone.utc),
-            ok=True,
-            result_json_str=_OK_WIRE,
-            failed_reason=None,
-            task_name='my_task',
-            queue_name='q1',
-            is_workflow_task=False,
-        )
+        with patch(
+            'horsies.core.worker.finalize.apply_async',
+            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_FUSED)),
+        ) as apply:
+            result = await worker._persist_task_terminal_state(
+                task_id='task-1',
+                now=datetime.now(timezone.utc),
+                ok=True,
+                result_json_str=_OK_WIRE,
+                failed_reason=None,
+                task_name='my_task',
+                queue_name='q1',
+                is_workflow_task=False,
+            )
 
         assert result.ok_value is None
-        execute.assert_awaited_once()
-        stmt, params = execute.await_args.args
-        assert stmt is FINALIZE_TASK_COMPLETED_SQL
-        assert params['id'] == 'task-1'
-        assert params['result_json'] == _OK_WIRE
-        assert params['notify_channel'] == 'task_queue_q1'
-        assert params['notify_payload'] == 'capacity:task-1'
-        commit.assert_awaited_once()
+        apply.assert_awaited_once()
+        command = apply.await_args.args[1]
+        assert isinstance(command, CompleteTaskFused)
+        assert command.task_id == 'task-1'
+        assert command.result_json == _OK_WIRE
+        assert command.notify_channel == 'task_queue_q1'
+        assert command.notify_payload == 'capacity:task-1'
+        session.execute.assert_not_awaited()
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_fused_row_gone_skips_without_commit(self) -> None:
         """Status/ownership changed → Ok(None), nothing committed."""
-        worker, execute, commit = _make_session_worker(
-            fetchone_results=[None],
-        )
+        worker, session = _make_session_worker(fetchone_results=[])
 
-        result = await worker._persist_task_terminal_state(
-            task_id='task-1',
-            now=datetime.now(timezone.utc),
-            ok=True,
-            result_json_str=_OK_WIRE,
-            failed_reason=None,
-            task_name='my_task',
-            queue_name='q1',
-            is_workflow_task=False,
-        )
+        with patch(
+            'horsies.core.worker.finalize.apply_async',
+            AsyncMock(return_value=_lost_claim()),
+        ):
+            result = await worker._persist_task_terminal_state(
+                task_id='task-1',
+                now=datetime.now(timezone.utc),
+                ok=True,
+                result_json_str=_OK_WIRE,
+                failed_reason=None,
+                task_name='my_task',
+                queue_name='q1',
+                is_workflow_task=False,
+            )
 
         assert result.ok_value is None
-        execute.assert_awaited_once()
-        commit.assert_not_awaited()
+        session.commit.assert_not_awaited()
+        session.rollback.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_workflow_ok_result_keeps_legacy_path(self) -> None:
-        """Workflow task ok result → ctx select + attempt + CAS, Ok(tr)."""
+    async def test_workflow_ok_result_returns_persisted_routing_facts(self) -> None:
+        """The locked row supplies phase-2 routing after terminalization."""
         ctx_row = SimpleNamespace(
-            task_name='my_task',
+            task_name='persisted_task',
             retry_count=0,
             started_at=datetime.now(timezone.utc),
             claimed_by_worker_id='w-1',
             worker_hostname='host',
             worker_pid=1,
             worker_process_name='p',
-            queue_name='q1',
+            queue_name='persisted_queue',
             is_workflow_task=True,
             db_now=datetime.now(timezone.utc),
         )
-        worker, execute, commit = _make_session_worker(
-            # ctx SELECT, attempt UPSERT (fetchone unused), COMPLETED CAS
-            fetchone_results=[ctx_row, None, MagicMock(id='task-1')],
+        worker, session = _make_session_worker(
+            # generation-fenced context SELECT, then attempt UPSERT
+            fetchone_results=[ctx_row, None],
         )
 
-        result = await worker._persist_task_terminal_state(
-            task_id='task-1',
-            now=datetime.now(timezone.utc),
-            ok=True,
-            result_json_str=_OK_WIRE,
-            failed_reason=None,
-            task_name='my_task',
-            queue_name='q1',
-            is_workflow_task=True,
-        )
+        with patch(
+            'horsies.core.worker.finalize.apply_async',
+            AsyncMock(return_value=_applied(TerminalizationKind.COMPLETE_LOCKED)),
+        ) as apply:
+            result = await worker._persist_task_terminal_state(
+                task_id='task-1',
+                now=datetime.now(timezone.utc),
+                ok=True,
+                result_json_str=_OK_WIRE,
+                failed_reason=None,
+                task_name='my_task',
+                queue_name='q1',
+                is_workflow_task=True,
+            )
 
-        tr = result.ok_value
-        assert tr is not None and tr.is_ok()
-        statements = [c.args[0] for c in execute.await_args_list]
-        assert FINALIZE_TASK_COMPLETED_SQL not in statements
-        assert statements[-1] is MARK_TASK_COMPLETED_SQL
-        commit.assert_awaited_once()
+        persisted = result.ok_value
+        assert persisted is not None and persisted.result.is_ok()
+        assert persisted.task_name == 'persisted_task'
+        assert persisted.queue_name == 'persisted_queue'
+        assert persisted.is_workflow_task is True
+        command = apply.await_args.args[1]
+        assert isinstance(command, CompleteLockedTask)
+        assert session.execute.await_count == 2
+        session.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_workflow_stopped_returns_none_without_sql(self) -> None:
         """WORKFLOW_STOPPED err result → Ok(None) before any session opens."""
-        worker, execute, _ = _make_session_worker(fetchone_results=[])
+        worker, session = _make_session_worker(fetchone_results=[])
 
         result = await worker._persist_task_terminal_state(
             task_id='task-1',
@@ -4961,7 +5125,7 @@ class TestPersistTerminalStateFusedPath:
 
         assert result.ok_value is None
         worker.sf.assert_not_called()
-        execute.assert_not_awaited()
+        session.execute.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -4976,7 +5140,9 @@ from horsies.core.worker.runtime import (
 )
 
 
-def _reaper_err(*, retryable: bool, exc: BaseException | None = None) -> Err[BrokerOperationError]:
+def _reaper_err(
+    *, retryable: bool, exc: BaseException | None = None
+) -> Err[BrokerOperationError]:
     return Err(
         BrokerOperationError(
             code=BrokerErrorCode.CLEANUP_FAILED,

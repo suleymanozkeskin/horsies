@@ -127,6 +127,7 @@ class _RetryError:
 
 class _RequeueOutcome(str, Enum):
     REQUEUED = 'REQUEUED'
+    TERMINAL_REPLAYED = 'TERMINAL_REPLAYED'
     NOT_OWNER_OR_NOT_CLAIMED = 'NOT_OWNER_OR_NOT_CLAIMED'
     DB_ERROR = 'DB_ERROR'
 
