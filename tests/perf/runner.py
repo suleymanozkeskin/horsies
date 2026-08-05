@@ -41,7 +41,14 @@ from tests.perf.scenarios import (
     seed_terminal_ballast,
     task_ids,
 )
-from tests.perf.statistics import Comparison, Verdict, compare, worst
+from tests.perf.statistics import (
+    Comparison,
+    ThroughputComparison,
+    Verdict,
+    compare,
+    compare_throughput,
+    worst,
+)
 
 BALLAST_ROWS = 100_000
 WAL_RECORD_DELTA_PER_TERMINAL_ROW = 0.10
@@ -105,6 +112,7 @@ class RunResult:
     candidate: Measurement
     plans: PlanEvidence | None
     comparisons: list[Comparison]
+    throughput: ThroughputComparison | None
     contract_violations: tuple[str, ...]
     verdict: Verdict
 
@@ -161,20 +169,44 @@ def run_scenario(
                 scenario.cleanup(connection, seeded)
             delete_seeded(connection, ballast_prefix)
 
-    comparisons = [
-        compare(
-            baseline=baseline.samples_ms,
-            candidate=candidate.samples_ms,
-            percentile=percentile,
-            budget=budget,
-            resamples=resamples,
-            seed=seed,
-        )
-        for percentile, budget in (
-            (50.0, scenario.p50_budget),
-            (99.0, scenario.p99_budget),
-        )
-    ]
+    match scenario:
+        case SingleRowScenario():
+            comparisons = [
+                compare(
+                    baseline=baseline.samples_ms,
+                    candidate=candidate.samples_ms,
+                    percentile=percentile,
+                    budget=budget,
+                    resamples=resamples,
+                    seed=seed,
+                )
+                for percentile, budget in (
+                    (50.0, scenario.p50_budget),
+                    (99.0, scenario.p99_budget),
+                )
+            ]
+            throughput = None
+        case BatchScenario():
+            comparisons = [
+                compare(
+                    baseline=baseline.samples_ms,
+                    candidate=candidate.samples_ms,
+                    percentile=95.0,
+                    budget=scenario.lock_p95_budget,
+                    resamples=resamples,
+                    seed=seed,
+                )
+            ]
+            throughput = compare_throughput(
+                baseline_ms=baseline.samples_ms,
+                candidate_ms=candidate.samples_ms,
+                rows_per_operation=scenario.batch_size,
+                minimum_ratio=scenario.minimum_throughput_ratio,
+                resamples=resamples,
+                seed=seed,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
     conditions = Conditions(
         scenario=scenario.name,
@@ -203,7 +235,12 @@ def run_scenario(
         plans=plans,
         control=control,
     )
-    latency_verdict = worst([c.verdict for c in comparisons])
+    performance_verdict = worst(
+        [
+            *(comparison.verdict for comparison in comparisons),
+            *([throughput.verdict] if throughput is not None else []),
+        ]
+    )
 
     return RunResult(
         conditions=conditions,
@@ -211,8 +248,9 @@ def run_scenario(
         candidate=candidate,
         plans=plans,
         comparisons=comparisons,
+        throughput=throughput,
         contract_violations=contract_violations,
-        verdict=Verdict.FAIL if contract_violations else latency_verdict,
+        verdict=Verdict.FAIL if contract_violations else performance_verdict,
     )
 
 
@@ -264,6 +302,13 @@ def _measure_interleaved(
         case BatchScenario():
             for side in prefixes:
                 ids[side] = iter(())
+            plans = _capture_batch_plans(
+                connection,
+                scenario,
+                baseline_prefix=baseline_prefix,
+                candidate_prefix=candidate_prefix,
+                control=control,
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -352,6 +397,35 @@ def _capture_plans(
             candidate_factory(candidate_task_id),
         ),
     )
+
+
+def _capture_batch_plans(
+    connection: Connection,
+    scenario: BatchScenario,
+    *,
+    baseline_prefix: str,
+    candidate_prefix: str,
+    control: bool,
+) -> PlanEvidence | None:
+    """Capture each discovery plan against its own isolated eligible pool."""
+    candidate_factory = (
+        scenario.baseline_invocation if control else scenario.candidate_invocation
+    )
+    if candidate_factory is None:
+        return None
+
+    scenario.cleanup(connection, baseline_prefix)
+    scenario.cleanup(connection, candidate_prefix)
+    scenario.seed(connection, baseline_prefix, scenario.batch_size)
+    analyze(connection)
+    baseline = _explain(connection, scenario.baseline_invocation())
+    scenario.cleanup(connection, baseline_prefix)
+
+    scenario.seed(connection, candidate_prefix, scenario.batch_size)
+    analyze(connection)
+    candidate = _explain(connection, candidate_factory())
+    scenario.cleanup(connection, candidate_prefix)
+    return PlanEvidence(baseline=baseline, candidate=candidate)
 
 
 def _explain(connection: Connection, invocation: Invocation) -> dict[str, Any]:

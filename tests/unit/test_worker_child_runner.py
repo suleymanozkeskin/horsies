@@ -1481,6 +1481,88 @@ class TestDedupeAndBuildSysPath:
 
 
 # ===================================================================
+# L. Pre-start expiry operation boundary
+# ===================================================================
+
+
+@pytest.mark.unit
+class TestExpireClaimedBeforeStart:
+    """The child maps typed expiry outcomes to its existing return contract."""
+
+    @pytest.mark.parametrize('outcome_type', ['Applied', 'AlreadyApplied'])
+    def test_applied_or_replayed_expiry_commits_and_returns_expired(
+        self,
+        outcome_type: str,
+    ) -> None:
+        from horsies.core.lifecycle.commands import ExpireOwnedClaim
+        from horsies.core.lifecycle.outcomes import AlreadyApplied, Applied
+        from horsies.core.worker.child_runner import (
+            _expire_claimed_task_before_start,
+        )
+
+        outcomes = {'Applied': Applied, 'AlreadyApplied': AlreadyApplied}
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=outcomes[outcome_type]),
+        ) as apply:
+            result = _expire_claimed_task_before_start(
+                cursor,
+                conn,
+                'task-1',
+                'worker-A',
+            )
+
+        assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
+        assert conn.commits == 1
+        command = apply.call_args.args[1]
+        assert isinstance(command, ExpireOwnedClaim)
+        assert command.task_id == 'task-1'
+        assert command.fence.worker_id == 'worker-A'
+        assert command.error_code == OutcomeCode.TASK_EXPIRED.value
+        assert OutcomeCode.TASK_EXPIRED.value in command.result_json
+
+    @pytest.mark.parametrize(
+        'outcome_type',
+        ['LostClaim', 'SourceStateConflict', 'TaskAbsent'],
+    )
+    def test_refusal_or_absence_falls_through_to_existing_classification(
+        self,
+        outcome_type: str,
+    ) -> None:
+        from horsies.core.lifecycle.outcomes import (
+            LostClaim,
+            SourceStateConflict,
+            TaskAbsent,
+        )
+        from horsies.core.worker.child_runner import (
+            _expire_claimed_task_before_start,
+        )
+
+        outcomes = {
+            'LostClaim': LostClaim,
+            'SourceStateConflict': SourceStateConflict,
+            'TaskAbsent': TaskAbsent,
+        }
+        cursor = _FakeCursor()
+        conn = _FakeConn(cursor)
+        with patch(
+            'horsies.core.worker.child_runner.apply_sync',
+            return_value=MagicMock(spec=outcomes[outcome_type]),
+        ):
+            result = _expire_claimed_task_before_start(
+                cursor,
+                conn,
+                'task-1',
+                'worker-A',
+            )
+
+        assert result is None
+        assert conn.commits == 0
+
+
+# ===================================================================
 # M. Ownership lost → workflow PAUSED/CANCELLED sub-branch
 # ===================================================================
 
@@ -1503,8 +1585,6 @@ class TestOwnershipLostWorkflowBranch:
                 call_count += 1
                 if call_count == 1:
                     return None  # UPDATE RETURNING → None (ownership lost)
-                if call_count == 2:
-                    return None  # expire-before-start UPDATE → no match
                 # Workflow status check → PAUSED
                 return _FakeRow(status='PAUSED')
 
@@ -1515,6 +1595,9 @@ class TestOwnershipLostWorkflowBranch:
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ):
@@ -1531,25 +1614,21 @@ class TestOwnershipLostWorkflowBranch:
             _confirm_ownership_and_set_running,
         )
 
-        class _MultiReturnCursor(_FakeCursor):
-            def __init__(self) -> None:
-                super().__init__()
-                self._returns = [
-                    None,  # RUNNING UPDATE rejected
-                    _FakeRow(id='task-1'),  # EXPIRED UPDATE succeeded
-                ]
-
-            def fetchone(self) -> Any:
-                assert self._returns, 'unexpected extra fetchone() call'
-                return self._returns.pop(0)
-
-        cursor = _MultiReturnCursor()
+        cursor = _FakeCursor(fetchone_return=None)
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
+        expired = (False, '', OutcomeCode.TASK_EXPIRED.value)
+
+        def expire_and_commit(*args: Any) -> tuple[bool, str, str]:  # noqa: ARG001
+            conn.commit()
+            return expired
 
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            side_effect=expire_and_commit,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as update_workflow_task:
@@ -1561,8 +1640,6 @@ class TestOwnershipLostWorkflowBranch:
         update_workflow_task.assert_not_called()
         executed_sql = '\n'.join(sql for sql, _ in cursor.queries)
         assert 'good_until IS NULL OR good_until > now()' in executed_sql
-        assert "SET status = 'EXPIRED'" in executed_sql
-        assert 'claimed_by_worker_id = NULL' not in executed_sql
 
     def test_expire_race_falls_back_to_claim_lost(self) -> None:
         """If the expiry UPDATE matches no row, ownership loss is still reported."""
@@ -1575,7 +1652,6 @@ class TestOwnershipLostWorkflowBranch:
                 super().__init__()
                 self._returns = [
                     None,  # RUNNING UPDATE rejected
-                    None,  # EXPIRED UPDATE matched no row
                     None,  # workflow status check: not PAUSED/CANCELLED
                 ]
 
@@ -1590,6 +1666,9 @@ class TestOwnershipLostWorkflowBranch:
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
+        ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
         ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as update_workflow_task:

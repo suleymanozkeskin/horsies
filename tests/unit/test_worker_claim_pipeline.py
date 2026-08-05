@@ -325,6 +325,9 @@ class TestOwnershipGateBehavioral:
             'horsies.core.worker.child_runner._get_worker_pool',
             return_value=pool,
         ), patch(
+            'horsies.core.worker.child_runner._expire_claimed_task_before_start',
+            return_value=None,
+        ), patch(
             'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
         ) as mock_wf_update:
             from horsies.core.worker.child_runner import (

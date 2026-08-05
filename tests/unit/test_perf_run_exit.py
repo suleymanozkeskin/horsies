@@ -93,6 +93,7 @@ def _control_result(
         candidate=Measurement(samples_ms=[1.0], counts=candidate),
         plans=None,
         comparisons=[],
+        throughput=None,
         contract_violations=(),
         verdict=verdict,
     )
@@ -185,6 +186,7 @@ class TestControlCountChecks:
             ),
             plans=None,
             comparisons=[],
+            throughput=None,
             contract_violations=(),
             verdict=Verdict.PASS,
         )

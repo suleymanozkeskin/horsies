@@ -68,12 +68,12 @@ pytestmark = [pytest.mark.unit]
 
 
 def _child_statement_texts() -> dict[str, str]:
-    """SQL for the child writers, which have no importable constant.
+    """SQL for the two child cancellation writers without constants.
 
-    Their statements are string literals inside functions, so the text comes
-    from the same AST extraction the writer inventory uses. T10 and T11 share
-    a function and both target CANCELLED; they are told apart by source state,
-    since only the cancelled-workflow branch also accepts PENDING.
+    T10 and T11 are string literals in one function, so the text comes from
+    the same AST extraction the writer inventory uses. They are told apart by
+    source state, since only the cancelled-workflow branch also accepts
+    PENDING.
     """
     source = Path(child_runner.__file__).read_text(encoding='utf-8')
     tree = ast.parse(source)
@@ -81,8 +81,6 @@ def _child_statement_texts() -> dict[str, str]:
     found: dict[str, str] = {}
     for lineno, text in _task_update_strings(tree):
         match contexts.get(lineno):
-            case '_expire_claimed_task_before_start':
-                found['T12'] = text
             case '_handle_workflow_stop_before_start':
                 found["T11" if "'PENDING'" in text else 'T10'] = text
             case _:
@@ -101,6 +99,7 @@ _STATEMENT_TEXT: dict[str, str] = {
     'T07': FINALIZE_TASK_COMPLETED_SQL.text,
     'T08': TERMINATE_ORPHANED_WORKFLOW_TASK_SQL.text,
     'T09': CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL.text,
+    'T12': child_runner._EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
     'T13': MARK_STALE_TASK_FAILED_SQL.text,
     'T14': EXPIRE_PENDING_TASKS_SQL.text,
     'T15': TERMINATE_ORPHANED_CLAIMED_WORKFLOW_TASKS_SQL.text,

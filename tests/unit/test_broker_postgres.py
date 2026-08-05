@@ -1428,6 +1428,30 @@ class TestMarkStaleTasksAsFailed:
     """Tests for mark_stale_tasks_as_failed stale detection and cleanup."""
 
     @pytest.mark.asyncio
+    async def test_fractional_second_thresholds_keep_millisecond_precision(
+        self,
+    ) -> None:
+        """The public millisecond contract is not restricted to whole seconds."""
+        broker = _make_broker()
+        scan_result = MagicMock()
+        scan_result.fetchall.return_value = []
+        scan_session = AsyncMock()
+        scan_session.__aenter__ = AsyncMock(return_value=scan_session)
+        scan_session.__aexit__ = AsyncMock(return_value=None)
+        scan_session.execute = AsyncMock(return_value=scan_result)
+        broker.session_factory = MagicMock(return_value=scan_session)
+
+        result = await broker.mark_stale_tasks_as_failed(
+            stale_threshold_ms=1_500,
+            finalizing_stale_threshold_ms=2_750,
+        )
+
+        assert is_ok(result)
+        parameters = scan_session.execute.call_args.args[1]
+        assert parameters['stale_threshold'] == 1.5
+        assert parameters['finalizing_stale_threshold'] == 2.75
+
+    @pytest.mark.asyncio
     async def test_no_stale_tasks_returns_zero(self) -> None:
         """When no stale tasks found, should return 0 without commit."""
         broker = _make_broker()
@@ -1781,39 +1805,94 @@ class TestExpirePendingTasks:
     async def test_no_expired_returns_zero(self) -> None:
         """When UPDATE matches no rows, return 0."""
         broker = _make_broker()
-        update_result = MagicMock(rowcount=0)
 
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=update_result)
         broker.session_factory = MagicMock(return_value=session)
 
-        result = await broker.expire_pending_tasks()
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=[]),
+        ) as apply_batch:
+            result = await broker.expire_pending_tasks()
+
         assert is_ok(result)
         assert result.ok_value == 0
+        apply_batch.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_expired_tasks_transitioned(self) -> None:
         """When UPDATE matches rows, return count and verify TASK_EXPIRED in params."""
+        from horsies.core.lifecycle.commands import ExpirePendingTasks
+        from horsies.core.lifecycle.outcomes import Applied
+
         broker = _make_broker()
-        update_result = MagicMock(rowcount=3)
 
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(return_value=update_result)
         broker.session_factory = MagicMock(return_value=session)
 
-        result = await broker.expire_pending_tasks()
+        outcomes = [MagicMock(spec=Applied) for _ in range(3)]
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=outcomes),
+        ) as apply_batch:
+            result = await broker.expire_pending_tasks()
+
         assert is_ok(result)
         assert result.ok_value == 3
         session.commit.assert_awaited_once()
 
-        # Verify the params include TASK_EXPIRED error code
-        call_params = session.execute.call_args[0][1]
-        assert call_params['error_code'] == 'TASK_EXPIRED'
-        assert 'TASK_EXPIRED' in call_params['result']
+        command = apply_batch.await_args.args[1]
+        assert isinstance(command, ExpirePendingTasks)
+        assert command.error_code == 'TASK_EXPIRED'
+        assert 'TASK_EXPIRED' in command.result_json
+
+    @pytest.mark.asyncio
+    async def test_a_full_batch_continues_until_a_short_batch(self) -> None:
+        """The operation's returned rows preserve the existing drain loop."""
+        from horsies.core.lifecycle.outcomes import Applied
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+        full = [MagicMock(spec=Applied) for _ in range(500)]
+        final = [MagicMock(spec=Applied) for _ in range(2)]
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(side_effect=[full, final]),
+        ) as apply_batch:
+            result = await broker.expire_pending_tasks()
+
+        assert is_ok(result)
+        assert result.ok_value == 502
+        assert apply_batch.await_count == 2
+        assert session.commit.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_non_applied_batch_outcome_fails_closed(self) -> None:
+        """Discovery functions report transitions, never refusal-shaped rows."""
+        from horsies.core.lifecycle.outcomes import TaskAbsent
+
+        broker = _make_broker()
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        broker.session_factory = MagicMock(return_value=session)
+
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(return_value=[MagicMock(spec=TaskAbsent)]),
+        ):
+            result = await broker.expire_pending_tasks()
+
+        assert is_err(result)
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_db_error_returns_err(self) -> None:
@@ -1822,10 +1901,13 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        session.execute = AsyncMock(side_effect=Exception('db down'))
         broker.session_factory = MagicMock(return_value=session)
 
-        result = await broker.expire_pending_tasks()
+        with patch(
+            'horsies.core.brokers.postgres.apply_batch_async',
+            new=AsyncMock(side_effect=Exception('db down')),
+        ):
+            result = await broker.expire_pending_tasks()
         assert not is_ok(result)
 
 

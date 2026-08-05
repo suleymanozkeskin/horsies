@@ -676,69 +676,96 @@ DECLARE
     v_worker varchar;
     v_good_until timestamptz;
     v_evaluated_at timestamptz;
+    v_retry_under_lock boolean := FALSE;
 BEGIN
-    -- One snapshot: the row locked, its deadline and the instant it is
-    -- judged at captured together. The decision and the evidence both come
-    -- from this capture; nothing is reread after a refusal.
-    SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
-           t.good_until, NOW()
-    INTO v_status, v_worker, v_claimed_at, v_good_until, v_evaluated_at
-    FROM horsies_tasks t
-    WHERE t.id = p_task_id
-    FOR UPDATE;
+    LOOP
+        -- The common apply path is one guarded UPDATE. A preceding SELECT FOR
+        -- UPDATE would emit an extra tuple-lock WAL record for every expiry;
+        -- the update already owns the lock and can return the pre-image fields
+        -- that remain unchanged by this transition.
+        UPDATE horsies_tasks t
+        SET status = 'EXPIRED',
+            claimed = FALSE,
+            claim_expires_at = NULL,
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            failed_at = NOW(),
+            result = p_result,
+            error_code = p_error_code,
+            terminal_at = NOW(),
+            terminalization_kind =
+                '{TerminalizationKind.EXPIRE_CLAIMED.value}',
+            updated_at = NOW()
+        WHERE t.id = p_task_id
+          AND t.status = 'CLAIMED'
+          AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+          AND t.good_until IS NOT NULL
+          AND t.good_until <= NOW()
+        RETURNING t.terminal_at, t.terminalization_kind,
+                  t.claimed_by_worker_id, t.claimed_at
+        INTO v_terminal_at, v_kind, v_worker, v_claimed_at;
 
-    IF FOUND
-       AND v_status = 'CLAIMED'
-       AND v_worker = CAST(p_worker_id AS VARCHAR) THEN
-        IF v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at THEN
-            UPDATE horsies_tasks t
-            SET status = 'EXPIRED',
-                claimed = FALSE,
-                claim_expires_at = NULL,
-                finalizing_at = NULL,
-                finalizing_by_worker_id = NULL,
-                failed_at = NOW(),
-                result = p_result,
-                error_code = p_error_code,
-                terminal_at = NOW(),
-                terminalization_kind =
-                    '{TerminalizationKind.EXPIRE_CLAIMED.value}',
-                updated_at = NOW()
-            WHERE t.id = p_task_id
-            RETURNING t.terminal_at, t.terminalization_kind
-            INTO v_terminal_at, v_kind;
-
+        IF FOUND THEN
             RETURN QUERY SELECT
                 p_task_id, NULL::bigint, 'APPLIED'::text,
                 v_terminal_at, v_kind,
-                'CLAIMED'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+                'CLAIMED'::text, v_worker, v_claimed_at,
                 NULL::text, NULL::jsonb;
             RETURN;
         END IF;
 
-        -- Under this caller's claim and in the source state, so it was the
-        -- deadline guard that refused: not yet passed, or absent.
-        RETURN QUERY SELECT
-            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
-            NULL::timestamptz, NULL::text,
-            v_status, v_worker, v_claimed_at,
-            'DEADLINE'::text,
-            jsonb_build_object(
-                'good_until', v_good_until,
-                'evaluated_at', v_evaluated_at
-            );
-        RETURN;
-    END IF;
+        IF v_retry_under_lock THEN
+            RAISE EXCEPTION
+                'owned expiry lost an eligible row while holding its lock'
+                USING ERRCODE = 'serialization_failure';
+        END IF;
 
-    -- Absent, terminal, another worker's claim, or live outside the source
-    -- state: the shared classifier's arms are exactly right, and the worker
-    -- parameter keeps a foreign claim reported as the lost claim it is.
-    RETURN QUERY SELECT * FROM horsies_terminalization_miss(
-        p_task_id,
-        {_kind_array(TerminalizationKind.EXPIRE_CLAIMED)},
-        p_worker_id,
-        NULL::timestamptz
-    );
+        -- The apply attempt matched nothing. Lock and capture the row once,
+        -- then judge every refusal from that capture. A concurrent update may
+        -- have made the deadline eligible between statements; in that case
+        -- retry the guarded UPDATE while this transaction owns the row lock.
+        SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
+               t.good_until, NOW()
+        INTO v_status, v_worker, v_claimed_at, v_good_until, v_evaluated_at
+        FROM horsies_tasks t
+        WHERE t.id = p_task_id
+        FOR UPDATE;
+
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS VARCHAR) THEN
+            IF v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at THEN
+                v_retry_under_lock := TRUE;
+                CONTINUE;
+            END IF;
+
+            -- Under this caller's claim and in the source state, so it was
+            -- the deadline guard that refused: not yet passed, or absent.
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+                NULL::timestamptz, NULL::text,
+                v_status, v_worker, v_claimed_at,
+                'DEADLINE'::text,
+                jsonb_build_object(
+                    'good_until', v_good_until,
+                    'evaluated_at', v_evaluated_at
+                );
+            RETURN;
+        END IF;
+
+        -- Absent, terminal, another worker's claim, or live outside the source
+        -- state: the shared classifier's arms are exactly right, and the
+        -- worker parameter keeps a foreign claim reported as the lost claim
+        -- it is. A present row remains locked, so the classifier observes the
+        -- same pre-image captured above.
+        RETURN QUERY SELECT * FROM horsies_terminalization_miss(
+            p_task_id,
+            {_kind_array(TerminalizationKind.EXPIRE_CLAIMED)},
+            p_worker_id,
+            NULL::timestamptz
+        );
+        RETURN;
+    END LOOP;
 END;
 $$
 """)

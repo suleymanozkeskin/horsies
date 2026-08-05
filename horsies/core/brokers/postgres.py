@@ -1,7 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, uuid
-from typing import Any, Optional, TYPE_CHECKING, cast
+from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -29,6 +29,15 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.json_io import loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
+from horsies.core.lifecycle.commands import ExpirePendingTasks
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.models.health import (
     WORKER_PING_CHANNEL,
     DatabasePing,
@@ -2114,16 +2123,33 @@ class PostgresBroker:
             total_expired = 0
             for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
                 async with self.session_factory() as session:
-                    res = await session.execute(
-                        EXPIRE_PENDING_TASKS_SQL,
-                        {
-                            'result': result_json,
-                            'error_code': OutcomeCode.TASK_EXPIRED.value,
-                            'batch_size': _EXPIRE_BATCH_SIZE,
-                        },
+                    outcomes = await apply_batch_async(
+                        await session.connection(),
+                        ExpirePendingTasks(
+                            batch_size=_EXPIRE_BATCH_SIZE,
+                            result_json=result_json,
+                            error_code=OutcomeCode.TASK_EXPIRED.value,
+                        ),
                     )
+                    for outcome in outcomes:
+                        match outcome:
+                            case Applied():
+                                continue
+                            case (
+                                AlreadyApplied()
+                                | LostClaim()
+                                | SourceStateConflict()
+                                | TaskAbsent()
+                            ):
+                                raise RuntimeError(
+                                    'pending expiry operation returned '
+                                    f'{type(outcome).__name__}; discovery batches '
+                                    'report transitioned rows only'
+                                )
+                            case _ as unreachable:
+                                assert_never(unreachable)
                     await session.commit()
-                batch_expired = int(getattr(res, 'rowcount', 0) or 0)
+                batch_expired = len(outcomes)
                 total_expired += batch_expired
                 if batch_expired < _EXPIRE_BATCH_SIZE:
                     return Ok(total_expired)

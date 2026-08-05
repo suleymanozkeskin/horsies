@@ -32,6 +32,8 @@ from sqlalchemy.sql.elements import TextClause
 from horsies.core.brokers.postgres import (
     _EXPIRE_BATCH_SIZE,
     EXPIRE_PENDING_TASKS_SQL,
+    MARK_STALE_TASK_FAILED_SQL,
+    SELECT_STALE_TASK_FOR_UPDATE_SQL,
 )
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import dumps_json
@@ -39,16 +41,27 @@ from horsies.core.codec.typed import encode_task_result
 from horsies.core.lifecycle.commands import (
     CompleteLockedTask,
     CompleteTaskFused,
+    ExpireOwnedClaim,
+    ExpirePendingTasks,
     FailLockedTask,
+    FailStaleTask,
     TerminalizationCommand,
 )
-from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead, WorkerOwned
 from horsies.core.lifecycle.outcomes import Applied, decode_outcome_row
 from horsies.core.lifecycle.persistence import (
     _log_outcome,
+    apply_sync,
+    batch_call_for,
     call_for,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    OutcomeCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.worker.child_runner import _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL
 from horsies.core.worker.sql import (
     FINALIZE_TASK_COMPLETED_SQL,
     MARK_TASK_COMPLETED_SQL,
@@ -68,8 +81,8 @@ FUSED_P50 = Budget(fraction=0.05, floor_ms=0.2)
 FUSED_P99 = Budget(fraction=0.10, floor_ms=1.0)
 SINGLE_ROW_P50 = Budget(fraction=0.10, floor_ms=0.5)
 SINGLE_ROW_P99 = Budget(fraction=0.15, floor_ms=1.5)
-BATCH_P50 = Budget(fraction=0.10, floor_ms=0.5)
-BATCH_P99 = Budget(fraction=0.15, floor_ms=1.5)
+BATCH_LOCK_P95 = Budget(fraction=0.10, floor_ms=1.0)
+MINIMUM_BATCH_THROUGHPUT_RATIO = 0.90
 
 _INSERT_RUNNING_SQL = text("""
     INSERT INTO horsies_tasks (
@@ -93,6 +106,39 @@ _INSERT_PENDING_EXPIRED_SQL = text("""
         :prefix || g, 'perf.task', 'default', 'PENDING', '[]', '{}',
         repeat('0', 64), FALSE, FALSE, NOW() - INTERVAL '1 hour'
     FROM generate_series(1, :count) AS g
+""")
+
+_INSERT_CLAIMED_EXPIRED_SQL = text("""
+    INSERT INTO horsies_tasks (
+        id, task_name, queue_name, status, args, kwargs, enqueue_sha,
+        is_workflow_task, claimed, claimed_by_worker_id, claimed_at,
+        claim_expires_at, good_until
+    )
+    SELECT
+        :prefix || g, 'perf.task', 'default', 'CLAIMED', '[]', '{}',
+        repeat('0', 64), FALSE, TRUE, :worker_id, :claimed_at,
+        NOW() + INTERVAL '5 minutes', NOW() - INTERVAL '1 hour'
+    FROM generate_series(1, :count) AS g
+""")
+
+_EXPIRE_OWNED_BASELINE_PLAN_SQL = text("""
+    UPDATE horsies_tasks
+    SET status = 'EXPIRED',
+        claimed = FALSE,
+        claim_expires_at = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        failed_at = NOW(),
+        result = :result,
+        error_code = :error_code,
+        terminal_at = NOW(),
+        updated_at = NOW()
+    WHERE id = :task_id
+      AND status = 'CLAIMED'
+      AND claimed_by_worker_id = :worker_id
+      AND good_until IS NOT NULL
+      AND good_until <= NOW()
+    RETURNING id
 """)
 
 # A heap where every row is fresh is not the heap this runs against in
@@ -162,6 +208,7 @@ class Invocation:
 
 
 type InvocationFactory = Callable[[str], Invocation]
+type BatchInvocationFactory = Callable[[], Invocation]
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,13 +236,15 @@ class BatchScenario:
 
     name: str
     description: str
-    p50_budget: Budget
-    p99_budget: Budget
+    lock_p95_budget: Budget
+    minimum_throughput_ratio: float
     batch_size: int
     seed: Seed
     cleanup: Cleanup
     baseline: Callable[[Connection], int]
     candidate: Callable[[Connection], int] | None
+    baseline_invocation: BatchInvocationFactory
+    candidate_invocation: BatchInvocationFactory | None
     exact_client_statements_per_operation: int | None = 1
     exact_write_transactions_per_operation: int = 1
 
@@ -249,6 +298,23 @@ def seed_expired_pending_tasks(
     connection.execute(
         _INSERT_PENDING_EXPIRED_SQL,
         {'prefix': prefix, 'count': count},
+    )
+    connection.commit()
+
+
+def seed_expired_claimed_tasks(
+    connection: Connection,
+    prefix: str,
+    count: int,
+) -> None:
+    connection.execute(
+        _INSERT_CLAIMED_EXPIRED_SQL,
+        {
+            'prefix': prefix,
+            'count': count,
+            'worker_id': WORKER_ID,
+            'claimed_at': CLAIMED_AT,
+        },
     )
     connection.commit()
 
@@ -431,6 +497,27 @@ _FAILURE_RESULT = serialize_error_payload(
     )
 )
 
+_EXPIRY_RESULT = serialize_error_payload(
+    TaskResult(
+        err=TaskError(
+            error_code=OutcomeCode.TASK_EXPIRED,
+            message='Task expired: good_until deadline passed before execution started',
+        )
+    )
+)
+
+_STALE_AFTER_SECONDS = 5
+_FINALIZING_STALE_AFTER_SECONDS = 5
+_STALE_FAILURE_REASON = 'Worker process crashed (no runner heartbeat for 5000ms)'
+_STALE_FAILURE_RESULT = serialize_error_payload(
+    TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.WORKER_CRASHED,
+            message=_STALE_FAILURE_REASON,
+        )
+    )
+)
+
 
 def _failure_invocation(*, candidate: bool) -> InvocationFactory:
     def build(task_id: str) -> Invocation:
@@ -463,6 +550,156 @@ def _failure_invocation(*, candidate: bool) -> InvocationFactory:
         )
 
     return build
+
+
+def _owned_expiry_invocation(*, candidate: bool) -> InvocationFactory:
+    def build(task_id: str) -> Invocation:
+        if candidate:
+            command = ExpireOwnedClaim(
+                task_id=task_id,
+                fence=WorkerOwned(worker_id=WORKER_ID),
+                result_json=_EXPIRY_RESULT,
+                error_code='TASK_EXPIRED',
+            )
+            statement, parameters = call_for(command)
+            return Invocation(
+                statement=statement,
+                parameters=dict(parameters),
+                candidate=True,
+                operation='owned claim expiry operation',
+                command=command,
+            )
+        return Invocation(
+            statement=_EXPIRE_OWNED_BASELINE_PLAN_SQL,
+            parameters={
+                'result': _EXPIRY_RESULT,
+                'error_code': 'TASK_EXPIRED',
+                'task_id': task_id,
+                'worker_id': WORKER_ID,
+            },
+            candidate=False,
+            operation='owned claim expiry statement',
+        )
+
+    return build
+
+
+def _stale_failure_invocation(*, candidate: bool) -> InvocationFactory:
+    def build(task_id: str) -> Invocation:
+        if candidate:
+            command = FailStaleTask(
+                task_id=task_id,
+                stale_after_seconds=_STALE_AFTER_SECONDS,
+                finalizing_stale_after_seconds=_FINALIZING_STALE_AFTER_SECONDS,
+                result_json=_STALE_FAILURE_RESULT,
+                error_code=OperationalErrorCode.WORKER_CRASHED.value,
+                failed_reason=_STALE_FAILURE_REASON,
+            )
+            statement, parameters = call_for(command)
+            return Invocation(
+                statement=statement,
+                parameters=dict(parameters),
+                candidate=True,
+                operation='stale terminal failure operation',
+                command=command,
+            )
+        return Invocation(
+            statement=MARK_STALE_TASK_FAILED_SQL,
+            parameters={
+                'task_id': task_id,
+                'failed_reason': _STALE_FAILURE_REASON,
+                'result': _STALE_FAILURE_RESULT,
+                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                'stale_threshold': _STALE_AFTER_SECONDS,
+                'finalizing_stale_threshold': _FINALIZING_STALE_AFTER_SECONDS,
+            },
+            candidate=False,
+            operation='stale terminal failure statement',
+        )
+
+    return build
+
+
+def _run_owned_expiry(*, candidate: bool) -> Callable[[Connection, str], int]:
+    def run(connection: Connection, task_id: str) -> int:
+        raw_connection = cast(Any, connection.connection.driver_connection)
+        with raw_connection.cursor() as cursor:
+            if candidate:
+                command = ExpireOwnedClaim(
+                    task_id=task_id,
+                    fence=WorkerOwned(worker_id=WORKER_ID),
+                    result_json=_EXPIRY_RESULT,
+                    error_code='TASK_EXPIRED',
+                )
+                outcome = apply_sync(cursor, command)
+                if not isinstance(outcome, Applied):
+                    raw_connection.rollback()
+                    raise RuntimeError(
+                        'owned claim expiry operation returned '
+                        f'{type(outcome).__name__} for a seeded eligible task'
+                    )
+            else:
+                cursor.execute(
+                    _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
+                    (
+                        _EXPIRY_RESULT,
+                        'TASK_EXPIRED',
+                        task_id,
+                        WORKER_ID,
+                    ),
+                )
+                if cursor.fetchone() is None:
+                    raw_connection.rollback()
+                    raise RuntimeError(
+                        'owned claim expiry statement did not transition its '
+                        'seeded task'
+                    )
+            raw_connection.commit()
+        return 1
+
+    return run
+
+
+def _run_stale_failure(*, candidate: bool) -> Callable[[Connection, str], int]:
+    invocation_for = _stale_failure_invocation(candidate=candidate)
+
+    def run(connection: Connection, task_id: str) -> int:
+        context = connection.execute(
+            SELECT_STALE_TASK_FOR_UPDATE_SQL,
+            {
+                'id': task_id,
+                'stale_threshold': _STALE_AFTER_SECONDS,
+                'finalizing_stale_threshold': _FINALIZING_STALE_AFTER_SECONDS,
+            },
+        ).fetchone()
+        if context is None:
+            connection.rollback()
+            raise RuntimeError('stale failure could not lock its seeded task')
+
+        failed_reason = _STALE_FAILURE_REASON
+        connection.execute(
+            UPSERT_TASK_ATTEMPT_SQL,
+            {
+                'task_id': task_id,
+                'attempt': (context.retry_count or 0) + 1,
+                'outcome': 'FAILED',
+                'will_retry': False,
+                'started_at': context.started_at or context.db_now,
+                'finished_at': context.db_now,
+                'error_code': OperationalErrorCode.WORKER_CRASHED.value,
+                'error_message': failed_reason,
+                'failed_reason': failed_reason,
+                'worker_id': context.claimed_by_worker_id,
+                'worker_hostname': context.worker_hostname,
+                'worker_pid': context.worker_pid,
+                'worker_process_name': context.worker_process_name,
+            },
+        )
+        transitioned = _execute_invocation(connection, invocation_for(task_id))
+        connection.commit()
+        return transitioned
+
+    return run
 
 
 def _run_terminal_invocation(
@@ -549,17 +786,67 @@ def _run_workflow_success(
     return run
 
 
-def _run_pending_expiry(batch_size: int) -> Callable[[Connection], int]:
-    def run(connection: Connection) -> int:
-        result = connection.execute(
-            EXPIRE_PENDING_TASKS_SQL,
-            {
+def _pending_expiry_invocation(
+    batch_size: int,
+    *,
+    candidate: bool,
+) -> BatchInvocationFactory:
+    def build() -> Invocation:
+        if candidate:
+            command = ExpirePendingTasks(
+                batch_size=batch_size,
+                result_json=payload_of(200),
+                error_code='TASK_EXPIRED',
+            )
+            statement, parameters = batch_call_for(command)
+            return Invocation(
+                statement=statement,
+                parameters=dict(parameters),
+                candidate=True,
+                operation='pending expiry batch operation',
+                command=command,
+            )
+        return Invocation(
+            statement=EXPIRE_PENDING_TASKS_SQL,
+            parameters={
                 'result': payload_of(200),
                 'error_code': 'TASK_EXPIRED',
                 'batch_size': batch_size,
             },
+            candidate=False,
+            operation='pending expiry batch statement',
         )
-        transitioned = int(result.rowcount or 0)
+
+    return build
+
+
+def _run_pending_expiry(
+    invocation_for: BatchInvocationFactory,
+    *,
+    batch_size: int,
+) -> Callable[[Connection], int]:
+    def run(connection: Connection) -> int:
+        invocation = invocation_for()
+        result = connection.execute(invocation.statement, invocation.parameters)
+        if invocation.candidate:
+            if invocation.command is None:
+                raise RuntimeError('pending expiry candidate has no command')
+            outcomes = [
+                decode_outcome_row({str(key): value for key, value in row.items()})
+                for row in result.mappings().all()
+            ]
+            if len(outcomes) != batch_size or not all(
+                isinstance(outcome, Applied) for outcome in outcomes
+            ):
+                raise RuntimeError(
+                    'pending expiry operation did not apply exactly '
+                    f'{batch_size} transitions'
+                )
+            for outcome in outcomes:
+                _log_outcome(invocation.command, outcome)
+            transitioned = len(outcomes)
+        else:
+            transitioned = int(result.rowcount or 0)
         connection.commit()
         if transitioned != batch_size:
             raise RuntimeError(
@@ -575,6 +862,15 @@ def _run_pending_expiry(batch_size: int) -> Callable[[Connection], int]:
 # the old batch after the runtime changed its mind.
 PRODUCTION_EXPIRE_BATCH_SIZE = _EXPIRE_BATCH_SIZE
 
+_PENDING_EXPIRY_BASELINE = _pending_expiry_invocation(
+    PRODUCTION_EXPIRE_BATCH_SIZE,
+    candidate=False,
+)
+_PENDING_EXPIRY_CANDIDATE = _pending_expiry_invocation(
+    PRODUCTION_EXPIRE_BATCH_SIZE,
+    candidate=True,
+)
+
 _FUSED_SMALL_BASELINE = _fused_invocation(payload_of(200), candidate=False)
 _FUSED_SMALL_CANDIDATE = _fused_invocation(payload_of(200), candidate=True)
 _FUSED_LARGE_BASELINE = _fused_invocation(
@@ -589,6 +885,10 @@ _LOCKED_BASELINE = _locked_completion_invocation(payload_of(200), candidate=Fals
 _LOCKED_CANDIDATE = _locked_completion_invocation(payload_of(200), candidate=True)
 _FAILURE_BASELINE = _failure_invocation(candidate=False)
 _FAILURE_CANDIDATE = _failure_invocation(candidate=True)
+_OWNED_EXPIRY_BASELINE = _owned_expiry_invocation(candidate=False)
+_OWNED_EXPIRY_CANDIDATE = _owned_expiry_invocation(candidate=True)
+_STALE_FAILURE_BASELINE = _stale_failure_invocation(candidate=False)
+_STALE_FAILURE_CANDIDATE = _stale_failure_invocation(candidate=True)
 _WORKFLOW_BASELINE = _locked_completion_invocation(
     _WORKFLOW_RESULT_JSON,
     candidate=False,
@@ -656,6 +956,36 @@ SCENARIOS: tuple[Scenario, ...] = (
         exact_client_statements_per_operation=1,
     ),
     SingleRowScenario(
+        name='owned-claim-expiry',
+        description='deadline expiry of a worker-owned claim before user code starts',
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=SINGLE_ROW_P99,
+        payload_bytes=len(_EXPIRY_RESULT.encode('utf-8')),
+        seed=seed_expired_claimed_tasks,
+        cleanup=delete_seeded,
+        baseline=_run_owned_expiry(candidate=False),
+        candidate=_run_owned_expiry(candidate=True),
+        baseline_invocation=_OWNED_EXPIRY_BASELINE,
+        candidate_invocation=_OWNED_EXPIRY_CANDIDATE,
+        exact_client_statements_per_operation=1,
+    ),
+    SingleRowScenario(
+        name='stale-terminal-failure',
+        description=(
+            'one stale-running terminal branch including row lock and attempt write'
+        ),
+        p50_budget=SINGLE_ROW_P50,
+        p99_budget=SINGLE_ROW_P99,
+        payload_bytes=len(_STALE_FAILURE_RESULT.encode('utf-8')),
+        seed=seed_running_tasks,
+        cleanup=delete_seeded,
+        baseline=_run_stale_failure(candidate=False),
+        candidate=_run_stale_failure(candidate=True),
+        baseline_invocation=_STALE_FAILURE_BASELINE,
+        candidate_invocation=_STALE_FAILURE_CANDIDATE,
+        exact_client_statements_per_operation=3,
+    ),
+    SingleRowScenario(
         name='workflow-success-phase2',
         description=(
             'one-node workflow success through terminal persistence, phase 2, '
@@ -675,13 +1005,21 @@ SCENARIOS: tuple[Scenario, ...] = (
     BatchScenario(
         name='pending-expiry-batch',
         description='deadline expiry of unclaimed tasks, one bounded batch',
-        p50_budget=BATCH_P50,
-        p99_budget=BATCH_P99,
+        lock_p95_budget=BATCH_LOCK_P95,
+        minimum_throughput_ratio=MINIMUM_BATCH_THROUGHPUT_RATIO,
         batch_size=PRODUCTION_EXPIRE_BATCH_SIZE,
         seed=seed_expired_pending_tasks,
         cleanup=delete_seeded,
-        baseline=_run_pending_expiry(PRODUCTION_EXPIRE_BATCH_SIZE),
-        candidate=None,
+        baseline=_run_pending_expiry(
+            _PENDING_EXPIRY_BASELINE,
+            batch_size=PRODUCTION_EXPIRE_BATCH_SIZE,
+        ),
+        candidate=_run_pending_expiry(
+            _PENDING_EXPIRY_CANDIDATE,
+            batch_size=PRODUCTION_EXPIRE_BATCH_SIZE,
+        ),
+        baseline_invocation=_PENDING_EXPIRY_BASELINE,
+        candidate_invocation=_PENDING_EXPIRY_CANDIDATE,
     ),
 )
 

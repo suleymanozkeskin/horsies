@@ -15,13 +15,14 @@ the coupled write that should have accompanied it.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 
@@ -914,6 +915,71 @@ class TestExpireOwnedClaim:
         assert row.claim_expires_at is None
         assert row.failed_at is not None
         assert row.error_code == 'TASK_EXPIRED'
+
+    async def test_deadline_change_while_waiting_on_the_row_is_rechecked(
+        self,
+        engine: AsyncEngine,
+        session: AsyncSession,
+    ) -> None:
+        """A newly eligible row is not misclassified after lock contention.
+
+        The operation's first guarded update sees the committed future
+        deadline. A concurrent transaction already holds the row with a past
+        deadline; the refusal capture waits for that transaction, then the
+        operation must apply from the locked post-commit image.
+        """
+        task_id = await _seed(session, status='CLAIMED')
+        await _deadline(session, task_id, seconds_ago=-3600)
+
+        async with (
+            AsyncSession(engine, expire_on_commit=False) as mutator,
+            AsyncSession(engine, expire_on_commit=False) as applier,
+            AsyncSession(engine, expire_on_commit=False) as observer,
+        ):
+            mutator_pid = int(
+                (await mutator.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+            )
+            await mutator.execute(
+                text("""
+                    UPDATE horsies_tasks
+                    SET good_until = NOW() - INTERVAL '1 hour'
+                    WHERE id = :id
+                """),
+                {'id': task_id},
+            )
+
+            applier_pid = int(
+                (await applier.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+            )
+            application = asyncio.create_task(
+                apply_async(await applier.connection(), _expire_claim(task_id))
+            )
+            for _ in range(100):
+                blocked_by_mutator = bool(
+                    (
+                        await observer.execute(
+                            text(
+                                'SELECT :mutator = ANY('
+                                'pg_blocking_pids(:applier))'
+                            ),
+                            {'mutator': mutator_pid, 'applier': applier_pid},
+                        )
+                    ).scalar_one()
+                )
+                if blocked_by_mutator:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                await mutator.rollback()
+                await asyncio.wait_for(application, timeout=5)
+                raise AssertionError('expiry operation never waited on the row lock')
+
+            await mutator.commit()
+            outcome = await asyncio.wait_for(application, timeout=5)
+            await applier.commit()
+
+        assert isinstance(outcome, Applied)
+        assert outcome.kind is TerminalizationKind.EXPIRE_CLAIMED
 
     async def test_a_live_deadline_refuses_with_the_evidence(
         self,

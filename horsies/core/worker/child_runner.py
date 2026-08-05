@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from importlib import import_module
-from typing import Any, Optional, Tuple, cast
+from typing import Any, Optional, Tuple, assert_never, cast
 
 from psycopg import Connection, Cursor, InterfaceError, OperationalError
 from psycopg.rows import namedtuple_row
@@ -48,6 +48,16 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
 )
+from horsies.core.lifecycle.commands import ExpireOwnedClaim
+from horsies.core.lifecycle.fences import WorkerOwned
+from horsies.core.lifecycle.outcomes import (
+    AlreadyApplied,
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TaskAbsent,
+)
+from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.types.result import is_err
 
 
@@ -656,22 +666,7 @@ def _update_workflow_task_running_with_retry(task_id: str) -> bool:
     return False
 
 
-def _expire_claimed_task_before_start(
-    cursor: Cursor[Any],
-    conn: Connection[Any],
-    task_id: str,
-    worker_id: str,
-) -> Optional[Tuple[bool, str, Optional[str]]]:
-    task_result: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OutcomeCode.TASK_EXPIRED,
-            message='Task expired: good_until deadline passed before execution started',
-            data={'task_id': task_id, 'worker_id': worker_id},
-        ),
-    )
-    result_json = serialize_error_payload(task_result)
-    cursor.execute(
-        """
+_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL = """
         UPDATE horsies_tasks
         SET status = 'EXPIRED',
             claimed = FALSE,
@@ -689,21 +684,43 @@ def _expire_claimed_task_before_start(
           AND good_until IS NOT NULL
           AND good_until <= NOW()
         RETURNING id
-        """,
-        (
-            result_json,
-            OutcomeCode.TASK_EXPIRED.value,
-            task_id,
-            worker_id,
+"""
+
+
+def _expire_claimed_task_before_start(
+    cursor: Cursor[Any],
+    conn: Connection[Any],
+    task_id: str,
+    worker_id: str,
+) -> Optional[Tuple[bool, str, Optional[str]]]:
+    task_result: TaskResult[None, TaskError] = TaskResult(
+        err=TaskError(
+            error_code=OutcomeCode.TASK_EXPIRED,
+            message='Task expired: good_until deadline passed before execution started',
+            data={'task_id': task_id, 'worker_id': worker_id},
         ),
     )
-    if cursor.fetchone() is None:
-        return None
-    conn.commit()
-    logger.info(
-        f'Task {task_id} expired before actual execution start; marked EXPIRED.',
+    result_json = serialize_error_payload(task_result)
+    outcome = apply_sync(
+        cursor,
+        ExpireOwnedClaim(
+            task_id=task_id,
+            fence=WorkerOwned(worker_id=worker_id),
+            result_json=result_json,
+            error_code=OutcomeCode.TASK_EXPIRED.value,
+        ),
     )
-    return (False, '', OutcomeCode.TASK_EXPIRED.value)
+    match outcome:
+        case Applied() | AlreadyApplied():
+            conn.commit()
+            logger.info(
+                f'Task {task_id} expired before actual execution start; marked EXPIRED.',
+            )
+            return (False, '', OutcomeCode.TASK_EXPIRED.value)
+        case LostClaim() | SourceStateConflict() | TaskAbsent():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _confirm_ownership_and_set_running(

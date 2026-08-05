@@ -184,7 +184,13 @@ from sqlalchemy import text
 #      are verified by ordinality; workflow-scoped batches report transitions
 #      only. No schema change.
 
-SCHEMA_VERSION = 24
+# v25: replace the owned-claim expiry body so its common apply path relies on
+#      the guarded UPDATE's row lock rather than issuing SELECT FOR UPDATE
+#      first. Refusals still lock and capture every deadline observable before
+#      classification; eligible transitions no longer emit a separate
+#      tuple-lock WAL record. No schema change.
+
+SCHEMA_VERSION = 25
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

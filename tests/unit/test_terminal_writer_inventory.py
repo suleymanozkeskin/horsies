@@ -113,7 +113,7 @@ FROZEN_TERMINAL_WRITERS: dict[_InventoryKey, int] = {
     # T12
     (
         'horsies/core/worker/child_runner.py',
-        '_expire_claimed_task_before_start',
+        '_EXPIRE_CLAIMED_TASK_BEFORE_START_SQL',
         'EXPIRED',
     ): 1,
     # T13
