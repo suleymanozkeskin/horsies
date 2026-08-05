@@ -453,6 +453,92 @@ async def test_terminalization_rejects_invalid_window_before_mutation(
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
+async def test_missing_history_leaf_rolls_back_location_transition(
+    identity_schema: AsyncConnection,
+    candidate: str,
+) -> None:
+    schema = _schema(identity_schema)
+    command = _command()
+    key = ScopedIdempotencyKey(command.task_name, 'missing-leaf')
+    task_id = str(uuid4())
+    await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=task_id,
+        command=command,
+        key=key,
+    )
+    await identity_schema.commit()
+    terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
+
+    with pytest.raises(DBAPIError, match='no partition.*found'):
+        await identity_schema.execute(
+            text(
+                f"""
+                SELECT {schema.sql}.terminalize_{terminal_prefix}(
+                    CAST(:task_id AS varchar(36)),
+                    '2030-08-05T12:00:00Z'::timestamptz,
+                    interval '24 hours'
+                )
+                """
+            ),
+            {'task_id': task_id},
+        )
+    await identity_schema.rollback()
+
+    live_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    locations = (
+        await identity_schema.execute(
+            text(
+                f"""
+                SELECT
+                    (SELECT count(*) FROM {schema.sql}.{live_prefix}_live
+                     WHERE task_id = :task_id) AS live_count,
+                    (SELECT count(*) FROM {schema.sql}.{live_prefix}_history
+                     WHERE task_id = :task_id) AS history_count
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(locations) == (1, 0)
+
+    match candidate:
+        case 'combined_registry':
+            disposition = (
+                await identity_schema.execute(
+                    text(
+                        f"""
+                        SELECT location
+                        FROM {schema.sql}.combined_registry
+                        WHERE task_id = :task_id
+                        """
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+            assert disposition == 'LIVE'
+        case 'key_registry':
+            disposition = (
+                await identity_schema.execute(
+                    text(
+                        f"""
+                        SELECT disposition
+                        FROM {schema.sql}.key_reservations
+                        WHERE task_id = :task_id
+                        """
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+            assert disposition == 'LIVE'
+        case 'no_directory':
+            pass
+        case _:
+            pytest.fail(f'unrecognized identity candidate: {candidate}')
+
+
+@pytest.mark.parametrize('candidate', _CANDIDATES)
 async def test_point_lookup_distinguishes_live_history_and_absence(
     identity_schema: AsyncConnection,
     candidate: str,
