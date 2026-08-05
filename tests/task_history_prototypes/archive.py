@@ -14,6 +14,8 @@ from pydantic import TypeAdapter, ValidationError
 
 ARCHIVE_CODEC = 'json-utf8'
 ARCHIVE_VERSION = 1
+ARCHIVE_CODEC_V2 = 'framed-json-v2'
+ARCHIVE_FRAME_V2 = b'H2'
 
 
 class ArchiveDomain(StrEnum):
@@ -60,6 +62,14 @@ class DecodedArchiveValue[T]:
 
 
 type ArchiveDecodeResult[T] = DecodedArchiveValue[T] | ArchiveDecodeFailure
+
+
+def decode_history_row_version(version: int) -> ArchiveDecodeResult[int]:
+    match version:
+        case 1 | 2:
+            return DecodedArchiveValue(version)
+        case _:
+            return UnknownArchiveVersion(ArchiveDomain.HISTORY_ROW, version)
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,19 +180,24 @@ def decode_json_value(
     payload: bytes,
     digest: bytes,
 ) -> ArchiveDecodeResult[Any]:
-    contract_error = _validate_contract(
+    decoded_payload = _decode_payload_contract(
         domain=domain,
         version=version,
         codec=codec,
         payload=payload,
         digest=digest,
     )
-    if contract_error is not None:
-        return contract_error
-    try:
-        return DecodedArchiveValue(json.loads(payload))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return CorruptArchiveValue(domain=domain, detail=type(exc).__name__)
+    match decoded_payload:
+        case DecodedArchiveValue(value=unframed):
+            try:
+                return DecodedArchiveValue(json.loads(unframed))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                return CorruptArchiveValue(
+                    domain=domain,
+                    detail=type(exc).__name__,
+                )
+        case failure:
+            return failure
 
 
 def encode_attempts(attempts: tuple[AttemptRecord, ...]) -> StoredArchiveValue:
@@ -266,21 +281,39 @@ def decode_rerun_input(
     inline_payload: bytes | None,
     reference: str | None,
 ) -> ArchiveDecodeResult[RerunInput]:
-    if version != ARCHIVE_VERSION:
-        return UnknownArchiveVersion(ArchiveDomain.RERUN_INPUT, version)
-    if codec != ARCHIVE_CODEC:
-        return UnknownArchiveCodec(ArchiveDomain.RERUN_INPUT, codec)
-
+    contract_error = _validate_version_and_codec(
+        domain=ArchiveDomain.RERUN_INPUT,
+        version=version,
+        codec=codec,
+    )
+    if contract_error is not None:
+        return contract_error
     match form, inline_payload, reference:
         case RerunInputForm.INLINE, bytes() as payload, None:
-            if archive_digest(payload) != digest:
-                return ArchiveDigestMismatch(ArchiveDomain.RERUN_INPUT)
-            return DecodedArchiveValue(InlineRerunInput(payload=payload, digest=digest))
+            decoded_payload = _decode_payload_contract(
+                domain=ArchiveDomain.RERUN_INPUT,
+                version=version,
+                codec=codec,
+                payload=payload,
+                digest=digest,
+            )
+            match decoded_payload:
+                case DecodedArchiveValue(value=unframed):
+                    return DecodedArchiveValue(
+                        InlineRerunInput(payload=unframed, digest=digest)
+                    )
+                case failure:
+                    return failure
         case (
             RerunInputForm.REFERENCE,
             None,
             str() as object_reference,
         ) if object_reference:
+            if len(digest) != 32:
+                return CorruptArchiveValue(
+                    domain=ArchiveDomain.RERUN_INPUT,
+                    detail='invalid_reference_digest',
+                )
             return DecodedArchiveValue(
                 ReferencedRerunInput(reference=object_reference, digest=digest)
             )
@@ -291,18 +324,49 @@ def decode_rerun_input(
             )
 
 
-def _validate_contract(
+def _decode_payload_contract(
     *,
     domain: ArchiveDomain,
     version: int,
     codec: str,
     payload: bytes,
     digest: bytes,
-) -> ArchiveDecodeFailure | None:
-    if version != ARCHIVE_VERSION:
-        return UnknownArchiveVersion(domain=domain, version=version)
-    if codec != ARCHIVE_CODEC:
-        return UnknownArchiveCodec(domain=domain, codec=codec)
+) -> ArchiveDecodeResult[bytes]:
+    contract_error = _validate_version_and_codec(
+        domain=domain,
+        version=version,
+        codec=codec,
+    )
+    if contract_error is not None:
+        return contract_error
     if archive_digest(payload) != digest:
         return ArchiveDigestMismatch(domain=domain)
-    return None
+    match version:
+        case 1:
+            return DecodedArchiveValue(payload)
+        case 2 if payload.startswith(ARCHIVE_FRAME_V2):
+            return DecodedArchiveValue(payload[len(ARCHIVE_FRAME_V2) :])
+        case 2:
+            return CorruptArchiveValue(
+                domain=domain,
+                detail='invalid_frame',
+            )
+        case _:
+            raise AssertionError('version validation was not exhaustive')
+
+
+def _validate_version_and_codec(
+    *,
+    domain: ArchiveDomain,
+    version: int,
+    codec: str,
+) -> ArchiveDecodeFailure | None:
+    match version:
+        case 1 if codec == ARCHIVE_CODEC:
+            return None
+        case 2 if codec == ARCHIVE_CODEC_V2:
+            return None
+        case 1 | 2:
+            return UnknownArchiveCodec(domain=domain, codec=codec)
+        case _:
+            return UnknownArchiveVersion(domain=domain, version=version)

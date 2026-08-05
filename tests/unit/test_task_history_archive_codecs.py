@@ -8,6 +8,8 @@ import pytest
 
 from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC,
+    ARCHIVE_CODEC_V2,
+    ARCHIVE_FRAME_V2,
     ARCHIVE_VERSION,
     ArchiveDigestMismatch,
     ArchiveDomain,
@@ -18,6 +20,7 @@ from tests.task_history_prototypes.archive import (
     UnknownArchiveCodec,
     UnknownArchiveVersion,
     decode_attempts,
+    decode_history_row_version,
     decode_json_value,
     decode_rerun_input,
     encode_attempts,
@@ -53,6 +56,27 @@ def test_result_decoder_accepts_current_contract() -> None:
         payload=stored.payload,
         digest=stored.digest,
     ) == DecodedArchiveValue({'ok': {'value': 42}})
+
+
+def test_result_decoder_accepts_retained_version_two_contract() -> None:
+    stored = encode_json_value({'ok': {'value': 42}})
+    payload = ARCHIVE_FRAME_V2 + stored.payload
+    assert decode_json_value(
+        domain=ArchiveDomain.RESULT,
+        version=2,
+        codec=ARCHIVE_CODEC_V2,
+        payload=payload,
+        digest=hashlib.sha256(payload).digest(),
+    ) == DecodedArchiveValue({'ok': {'value': 42}})
+
+
+def test_history_row_decoder_tracks_its_version_independently() -> None:
+    assert decode_history_row_version(1) == DecodedArchiveValue(1)
+    assert decode_history_row_version(2) == DecodedArchiveValue(2)
+    assert decode_history_row_version(99) == UnknownArchiveVersion(
+        ArchiveDomain.HISTORY_ROW,
+        99,
+    )
 
 
 @pytest.mark.parametrize(
