@@ -130,12 +130,12 @@ async def _requeued_after_failed_attempt(
     *,
     failed_reason: str,
 ) -> None:
-    """Leave the row and history where a requeued first attempt leaves them.
+    """Leave the row and history where an automatic retry leaves them.
 
     The retry path records attempt 1 as FAILED with will_retry and advances
-    retry_count, but no requeue path clears the summary fields on the task
-    row — that residue is what the terminal writers must not carry into the
-    terminal record.
+    retry_count. The requeue statements clear error_code but not
+    failed_reason — that residue is what the terminal writers must not carry
+    into the terminal record.
     """
     await session.execute(
         text("""
@@ -156,7 +156,6 @@ async def _requeued_after_failed_attempt(
         text("""
             UPDATE horsies_tasks
             SET retry_count = 1,
-                error_code = 'TASK_EXCEPTION',
                 failed_reason = :reason
             WHERE id = :id
         """),
@@ -367,12 +366,12 @@ class TestAppliedTransitions:
         """Attempt one failed and requeued; attempt two completes.
 
         Both halves of the invariant: the terminal row contains only the
-        final disposition — the error_code and failed_reason the requeued
-        attempt left there are cleared beside COMPLETED — and attempt one's
-        history row keeps its reason untouched. The fused operation records
-        the completion as attempt two after attempt one's failure; the
-        locked operation writes no attempt row of its own, so history stays
-        exactly the failed attempt.
+        final disposition — the failed_reason the automatic requeue left on
+        the row is cleared beside COMPLETED — and attempt one's history row
+        keeps its reason untouched. The fused operation records the
+        completion as attempt two after attempt one's failure; the locked
+        operation writes no attempt row of its own, so history stays exactly
+        the failed attempt.
         """
         task_id = await _seed(session)
         await _requeued_after_failed_attempt(
