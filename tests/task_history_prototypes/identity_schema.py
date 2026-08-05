@@ -126,6 +126,9 @@ def _identity_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
                 disposition text NOT NULL CHECK (
                     disposition IN ('LIVE', 'TERMINAL')
                 ),
+                reservation_window interval NOT NULL CHECK (
+                    reservation_window > interval '0'
+                ),
                 expires_at timestamptz NOT NULL,
                 CHECK (octet_length(idempotency_key_digest) = 32),
                 CHECK (octet_length(command_fingerprint) = 32)
@@ -146,13 +149,16 @@ def _identity_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
                 location text NOT NULL CHECK (location IN ('LIVE', 'HISTORY')),
                 retention_class_key text NOT NULL,
                 retention_anchor_at timestamptz,
+                key_window interval,
                 key_expires_at timestamptz,
                 CHECK (
                     (idempotency_key_digest IS NULL
                         AND key_scope_version IS NULL
+                        AND key_window IS NULL
                         AND key_expires_at IS NULL)
                     OR (octet_length(idempotency_key_digest) = 32
                         AND key_scope_version IS NOT NULL
+                        AND key_window > interval '0'
                         AND key_expires_at IS NOT NULL)
                 ),
                 CHECK (octet_length(command_fingerprint) = 32),
@@ -186,6 +192,7 @@ def _authoritative_task_tables(namespace: str, prefix: str) -> tuple[str, ...]:
         """
         idempotency_key_digest bytea,
         key_scope_version smallint,
+        idempotency_window interval,
         idempotency_expires_at timestamptz,
         """
         if prefix == 'no_directory'
@@ -196,9 +203,11 @@ def _authoritative_task_tables(namespace: str, prefix: str) -> tuple[str, ...]:
         , CHECK (
             (idempotency_key_digest IS NULL
                 AND key_scope_version IS NULL
+                AND idempotency_window IS NULL
                 AND idempotency_expires_at IS NULL)
             OR (octet_length(idempotency_key_digest) = 32
                 AND key_scope_version IS NOT NULL
+                AND idempotency_window > interval '0'
                 AND idempotency_expires_at IS NOT NULL)
         )
         """
@@ -295,6 +304,7 @@ def _function_header(namespace: str, name: str) -> str:
         p_task_name text,
         p_key_digest bytea,
         p_key_scope_version smallint,
+        p_key_window interval,
         p_fingerprint_version smallint,
         p_fingerprint bytea,
         p_retention_class_key text
@@ -312,13 +322,18 @@ def _function_header(namespace: str, name: str) -> str:
             RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
                 MESSAGE = 'fingerprint must be 32 bytes';
         END IF;
-        IF (p_key_digest IS NULL) <> (p_key_scope_version IS NULL) THEN
+        IF (p_key_digest IS NULL) <> (p_key_scope_version IS NULL)
+           OR (p_key_digest IS NULL) <> (p_key_window IS NULL) THEN
             RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-                MESSAGE = 'key digest and scope version must be present together';
+                MESSAGE = 'key digest, scope version, and window must be present together';
         END IF;
         IF p_key_digest IS NOT NULL AND octet_length(p_key_digest) <> 32 THEN
             RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
                 MESSAGE = 'key digest must be 32 bytes';
+        END IF;
+        IF p_key_window IS NOT NULL AND p_key_window <= interval '0' THEN
+            RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+                MESSAGE = 'idempotency window must be positive';
         END IF;
         {_lock_sql()}
     """
@@ -387,10 +402,12 @@ def _no_directory_enqueue(namespace: str) -> str:
         INSERT INTO {namespace}.no_directory_live (
             task_id, task_name, fingerprint_version, command_fingerprint,
             idempotency_key_digest, key_scope_version,
-            idempotency_expires_at, retention_class_key, created_at
+            idempotency_window, idempotency_expires_at,
+            retention_class_key, created_at
         ) VALUES (
             p_task_id, p_task_name, p_fingerprint_version, p_fingerprint,
             p_key_digest, p_key_scope_version,
+            p_key_window,
             CASE WHEN p_key_digest IS NULL THEN NULL
                  ELSE 'infinity'::timestamptz END,
             p_retention_class_key, statement_timestamp()
@@ -459,10 +476,11 @@ def _key_registry_enqueue(namespace: str) -> str:
             INSERT INTO {namespace}.key_reservations (
                 idempotency_key_digest, key_scope_version,
                 fingerprint_version, command_fingerprint, task_id,
-                disposition, expires_at
+                disposition, reservation_window, expires_at
             ) VALUES (
                 p_key_digest, p_key_scope_version, p_fingerprint_version,
-                p_fingerprint, p_task_id, 'LIVE', 'infinity'::timestamptz
+                p_fingerprint, p_task_id, 'LIVE', p_key_window,
+                'infinity'::timestamptz
             );
         END IF;
         RETURN ROW('APPLIED', p_task_id, NULL)::{namespace}.enqueue_outcome;
@@ -498,6 +516,7 @@ def _combined_enqueue(namespace: str) -> str:
             UPDATE {namespace}.combined_registry
             SET idempotency_key_digest = NULL,
                 key_scope_version = NULL,
+                key_window = NULL,
                 key_expires_at = NULL
             WHERE idempotency_key_digest = p_key_digest
               AND location = 'HISTORY'
@@ -514,11 +533,12 @@ def _combined_enqueue(namespace: str) -> str:
         INSERT INTO {namespace}.combined_registry (
             task_id, idempotency_key_digest, key_scope_version,
             fingerprint_version, command_fingerprint, location,
-            retention_class_key, retention_anchor_at, key_expires_at
+            retention_class_key, retention_anchor_at, key_window,
+            key_expires_at
         ) VALUES (
             p_task_id, p_key_digest, p_key_scope_version,
             p_fingerprint_version, p_fingerprint, 'LIVE',
-            p_retention_class_key, NULL,
+            p_retention_class_key, NULL, p_key_window,
             CASE WHEN p_key_digest IS NULL THEN NULL
                  ELSE 'infinity'::timestamptz END
         );
@@ -531,14 +551,16 @@ def _combined_enqueue(namespace: str) -> str:
 
 def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
     no_directory_columns = (
-        'idempotency_key_digest, key_scope_version, idempotency_expires_at, '
+        'idempotency_key_digest, key_scope_version, idempotency_window, '
+        'idempotency_expires_at, '
         if registry == 'none'
         else ''
     )
     no_directory_values = (
         'moved.idempotency_key_digest, moved.key_scope_version, '
+        'moved.idempotency_window, '
         'CASE WHEN moved.idempotency_key_digest IS NULL THEN NULL '
-        'ELSE p_terminal_at + p_key_window END, '
+        'ELSE p_terminal_at + moved.idempotency_window END, '
         if registry == 'none'
         else ''
     )
@@ -546,7 +568,7 @@ def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
         final_statement = f"""
         UPDATE {namespace}.key_reservations
         SET disposition = 'TERMINAL',
-            expires_at = p_terminal_at + p_key_window
+            expires_at = p_terminal_at + reservation_window
         WHERE task_id = p_task_id;
         """
     elif registry == 'combined':
@@ -556,7 +578,7 @@ def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
             retention_anchor_at = p_terminal_at,
             key_expires_at = CASE
                 WHEN idempotency_key_digest IS NULL THEN NULL
-                ELSE p_terminal_at + p_key_window
+                ELSE p_terminal_at + key_window
             END
         WHERE task_id = p_task_id;
         """
@@ -565,8 +587,7 @@ def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.terminalize_{prefix}(
         p_task_id varchar(36),
-        p_terminal_at timestamptz,
-        p_key_window interval
+        p_terminal_at timestamptz
     ) RETURNS boolean
     LANGUAGE plpgsql
     AS $function$
@@ -576,10 +597,6 @@ def _terminalize_function(namespace: str, prefix: str, *, registry: str) -> str:
         IF p_terminal_at IS NULL THEN
             RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
                 MESSAGE = 'terminal instant must be non-null';
-        END IF;
-        IF p_key_window <= interval '0' THEN
-            RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
-                MESSAGE = 'idempotency window must be positive';
         END IF;
         WITH moved AS (
             DELETE FROM {namespace}.{prefix}_live

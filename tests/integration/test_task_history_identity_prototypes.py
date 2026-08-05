@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from tests.task_history_prototypes.identity import (
@@ -84,6 +84,7 @@ async def _enqueue(
     task_id: str,
     command: EnqueueCommandV1,
     key: ScopedIdempotencyKey | None,
+    key_window: str | None = None,
 ) -> tuple[str, str, int | None]:
     schema = _schema(connection)
     row = (
@@ -97,6 +98,7 @@ async def _enqueue(
                         CAST(:task_id AS varchar(36)), CAST(:task_name AS text),
                         CAST(:key_digest AS bytea),
                         CAST(:key_scope_version AS smallint),
+                        CAST(:key_window AS interval),
                         CAST(1 AS smallint), CAST(:fingerprint AS bytea),
                         CAST(:retention_class_key AS text)
                     ) AS outcome
@@ -108,6 +110,7 @@ async def _enqueue(
                 'task_name': command.task_name,
                 'key_digest': key.digest if key else None,
                 'key_scope_version': 1 if key else None,
+                'key_window': (key_window or '24 hours') if key else None,
                 'fingerprint': command.fingerprint,
                 'retention_class_key': command.retention_class_key,
             },
@@ -254,7 +257,7 @@ async def test_replay_survives_terminal_move_for_declared_window(
             text(
                 f"""
                 SELECT {schema.sql}.terminalize_{terminal_prefix}(
-                    :task_id, :terminal_at, interval '24 hours'
+                    :task_id, :terminal_at
                 )
                 """
             ),
@@ -272,6 +275,68 @@ async def test_replay_survives_terminal_move_for_declared_window(
         command=command,
         key=key,
     ) == ('REPLAY', task_id, 1)
+
+
+@pytest.mark.parametrize('candidate', _CANDIDATES)
+async def test_terminal_window_is_the_duration_snapshotted_at_enqueue(
+    identity_schema: AsyncConnection,
+    candidate: str,
+) -> None:
+    schema = _schema(identity_schema)
+    command = _command()
+    key = ScopedIdempotencyKey(command.task_name, 'snapshotted-window')
+    task_id = str(uuid4())
+    terminal_at = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    await _enqueue(
+        identity_schema,
+        candidate,
+        task_id=task_id,
+        command=command,
+        key=key,
+        key_window='3 days',
+    )
+    terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    await identity_schema.execute(
+        text(
+            f"""
+            SELECT {schema.sql}.terminalize_{terminal_prefix}(
+                :task_id, :terminal_at
+            )
+            """
+        ),
+        {'task_id': task_id, 'terminal_at': terminal_at},
+    )
+
+    match candidate:
+        case 'no_directory':
+            relation = 'no_directory_history'
+            window_column = 'idempotency_window'
+            expiry_column = 'idempotency_expires_at'
+        case 'key_registry':
+            relation = 'key_reservations'
+            window_column = 'reservation_window'
+            expiry_column = 'expires_at'
+        case 'combined_registry':
+            relation = 'combined_registry'
+            window_column = 'key_window'
+            expiry_column = 'key_expires_at'
+        case _:
+            pytest.fail(f'unrecognized identity candidate: {candidate}')
+    observed = (
+        await identity_schema.execute(
+            text(
+                f"""
+                SELECT {window_column} AS reservation_window,
+                       {expiry_column} AS expires_at
+                FROM {schema.sql}.{relation}
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert observed.reservation_window == timedelta(days=3)
+    assert observed.expires_at == terminal_at + timedelta(days=3)
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
@@ -312,29 +377,37 @@ async def test_unkeyed_enqueue_creates_no_key_only_registry_row(
 @pytest.mark.parametrize('candidate', _CANDIDATES)
 async def test_concurrent_same_key_commits_exactly_one_request(
     identity_schema: AsyncConnection,
-    engine: AsyncEngine,
+    db_url: str,
     candidate: str,
 ) -> None:
     schema = _schema(identity_schema)
     command = _command()
     key = ScopedIdempotencyKey(command.task_name, 'concurrent-order')
-    outcomes = await asyncio.gather(
-        *(
-            _enqueue_committed(
-                engine,
-                schema,
-                candidate,
-                task_id=str(uuid4()),
-                command=command,
-                key=key,
-            )
-            for _ in range(8)
-        )
+    concurrent_engine = create_async_engine(
+        db_url,
+        pool_size=64,
+        max_overflow=0,
     )
+    try:
+        outcomes = await asyncio.gather(
+            *(
+                _enqueue_committed(
+                    concurrent_engine,
+                    schema,
+                    candidate,
+                    task_id=str(uuid4()),
+                    command=command,
+                    key=key,
+                )
+                for _ in range(64)
+            )
+        )
+    finally:
+        await concurrent_engine.dispose()
     applied = [outcome for outcome in outcomes if outcome[0] == 'APPLIED']
     replays = [outcome for outcome in outcomes if outcome[0] == 'REPLAY']
     assert len(applied) == 1
-    assert len(replays) == 7
+    assert len(replays) == 63
     assert {outcome[1] for outcome in outcomes} == {applied[0][1]}
 
 
@@ -354,14 +427,14 @@ async def test_expired_key_can_be_reused_without_removing_old_task_identity(
         task_id=first_id,
         command=command,
         key=key,
+        key_window='1 microsecond',
     )
     terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
     await identity_schema.execute(
         text(
             f"""
             SELECT {schema.sql}.terminalize_{terminal_prefix}(
-                CAST(:task_id AS varchar(36)), statement_timestamp(),
-                interval '1 microsecond'
+                CAST(:task_id AS varchar(36)), statement_timestamp()
             )
             """
         ),
@@ -408,33 +481,22 @@ async def test_expired_key_can_be_reused_without_removing_old_task_identity(
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
-async def test_terminalization_rejects_invalid_window_before_mutation(
+async def test_enqueue_rejects_invalid_window_before_mutation(
     identity_schema: AsyncConnection,
     candidate: str,
 ) -> None:
     schema = _schema(identity_schema)
     command = _command()
     task_id = str(uuid4())
-    await _enqueue(
-        identity_schema,
-        candidate,
-        task_id=task_id,
-        command=command,
-        key=None,
-    )
-    await identity_schema.commit()
-    terminal_prefix = 'combined' if candidate == 'combined_registry' else candidate
+    key = ScopedIdempotencyKey(command.task_name, 'invalid-window')
     with pytest.raises(DBAPIError, match='idempotency window must be positive'):
-        await identity_schema.execute(
-            text(
-                f"""
-                SELECT {schema.sql}.terminalize_{terminal_prefix}(
-                    CAST(:task_id AS varchar(36)), statement_timestamp(),
-                    interval '0'
-                )
-                """
-            ),
-            {'task_id': task_id},
+        await _enqueue(
+            identity_schema,
+            candidate,
+            task_id=task_id,
+            command=command,
+            key=key,
+            key_window='0 seconds',
         )
     await identity_schema.rollback()
     live_prefix = 'combined' if candidate == 'combined_registry' else candidate
@@ -449,7 +511,7 @@ async def test_terminalization_rejects_invalid_window_before_mutation(
             {'task_id': task_id},
         )
     ).scalar_one()
-    assert count == 1
+    assert count == 0
 
 
 @pytest.mark.parametrize('candidate', _CANDIDATES)
@@ -477,8 +539,7 @@ async def test_missing_history_leaf_rolls_back_location_transition(
                 f"""
                 SELECT {schema.sql}.terminalize_{terminal_prefix}(
                     CAST(:task_id AS varchar(36)),
-                    '2030-08-05T12:00:00Z'::timestamptz,
-                    interval '24 hours'
+                    '2030-08-05T12:00:00Z'::timestamptz
                 )
                 """
             ),
@@ -567,8 +628,7 @@ async def test_point_lookup_distinguishes_live_history_and_absence(
             f"""
             SELECT {schema.sql}.terminalize_{terminal_prefix}(
                 CAST(:task_id AS varchar(36)),
-                '2026-08-05T12:00:00Z'::timestamptz,
-                interval '24 hours'
+                '2026-08-05T12:00:00Z'::timestamptz
             )
             """
         ),

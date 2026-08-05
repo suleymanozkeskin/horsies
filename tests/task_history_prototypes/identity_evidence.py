@@ -443,12 +443,15 @@ async def _seed_live(
     prefix = _storage_prefix(candidate)
     if candidate is IdentityCandidate.NO_DIRECTORY:
         key_columns = (
-            ', idempotency_key_digest, key_scope_version, idempotency_expires_at'
+            ', idempotency_key_digest, key_scope_version, '
+            'idempotency_window, idempotency_expires_at'
         )
         key_values = f""",
             CASE WHEN {_key_predicate(keyed_percent)}
                  THEN {_digest_sql('live-key')} END,
             CASE WHEN {_key_predicate(keyed_percent)} THEN 1::smallint END,
+            CASE WHEN {_key_predicate(keyed_percent)}
+                 THEN interval '24 hours' END,
             CASE WHEN {_key_predicate(keyed_percent)}
                  THEN 'infinity'::timestamptz END
         """
@@ -535,12 +538,15 @@ async def _seed_history(
     prefix = _storage_prefix(candidate)
     if candidate is IdentityCandidate.NO_DIRECTORY:
         key_columns = (
-            ', idempotency_key_digest, key_scope_version, idempotency_expires_at'
+            ', idempotency_key_digest, key_scope_version, '
+            'idempotency_window, idempotency_expires_at'
         )
         key_values = f""",
             CASE WHEN {_key_predicate(keyed_percent)}
                  THEN {_digest_sql(f'{row_kind}-key')} END,
             CASE WHEN {_key_predicate(keyed_percent)} THEN 1::smallint END,
+            CASE WHEN {_key_predicate(keyed_percent)}
+                 THEN interval '24 hours' END,
             CASE WHEN {_key_predicate(keyed_percent)}
                  THEN 'infinity'::timestamptz END
         """
@@ -599,12 +605,14 @@ async def _seed_registry(
                         INSERT INTO {schema.sql}.key_reservations (
                             idempotency_key_digest, key_scope_version,
                             fingerprint_version, command_fingerprint,
-                            task_id, disposition, expires_at
+                            task_id, disposition, reservation_window,
+                            expires_at
                         )
                         SELECT {_digest_sql(f'{row_kind}-key')}, 1, 1,
                                {_digest_sql(f'{row_kind}-fingerprint')},
                                md5('{row_kind}-' || series::text)::uuid::text,
-                               :disposition, 'infinity'::timestamptz
+                               :disposition, interval '24 hours',
+                               'infinity'::timestamptz
                         FROM generate_series(1, :rows) AS series
                         WHERE {_key_predicate(keyed_percent)}
                         """
@@ -667,7 +675,8 @@ async def _seed_combined_registry_part(
             INSERT INTO {schema.sql}.combined_registry (
                 task_id, idempotency_key_digest, key_scope_version,
                 fingerprint_version, command_fingerprint, location,
-                retention_class_key, retention_anchor_at, key_expires_at
+                retention_class_key, retention_anchor_at, key_window,
+                key_expires_at
             )
             SELECT md5('{row_kind}-' || series::text)::uuid::text,
                    CASE WHEN {_key_predicate(keyed_percent)}
@@ -675,6 +684,8 @@ async def _seed_combined_registry_part(
                    CASE WHEN {_key_predicate(keyed_percent)} THEN 1::smallint END,
                    1, {_digest_sql(f'{row_kind}-fingerprint')},
                    :location, :retention_class_key, {anchor_expression},
+                   CASE WHEN {_key_predicate(keyed_percent)}
+                        THEN interval '24 hours' END,
                    CASE WHEN {_key_predicate(keyed_percent)}
                         THEN 'infinity'::timestamptz END
             FROM generate_series(1, :rows) AS series
