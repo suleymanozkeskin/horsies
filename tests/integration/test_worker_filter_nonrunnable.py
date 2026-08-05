@@ -120,6 +120,21 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     return str(row[0])
 
 
+async def _get_terminalization_kind(
+    session: AsyncSession,
+    task_id: str,
+) -> str | None:
+    return (
+        await session.execute(
+            text(
+                'SELECT terminalization_kind FROM horsies_tasks '
+                'WHERE id = :id'
+            ),
+            {'id': task_id},
+        )
+    ).scalar_one()
+
+
 async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str, bool, str | None]:
     """Read task status/claim ownership fields for a task."""
     row = (
@@ -201,6 +216,9 @@ async def test_paused_workflow_cancels_and_resets(
 
     # horsies_tasks: cancelled so claimed work does not leak back into the queue
     assert await _get_task_status(session, tid) == 'CANCELLED'
+    assert await _get_terminalization_kind(session, tid) == (
+        'PAUSE_ABANDON_CLAIM_BATCH'
+    )
 
     # horsies_workflow_tasks: reset to READY with task_id NULLed
     wt_row = (
@@ -285,6 +303,9 @@ async def test_cancelled_workflow_cancels_and_skips(
 
     # horsies_tasks: cancelled
     assert await _get_task_status(session, tid) == 'CANCELLED'
+    assert await _get_terminalization_kind(session, tid) == (
+        'WORKFLOW_CANCEL_CLAIM_BATCH'
+    )
 
     # horsies_workflow_tasks: skipped
     wt_row = (
