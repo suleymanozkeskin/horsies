@@ -329,6 +329,33 @@ async def _expire_pending(
     return [decode_outcome_row(_plain_mapping(row)) for row in rows]
 
 
+async def _cancel_admin(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    permitted_statuses: list[str],
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_cancel_locked_task(
+                    CAST(:task_id AS varchar),
+                    CAST(:statuses AS text[])
+                )
+                """
+                ),
+                {'task_id': task_id, 'statuses': permitted_statuses},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
 async def _seed_attempt(
     connection: AsyncConnection,
     task_id: str,
@@ -803,6 +830,95 @@ async def test_pending_expiry_emits_one_transactional_raw_id_per_task(
         assert received == set(task_ids)
     finally:
         await listener.close()
+
+
+async def test_admin_cancel_separates_versioned_prior_result_from_disposition(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, _ = await _seed_live_task(terminalization_schema)
+    prior_result = '{"ok":{"prior":true}}'
+    await terminalization_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.live_tasks
+            SET result = :prior_result
+            WHERE id = :task_id
+            """
+        ),
+        {'task_id': task_id, 'prior_result': prior_result},
+    )
+    await _seed_attempt(
+        terminalization_schema,
+        task_id,
+        outcome='FAILED',
+        will_retry=True,
+    )
+
+    outcome = await _cancel_admin(
+        terminalization_schema,
+        task_id,
+        permitted_statuses=['PENDING', 'CLAIMED', 'RUNNING'],
+    )
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.CANCEL_ADMIN
+    history = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, error_code, final_failed_reason,
+                       result_envelope_version, result_codec,
+                       result_payload, prior_result_payload, result_digest
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(history[:3]) == (
+        'CANCELLED',
+        'TASK_CANCELLED',
+        'Cancelled via monitoring API',
+    )
+    assert history.result_payload is None
+    decoded = decode_json_value(
+        domain=ArchiveDomain.RESULT,
+        version=history.result_envelope_version,
+        codec=history.result_codec,
+        payload=bytes(history.prior_result_payload),
+        digest=bytes(history.result_digest),
+    )
+    assert decoded == DecodedArchiveValue({'ok': {'prior': True}})
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+
+
+async def test_admin_cancel_refuses_unpermitted_status_without_archiving(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(terminalization_schema)
+
+    outcome = await _cancel_admin(
+        terminalization_schema,
+        task_id,
+        permitted_statuses=['PENDING', 'CLAIMED'],
+    )
+    assert isinstance(outcome, SourceStateConflict)
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_admin_cancel_refuses_workflow_backing_task(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(terminalization_schema, is_workflow_task=True)
+
+    outcome = await _cancel_admin(
+        terminalization_schema,
+        task_id,
+        permitted_statuses=['RUNNING'],
+    )
+    assert isinstance(outcome, SourceStateConflict)
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
 
 
 @pytest.mark.parametrize('first', ['fused', 'locked'])

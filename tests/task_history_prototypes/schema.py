@@ -201,6 +201,16 @@ def _common_history_columns(namespace: str) -> str:
         CHECK (
             terminalization_kind <> 'CANCEL_ADMIN'
             OR result_payload IS NULL
+        ),
+        CHECK (
+            prior_result_payload IS NULL
+            OR terminalization_kind = 'CANCEL_ADMIN'
+        ),
+        CHECK (
+            result_payload IS NULL OR prior_result_payload IS NULL
+        ),
+        CHECK (
+            prior_result_payload IS NULL OR result_digest IS NOT NULL
         )
     """
 

@@ -84,6 +84,7 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         _fail_stale_function(namespace),
         _expire_owned_function(namespace),
         _expire_pending_function(namespace),
+        _cancel_admin_function(namespace),
     )
 
 
@@ -164,6 +165,7 @@ def _move_function(namespace: str) -> str:
         v_task {namespace}.live_tasks%ROWTYPE;
         v_attempt_snapshot bytea;
         v_result_payload bytea;
+        v_prior_result_payload bytea;
         v_workflow_id varchar(36);
         v_node_id text;
         v_history_rows bigint;
@@ -198,6 +200,13 @@ def _move_function(namespace: str) -> str:
                     RAISE EXCEPTION 'claimed-expiry projection disagrees';
                 END IF;
                 v_requires_deferred_phase2 := TRUE;
+            WHEN '{TerminalizationKind.CANCEL_ADMIN.value}' THEN
+                IF p_terminal_status <> 'CANCELLED'
+                   OR p_error_code <> 'TASK_CANCELLED'
+                   OR p_failed_reason <> 'Cancelled via monitoring API' THEN
+                    RAISE EXCEPTION 'administrative-cancel projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := FALSE;
             ELSE
                 RAISE EXCEPTION 'unsupported prototype terminalization kind %',
                     p_terminalization_kind
@@ -223,9 +232,12 @@ def _move_function(namespace: str) -> str:
         END IF;
 
         IF v_task.is_workflow_task THEN
-            IF NOT v_requires_deferred_phase2 THEN
+            IF p_terminalization_kind IN (
+                '{TerminalizationKind.COMPLETE_FUSED.value}',
+                '{TerminalizationKind.CANCEL_ADMIN.value}'
+            ) THEN
                 RAISE EXCEPTION
-                    'fused completion cannot terminalize a workflow task'
+                    'operation cannot terminalize a workflow task'
                     USING ERRCODE = 'invalid_parameter_value';
             END IF;
             SELECT n.workflow_id, n.node_id
@@ -246,10 +258,19 @@ def _move_function(namespace: str) -> str:
         END IF;
 
         v_attempt_snapshot := {namespace}.encode_live_attempts(p_task_id);
-        v_result_payload := CASE
-            WHEN p_result IS NULL THEN NULL
-            ELSE convert_to(p_result, 'UTF8')
-        END;
+        IF p_terminalization_kind = '{TerminalizationKind.CANCEL_ADMIN.value}' THEN
+            v_result_payload := NULL;
+            v_prior_result_payload := CASE
+                WHEN v_task.result IS NULL THEN NULL
+                ELSE convert_to(v_task.result, 'UTF8')
+            END;
+        ELSE
+            v_result_payload := CASE
+                WHEN p_result IS NULL THEN NULL
+                ELSE convert_to(p_result, 'UTF8')
+            END;
+            v_prior_result_payload := NULL;
+        END IF;
 
         INSERT INTO {namespace}.history_aggregate (
             task_id, task_name, queue_name, priority, status,
@@ -258,6 +279,7 @@ def _move_function(namespace: str) -> str:
             started_at, created_at,
             result_envelope_version, result_codec, result_payload,
             result_digest, error_code, final_failed_reason,
+            prior_result_payload,
             retry_count, rerun_of_task_id, rerun_root_task_id,
             input_digest, workflow_id, is_workflow_task,
             history_schema_version, attempt_archive_version,
@@ -271,8 +293,11 @@ def _move_function(namespace: str) -> str:
             v_task.started_at, v_task.created_at,
             1, 'json-utf8', v_result_payload,
             CASE WHEN v_result_payload IS NULL
-                 THEN NULL ELSE sha256(v_result_payload) END,
+                 THEN CASE WHEN v_prior_result_payload IS NULL
+                           THEN NULL ELSE sha256(v_prior_result_payload) END
+                 ELSE sha256(v_result_payload) END,
             p_error_code, p_failed_reason,
+            v_prior_result_payload,
             v_task.retry_count, v_task.rerun_of_task_id,
             v_task.rerun_root_task_id, v_task.input_digest,
             v_workflow_id, v_task.is_workflow_task,
@@ -894,6 +919,56 @@ def _expire_pending_function(namespace: str) -> str:
         JOIN notifications AS notification
             ON notification.task_id = history.task_id
         ORDER BY target.good_until, target.id;
+    END
+    $function$
+    """
+
+
+def _cancel_admin_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_cancel_locked_task(
+        p_task_id varchar,
+        p_permitted_source_statuses text[]
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_terminal_at timestamptz;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT status::text, claimed_by_worker_id, claimed_at
+        INTO v_status, v_worker, v_claimed_at
+        FROM {namespace}.live_tasks
+        WHERE id = p_task_id
+          AND NOT is_workflow_task
+          AND status::text IN ('PENDING', 'CLAIMED', 'RUNNING')
+          AND status::text = ANY(p_permitted_source_statuses)
+        FOR UPDATE;
+        IF FOUND THEN
+            v_terminal_at := NOW();
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'CANCELLED',
+                '{TerminalizationKind.CANCEL_ADMIN.value}',
+                v_terminal_at, NULL,
+                'TASK_CANCELLED', 'Cancelled via monitoring API'
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at,
+                '{TerminalizationKind.CANCEL_ADMIN.value}'::text,
+                v_status, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY['{TerminalizationKind.CANCEL_ADMIN.value}']::text[],
+            NULL::text, NULL::timestamptz
+        );
     END
     $function$
     """

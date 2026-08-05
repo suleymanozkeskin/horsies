@@ -154,6 +154,8 @@ class _ComponentColumns:
     form: str
     reference: str
     metadata_only: bool
+    payload_set: str
+    updated_payload: str
 
 
 async def install_archive_transcode_prototype(
@@ -570,13 +572,13 @@ async def run_archive_transcode_batch(
     if not columns.metadata_only:
         set_clause += f""",
                         {columns.codec} = :target_codec,
-                        {columns.payload} = encoded.target_payload,
+                        {columns.payload_set},
                         {columns.digest} = CASE
                             WHEN encoded.target_payload IS NULL
                                 THEN encoded.source_digest
                             ELSE sha256(encoded.target_payload)
                         END"""
-        payload_size_expression = f'octet_length(history.{columns.payload})'
+        payload_size_expression = f'octet_length({columns.updated_payload})'
     rewritten = (
         await connection.execute(
             text(
@@ -948,17 +950,32 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
                 form='NULL::text',
                 reference='NULL::text',
                 metadata_only=True,
+                payload_set='history_schema_version = :target_version',
+                updated_payload='NULL::bytea',
             )
         case ArchiveComponent.RESULT:
             return _ComponentColumns(
                 version='result_envelope_version',
                 codec='result_codec',
-                payload='result_payload',
+                payload='COALESCE(result_payload, prior_result_payload)',
                 digest='result_digest',
-                presence_predicate='result_payload IS NOT NULL',
+                presence_predicate=(
+                    'result_payload IS NOT NULL ' 'OR prior_result_payload IS NOT NULL'
+                ),
                 form='NULL::text',
                 reference='NULL::text',
                 metadata_only=False,
+                payload_set=(
+                    'result_payload = CASE '
+                    'WHEN history.result_payload IS NULL THEN NULL '
+                    'ELSE encoded.target_payload END, '
+                    'prior_result_payload = CASE '
+                    'WHEN history.prior_result_payload IS NULL THEN NULL '
+                    'ELSE encoded.target_payload END'
+                ),
+                updated_payload=(
+                    'COALESCE(history.result_payload, ' 'history.prior_result_payload)'
+                ),
             )
         case ArchiveComponent.ATTEMPTS:
             return _ComponentColumns(
@@ -970,6 +987,8 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
                 form='NULL::text',
                 reference='NULL::text',
                 metadata_only=False,
+                payload_set='attempt_snapshot = encoded.target_payload',
+                updated_payload='history.attempt_snapshot',
             )
         case ArchiveComponent.RERUN_INPUT:
             return _ComponentColumns(
@@ -981,6 +1000,8 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
                 form='rerun_input_form',
                 reference='rerun_input_reference',
                 metadata_only=False,
+                payload_set='rerun_input_inline = encoded.target_payload',
+                updated_payload='history.rerun_input_inline',
             )
 
 

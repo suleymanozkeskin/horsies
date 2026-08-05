@@ -21,6 +21,7 @@ from tests.task_history_prototypes.archive import (
     InlineRerunInput,
     ReferencedRerunInput,
     RerunInputForm,
+    archive_digest,
     decode_attempts,
     decode_rerun_input,
     encode_attempts,
@@ -406,7 +407,8 @@ async def test_named_prior_result_is_separate_from_cancel_disposition(
                 terminalization_kind, terminal_at, retention_anchor_at,
                 retention_class_key, enqueued_at, created_at,
                 result_envelope_version, result_codec, result_payload,
-                prior_result_payload, retry_count, is_workflow_task,
+                result_digest, prior_result_payload,
+                retry_count, is_workflow_task,
                 history_schema_version, attempt_archive_version,
                 attempt_snapshot_codec, attempt_snapshot,
                 attempt_snapshot_digest
@@ -415,7 +417,7 @@ async def test_named_prior_result_is_separate_from_cancel_disposition(
                 'CANCEL_ADMIN', :terminal_at, :terminal_at,
                 'finite_30d_v1', :terminal_at, :terminal_at,
                 1, 'json-utf8', NULL,
-                :prior_result, 0, FALSE,
+                :prior_result_digest, :prior_result, 0, FALSE,
                 1, 1, 'json-utf8', :attempts, :attempts_digest
             )
             """
@@ -424,6 +426,7 @@ async def test_named_prior_result_is_separate_from_cancel_disposition(
             'task_id': task_id,
             'terminal_at': terminal_at,
             'prior_result': prior_result,
+            'prior_result_digest': archive_digest(prior_result),
             'attempts': attempts.payload,
             'attempts_digest': attempts.digest,
         },

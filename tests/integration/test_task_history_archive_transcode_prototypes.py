@@ -280,6 +280,75 @@ async def test_dry_run_inventories_finite_and_forever_without_mutation(
     assert {row.result_envelope_version for row in versions} == {1}
 
 
+async def test_result_transcode_includes_named_administrative_prior_result(
+    transcode_schema: AsyncConnection,
+) -> None:
+    schema = _schema(transcode_schema)
+    seeded = await _seed_history(transcode_schema, finite_rows=1, forever_rows=1)
+    prior = seeded[0]
+    await transcode_schema.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.history_aggregate
+            SET status = 'CANCELLED',
+                terminalization_kind = 'CANCEL_ADMIN',
+                prior_result_payload = result_payload,
+                result_payload = NULL
+            WHERE task_id = :task_id
+            """
+        ),
+        {'task_id': prior.task_id},
+    )
+    await transcode_schema.commit()
+    job_id = str(uuid4())
+    plan = await plan_archive_transcode(
+        transcode_schema,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.RESULT,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, TranscodePlan)
+    assert (plan.affected_rows, plan.payload_rows) == (2, 2)
+    await transcode_schema.commit()
+    await _run_to_completion(
+        transcode_schema,
+        schema,
+        job_id=job_id,
+        batch_size=1,
+    )
+    verified = await verify_archive_transcode(
+        transcode_schema,
+        schema,
+        job_id=job_id,
+    )
+    assert verified.job_id == job_id
+    row = (
+        await transcode_schema.execute(
+            text(
+                f"""
+                SELECT result_envelope_version, result_codec,
+                       result_payload, prior_result_payload, result_digest
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': prior.task_id},
+        )
+    ).one()
+    assert row.result_payload is None
+    assert bytes(row.prior_result_payload).startswith(ARCHIVE_FRAME_V2)
+    decoded = decode_json_value(
+        domain=ArchiveDomain.RESULT,
+        version=row.result_envelope_version,
+        codec=row.result_codec,
+        payload=bytes(row.prior_result_payload),
+        digest=bytes(row.result_digest),
+    )
+    assert isinstance(decoded, DecodedArchiveValue)
+
+
 async def test_version_inventory_covers_all_domains_and_unknown_values(
     transcode_schema: AsyncConnection,
 ) -> None:
