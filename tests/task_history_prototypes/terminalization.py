@@ -82,6 +82,8 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         _complete_fused_function(namespace),
         _fail_locked_function(namespace),
         _fail_stale_function(namespace),
+        _expire_owned_function(namespace),
+        _expire_pending_function(namespace),
     )
 
 
@@ -189,6 +191,11 @@ def _move_function(namespace: str) -> str:
             WHEN '{TerminalizationKind.FAIL_STALE.value}' THEN
                 IF p_terminal_status <> 'FAILED' THEN
                     RAISE EXCEPTION 'stale-failure projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := TRUE;
+            WHEN '{TerminalizationKind.EXPIRE_CLAIMED.value}' THEN
+                IF p_terminal_status <> 'EXPIRED' THEN
+                    RAISE EXCEPTION 'claimed-expiry projection disagrees';
                 END IF;
                 v_requires_deferred_phase2 := TRUE;
             ELSE
@@ -656,6 +663,237 @@ def _fail_stale_function(namespace: str) -> str:
             ARRAY['{TerminalizationKind.FAIL_STALE.value}']::text[],
             NULL::text, NULL::timestamptz
         );
+    END
+    $function$
+    """
+
+
+def _expire_owned_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_expire_owned_claim(
+        p_task_id varchar,
+        p_worker_id text,
+        p_result text,
+        p_error_code text
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_good_until timestamptz;
+        v_evaluated_at timestamptz;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT status::text, claimed_by_worker_id, claimed_at,
+               good_until, NOW()
+        INTO v_status, v_worker, v_claimed_at,
+             v_good_until, v_evaluated_at
+        FROM {namespace}.live_tasks
+        WHERE id = p_task_id
+        FOR UPDATE;
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS varchar)
+           AND v_good_until IS NOT NULL
+           AND v_good_until <= v_evaluated_at THEN
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'EXPIRED',
+                '{TerminalizationKind.EXPIRE_CLAIMED.value}',
+                v_evaluated_at, p_result, p_error_code, NULL
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_evaluated_at,
+                '{TerminalizationKind.EXPIRE_CLAIMED.value}'::text,
+                v_status, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        IF FOUND
+           AND v_status = 'CLAIMED'
+           AND v_worker = CAST(p_worker_id AS varchar) THEN
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+                NULL::timestamptz, NULL::text,
+                v_status, v_worker, v_claimed_at,
+                'DEADLINE'::text,
+                jsonb_build_object(
+                    'good_until', v_good_until,
+                    'evaluated_at', v_evaluated_at
+                );
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY[
+                '{TerminalizationKind.EXPIRE_CLAIMED.value}',
+                '{TerminalizationKind.EXPIRE_PENDING.value}'
+            ]::text[],
+            p_worker_id, NULL::timestamptz
+        );
+    END
+    $function$
+    """
+
+
+def _expire_pending_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_expire_pending_tasks(
+        p_batch_size integer,
+        p_result text,
+        p_error_code text
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    BEGIN
+        IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+            RAISE EXCEPTION
+                'p_batch_size must be a positive integer, got %', p_batch_size
+                USING ERRCODE = 'invalid_parameter_value';
+        END IF;
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM duplicate.id
+        FROM {namespace}.live_tasks AS duplicate
+        WHERE duplicate.status = 'PENDING'
+          AND duplicate.good_until IS NOT NULL
+          AND duplicate.good_until <= NOW()
+          AND EXISTS (
+              SELECT 1 FROM {namespace}.history_aggregate AS history
+              WHERE history.task_id = duplicate.id
+          )
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED;
+        IF FOUND THEN
+            RAISE EXCEPTION 'task identity exists in multiple locations';
+        END IF;
+        PERFORM invalid.id
+        FROM {namespace}.live_tasks AS invalid
+        WHERE invalid.status = 'PENDING'
+          AND invalid.good_until IS NOT NULL
+          AND invalid.good_until <= NOW()
+          AND invalid.is_workflow_task
+          AND NOT EXISTS (
+              SELECT 1 FROM {namespace}.phase2_nodes AS node
+              WHERE node.task_id = invalid.id
+          )
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED;
+        IF FOUND THEN
+            RAISE EXCEPTION
+                'deferred workflow terminalization has no node linkage'
+                USING ERRCODE = 'foreign_key_violation';
+        END IF;
+
+        RETURN QUERY
+        WITH targets AS MATERIALIZED (
+            SELECT task.*, node.workflow_id, node.node_id,
+                   NOW() AS assigned_terminal_at,
+                   {namespace}.encode_live_attempts(task.id)
+                       AS encoded_attempts,
+                   CASE WHEN p_result IS NULL THEN NULL::bytea
+                        ELSE convert_to(p_result, 'UTF8') END
+                       AS encoded_result
+            FROM {namespace}.live_tasks AS task
+            LEFT JOIN {namespace}.phase2_nodes AS node
+                ON node.task_id = task.id
+            WHERE task.status = 'PENDING'
+              AND task.good_until IS NOT NULL
+              AND task.good_until <= NOW()
+            ORDER BY task.good_until, task.id
+            LIMIT p_batch_size
+            FOR UPDATE OF task SKIP LOCKED
+        ),
+        history_rows AS (
+            INSERT INTO {namespace}.history_aggregate (
+                task_id, task_name, queue_name, priority, status,
+                terminalization_kind, terminal_at, retention_anchor_at,
+                retention_class_key, sent_at, enqueued_at, claimed_at,
+                started_at, created_at,
+                result_envelope_version, result_codec, result_payload,
+                result_digest, error_code, final_failed_reason,
+                retry_count, rerun_of_task_id, rerun_root_task_id,
+                input_digest, workflow_id, is_workflow_task,
+                history_schema_version, attempt_archive_version,
+                attempt_snapshot_codec, attempt_snapshot,
+                attempt_snapshot_digest
+            )
+            SELECT target.id, target.task_name, target.queue_name,
+                   target.priority, 'EXPIRED',
+                   '{TerminalizationKind.EXPIRE_PENDING.value}',
+                   target.assigned_terminal_at, target.assigned_terminal_at,
+                   target.retention_class_key, target.sent_at,
+                   target.enqueued_at, target.claimed_at, target.started_at,
+                   target.created_at, 1, 'json-utf8', target.encoded_result,
+                   CASE WHEN target.encoded_result IS NULL THEN NULL
+                        ELSE sha256(target.encoded_result) END,
+                   p_error_code, NULL,
+                   target.retry_count, target.rerun_of_task_id,
+                   target.rerun_root_task_id, target.input_digest,
+                   target.workflow_id, target.is_workflow_task,
+                   1, 1, 'json-utf8', target.encoded_attempts,
+                   sha256(target.encoded_attempts)
+            FROM targets AS target
+            RETURNING task_id, terminal_at, terminalization_kind
+        ),
+        pending_rows AS (
+            INSERT INTO {namespace}.workflow_phase2_pending (
+                task_id, workflow_id, node_id, task_name,
+                terminal_status, terminal_at, terminalization_kind,
+                recovery_source, history_class, history_anchor,
+                history_schema_version, result_digest,
+                phase2_generation, created_at
+            )
+            SELECT target.id, target.workflow_id, target.node_id,
+                   target.task_name, 'EXPIRED', history.terminal_at,
+                   history.terminalization_kind, 'HISTORY',
+                   target.retention_class_key, history.terminal_at,
+                   1, sha256(target.encoded_result),
+                   gen_random_uuid()::text, statement_timestamp()
+            FROM targets AS target
+            JOIN history_rows AS history ON history.task_id = target.id
+            WHERE target.is_workflow_task
+            RETURNING task_id
+        ),
+        ready AS MATERIALIZED (
+            SELECT history.task_id
+            FROM history_rows AS history
+            JOIN targets AS target ON target.id = history.task_id
+            WHERE NOT target.is_workflow_task
+               OR EXISTS (
+                   SELECT 1 FROM pending_rows AS pending
+                   WHERE pending.task_id = history.task_id
+               )
+        ),
+        purged_attempts AS (
+            DELETE FROM {namespace}.live_attempts AS attempt
+            WHERE attempt.task_id IN (SELECT task_id FROM ready)
+            RETURNING attempt.task_id
+        ),
+        deleted_tasks AS (
+            DELETE FROM {namespace}.live_tasks AS task
+            WHERE task.id IN (SELECT task_id FROM ready)
+              AND (SELECT count(*) FROM purged_attempts) >= 0
+            RETURNING task.id
+        ),
+        notifications AS MATERIALIZED (
+            SELECT ready.task_id,
+                   pg_notify('task_done', ready.task_id) AS emitted
+            FROM ready
+            JOIN deleted_tasks AS deleted ON deleted.id = ready.task_id
+        )
+        SELECT history.task_id, NULL::bigint, 'APPLIED'::text,
+               history.terminal_at, history.terminalization_kind,
+               'PENDING'::text, target.claimed_by_worker_id,
+               target.claimed_at, NULL::text, NULL::jsonb
+        FROM history_rows AS history
+        JOIN targets AS target ON target.id = history.task_id
+        JOIN deleted_tasks AS deleted ON deleted.id = history.task_id
+        JOIN notifications AS notification
+            ON notification.task_id = history.task_id
+        ORDER BY target.good_until, target.id;
     END
     $function$
     """

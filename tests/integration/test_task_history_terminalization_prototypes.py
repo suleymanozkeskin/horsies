@@ -23,6 +23,7 @@ from horsies.core.lifecycle.outcomes import (
     Applied,
     LostClaim,
     ObservedForeignTerminalization,
+    ObservedDeadline,
     ObservedStaleness,
     SourceStateConflict,
     TaskAbsent,
@@ -94,8 +95,10 @@ async def _seed_live_task(
     *,
     is_workflow_task: bool = False,
     retention_class: str = 'forever',
-    worker_id: str = _WORKER,
-    claimed_at: datetime = _GENERATION,
+    status: str = 'RUNNING',
+    worker_id: str | None = _WORKER,
+    claimed_at: datetime | None = _GENERATION,
+    good_until: datetime | None = None,
 ) -> tuple[str, str | None]:
     schema = _schema(connection)
     task_id = str(uuid4())
@@ -105,12 +108,12 @@ async def _seed_live_task(
             f"""
             INSERT INTO {schema.sql}.live_tasks (
                 id, task_name, queue_name, priority, status,
-                args, kwargs, enqueue_sha, is_workflow_task,
+                args, kwargs, enqueue_sha, is_workflow_task, good_until,
                 claimed, claimed_by_worker_id, claimed_at, started_at,
                 retention_class_key
             ) VALUES (
-                :task_id, 'prototype.complete', 'default', 100, 'RUNNING',
-                '[]', '{{}}', repeat('a', 64), :is_workflow_task,
+                :task_id, 'prototype.complete', 'default', 100, :status,
+                '[]', '{{}}', repeat('a', 64), :is_workflow_task, :good_until,
                 TRUE, :worker_id, :claimed_at, :claimed_at,
                 :retention_class
             )
@@ -119,8 +122,10 @@ async def _seed_live_task(
         {
             'task_id': task_id,
             'is_workflow_task': is_workflow_task,
+            'status': status,
             'worker_id': worker_id,
             'claimed_at': claimed_at,
+            'good_until': good_until,
             'retention_class': retention_class,
         },
     )
@@ -270,6 +275,58 @@ async def _fail_stale(
         .one()
     )
     return decode_outcome_row(_plain_mapping(row))
+
+
+async def _expire_owned(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker_id: str = _WORKER,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_expire_owned_claim(
+                    CAST(:task_id AS varchar), :worker_id, :result,
+                    'TASK_EXPIRED'
+                )
+                """
+                ),
+                {'task_id': task_id, 'worker_id': worker_id, 'result': _RESULT},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
+async def _expire_pending(
+    connection: AsyncConnection,
+    *,
+    batch_size: int | None,
+) -> list[Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent]:
+    schema = _schema(connection)
+    rows = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_expire_pending_tasks(
+                    :batch_size, :result, 'TASK_EXPIRED'
+                )
+                """
+                ),
+                {'batch_size': batch_size, 'result': _RESULT},
+            )
+        )
+        .mappings()
+        .all()
+    )
+    return [decode_outcome_row(_plain_mapping(row)) for row in rows]
 
 
 async def _seed_attempt(
@@ -572,6 +629,180 @@ async def test_stale_failure_moves_eligible_task_directly_to_history(
     assert isinstance(outcome, Applied)
     assert outcome.kind is TerminalizationKind.FAIL_STALE
     assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+
+
+async def test_owned_expiry_reports_deadline_refusal_from_locked_row(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    deadline = datetime.now(timezone.utc) + timedelta(hours=1)
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        status='CLAIMED',
+        good_until=deadline,
+    )
+
+    outcome = await _expire_owned(terminalization_schema, task_id)
+    assert isinstance(outcome, SourceStateConflict)
+    assert isinstance(outcome.evidence, ObservedDeadline)
+    assert outcome.evidence.good_until == deadline
+    assert outcome.evidence.evaluated_at < deadline
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_owned_expiry_moves_workflow_task_with_pending_locator(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='CLAIMED',
+        good_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    await _seed_attempt(terminalization_schema, task_id)
+
+    outcome = await _expire_owned(terminalization_schema, task_id)
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.EXPIRE_CLAIMED
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 1)
+
+
+async def test_pending_expiry_is_bounded_set_wise_and_preserves_attempts(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    deadlines = [
+        datetime.now(timezone.utc) - timedelta(minutes=3),
+        datetime.now(timezone.utc) - timedelta(minutes=2),
+        datetime.now(timezone.utc) - timedelta(minutes=1),
+    ]
+    seeded: list[str] = []
+    for index, deadline in enumerate(deadlines):
+        task_id, _ = await _seed_live_task(
+            terminalization_schema,
+            is_workflow_task=index == 0,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            good_until=deadline,
+        )
+        seeded.append(task_id)
+    await _seed_attempt(
+        terminalization_schema,
+        seeded[0],
+        outcome='FAILED',
+        will_retry=True,
+    )
+
+    first = await _expire_pending(terminalization_schema, batch_size=2)
+    assert len(first) == 2
+    assert all(isinstance(outcome, Applied) for outcome in first)
+    assert {outcome.task_id for outcome in first} == set(seeded[:2])
+    assert [outcome.kind for outcome in first if isinstance(outcome, Applied)] == [
+        TerminalizationKind.EXPIRE_PENDING,
+        TerminalizationKind.EXPIRE_PENDING,
+    ]
+    assert await _relation_counts(terminalization_schema, seeded[0]) == (0, 0, 1, 1)
+    assert await _relation_counts(terminalization_schema, seeded[1]) == (0, 0, 1, 0)
+    assert await _relation_counts(terminalization_schema, seeded[2]) == (1, 0, 0, 0)
+    archived_attempt = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT attempt_snapshot FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': seeded[0]},
+        )
+    ).scalar_one()
+    assert b'"will_retry": true' in bytes(archived_attempt)
+
+    second = await _expire_pending(terminalization_schema, batch_size=2)
+    assert [outcome.task_id for outcome in second] == [seeded[2]]
+    assert await _expire_pending(terminalization_schema, batch_size=2) == []
+
+
+@pytest.mark.parametrize('batch_size', [None, 0, -1])
+async def test_pending_expiry_rejects_invalid_bound_before_mutation(
+    terminalization_schema: AsyncConnection,
+    batch_size: int | None,
+) -> None:
+    task_id, _ = await _seed_live_task(
+        terminalization_schema,
+        status='PENDING',
+        worker_id=None,
+        claimed_at=None,
+        good_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+
+    with pytest.raises(DBAPIError, match='positive integer'):
+        await _expire_pending(terminalization_schema, batch_size=batch_size)
+    await terminalization_schema.rollback()
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_pending_expiry_missing_workflow_link_aborts_whole_batch(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema,
+        is_workflow_task=True,
+        status='PENDING',
+        worker_id=None,
+        claimed_at=None,
+        good_until=datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    assert workflow_id is not None
+    await terminalization_schema.execute(
+        text(
+            f"""
+            DELETE FROM {schema.sql}.phase2_nodes
+            WHERE workflow_id = :workflow_id
+            """
+        ),
+        {'workflow_id': workflow_id},
+    )
+    await terminalization_schema.commit()
+
+    with pytest.raises(DBAPIError, match='no node linkage'):
+        await _expire_pending(terminalization_schema, batch_size=10)
+    await terminalization_schema.rollback()
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_pending_expiry_emits_one_transactional_raw_id_per_task(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_ids: list[str] = []
+    for seconds in (2, 1):
+        task_id, _ = await _seed_live_task(
+            terminalization_schema,
+            status='PENDING',
+            worker_id=None,
+            claimed_at=None,
+            good_until=datetime.now(timezone.utc) - timedelta(seconds=seconds),
+        )
+        task_ids.append(task_id)
+    listener = await psycopg.AsyncConnection.connect(
+        to_psycopg_url(DB_URL), autocommit=True
+    )
+    try:
+        await listener.execute(sql.SQL('LISTEN {}').format(sql.Identifier('task_done')))
+        outcomes = await _expire_pending(terminalization_schema, batch_size=2)
+        assert {outcome.task_id for outcome in outcomes} == set(task_ids)
+        await terminalization_schema.commit()
+        notifications = listener.notifies()
+        try:
+            received = {
+                (await asyncio.wait_for(anext(notifications), timeout=2)).payload,
+                (await asyncio.wait_for(anext(notifications), timeout=2)).payload,
+            }
+        finally:
+            await notifications.aclose()
+        assert received == set(task_ids)
+    finally:
+        await listener.close()
 
 
 @pytest.mark.parametrize('first', ['fused', 'locked'])
