@@ -80,6 +80,8 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         _miss_function(namespace),
         _complete_locked_function(namespace),
         _complete_fused_function(namespace),
+        _fail_locked_function(namespace),
+        _fail_stale_function(namespace),
     )
 
 
@@ -179,6 +181,16 @@ def _move_function(namespace: str) -> str:
                     RAISE EXCEPTION 'completion-fused projection disagrees';
                 END IF;
                 v_requires_deferred_phase2 := FALSE;
+            WHEN '{TerminalizationKind.FAIL_RUNNING.value}' THEN
+                IF p_terminal_status <> 'FAILED' THEN
+                    RAISE EXCEPTION 'running-failure projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := TRUE;
+            WHEN '{TerminalizationKind.FAIL_STALE.value}' THEN
+                IF p_terminal_status <> 'FAILED' THEN
+                    RAISE EXCEPTION 'stale-failure projection disagrees';
+                END IF;
+                v_requires_deferred_phase2 := TRUE;
             ELSE
                 RAISE EXCEPTION 'unsupported prototype terminalization kind %',
                     p_terminalization_kind
@@ -499,6 +511,150 @@ def _complete_fused_function(namespace: str) -> str:
                 '{TerminalizationKind.COMPLETE_LOCKED.value}'
             ]::text[],
             p_worker_id, p_claimed_at
+        );
+    END
+    $function$
+    """
+
+
+def _fail_locked_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_fail_locked_task(
+        p_task_id varchar,
+        p_worker_id text,
+        p_result text,
+        p_error_code text,
+        p_failed_reason text
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_claimed_at timestamptz;
+        v_terminal_at timestamptz;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT claimed_at INTO v_claimed_at
+        FROM {namespace}.live_tasks
+        WHERE id = p_task_id
+          AND status = 'RUNNING'
+          AND claimed_by_worker_id = CAST(p_worker_id AS varchar)
+        FOR UPDATE;
+        IF FOUND THEN
+            v_terminal_at := NOW();
+            PERFORM {namespace}.move_locked_task_to_history(
+                p_task_id, 'FAILED',
+                '{TerminalizationKind.FAIL_RUNNING.value}',
+                v_terminal_at, p_result, p_error_code, p_failed_reason
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at,
+                '{TerminalizationKind.FAIL_RUNNING.value}'::text,
+                'RUNNING'::text, CAST(p_worker_id AS varchar), v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY['{TerminalizationKind.FAIL_RUNNING.value}']::text[],
+            p_worker_id, NULL::timestamptz
+        );
+    END
+    $function$
+    """
+
+
+def _fail_stale_function(namespace: str) -> str:
+    return f"""
+    CREATE FUNCTION {namespace}.horsies_fail_stale_task(
+        p_task_id varchar,
+        p_stale_after_ms integer,
+        p_finalizing_stale_after_ms integer,
+        p_result text,
+        p_error_code text,
+        p_failed_reason text
+    ) RETURNS SETOF {namespace}.terminalization_outcome
+    LANGUAGE plpgsql
+    AS $function$
+    DECLARE
+        v_terminal_at timestamptz;
+        v_status text;
+        v_worker varchar;
+        v_claimed_at timestamptz;
+        v_started_at timestamptz;
+        v_finalizing_at timestamptz;
+        v_last_heartbeat timestamptz;
+        v_evaluated_at timestamptz;
+    BEGIN
+        PERFORM {namespace}.assert_archive_available();
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
+               t.started_at, t.finalizing_at,
+               (
+                   SELECT h.sent_at
+                   FROM {namespace}.live_heartbeats AS h
+                   WHERE h.task_id = t.id AND h.role = 'runner'
+                   ORDER BY h.sent_at DESC
+                   LIMIT 1
+               ),
+               NOW()
+        INTO v_status, v_worker, v_claimed_at, v_started_at, v_finalizing_at,
+             v_last_heartbeat, v_evaluated_at
+        FROM {namespace}.live_tasks AS t
+        WHERE t.id = p_task_id
+        FOR UPDATE;
+
+        IF FOUND AND v_status = 'RUNNING' THEN
+            IF v_started_at IS NOT NULL
+               AND (
+                   v_finalizing_at IS NULL
+                   OR v_finalizing_at
+                      < v_evaluated_at
+                        - make_interval(
+                            secs => p_finalizing_stale_after_ms::double precision
+                                / 1000.0
+                        )
+               )
+               AND COALESCE(v_last_heartbeat, v_started_at)
+                   < v_evaluated_at
+                        - make_interval(
+                            secs => p_stale_after_ms::double precision / 1000.0
+                        )
+            THEN
+                v_terminal_at := v_evaluated_at;
+                PERFORM {namespace}.move_locked_task_to_history(
+                    p_task_id, 'FAILED',
+                    '{TerminalizationKind.FAIL_STALE.value}',
+                    v_terminal_at, p_result, p_error_code, p_failed_reason
+                );
+                RETURN QUERY SELECT
+                    p_task_id, NULL::bigint, 'APPLIED'::text,
+                    v_terminal_at,
+                    '{TerminalizationKind.FAIL_STALE.value}'::text,
+                    'RUNNING'::text, v_worker, v_claimed_at,
+                    NULL::text, NULL::jsonb;
+                RETURN;
+            END IF;
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+                NULL::timestamptz, NULL::text,
+                v_status, v_worker, v_claimed_at,
+                'STALENESS'::text,
+                jsonb_build_object(
+                    'last_heartbeat_at', v_last_heartbeat,
+                    'started_at', v_started_at,
+                    'finalizing_at', v_finalizing_at,
+                    'stale_after_ms', p_stale_after_ms,
+                    'finalizing_stale_after_ms', p_finalizing_stale_after_ms,
+                    'evaluated_at', v_evaluated_at
+                );
+            RETURN;
+        END IF;
+        RETURN QUERY SELECT * FROM {namespace}.terminalization_miss(
+            p_task_id,
+            ARRAY['{TerminalizationKind.FAIL_STALE.value}']::text[],
+            NULL::text, NULL::timestamptz
         );
     END
     $function$

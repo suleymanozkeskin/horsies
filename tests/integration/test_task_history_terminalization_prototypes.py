@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +23,7 @@ from horsies.core.lifecycle.outcomes import (
     Applied,
     LostClaim,
     ObservedForeignTerminalization,
+    ObservedStaleness,
     SourceStateConflict,
     TaskAbsent,
     decode_outcome_row,
@@ -210,6 +211,103 @@ async def _complete_locked(
     return decode_outcome_row(_plain_mapping(row))
 
 
+async def _fail_locked(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker_id: str = _WORKER,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_fail_locked_task(
+                    CAST(:task_id AS varchar), :worker_id, :result,
+                    'TASK_EXCEPTION', 'final attempt failed'
+                )
+                """
+                ),
+                {'task_id': task_id, 'worker_id': worker_id, 'result': _RESULT},
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
+async def _fail_stale(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    stale_after_ms: int,
+    finalizing_stale_after_ms: int,
+) -> Applied | AlreadyApplied | LostClaim | SourceStateConflict | TaskAbsent:
+    schema = _schema(connection)
+    row = (
+        (
+            await connection.execute(
+                text(
+                    f"""
+                SELECT * FROM {schema.sql}.horsies_fail_stale_task(
+                    CAST(:task_id AS varchar), :stale_after_ms,
+                    :finalizing_stale_after_ms, :result,
+                    'WORKER_LOST', 'stale runner'
+                )
+                """
+                ),
+                {
+                    'task_id': task_id,
+                    'stale_after_ms': stale_after_ms,
+                    'finalizing_stale_after_ms': finalizing_stale_after_ms,
+                    'result': _RESULT,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    return decode_outcome_row(_plain_mapping(row))
+
+
+async def _seed_attempt(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    attempt: int = 1,
+    outcome: str = 'FAILED',
+    will_retry: bool = False,
+) -> None:
+    schema = _schema(connection)
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.live_attempts (
+                task_id, attempt, outcome, will_retry,
+                started_at, finished_at, error_code, error_message,
+                failed_reason, worker_id
+            ) VALUES (
+                :task_id, :attempt, :outcome, :will_retry,
+                :started_at, :finished_at, 'TASK_EXCEPTION',
+                'attempt failed', 'final attempt failed', :worker_id
+            )
+            """
+        ),
+        {
+            'task_id': task_id,
+            'attempt': attempt,
+            'outcome': outcome,
+            'will_retry': will_retry,
+            'started_at': _GENERATION,
+            'finished_at': _GENERATION + timedelta(seconds=1),
+            'worker_id': _WORKER,
+        },
+    )
+    await connection.commit()
+
+
 def _plain_mapping(row: Mapping[Any, Any]) -> dict[str, Any]:
     return {str(key): value for key, value in row.items()}
 
@@ -344,6 +442,135 @@ async def test_workflow_completion_creates_precise_pending_and_phase2_applies(
     ).one()
     assert node.status == 'COMPLETED'
     assert bytes(node.result_digest) == bytes(pending.result_digest)
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
+
+
+async def test_workflow_failure_archives_attempt_and_defers_phase2(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, workflow_id = await _seed_live_task(
+        terminalization_schema, is_workflow_task=True
+    )
+    assert workflow_id is not None
+    await _seed_attempt(terminalization_schema, task_id)
+
+    outcome = await _fail_locked(terminalization_schema, task_id)
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.FAIL_RUNNING
+    assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 1)
+    history = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status, error_code, final_failed_reason,
+                       attempt_archive_version, attempt_snapshot_codec,
+                       attempt_snapshot, attempt_snapshot_digest
+                FROM {schema.sql}.history_aggregate
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    assert tuple(history[:3]) == ('FAILED', 'TASK_EXCEPTION', 'final attempt failed')
+    attempts = decode_attempts(
+        version=history.attempt_archive_version,
+        codec=history.attempt_snapshot_codec,
+        payload=bytes(history.attempt_snapshot),
+        digest=bytes(history.attempt_snapshot_digest),
+    )
+    assert isinstance(attempts, DecodedArchiveValue)
+    assert [
+        (item.attempt, item.outcome, item.will_retry) for item in attempts.value
+    ] == [(1, 'FAILED', False)]
+    pending = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT phase2_generation
+                FROM {schema.sql}.workflow_phase2_pending
+                WHERE task_id = :task_id
+                """
+            ),
+            {'task_id': task_id},
+        )
+    ).one()
+    disposition = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT {schema.sql}.apply_phase2(
+                    CAST(:task_id AS varchar(36)),
+                    CAST(:generation AS varchar(36))
+                )::text
+                """
+            ),
+            {'task_id': task_id, 'generation': pending.phase2_generation},
+        )
+    ).scalar_one()
+    assert disposition == 'APPLIED_TO_NODE'
+    node_status = (
+        await terminalization_schema.execute(
+            text(
+                f"""
+                SELECT status FROM {schema.sql}.phase2_nodes
+                WHERE workflow_id = :workflow_id AND node_id = 'node-1'
+                """
+            ),
+            {'workflow_id': workflow_id},
+        )
+    ).scalar_one()
+    assert node_status == 'FAILED'
+
+
+async def test_stale_failure_reports_locked_guard_evidence(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    schema = _schema(terminalization_schema)
+    task_id, _ = await _seed_live_task(terminalization_schema)
+    await terminalization_schema.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.live_heartbeats (
+                task_id, sender_id, role, sent_at
+            ) VALUES (:task_id, :worker_id, 'runner', NOW())
+            """
+        ),
+        {'task_id': task_id, 'worker_id': _WORKER},
+    )
+    await terminalization_schema.commit()
+
+    outcome = await _fail_stale(
+        terminalization_schema,
+        task_id,
+        stale_after_ms=60_000,
+        finalizing_stale_after_ms=60_000,
+    )
+    assert isinstance(outcome, SourceStateConflict)
+    assert isinstance(outcome.evidence, ObservedStaleness)
+    assert outcome.evidence.last_heartbeat_at is not None
+    assert outcome.evidence.started_at == _GENERATION
+    assert outcome.evidence.stale_after_ms == 60_000
+    assert outcome.evidence.finalizing_stale_after_ms == 60_000
+    assert outcome.evidence.evaluated_at >= outcome.evidence.last_heartbeat_at
+    assert await _relation_counts(terminalization_schema, task_id) == (1, 0, 0, 0)
+
+
+async def test_stale_failure_moves_eligible_task_directly_to_history(
+    terminalization_schema: AsyncConnection,
+) -> None:
+    task_id, _ = await _seed_live_task(terminalization_schema)
+    await _seed_attempt(terminalization_schema, task_id)
+
+    outcome = await _fail_stale(
+        terminalization_schema,
+        task_id,
+        stale_after_ms=0,
+        finalizing_stale_after_ms=0,
+    )
+    assert isinstance(outcome, Applied)
+    assert outcome.kind is TerminalizationKind.FAIL_STALE
     assert await _relation_counts(terminalization_schema, task_id) == (0, 0, 1, 0)
 
 
