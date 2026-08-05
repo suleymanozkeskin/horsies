@@ -8,6 +8,34 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-08-05
+
+Terminal failure-summary cleanup. Schema v26.
+
+> Every worker calls the shared terminalization functions, so the corrected
+> summaries take effect fleet-wide as soon as the first upgraded process
+> migrates the schema to v26. They do not roll out worker by worker.
+
+### Fixed
+
+- Terminal writers own the complete final-attempt summary. Automatic retry
+  clears `error_code` when it requeues a task but never `failed_reason`, so a
+  task that failed, was retried, and then reached a different terminal outcome
+  carried the earlier attempt's reason beside that outcome: a completed task
+  could show a stale failure reason, and an expired task kept one beside
+  `TASK_EXPIRED`. Locked failure now assigns its reason unconditionally — a
+  NULL reason clears the column instead of preserving the old value — and the
+  completion and expiry operations clear `failed_reason` at the transition.
+  Per-attempt reasons remain in `horsies_task_attempts`.
+
+### Documentation
+
+- Corrected the retention description for workflow-backing task rows: they use
+  the global window and are protected while their workflow is non-terminal;
+  once the workflow is terminal, each row ages from its own terminal
+  timestamp. The previous wording claimed a workflow and its task rows are
+  retained as a unit.
+
 ## [0.4.6] - 2026-08-05
 
 Task terminalization consolidation. Schema v25.
