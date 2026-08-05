@@ -31,8 +31,6 @@ from sqlalchemy.sql.elements import TextClause
 
 from horsies.core.brokers.postgres import (
     _EXPIRE_BATCH_SIZE,
-    EXPIRE_PENDING_TASKS_SQL,
-    MARK_STALE_TASK_FAILED_SQL,
     SELECT_STALE_TASK_FOR_UPDATE_SQL,
 )
 from horsies.core.codec.error_payload import serialize_error_payload
@@ -61,16 +59,20 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.worker.child_runner import _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL
 from horsies.core.worker.sql import (
-    FINALIZE_TASK_COMPLETED_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
     NOTIFY_TASK_QUEUE_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     UPSERT_TASK_ATTEMPT_SQL,
 )
 from horsies.core.workflows.engine import on_workflow_task_complete
+from tests.perf.legacy_terminalization_sql import (
+    EXPIRE_CLAIMED_TASK_BEFORE_START_SQL as _EXPIRE_CLAIMED_TASK_BEFORE_START_SQL,
+    EXPIRE_PENDING_TASKS_SQL,
+    FINALIZE_TASK_COMPLETED_SQL,
+    MARK_STALE_TASK_FAILED_SQL,
+    MARK_TASK_COMPLETED_SQL,
+    MARK_TASK_FAILED_SQL,
+)
 from tests.perf.statistics import Budget
 
 WORKER_ID = 'perf-harness'

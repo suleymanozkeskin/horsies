@@ -38,13 +38,21 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.lifecycle.commands import CompleteTaskFused
+from horsies.core.lifecycle.fences import OwnedClaim
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    SourceStateConflict,
+    TerminalizationOutcome,
+)
+from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.worker.sql import FINALIZE_TASK_COMPLETED_SQL, HORSIES_CLAIM_SQL
+from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.monitoring import (
     TaskActionErrorCode,
     cancel_task,
@@ -255,6 +263,25 @@ def serialize_ok(value: object) -> str:
     encoded = dumps_json(encode_task_result(TaskResult(ok=value), JsonValue))
     assert is_ok(encoded)
     return encoded.ok_value
+
+
+async def complete_fused(
+    session: AsyncSession,
+    *,
+    task_id: str,
+    claimed_at: datetime,
+    result_json: str,
+) -> TerminalizationOutcome:
+    return await apply_async(
+        await session.connection(),
+        CompleteTaskFused(
+            task_id=task_id,
+            fence=OwnedClaim(worker_id=WORKER_ID, claimed_at=claimed_at),
+            result_json=result_json,
+            notify_channel='task_queue_default',
+            notify_payload=task_id,
+        ),
+    )
 
 
 async def next_notification(
@@ -514,22 +541,15 @@ class TestCancelRunningVersusFinalize:
         )
         await persist(session, task)
 
-        finalized = (
-            await session.execute(
-                FINALIZE_TASK_COMPLETED_SQL,
-                {
-                    'id': task.id,
-                    'wid': WORKER_ID,
-                    'claimed_at': claimed_at,
-                    'result_json': serialize_ok(99),
-                    'notify_channel': 'task_queue_default',
-                    'notify_payload': task.id,
-                },
-            )
-        ).first()
+        finalized = await complete_fused(
+            session,
+            task_id=task.id,
+            claimed_at=claimed_at,
+            result_json=serialize_ok(99),
+        )
         await session.commit()
 
-        assert finalized is not None
+        assert isinstance(finalized, Applied)
         assert (await read_task(session, task.id)).status == 'COMPLETED'
         assert [row.attempt for row in await attempt_rows(session, task.id)] == [1]
 
@@ -547,22 +567,15 @@ class TestCancelRunningVersusFinalize:
         cancelled = await cancel_task(broker, task.id, include_running=True)
         assert is_ok(cancelled)
 
-        finalized = (
-            await session.execute(
-                FINALIZE_TASK_COMPLETED_SQL,
-                {
-                    'id': task.id,
-                    'wid': WORKER_ID,
-                    'claimed_at': claimed_at,
-                    'result_json': serialize_ok(99),
-                    'notify_channel': 'task_queue_default',
-                    'notify_payload': task.id,
-                },
-            )
-        ).first()
+        finalized = await complete_fused(
+            session,
+            task_id=task.id,
+            claimed_at=claimed_at,
+            result_json=serialize_ok(99),
+        )
         await session.commit()
 
-        assert finalized is None
+        assert isinstance(finalized, SourceStateConflict)
         row = await read_task(session, task.id)
         assert row.status == 'CANCELLED'
         assert row.result is None
@@ -740,16 +753,11 @@ class TestRetryAttemptNumbering:
             {'id': task.id, 'wid': WORKER_ID, 'claimed_at': claimed_at},
         )
         await session.commit()
-        await session.execute(
-            FINALIZE_TASK_COMPLETED_SQL,
-            {
-                'id': task.id,
-                'wid': WORKER_ID,
-                'claimed_at': claimed_at,
-                'result_json': serialize_ok('third time lucky'),
-                'notify_channel': 'task_queue_default',
-                'notify_payload': task.id,
-            },
+        await complete_fused(
+            session,
+            task_id=task.id,
+            claimed_at=claimed_at,
+            result_json=serialize_ok('third time lucky'),
         )
         await session.commit()
 
@@ -924,16 +932,11 @@ class TestRetryUnblocksResultWaiters:
             {'id': task.id, 'wid': WORKER_ID, 'claimed_at': claimed_at},
         )
         await session.commit()
-        await session.execute(
-            FINALIZE_TASK_COMPLETED_SQL,
-            {
-                'id': task.id,
-                'wid': WORKER_ID,
-                'claimed_at': claimed_at,
-                'result_json': serialize_ok(4242),
-                'notify_channel': 'task_queue_default',
-                'notify_payload': task.id,
-            },
+        await complete_fused(
+            session,
+            task_id=task.id,
+            claimed_at=claimed_at,
+            result_json=serialize_ok(4242),
         )
         await session.commit()
 

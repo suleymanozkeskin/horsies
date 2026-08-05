@@ -37,15 +37,14 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from horsies.core.models.workflow.handle import (
-    MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
+from horsies.core.lifecycle.commands import (
+    AbandonNodesOfPausedWorkflows,
+    CancelNodesOfCancelledWorkflow,
 )
+from horsies.core.lifecycle.persistence import apply_batch_async
 from horsies.core.worker.child_runner import _handle_workflow_stop_before_start
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
-from horsies.core.workflows.sql import (
-    CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-)
 from tests.integration.conftest import compute_test_enqueue_sha
 
 pytestmark = [pytest.mark.integration]
@@ -524,9 +523,9 @@ async def test_t09_skips_tasks_whose_workflow_resumed(
         text("UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = :id"),
         {'id': wf_id},
     )
-    await session.execute(
-        CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-        {'workflow_ids': [wf_id]},
+    await apply_batch_async(
+        await session.connection(),
+        AbandonNodesOfPausedWorkflows(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -549,9 +548,9 @@ async def test_t09_abandons_a_claim_taken_while_still_paused(
     wf_id = await _link_to_workflow(session, task_id, wf_status='PAUSED')
     await session.commit()
 
-    await session.execute(
-        CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL,
-        {'workflow_ids': [wf_id]},
+    await apply_batch_async(
+        await session.connection(),
+        AbandonNodesOfPausedWorkflows(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -569,9 +568,9 @@ async def test_t16_skips_tasks_whose_workflow_is_not_cancelled(
     wf_id = await _link_to_workflow(session, task_id, wf_status='RUNNING')
     await session.commit()
 
-    await session.execute(
-        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-        {'wf_id': wf_id},
+    await apply_batch_async(
+        await session.connection(),
+        CancelNodesOfCancelledWorkflow(workflow_ids=(wf_id,)),
     )
     await session.commit()
 
@@ -588,9 +587,9 @@ async def test_t16_cancels_whatever_claim_exists_under_a_cancelled_workflow(
     wf_id = await _link_to_workflow(session, task_id, wf_status='CANCELLED')
     await session.commit()
 
-    await session.execute(
-        MARK_ENQUEUED_NOT_STARTED_TASKS_CANCELLED_SQL,
-        {'wf_id': wf_id},
+    await apply_batch_async(
+        await session.connection(),
+        CancelNodesOfCancelledWorkflow(workflow_ids=(wf_id,)),
     )
     await session.commit()
 

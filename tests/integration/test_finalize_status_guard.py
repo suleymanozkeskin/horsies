@@ -19,15 +19,27 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.worker.sql import FINALIZE_TASK_COMPLETED_SQL
+from horsies.core.lifecycle.commands import (
+    CompleteLockedTask,
+    CompleteTaskFused,
+    FailLockedTask,
+)
+from horsies.core.lifecycle.fences import OwnedClaim, PriorLockedRead
+from horsies.core.lifecycle.outcomes import (
+    Applied,
+    LostClaim,
+    SourceStateConflict,
+    TerminalizationOutcome,
+)
+from horsies.core.lifecycle.persistence import (
+    apply_async,
+    classify_locked_read_miss_async,
+)
 from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
     GET_TASK_RETRY_CONFIG_SQL,
     GET_TASK_RETRY_INFO_SQL,
-    MARK_TASK_COMPLETED_SQL,
-    MARK_TASK_FAILED_SQL,
-    MARK_TASK_FAILED_WORKER_SQL,
     SCHEDULE_TASK_RETRY_SQL,
     SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
@@ -170,6 +182,86 @@ async def _set_task_status(
     await session.flush()
 
 
+async def _complete_locked(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    worker_id: str = OWNER_WORKER_ID,
+    result_json: str = '{"ok": "result"}',
+) -> TerminalizationOutcome:
+    command = CompleteLockedTask(
+        task_id=task_id,
+        fence=PriorLockedRead(worker_id=worker_id),
+        result_json=result_json,
+    )
+    context = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': worker_id, 'claimed_at': None},
+        )
+    ).first()
+    connection = await session.connection()
+    if context is None:
+        return await classify_locked_read_miss_async(
+            connection,
+            command,
+            claimed_at=None,
+        )
+    return await apply_async(connection, command)
+
+
+async def _fail_locked(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    worker_id: str = OWNER_WORKER_ID,
+    failed_reason: str | None = None,
+) -> TerminalizationOutcome:
+    command = FailLockedTask(
+        task_id=task_id,
+        fence=PriorLockedRead(worker_id=worker_id),
+        result_json='{"err": {"error_code": "LATE"}}',
+        error_code='LATE',
+        failed_reason=failed_reason,
+    )
+    context = (
+        await session.execute(
+            SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL,
+            {'id': task_id, 'wid': worker_id, 'claimed_at': None},
+        )
+    ).first()
+    connection = await session.connection()
+    if context is None:
+        return await classify_locked_read_miss_async(
+            connection,
+            command,
+            claimed_at=None,
+        )
+    return await apply_async(connection, command)
+
+
+async def _complete_fused(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    claimed_at: datetime | None,
+    result_json: str,
+) -> TerminalizationOutcome:
+    return await apply_async(
+        await session.connection(),
+        CompleteTaskFused(
+            task_id=task_id,
+            fence=OwnedClaim(
+                worker_id=OWNER_WORKER_ID,
+                claimed_at=claimed_at,
+            ),
+            result_json=result_json,
+            notify_channel='task_queue_default',
+            notify_payload=f'capacity:{task_id}',
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -180,28 +272,19 @@ async def test_complete_guard_blocks_when_not_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_COMPLETED_SQL is a no-op when task is no longer RUNNING."""
+    """Locked completion refuses a task that is no longer RUNNING."""
     task_id = await _insert_running_task(session)
 
     # Simulate reaper marking task as FAILED
     await _set_task_status(session, task_id, 'FAILED')
 
-    # Late finalize attempt — should return no rows
-    now = datetime.now(timezone.utc)
-    result = await session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'now': now,
-            'result_json': '{"ok": "late_result"}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
+    outcome = await _complete_locked(
+        session,
+        task_id,
+        result_json='{"ok": "late_result"}',
     )
-    returned_row = result.fetchone()
 
-    assert returned_row is None, (
-        'MARK_TASK_COMPLETED_SQL must be a no-op when status != RUNNING'
-    )
+    assert isinstance(outcome, SourceStateConflict)
     assert await _get_task_status(session, task_id) == 'FAILED', (
         'Task status must remain FAILED after blocked finalize'
     )
@@ -212,24 +295,12 @@ async def test_complete_guard_succeeds_when_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_COMPLETED_SQL works normally when task IS running."""
+    """Locked completion applies when the task is RUNNING."""
     task_id = await _insert_running_task(session)
 
-    now = datetime.now(timezone.utc)
-    result = await session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'now': now,
-            'result_json': '{"ok": "result"}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
-    )
-    returned_row = result.fetchone()
+    outcome = await _complete_locked(session, task_id)
 
-    assert returned_row is not None, (
-        'MARK_TASK_COMPLETED_SQL must return a row when status == RUNNING'
-    )
+    assert isinstance(outcome, Applied)
     assert await _get_task_status(session, task_id) == 'COMPLETED'
 
 
@@ -238,28 +309,15 @@ async def test_fail_guard_blocks_when_not_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_FAILED_SQL is a no-op when task is no longer RUNNING."""
+    """Locked failure refuses a task that is no longer RUNNING."""
     task_id = await _insert_running_task(session)
 
     # Simulate reaper rescheduling a retry (RUNNING → PENDING)
     await _set_task_status(session, task_id, 'PENDING')
 
-    now = datetime.now(timezone.utc)
-    result = await session.execute(
-        MARK_TASK_FAILED_SQL,
-        {
-            'now': now,
-            'result_json': '{"err": {"error_code": "LATE"}}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'error_code': 'LATE',
-        },
-    )
-    returned_row = result.fetchone()
+    outcome = await _fail_locked(session, task_id)
 
-    assert returned_row is None, (
-        'MARK_TASK_FAILED_SQL must be a no-op when status != RUNNING'
-    )
+    assert isinstance(outcome, SourceStateConflict)
     assert await _get_task_status(session, task_id) == 'PENDING', (
         'Task status must remain PENDING after blocked finalize'
     )
@@ -270,27 +328,19 @@ async def test_fail_worker_guard_blocks_when_not_running(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_FAILED_WORKER_SQL is a no-op when task is no longer RUNNING."""
+    """Worker-level failure refuses a task that is no longer RUNNING."""
     task_id = await _insert_running_task(session)
 
     # Simulate reaper intervention
     await _set_task_status(session, task_id, 'FAILED')
 
-    result = await session.execute(
-        MARK_TASK_FAILED_WORKER_SQL,
-        {
-            'reason': 'late worker failure',
-            'result_json': '{"err": {"error_code": "BROKER_ERROR"}}',
-            'error_code': 'BROKER_ERROR',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
+    outcome = await _fail_locked(
+        session,
+        task_id,
+        failed_reason='late worker failure',
     )
-    returned_row = result.fetchone()
 
-    assert returned_row is None, (
-        'MARK_TASK_FAILED_WORKER_SQL must be a no-op when status != RUNNING'
-    )
+    assert isinstance(outcome, SourceStateConflict)
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -360,7 +410,7 @@ async def test_reaper_then_complete_race_sequence(
     Timeline:
       T=0  Task is RUNNING
       T=1  Reaper marks FAILED (simulated via MARK_STALE_TASK_FAILED_SQL pattern)
-      T=2  Late worker finalize fires MARK_TASK_COMPLETED_SQL → blocked
+      T=2  Late worker completion is refused
       T=3  Assert: task is FAILED, result is reaper's WORKER_CRASHED, not worker's
     """
     task_id = await _insert_running_task(session)
@@ -382,18 +432,13 @@ async def test_reaper_then_complete_race_sequence(
     await session.flush()
 
     # T=2: Late worker finalize fires — should be blocked
-    now = datetime.now(timezone.utc)
     late_result = '{"ok": "I completed successfully!"}'
-    comp_res = await session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'now': now,
-            'result_json': late_result,
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
+    outcome = await _complete_locked(
+        session,
+        task_id,
+        result_json=late_result,
     )
-    assert comp_res.fetchone() is None, 'Late COMPLETED must be blocked'
+    assert isinstance(outcome, SourceStateConflict)
 
     # T=3: Verify reaper's result is preserved
     row = (
@@ -541,22 +586,17 @@ async def test_complete_guard_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_COMPLETED_SQL is a no-op when another worker owns the row."""
+    """Locked completion refuses a row owned by another worker."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
-    result = await session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'result_json': '{"ok": "stale_result"}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
+    outcome = await _complete_locked(
+        session,
+        task_id,
+        result_json='{"ok": "stale_result"}',
     )
-    assert result.fetchone() is None, (
-        'MARK_TASK_COMPLETED_SQL must be a no-op on ownership mismatch'
-    )
+    assert isinstance(outcome, LostClaim)
     assert await _get_task_status(session, task_id) == 'RUNNING', (
         'Re-claimed RUNNING attempt must be left untouched'
     )
@@ -567,23 +607,13 @@ async def test_fail_guard_blocks_on_ownership_mismatch(
     session: AsyncSession,
     clean_workflow_tables: None,  # noqa: ARG001
 ) -> None:
-    """MARK_TASK_FAILED_SQL is a no-op when another worker owns the row."""
+    """Locked failure refuses a row owned by another worker."""
     task_id = await _insert_running_task(
         session, claimed_by_worker_id=OTHER_WORKER_ID
     )
 
-    result = await session.execute(
-        MARK_TASK_FAILED_SQL,
-        {
-            'result_json': '{"err": {"error_code": "STALE"}}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'error_code': 'STALE',
-        },
-    )
-    assert result.fetchone() is None, (
-        'MARK_TASK_FAILED_SQL must be a no-op on ownership mismatch'
-    )
+    outcome = await _fail_locked(session, task_id)
+    assert isinstance(outcome, LostClaim)
     assert await _get_task_status(session, task_id) == 'RUNNING'
 
 
@@ -663,17 +693,12 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
     await session.flush()
 
     # T=3: Worker A's stale finalizer fires — must be blocked
-    comp_res = await session.execute(
-        MARK_TASK_COMPLETED_SQL,
-        {
-            'result_json': '{"ok": "stale A result"}',
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-        },
+    outcome = await _complete_locked(
+        session,
+        task_id,
+        result_json='{"ok": "stale A result"}',
     )
-    assert comp_res.fetchone() is None, (
-        'Stale finalizer must be blocked while B\'s attempt is RUNNING'
-    )
+    assert isinstance(outcome, LostClaim)
 
     # T=4: B's in-flight attempt is untouched
     row = (
@@ -717,35 +742,25 @@ async def test_fused_finalize_rejects_stale_claim_generation(
     """Fused finalize is a no-op for a stale generation, applies for the live one."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
 
-    stale = await session.execute(
-        FINALIZE_TASK_COMPLETED_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'result_json': '{"ok": "stale_attempt_result"}',
-            'notify_channel': 'task_queue_default',
-            'notify_payload': f'capacity:{task_id}',
-            'claimed_at': GEN_STALE,
-        },
+    stale = await _complete_fused(
+        session,
+        task_id,
+        claimed_at=GEN_STALE,
+        result_json='{"ok": "stale_attempt_result"}',
     )
-    assert stale.fetchone() is None, (
+    assert isinstance(stale, LostClaim), (
         'Same worker id + RUNNING status must not be enough: a stale '
         'generation must be fenced out'
     )
     assert await _get_task_status(session, task_id) == 'RUNNING'
 
-    live = await session.execute(
-        FINALIZE_TASK_COMPLETED_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'result_json': '{"ok": "live_attempt_result"}',
-            'notify_channel': 'task_queue_default',
-            'notify_payload': f'capacity:{task_id}',
-            'claimed_at': GEN_CURRENT,
-        },
+    live = await _complete_fused(
+        session,
+        task_id,
+        claimed_at=GEN_CURRENT,
+        result_json='{"ok": "live_attempt_result"}',
     )
-    assert live.fetchone() is not None
+    assert isinstance(live, Applied)
     assert await _get_task_status(session, task_id) == 'COMPLETED'
 
 
@@ -757,18 +772,13 @@ async def test_fused_finalize_null_fence_matches_any_generation(
     """NULL fence preserves the (status, worker_id)-only behavior."""
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
 
-    res = await session.execute(
-        FINALIZE_TASK_COMPLETED_SQL,
-        {
-            'id': task_id,
-            'wid': OWNER_WORKER_ID,
-            'result_json': '{"ok": 1}',
-            'notify_channel': 'task_queue_default',
-            'notify_payload': f'capacity:{task_id}',
-            'claimed_at': None,
-        },
+    outcome = await _complete_fused(
+        session,
+        task_id,
+        claimed_at=None,
+        result_json='{"ok": 1}',
     )
-    assert res.fetchone() is not None
+    assert isinstance(outcome, Applied)
     assert await _get_task_status(session, task_id) == 'COMPLETED'
 
 
