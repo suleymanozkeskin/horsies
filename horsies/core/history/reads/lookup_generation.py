@@ -25,7 +25,7 @@ what the catalog manifest says and nothing else.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -36,6 +36,8 @@ from ..names import (
     TASK_LOOKUP_FUNCTION,
     TASK_LOOKUP_MANIFEST,
     TASK_LOOKUP_TYPE,
+    TASK_PROVENANCE_FUNCTION,
+    TASK_PROVENANCE_TYPE,
 )
 from ..partitions.catalog import LeafCatalogRow
 
@@ -51,6 +53,17 @@ CREATE TYPE {TASK_LOOKUP_TYPE} AS (
     task_id uuid,
     fingerprint_version smallint,
     command_fingerprint bytea
+)
+"""
+
+TASK_PROVENANCE_TYPE_DDL = f"""
+CREATE TYPE {TASK_PROVENANCE_TYPE} AS (
+    found boolean,
+    location text,
+    task_id uuid,
+    status text,
+    terminal_at timestamptz,
+    terminalization_kind text
 )
 """
 
@@ -134,9 +147,62 @@ def manifest_from_catalog(rows: Sequence[LeafCatalogRow]) -> LookupManifest:
 
 
 def render_staged_lookup_function(manifest: LookupManifest) -> str:
-    """Render the complete CREATE OR REPLACE FUNCTION statement."""
-    live_probe = _relation_probe(LIVE_TASKS, location='LIVE')
-    forever_probe = _relation_probe(TASK_HISTORY_FOREVER, location='HISTORY')
+    """Render the identity lookup: found rows carry fingerprint facts."""
+    return _staged_function(
+        function_name=TASK_LOOKUP_FUNCTION,
+        return_type=TASK_LOOKUP_TYPE,
+        declares=(
+            'v_task_id uuid;',
+            'v_fingerprint_version smallint;',
+            'v_fingerprint bytea;',
+        ),
+        absence_values='NULL, NULL, NULL, NULL',
+        live_probe=_identity_probe(LIVE_TASKS, location='LIVE'),
+        history_probe=lambda relation: _identity_probe(
+            relation, location='HISTORY'
+        ),
+        manifest=manifest,
+    )
+
+
+def render_staged_provenance_function(manifest: LookupManifest) -> str:
+    """Render the provenance lookup: found rows carry terminal facts.
+
+    The terminalization miss classifier consumes this to distinguish
+    already-applied from foreign terminalization after a task has moved to
+    history — the same staged mechanism, never the partitioned parent. A
+    live hit carries null terminal facts: liveness is the fact, and the
+    caller re-reads the live row under its own lock.
+    """
+    return _staged_function(
+        function_name=TASK_PROVENANCE_FUNCTION,
+        return_type=TASK_PROVENANCE_TYPE,
+        declares=(
+            'v_task_id uuid;',
+            'v_status text;',
+            'v_terminal_at timestamptz;',
+            'v_kind text;',
+        ),
+        absence_values='NULL, NULL, NULL, NULL, NULL',
+        live_probe=_provenance_live_probe(),
+        history_probe=_provenance_history_probe,
+        manifest=manifest,
+    )
+
+
+def _staged_function(
+    *,
+    function_name: str,
+    return_type: str,
+    declares: tuple[str, ...],
+    absence_values: str,
+    live_probe: str,
+    history_probe: Callable[[str], str],
+    manifest: LookupManifest,
+) -> str:
+    """The one staged skeleton both generated functions are rendered from."""
+    absence = f'RETURN ROW(FALSE, {absence_values})::{return_type};'
+    forever_probe = history_probe(TASK_HISTORY_FOREVER)
 
     if not manifest.leaves:
         finite_section = ''
@@ -145,14 +211,15 @@ def render_staged_lookup_function(manifest: LookupManifest) -> str:
         if manifest.birth_floor is not None:
             floor_check = f"""
             IF v_birth_at < {_timestamp_literal(manifest.birth_floor)} THEN
-                RETURN ROW(FALSE, NULL, NULL, NULL, NULL)::{TASK_LOOKUP_TYPE};
+                {absence}
             END IF;
 """
         pruned_probes = '\n'.join(
-            _pruned_probe(leaf) for leaf in manifest.leaves
+            _pruned_probe(leaf, history_probe(leaf.relation_name))
+            for leaf in manifest.leaves
         )
         legacy_probes = '\n'.join(
-            _relation_probe(leaf.relation_name, location='HISTORY')
+            history_probe(leaf.relation_name)
             for leaf in reversed(manifest.leaves)
         )
         finite_section = f"""
@@ -179,16 +246,15 @@ def render_staged_lookup_function(manifest: LookupManifest) -> str:
         END IF;
 """
 
+    declare_block = '\n'.join(f'        {declare}' for declare in declares)
     return f"""
-    CREATE OR REPLACE FUNCTION {TASK_LOOKUP_FUNCTION}(p_task_id uuid)
-    RETURNS {TASK_LOOKUP_TYPE}
+    CREATE OR REPLACE FUNCTION {function_name}(p_task_id uuid)
+    RETURNS {return_type}
     LANGUAGE plpgsql
     STABLE
     AS $function$
     DECLARE
-        v_task_id uuid;
-        v_fingerprint_version smallint;
-        v_fingerprint bytea;
+{declare_block}
         v_uuid_bytes bytea;
         v_birth_milliseconds bigint;
         v_birth_at timestamptz;
@@ -197,15 +263,14 @@ def render_staged_lookup_function(manifest: LookupManifest) -> str:
 {live_probe}
 {forever_probe}
 {finite_section}
-        RETURN ROW(FALSE, NULL, NULL, NULL, NULL)::{TASK_LOOKUP_TYPE};
+        {absence}
     END
     $function$
     """
 
 
-def _pruned_probe(leaf: LookupLeaf) -> str:
+def _pruned_probe(leaf: LookupLeaf, probe: str) -> str:
     upper = _timestamp_literal(leaf.upper_anchor)
-    probe = _relation_probe(leaf.relation_name, location='HISTORY')
     return f"""
             IF v_effective_birth < {upper} THEN
 {probe}
@@ -213,7 +278,7 @@ def _pruned_probe(leaf: LookupLeaf) -> str:
 """
 
 
-def _relation_probe(relation: str, *, location: str) -> str:
+def _identity_probe(relation: str, *, location: str) -> str:
     if not is_safe_identifier(relation):
         raise ValueError(f'relation name is not a safe identifier: {relation!r}')
     return f"""
@@ -226,6 +291,36 @@ def _relation_probe(relation: str, *, location: str) -> str:
                 TRUE, '{location}', v_task_id,
                 v_fingerprint_version, v_fingerprint
             )::{TASK_LOOKUP_TYPE};
+        END IF;
+"""
+
+
+def _provenance_live_probe() -> str:
+    return f"""
+        SELECT task_id INTO v_task_id
+        FROM {LIVE_TASKS}
+        WHERE task_id = p_task_id;
+        IF FOUND THEN
+            RETURN ROW(
+                TRUE, 'LIVE', v_task_id, NULL, NULL, NULL
+            )::{TASK_PROVENANCE_TYPE};
+        END IF;
+"""
+
+
+def _provenance_history_probe(relation: str) -> str:
+    if not is_safe_identifier(relation):
+        raise ValueError(f'relation name is not a safe identifier: {relation!r}')
+    return f"""
+        SELECT task_id, status, terminal_at, terminalization_kind
+        INTO v_task_id, v_status, v_terminal_at, v_kind
+        FROM {relation}
+        WHERE task_id = p_task_id;
+        IF FOUND THEN
+            RETURN ROW(
+                TRUE, 'HISTORY', v_task_id,
+                v_status, v_terminal_at, v_kind
+            )::{TASK_PROVENANCE_TYPE};
         END IF;
 """
 

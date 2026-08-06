@@ -25,6 +25,7 @@ from ..partitions.catalog import LEAF_CATALOG_DDL, LEAF_LOCK_KEY_FUNCTION_DDL
 from ..reads.lookup_generation import (
     TASK_LOOKUP_MANIFEST_DDL,
     TASK_LOOKUP_TYPE_DDL,
+    TASK_PROVENANCE_TYPE_DDL,
 )
 from .tables import (
     FOREVER_CLASS_ROW_DML,
@@ -50,6 +51,7 @@ def frozen_fragments() -> tuple[str, ...]:
         LEAF_CATALOG_DDL,
         LEAF_LOCK_KEY_FUNCTION_DDL,
         TASK_LOOKUP_TYPE_DDL,
+        TASK_PROVENANCE_TYPE_DDL,
         TASK_LOOKUP_MANIFEST_DDL,
         WORKFLOW_PHASE2_QUARANTINE_DDL,
         WORKFLOW_PHASE2_PENDING_DDL,

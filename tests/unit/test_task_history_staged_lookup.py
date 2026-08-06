@@ -28,6 +28,7 @@ from horsies.core.history.reads.lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
     render_staged_lookup_function,
+    render_staged_provenance_function,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -221,6 +222,58 @@ class TestRenderedFunction:
         assert body.count('IF v_effective_birth <') == 512
         for row in (rows[0], rows[255], rows[511]):
             assert body.count(f'FROM {row.leaf_name}\n') == 2
+
+
+class TestRenderedProvenanceFunction:
+    """The provenance variant shares the staged skeleton and cannot drift."""
+
+    def render(self, *rows: LeafCatalogRow) -> str:
+        return render_staged_provenance_function(
+            manifest_from_catalog(list(rows))
+        )
+
+    def test_never_references_the_partitioned_parent(self) -> None:
+        body = self.render(make_catalog_row(0), make_catalog_row(1))
+        assert re.search(r'FROM horsies_task_history\s', body) is None
+
+    def test_live_probe_carries_null_terminal_facts(self) -> None:
+        body = self.render(make_catalog_row(0))
+        assert "TRUE, 'LIVE', v_task_id, NULL, NULL, NULL" in body
+
+    def test_history_probes_carry_terminal_facts(self) -> None:
+        row = make_catalog_row(0)
+        body = self.render(row)
+        assert 'status, terminal_at, terminalization_kind' in body
+        assert body.count(f'FROM {row.leaf_name}\n') == 2
+
+    def test_probe_order_matches_the_identity_variant(self) -> None:
+        rows = (make_catalog_row(0), make_catalog_row(1))
+        identity_body = render_staged_lookup_function(
+            manifest_from_catalog(list(rows))
+        )
+        provenance_body = self.render(*rows)
+        for body in (identity_body, provenance_body):
+            live = body.index('FROM horsies_tasks\n')
+            forever = body.index('FROM horsies_task_history_forever\n')
+            oldest = body.index(f'FROM {rows[0].leaf_name}\n')
+            assert live < forever < oldest
+        assert "v_birth_at - INTERVAL '5 seconds'" in provenance_body
+
+    def test_floor_check_shares_the_manifest_rule(self) -> None:
+        birth = BASE - timedelta(hours=2)
+        with_floor = self.render(make_catalog_row(0, min_birth_at=birth))
+        without_floor = self.render(
+            make_catalog_row(0, min_birth_verified=False)
+        )
+        assert 'IF v_birth_at < TIMESTAMPTZ' in with_floor
+        assert 'IF v_birth_at < TIMESTAMPTZ' not in without_floor
+
+    def test_absence_row_is_six_wide(self) -> None:
+        body = self.render(make_catalog_row(0))
+        assert (
+            'RETURN ROW(FALSE, NULL, NULL, NULL, NULL, NULL)'
+            '::horsies_task_provenance;'
+        ) in body
 
 
 class TestLookupRowDecode:
