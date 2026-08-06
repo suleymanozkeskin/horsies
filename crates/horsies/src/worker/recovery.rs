@@ -762,40 +762,20 @@ async fn process_single_stale_task(
     Ok(true)
 }
 
-/// Expire unclaimed PENDING tasks whose `good_until` has passed.
-///
-/// Transitions matching tasks to EXPIRED with a TASK_EXPIRED result.
-/// No attempt rows are written (the task was never executed).
 /// Batch size per expiry statement.
-const EXPIRE_BATCH_SIZE: i64 = 500;
+const EXPIRE_BATCH_SIZE: i32 = 500;
 /// Max batches per reaper pass, bounding work and trigger-NOTIFY volume.
 const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
 
-/// SQL: expire one batch of unclaimed PENDING tasks past good_until.
+/// Expire unclaimed PENDING tasks whose `good_until` has passed.
 ///
-/// The candidate set is bounded by `LIMIT $2 FOR UPDATE SKIP LOCKED` so a mass
-/// expiry is spread across several committed statements instead of one
-/// transaction that row-locks every match and flushes two trigger NOTIFYs per
-/// row in a single commit (which can overflow listener queues).
-const EXPIRE_PENDING_BATCH_SQL: &str = "\
-UPDATE horsies_tasks t
-SET status = 'EXPIRED',
-    failed_at = NOW(),
-    result = $1,
-    error_code = 'TASK_EXPIRED',
-    terminal_at = NOW(),
-    updated_at = NOW()
-FROM (
-    SELECT id FROM horsies_tasks
-    WHERE status = 'PENDING'
-      AND good_until IS NOT NULL
-      AND good_until <= NOW()
-    LIMIT $2
-    FOR UPDATE SKIP LOCKED
-) s
-WHERE t.id = s.id";
-
-pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, sqlx::Error> {
+/// Runs `horsies_expire_pending_tasks` in bounded batches (earliest
+/// deadlines first, SKIP LOCKED) so a mass expiry is spread across several
+/// committed statements instead of one transaction that row-locks every
+/// match and flushes two trigger NOTIFYs per row in a single commit (which
+/// can overflow listener queues). No attempt rows are written (the task was
+/// never executed). Returns the number of expired tasks.
+pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, crate::broker::BrokerError> {
     let task_error = TaskError::builtin(
         crate::core::OutcomeCode::TaskExpired,
         "task expired before being claimed (good_until passed)",
@@ -803,15 +783,17 @@ pub async fn expire_pending_tasks(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let task_result = TaskResult::<()>::Err(task_error);
     let result_json = serde_json::to_string(&task_result)
         .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
+    let command = crate::core::lifecycle::TerminalizationCommand::ExpirePendingTasks {
+        batch_size: crate::core::lifecycle::BatchSize::new(EXPIRE_BATCH_SIZE)
+            .expect("EXPIRE_BATCH_SIZE is positive"),
+        result_json,
+        error_code: "TASK_EXPIRED".to_owned(),
+    };
 
     let mut total: u64 = 0;
     for _ in 0..EXPIRE_MAX_BATCHES_PER_PASS {
-        let result = sqlx::query(EXPIRE_PENDING_BATCH_SQL)
-            .bind(&result_json)
-            .bind(EXPIRE_BATCH_SIZE)
-            .execute(pool)
-            .await?;
-        let affected = result.rows_affected();
+        let expired = crate::broker::terminalization::terminalize(pool, &command).await?;
+        let affected = expired.len() as u64;
         total += affected;
         if affected < EXPIRE_BATCH_SIZE as u64 {
             break;

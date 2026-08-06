@@ -251,7 +251,7 @@ pub(crate) async fn confirm_ownership_and_set_running(
         }
         Ok(None) => {
             match broker
-                .expire_claimed_task_before_start(task_id, worker_id, claimed_at)
+                .expire_claimed_task_before_start(task_id, worker_id)
                 .await
             {
                 Ok(Some(result_json)) => {

@@ -1229,16 +1229,17 @@ impl PostgresBroker {
 
     /// Expire a CLAIMED task whose `good_until` passed before user code started.
     ///
-    /// `claimed_at` fences the transition to the caller's claim generation
-    /// (`None` disables the fence), so a stale dispatch cannot expire a row
-    /// the same worker re-claimed. Returns the persisted `TaskResult::Err`
-    /// JSON when the transition was applied. Returns `None` if another actor
-    /// already moved the task.
+    /// Runs through `horsies_expire_owned_claim`, which fences on worker
+    /// ownership but deliberately not on the claim generation: once the
+    /// deadline has passed, expiry is the correct outcome for whichever
+    /// generation holds the row. Returns the persisted `TaskResult::Err`
+    /// JSON when the transition was applied. Returns `None` if the deadline
+    /// guard refused or another actor already moved the task (the outcome is
+    /// logged with its evidence at the adapter boundary).
     pub async fn expire_claimed_task_before_start(
         &self,
         task_id: &str,
         worker_id: &str,
-        claimed_at: Option<DateTime<Utc>>,
     ) -> Result<Option<String>, BrokerError> {
         let task_error = crate::core::TaskError::builtin(
             crate::core::OutcomeCode::TaskExpired,
@@ -1247,36 +1248,26 @@ impl PostgresBroker {
         let task_result = crate::core::TaskResult::<serde_json::Value>::Err(task_error);
         let result_json = serde_json::to_string(&task_result)
             .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
-        let error_code = "TASK_EXPIRED";
 
-        let updated: Option<crate::broker::row::task::ClaimedId> = sqlx::query_as(
-            "UPDATE horsies_tasks \
-             SET status = 'EXPIRED', \
-                 claimed = FALSE, \
-                 claim_expires_at = NULL, \
-                 failed_at = NOW(), \
-                 result = $1, \
-                 error_code = $2, \
-                 terminal_at = NOW(), \
-                 updated_at = NOW() \
-             WHERE id = $3 \
-               AND status = 'CLAIMED' \
-               AND claimed_by_worker_id = $4 \
-               AND ($5::timestamptz IS NULL OR claimed_at = $5) \
-               AND good_until IS NOT NULL \
-               AND good_until <= NOW() \
-             RETURNING id",
+        let outcomes = crate::broker::terminalization::terminalize(
+            &self.pool,
+            &crate::core::lifecycle::TerminalizationCommand::ExpireOwnedClaim {
+                task_id: task_id.to_owned(),
+                fence: crate::core::lifecycle::WorkerOwned {
+                    worker_id: worker_id.to_owned(),
+                },
+                result_json: result_json.clone(),
+                error_code: "TASK_EXPIRED".to_owned(),
+            },
         )
-        .bind(&result_json)
-        .bind(error_code)
-        .bind(task_id)
-        .bind(worker_id)
-        .bind(claimed_at)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(BrokerError::Database)?;
+        .await?;
 
-        Ok(updated.map(|_| result_json))
+        Ok(match outcomes.first() {
+            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. }) => {
+                Some(result_json)
+            }
+            _ => None,
+        })
     }
 
     /// Cancel a task. Returns `true` if the task was actually cancelled
@@ -1835,49 +1826,6 @@ impl PostgresBroker {
     // -----------------------------------------------------------------------
     // Monitoring / observability queries
     // -----------------------------------------------------------------------
-
-    /// Find RUNNING tasks with stale heartbeats (potential worker crashes).
-    ///
-    /// Returns tasks whose most recent runner heartbeat (or `started_at` if
-    /// no heartbeat was ever recorded) is older than `stale_threshold_minutes`.
-    ///
-    /// Expire unclaimed PENDING tasks whose `good_until` has passed.
-    ///
-    /// Transitions matching tasks to EXPIRED with a TASK_EXPIRED result.
-    /// No attempt rows are written (the task was never executed).
-    /// Returns the number of expired tasks.
-    ///
-    /// Called by the reaper loop, matching Python's `expire_pending_tasks()`.
-    pub async fn expire_pending_tasks(&self) -> Result<u64, BrokerError> {
-        let task_error = crate::core::TaskError::builtin(
-            crate::core::OutcomeCode::TaskExpired,
-            "task expired before being claimed (good_until passed)",
-        );
-        let task_result = crate::core::TaskResult::<()>::Err(task_error);
-        let result_json = serde_json::to_string(&task_result)
-            .unwrap_or_else(|_| r#"{"__type":"err","value":{"message":"expired"}}"#.to_owned());
-        let error_code = "TASK_EXPIRED";
-
-        let result = sqlx::query(
-            "UPDATE horsies_tasks \
-             SET status = 'EXPIRED', \
-                 failed_at = NOW(), \
-                 result = $1, \
-                 error_code = $2, \
-                 terminal_at = NOW(), \
-                 updated_at = NOW() \
-             WHERE status = 'PENDING' \
-               AND good_until IS NOT NULL \
-               AND good_until <= NOW()",
-        )
-        .bind(&result_json)
-        .bind(error_code)
-        .execute(&self.pool)
-        .await
-        .map_err(BrokerError::Database)?;
-
-        Ok(result.rows_affected())
-    }
 
     /// Verify runtime-pool connectivity with a cheap `SELECT 1` query.
     ///
@@ -3925,31 +3873,30 @@ mod set_running_heartbeat_tests {
             .expect("unclaim");
         assert!(!released, "stale generation must not release the row");
 
-        // Stale expire-before-start: even with good_until in the past, the
-        // stale dispatch must not expire the live claim.
+        // Expire-before-start deliberately carries no claim generation: once
+        // the deadline has passed, expiry is the correct outcome for
+        // whichever generation holds the row — a stale dispatch and a live
+        // one commit the same correct event. Before the deadline, the
+        // deadline guard (not a generation fence) refuses.
+        let not_due = broker
+            .expire_claimed_task_before_start(&id, "w1")
+            .await
+            .expect("expire");
+        assert!(not_due.is_none(), "unexpired deadline must refuse");
         sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 second' WHERE id = $1")
             .bind(&id)
             .execute(&pool)
             .await
             .expect("age good_until");
         let expired = broker
-            .expire_claimed_task_before_start(&id, "w1", Some(stale_generation))
+            .expire_claimed_task_before_start(&id, "w1")
             .await
             .expect("expire");
-        assert!(expired.is_none(), "stale generation must not expire the row");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .expect("status");
-        assert_eq!(status, "CLAIMED", "row must still be CLAIMED after stale attempts");
-
-        // The live generation passes the fence.
-        let expired = broker
-            .expire_claimed_task_before_start(&id, "w1", Some(live_generation))
-            .await
-            .expect("expire");
-        assert!(expired.is_some(), "live generation must pass the fence");
+        assert!(
+            expired.is_some(),
+            "expired deadline must expire for any generation of this worker's claim"
+        );
+        let _ = live_generation;
 
         cleanup(&pool, &id).await;
     }
@@ -4397,7 +4344,7 @@ mod terminal_at_stamp_tests {
         seed(&pool, &id, "CLAIMED", Some("w1"), Some(-60)).await;
 
         let expired = broker
-            .expire_claimed_task_before_start(&id, "w1", None)
+            .expire_claimed_task_before_start(&id, "w1")
             .await
             .expect("expire");
         assert!(expired.is_some());

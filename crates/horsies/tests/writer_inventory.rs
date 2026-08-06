@@ -27,8 +27,8 @@ const TERMINAL_SET_MARKERS: [&str; 4] = [
 /// count going UP means a new legacy writer, which is structurally
 /// rejected.
 const ALLOWLIST: [(&str, usize); 3] = [
-    ("broker/postgres.rs", 7),
-    ("worker/recovery.rs", 2),
+    ("broker/postgres.rs", 5),
+    ("worker/recovery.rs", 1),
     ("workflow_engine/lifecycle.rs", 2),
 ];
 
