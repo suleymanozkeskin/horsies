@@ -124,6 +124,12 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Operations',
+					items: [
+						{ label: 'Autovacuum Tuning', slug: 'operations/autovacuum-tuning' },
+					],
+				},
+				{
 					label: 'Scheduling',
 					items: [
 						{ label: 'Scheduler Overview', slug: 'scheduling/scheduler-overview' },
