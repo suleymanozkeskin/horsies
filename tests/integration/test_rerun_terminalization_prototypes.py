@@ -38,6 +38,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from tests.perf.counters import Counts
 from tests.perf.statistics import Verdict
 from tests.task_history_prototypes.rerun_terminalization_evidence import (
+    ENVELOPE_WAL_COEFFICIENT,
+    ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES,
+    ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES,
     INLINE_BOUND_BYTES,
     InstalledComparison,
     PayloadShape,
@@ -50,6 +53,8 @@ from tests.task_history_prototypes.rerun_terminalization_evidence import (
     install_statement_counters,
     measure_cell,
     read_statement_counter_prerequisite,
+    WAL_FRACTION,
+    WalBoundKind,
     stored_history_form,
 )
 from tests.task_history_prototypes.schema import (
@@ -75,11 +80,13 @@ _DRIVER_OBSERVATIONS = 40
 _DRIVER_BLOCK_SIZE = 20
 _DRIVER_RESAMPLES = 200
 
-# The deliberately tightened WAL limit the detection control runs under:
-# no proportional allowance and a one-byte floor, which the candidate
-# necessarily exceeds because it copies the envelope into history.
-_TIGHTENED_WAL_FRACTION = 0.0
-_TIGHTENED_WAL_FLOOR_BYTES = 1
+# The deliberately tightened bound the detection control runs under. It is
+# the AMENDED shape with its coefficient cut: allowing only half a copy of
+# the prepared envelope, which an honest single copy necessarily exceeds.
+# Tightening the overhead floor alone would leave the coefficient — the
+# term the amended bound actually turns on — unexercised.
+_TIGHTENED_WAL_COEFFICIENT = 0.5
+_TIGHTENED_WAL_OVERHEAD_FLOOR_BYTES = 0
 
 
 def _counts(*, wal_bytes: int, terminal_rows: int) -> Counts:
@@ -560,25 +567,35 @@ class TestWalDetectionControl:
         connection, comparison = installed
         await _require_counters(connection)
 
+        # Incompressible deliberately. A compressible envelope reaches storage
+        # far smaller than its prepared size, so a halved coefficient still
+        # leaves room and the control would pass while proving nothing. The
+        # bound binds where the bytes are really written.
         cell = await measure_cell(
             connection,
             comparison,
-            payload_shape=PayloadShape.COMPRESSIBLE,
+            payload_shape=PayloadShape.INCOMPRESSIBLE,
             attempts_per_task=1,
             observations=_DRIVER_OBSERVATIONS,
             block_size=_DRIVER_BLOCK_SIZE,
             resamples=_DRIVER_RESAMPLES,
             seed=20260806,
-            wal_fraction=_TIGHTENED_WAL_FRACTION,
-            wal_floor_bytes=_TIGHTENED_WAL_FLOOR_BYTES,
+            wal_coefficient=_TIGHTENED_WAL_COEFFICIENT,
+            wal_overhead_floor_bytes=_TIGHTENED_WAL_OVERHEAD_FLOOR_BYTES,
         )
 
         assert cell.wal.verdict is Verdict.FAIL
         assert cell.verdict is Verdict.FAIL
         # The control is only reproducible if the artifact says what it used.
-        assert cell.wal.fraction == _TIGHTENED_WAL_FRACTION
-        assert cell.wal.floor_bytes == _TIGHTENED_WAL_FLOOR_BYTES
-        assert cell.wal.limit_bytes == float(_TIGHTENED_WAL_FLOOR_BYTES)
+        assert cell.wal.bound_kind is WalBoundKind.ENVELOPE_COPY
+        assert cell.wal.coefficient == _TIGHTENED_WAL_COEFFICIENT
+        assert (
+            cell.wal.overhead_floor_bytes
+            == _TIGHTENED_WAL_OVERHEAD_FLOOR_BYTES
+        )
+        assert cell.wal.limit_bytes == INLINE_BOUND_BYTES * (
+            _TIGHTENED_WAL_COEFFICIENT
+        )
         assert cell.wal.deliberately_tightened
 
     def test_declared_budget_is_not_marked_as_tightened(self) -> None:
@@ -587,6 +604,7 @@ class TestWalDetectionControl:
         comparison = compare_wal(
             baseline=_counts(wal_bytes=1_000, terminal_rows=10),
             candidate=_counts(wal_bytes=1_200, terminal_rows=10),
+            prepared_envelope_bytes=INLINE_BOUND_BYTES,
         )
 
         assert not comparison.deliberately_tightened
@@ -594,22 +612,89 @@ class TestWalDetectionControl:
 
     def test_the_same_measurement_passes_under_the_declared_budget(
         self,
-        installed: tuple[AsyncConnection, InstalledComparison],
     ) -> None:
         # Isolates the tightening from the workload: same counts, two limits.
-        baseline = _counts(wal_bytes=100_000, terminal_rows=100)
-        candidate = _counts(wal_bytes=140_000, terminal_rows=100)
+        # One honest copy of the envelope plus the measured residue.
+        per_task = INLINE_BOUND_BYTES + ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES
+        baseline = _counts(wal_bytes=1_340 * 100, terminal_rows=100)
+        candidate = _counts(
+            wal_bytes=(1_340 + per_task) * 100,
+            terminal_rows=100,
+        )
 
-        declared = compare_wal(baseline=baseline, candidate=candidate)
+        declared = compare_wal(
+            baseline=baseline,
+            candidate=candidate,
+            prepared_envelope_bytes=INLINE_BOUND_BYTES,
+        )
         tightened = compare_wal(
             baseline=baseline,
             candidate=candidate,
-            fraction=_TIGHTENED_WAL_FRACTION,
-            floor_bytes=_TIGHTENED_WAL_FLOOR_BYTES,
+            prepared_envelope_bytes=INLINE_BOUND_BYTES,
+            coefficient=_TIGHTENED_WAL_COEFFICIENT,
+            overhead_floor_bytes=_TIGHTENED_WAL_OVERHEAD_FLOOR_BYTES,
         )
 
         assert declared.verdict is Verdict.PASS
         assert tightened.verdict is Verdict.FAIL
+
+
+class TestAmendedEnvelopeBound:
+    """The bound turns on copying the envelope once, and says so numerically."""
+
+    def test_one_honest_copy_plus_measured_residue_passes(self) -> None:
+        per_task = INLINE_BOUND_BYTES + ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES
+        comparison = compare_wal(
+            baseline=_counts(wal_bytes=1_340 * 100, terminal_rows=100),
+            candidate=_counts(
+                wal_bytes=(1_340 + per_task) * 100,
+                terminal_rows=100,
+            ),
+            prepared_envelope_bytes=INLINE_BOUND_BYTES,
+        )
+
+        assert comparison.verdict is Verdict.PASS
+        assert comparison.bound_kind is WalBoundKind.ENVELOPE_COPY
+
+    def test_a_second_envelope_copy_fails_by_a_wide_margin(self) -> None:
+        # The reason the coefficient is exactly 1.0. A floor generous enough to
+        # admit a second copy would not be a copy-honesty bound at all.
+        per_task = (
+            2 * INLINE_BOUND_BYTES
+            + ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES
+        )
+        comparison = compare_wal(
+            baseline=_counts(wal_bytes=1_340 * 100, terminal_rows=100),
+            candidate=_counts(
+                wal_bytes=(1_340 + per_task) * 100,
+                terminal_rows=100,
+            ),
+            prepared_envelope_bytes=INLINE_BOUND_BYTES,
+        )
+
+        assert comparison.verdict is Verdict.FAIL
+
+    def test_declared_floor_covers_the_worst_measured_residue(self) -> None:
+        assert (
+            ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES
+            > ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES
+        )
+        # ...and stays far below what a second copy would add, or the bound
+        # would stop rejecting the thing it exists to reject.
+        assert ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES < INLINE_BOUND_BYTES / 4
+
+    def test_coefficient_is_exactly_one_copy(self) -> None:
+        assert ENVELOPE_WAL_COEFFICIENT == 1.0
+
+    def test_a_cell_without_an_envelope_keeps_the_share_bound(self) -> None:
+        comparison = compare_wal(
+            baseline=_counts(wal_bytes=100_000, terminal_rows=100),
+            candidate=_counts(wal_bytes=140_000, terminal_rows=100),
+            prepared_envelope_bytes=0,
+        )
+
+        assert comparison.bound_kind is WalBoundKind.BASELINE_SHARE
+        assert comparison.limit_bytes == max(1_000 * WAL_FRACTION, 4_096.0)
 
 
 class TestLeafBoundsAreTimezoneIndependent:

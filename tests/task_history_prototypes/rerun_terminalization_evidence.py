@@ -1266,6 +1266,49 @@ ABSOLUTE_LOCK_P95_LIMIT_MS = 25.0
 WAL_FRACTION = 0.50
 WAL_FLOOR_BYTES = 4096
 
+# Envelope-carrying terminalization is judged on copy honesty rather than on a
+# share of the baseline. The baseline's same-row update never rewrites an
+# unchanged out-of-line value, so it pays nothing for the envelope; the
+# candidate moves the envelope into history and pays for all of it. A share of
+# a baseline that never carried the payload is not a bound on carrying it once.
+#
+# The candidate may therefore write one copy of the prepared envelope plus a
+# declared overhead. The coefficient is exactly 1.0: a second copy is the thing
+# this bound exists to reject, and the structural one-copy assertion is its
+# counted twin.
+ENVELOPE_WAL_COEFFICIENT = 1.0
+
+# Derived, not assumed. Residue is WAL delta per task minus prepared envelope
+# bytes, measured on both supported majors in paired-micro mode at 200
+# observations per side:
+#
+#   envelope  chunks   residue att=1   residue att=4
+#      4,096       3       476 / 478       968 / 970
+#      8,192       5             865            1,357
+#     16,384       9   1,614 / 1,616    2,107 / 2,109
+#     32,768      17           3,122            3,614
+#     65,536      33   6,138 / 6,140    6,631 / 6,634
+#
+# (PostgreSQL 14 / PostgreSQL 16 where both were measured; three repetitions at
+# 65,536 on PostgreSQL 16 spread two bytes.)
+#
+# The residue is NOT size-invariant. It tracks TOAST chunk count at
+# 188.7 bytes per chunk, chunks = ceil(bytes / 1996), with a constant
+# 492-493 byte increment from one attempt row to four. Fitting the endpoints of
+# the attempt-1 series gives residue = 188.73 * chunks - 88, which reproduces
+# the measured 6,140 at 33 chunks exactly.
+#
+# The floor below is therefore declared AT the 65,536-byte shape and the worst
+# declared attempt depth, where the measured maximum across both majors is
+# 6,634 bytes. Eight kibibytes covers that with roughly 23% headroom while
+# remaining an order of magnitude below the 65,536 bytes a second envelope copy
+# would add, so the bound still rejects what it exists to reject. A different
+# inline bound must RE-DERIVE this floor from the per-chunk model above rather
+# than inherit it.
+ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES = 8_192
+ENVELOPE_WAL_DERIVED_AT_BYTES = 65_536
+ENVELOPE_WAL_WORST_MEASURED_RESIDUE_BYTES = 6_634
+
 _DEFAULT_BLOCK_SIZE = 100
 
 MEASURED_WORKER_ID = 'rerun-gate-worker'
@@ -1273,13 +1316,24 @@ MEASURED_ERROR_CODE = 'RERUN_GATE_FAILURE'
 FINITE_RETENTION_CLASS = 'finite_30d_v1'
 
 
+class WalBoundKind(StrEnum):
+    """Which declared WAL bound a cell was judged against."""
+
+    ENVELOPE_COPY = 'envelope_copy'
+    BASELINE_SHARE = 'baseline_share'
+
+
 @dataclass(frozen=True, slots=True)
 class WalComparison:
     """WAL bytes per terminal task, judged against its declared allowance."""
 
+    bound_kind: WalBoundKind
     baseline_bytes_per_task: float
     candidate_bytes_per_task: float
     delta_bytes_per_task: float
+    prepared_envelope_bytes: int
+    coefficient: float
+    overhead_floor_bytes: int
     fraction: float
     floor_bytes: int
     limit_bytes: float
@@ -1288,10 +1342,18 @@ class WalComparison:
     @property
     def deliberately_tightened(self) -> bool:
         """Whether this comparison ran under something other than the budget."""
-        return (
-            self.fraction != WAL_FRACTION
-            or self.floor_bytes != WAL_FLOOR_BYTES
-        )
+        match self.bound_kind:
+            case WalBoundKind.ENVELOPE_COPY:
+                return (
+                    self.coefficient != ENVELOPE_WAL_COEFFICIENT
+                    or self.overhead_floor_bytes
+                    != ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES
+                )
+            case WalBoundKind.BASELINE_SHARE:
+                return (
+                    self.fraction != WAL_FRACTION
+                    or self.floor_bytes != WAL_FLOOR_BYTES
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1521,24 +1583,44 @@ def compare_wal(
     *,
     baseline: Counts,
     candidate: Counts,
+    prepared_envelope_bytes: int,
+    coefficient: float = ENVELOPE_WAL_COEFFICIENT,
+    overhead_floor_bytes: int = ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES,
     fraction: float = WAL_FRACTION,
     floor_bytes: int = WAL_FLOOR_BYTES,
 ) -> WalComparison:
-    """Judge WAL per terminal task against the greater of a share and a floor.
+    """Judge WAL per terminal task against the bound its payload selects.
 
-    `fraction` and `floor_bytes` are arguments rather than constants read
-    inside so a detection control can tighten one deliberately; whatever value
-    was used travels in the result, which is what makes such a control
-    reproducible rather than an anecdote.
+    A cell carrying a prepared envelope is judged on copy honesty: one copy of
+    the prepared bytes plus a derived overhead. A cell carrying none keeps the
+    original share-of-baseline bound, which is meaningful there because both
+    sides write the same payload.
+
+    Every coefficient, floor, fraction and limit travels in the result. A
+    detection control tightens one deliberately, and a control whose tightened
+    value is not recorded is an anecdote rather than something reproducible.
     """
+    if prepared_envelope_bytes < 0:
+        raise RerunTerminalizationError(
+            'prepared envelope bytes cannot be negative'
+        )
     baseline_per_task = baseline.wal_bytes_per_row
     candidate_per_task = candidate.wal_bytes_per_row
-    limit = max(baseline_per_task * fraction, float(floor_bytes))
     delta = candidate_per_task - baseline_per_task
+    if prepared_envelope_bytes > 0:
+        bound_kind = WalBoundKind.ENVELOPE_COPY
+        limit = prepared_envelope_bytes * coefficient + overhead_floor_bytes
+    else:
+        bound_kind = WalBoundKind.BASELINE_SHARE
+        limit = max(baseline_per_task * fraction, float(floor_bytes))
     return WalComparison(
+        bound_kind=bound_kind,
         baseline_bytes_per_task=baseline_per_task,
         candidate_bytes_per_task=candidate_per_task,
         delta_bytes_per_task=delta,
+        prepared_envelope_bytes=prepared_envelope_bytes,
+        coefficient=coefficient,
+        overhead_floor_bytes=overhead_floor_bytes,
         fraction=fraction,
         floor_bytes=floor_bytes,
         limit_bytes=limit,
@@ -1706,8 +1788,8 @@ async def measure_cell(
     seed: int,
     envelope_bytes: int = INLINE_BOUND_BYTES,
     result_bytes: int = 200,
-    wal_fraction: float = WAL_FRACTION,
-    wal_floor_bytes: int = WAL_FLOOR_BYTES,
+    wal_coefficient: float = ENVELOPE_WAL_COEFFICIENT,
+    wal_overhead_floor_bytes: int = ENVELOPE_WAL_OVERHEAD_FLOOR_BYTES,
 ) -> CellResult:
     """Measure one (payload shape, attempt depth) cell and judge every budget.
 
@@ -1765,8 +1847,9 @@ async def measure_cell(
     wal = compare_wal(
         baseline=baseline.counts,
         candidate=candidate.counts,
-        fraction=wal_fraction,
-        floor_bytes=wal_floor_bytes,
+        prepared_envelope_bytes=envelope_bytes,
+        coefficient=wal_coefficient,
+        overhead_floor_bytes=wal_overhead_floor_bytes,
     )
     exact_counts = (
         _exact_counts(
