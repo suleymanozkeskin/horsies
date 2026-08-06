@@ -621,7 +621,7 @@ async def run_replacement_copy_batch(
                        (
                            SELECT source_ctid::text
                            FROM source_batch
-                           ORDER BY source_ctid DESC
+                           ORDER BY source_batch.source_ctid DESC
                            LIMIT 1
                        ) AS last_source_ctid,
                        (
@@ -892,7 +892,14 @@ async def swap_verified_replacement_partitions(
         job_id=job_id,
     )
     if not locked_verification.verified:
-        raise RuntimeError('replacement verification changed before binding swap')
+        raise RuntimeError(
+            'replacement verification changed before binding swap: '
+            'source_relations_changed='
+            f'{locked_verification.source_relations_changed}, '
+            'replacement_row_mismatches='
+            f'{locked_verification.replacement_row_mismatches}, '
+            f'invalid_target_rows={locked_verification.invalid_target_rows}'
+        )
     for relation in relations:
         source = _qualified(schema, relation.source_relation_name)
         parent = _qualified(schema, relation.parent_relation_name)

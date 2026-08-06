@@ -98,6 +98,8 @@ jobs:
               attempts=21
             fi
             output="$output_dir/${component,,}.json"
+            candidate_output="$output.candidate"
+            error_log="$output.stderr"
             if ! uv run python -m tests.task_history_prototypes \
               --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
               --commit '${{ github.sha }}' \
@@ -111,11 +113,53 @@ jobs:
               --batch-size 100000 \
               --result-bytes 200 \
               --attempts-per-task "$attempts" \
-              --demo-quiesced > "$output"
+              --demo-quiesced > "$candidate_output" 2> "$error_log"
             then
+              jq -n \
+                --arg component "$component" \
+                --arg commit '${{ github.sha }}' \
+                --arg postgres_major '${{ matrix.postgres }}' \
+                --arg server_image '${{ matrix.image }}' \
+                --arg host_description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+                --arg storage_description 'GitHub-hosted runner Docker overlay2 storage' \
+                --argjson attempts_per_task "$attempts" \
+                --rawfile error "$error_log" \
+                '{
+                  status: "execution_failure",
+                  component: $component,
+                  conditions: {
+                    commit: $commit,
+                    run_kind: "gate",
+                    postgres_major: $postgres_major,
+                    server_image: $server_image,
+                    host_description: $host_description,
+                    storage_description: $storage_description,
+                    demo_quiesced: true,
+                    fsync: "on",
+                    synchronous_commit: "on",
+                    full_page_writes: "on",
+                    autovacuum: "on",
+                    autovacuum_vacuum_threshold: "50",
+                    autovacuum_vacuum_scale_factor: "0.2",
+                    autovacuum_analyze_threshold: "50",
+                    autovacuum_analyze_scale_factor: "0.1",
+                    autovacuum_naptime: "1min",
+                    autovacuum_max_workers: "3",
+                    checkpoint_timeout: "5min",
+                    max_wal_size: "2GB"
+                  },
+                  workload: {
+                    rows: 1000000,
+                    batch_size: 100000,
+                    payload_bytes: 200,
+                    attempts_per_task: $attempts_per_task
+                  },
+                  error: $error
+                }' > "$output"
               failures=1
               continue
             fi
+            mv "$candidate_output" "$output"
             if ! jq -e '
               .verification.verified
               and .decoder_retirement_ready

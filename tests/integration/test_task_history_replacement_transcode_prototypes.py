@@ -45,6 +45,9 @@ from tests.task_history_prototypes.schema import (
 )
 from tests.task_history_prototypes.transcode import ArchiveComponent
 from tests.task_history_prototypes.transcode import ARCHIVE_CODEC_V2, ARCHIVE_FRAME_V2
+from tests.task_history_prototypes.transcode_evidence import (
+    seed_archive_transcode_workload,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -350,6 +353,79 @@ async def test_replacement_copy_verifies_swaps_and_retires_decoder(
     assert all(row.valid_task_id_index for row in indexes)
 
 
+async def test_replacement_copy_cursor_preserves_every_row_across_heap_pages(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+) -> None:
+    connection, schema, _ = replacement_schema
+    rows = 1_000
+    await seed_archive_transcode_workload(
+        connection,
+        schema,
+        rows=rows,
+        payload_bytes=200,
+        attempts_per_task=4,
+    )
+    await connection.commit()
+
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.HISTORY_ROW,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    batches = await _copy_all(
+        connection,
+        schema,
+        job_id=job_id,
+        batch_size=100,
+    )
+
+    assert len(batches) == 10
+    verification = await verify_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+    )
+    assert verification.verified is True
+    assert verification.replacement_row_mismatches == 0
+    replacement_relations = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT replacement_relation_name
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                ORDER BY relation_ordinal
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalars()
+    observed_rows = 0
+    observed_task_ids = 0
+    for relation_name in replacement_relations:
+        cardinality = (
+            await connection.execute(
+                text(
+                    f"""
+                    SELECT count(*) AS rows,
+                           count(DISTINCT task_id) AS distinct_task_ids
+                    FROM {schema.sql}."{relation_name}"
+                    """
+                )
+            )
+        ).one()
+        observed_rows += cardinality.rows
+        observed_task_ids += cardinality.distinct_task_ids
+    assert observed_rows == rows
+    assert observed_task_ids == rows
+
+
 async def test_copy_resumes_from_durable_cursor_across_connections(
     replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
     engine: AsyncEngine,
@@ -626,12 +702,16 @@ async def test_replacement_mutation_blocks_verification_and_swap(
     )
     assert verification.verified is False
     assert verification.replacement_row_mismatches == 1
-    with pytest.raises(RuntimeError, match='changed before binding swap'):
+    with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
         await swap_verified_replacement_partitions(
             connection,
             schema,
             job_id=job_id,
         )
+    message = str(raised.value)
+    assert 'source_relations_changed=0' in message
+    assert 'replacement_row_mismatches=1' in message
+    assert 'invalid_target_rows=0' in message
 
 
 async def test_source_mutation_after_verification_blocks_locked_swap(
@@ -671,12 +751,16 @@ async def test_source_mutation_after_verification_blocks_locked_swap(
     )
     await connection.commit()
 
-    with pytest.raises(RuntimeError, match='changed before binding swap'):
+    with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
         await swap_verified_replacement_partitions(
             connection,
             schema,
             job_id=job_id,
         )
+    message = str(raised.value)
+    assert 'source_relations_changed=0' in message
+    assert 'replacement_row_mismatches=1' in message
+    assert 'invalid_target_rows=0' in message
     await connection.rollback()
     assert (
         await connection.execute(
