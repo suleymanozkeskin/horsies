@@ -14,6 +14,8 @@ pub mod shared_listener;
 // first cutover commit.
 #[allow(dead_code)]
 pub mod terminalization;
+#[cfg(test)]
+mod terminalization_matrix;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};
