@@ -44,6 +44,8 @@ These values correspond to `TaskStatus` in the API (see Task Lifecycle for termi
 | `worker_process_name` | VARCHAR(255) | Process identifier |
 | `claim_expires_at` | TIMESTAMP | Claim lease expiry deadline |
 | `enqueue_sha` | VARCHAR(64) | SHA-256 digest for idempotent retry |
+| `terminal_at` | TIMESTAMPTZ | Canonical terminal instant. Non-NULL exactly while the row is terminal — enforced by `ck_horsies_tasks_terminal_at_terminal_only`: `(status IN (COMPLETED, FAILED, CANCELLED, EXPIRED)) = (terminal_at IS NOT NULL)` |
+| `terminalization_kind` | TEXT | Which terminal operation committed the row (e.g. `COMPLETE_FUSED`, `FAIL_STALE`, `CANCEL_ORPHAN_SWEEP`). Written only by the operation functions, never by callers; a value-domain CHECK rejects unknown kinds. NULL = the row predates the column; its provenance is unknown and never inferred |
 | `created_at` | TIMESTAMP | Row creation time |
 | `updated_at` | TIMESTAMP | Last update time |
 
@@ -229,6 +231,44 @@ let broker = app.get_broker().await?;
 // schema already ensured by the high-level app path
 broker.health_check().await?;
 ```
+
+## Terminalization Operations
+
+Every terminal task transition (COMPLETED / FAILED / CANCELLED / EXPIRED on
+`horsies_tasks`) executes through one of 15 PL/pgSQL operation functions plus
+one shared miss classifier, installed by migration 0032. Each function owns
+its guard, stamps `terminal_at` and its own `terminalization_kind`, and
+returns one typed outcome row per transition through the composite type
+`horsies_terminalization_outcome` (outcomes: `APPLIED`, `ALREADY_APPLIED`,
+`LOST_CLAIM`, `SOURCE_STATE_CONFLICT`, `TASK_ABSENT`, with guard evidence for
+refusals). No inline SQL in the library writes a terminal status — a source
+scan enforces this structurally.
+
+| Function | Kind | Target |
+| -------- | ---- | ------ |
+| `horsies_complete_locked_task` | COMPLETE_LOCKED | COMPLETED |
+| `horsies_complete_task_fused` | COMPLETE_FUSED | COMPLETED |
+| `horsies_fail_locked_task` | FAIL_RUNNING | FAILED |
+| `horsies_fail_stale_task` | FAIL_STALE | FAILED |
+| `horsies_expire_owned_claim` | EXPIRE_CLAIMED | EXPIRED |
+| `horsies_expire_pending_tasks` | EXPIRE_PENDING | EXPIRED |
+| `horsies_cancel_locked_task` | CANCEL_ADMIN | CANCELLED |
+| `horsies_cancel_owned_orphan` | CANCEL_ORPHAN | CANCELLED |
+| `horsies_cancel_orphaned_tasks` | CANCEL_ORPHAN_SWEEP | CANCELLED |
+| `horsies_abandon_owned_node` | PAUSE_ABANDON_CLAIM | CANCELLED |
+| `horsies_abandon_owned_nodes` | PAUSE_ABANDON_CLAIM_BATCH | CANCELLED |
+| `horsies_abandon_nodes_of_paused_workflows` | PAUSE_ABANDON_WORKFLOW | CANCELLED |
+| `horsies_cancel_owned_node` | WORKFLOW_CANCEL_CLAIM | CANCELLED |
+| `horsies_cancel_owned_nodes` | WORKFLOW_CANCEL_CLAIM_BATCH | CANCELLED |
+| `horsies_cancel_nodes_of_cancelled_workflow` | WORKFLOW_CANCEL_WORKFLOW | CANCELLED |
+| `horsies_terminalization_miss` | (shared classifier) | — |
+
+Kinds form equivalence classes (e.g. both completion kinds are
+interchangeable): a crash-replay that finds a kind from its own class already
+committed reports `ALREADY_APPLIED`; a kind from another class reports
+`SOURCE_STATE_CONFLICT` with `FOREIGN_TERMINALIZATION` evidence naming the
+committed kind. Functions are re-installed DROP-then-CREATE on migration
+apply, so a body change ships as a new migration re-running the set.
 
 ## Automatic Retention Cleanup
 

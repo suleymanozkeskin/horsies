@@ -92,7 +92,31 @@ When a RUNNING task has no recent runner heartbeat:
 - If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
+The terminal branch runs through `horsies_fail_stale_task`, which captures
+the heartbeat and finalizing state under its own row lock and re-judges
+staleness from that capture — the reaper's scan is advisory. A heartbeat
+that lands between the scan and the call refuses the failure and reports the
+compared values (`last_heartbeat_at`, `finalizing_at`, thresholds, and the
+evaluation instant) instead of failing a live task.
+
 This is why idempotent task design still matters: crash recovery can retry work that may have partially completed before the worker died.
+
+### Orphaned Workflow Task Cleanup
+
+A workflow task is *orphaned* when it sits CLAIMED or PENDING but no
+`workflow_tasks` row for it remains in a runnable state — it can never
+legitimately reach RUNNING, and left alone it holds a claim forever. With
+`auto_terminate_orphaned_workflow_tasks` (default `true`):
+
+- the reaper sweeps orphans CANCELLED in bounded batches (500 per batch, up
+  to 200 batches per pass); the sweep disables itself after 3 consecutive
+  permanent failures and logs that manual intervention is needed
+- a worker handed an orphan cancels it before start: the node RUNNING
+  handoff finding no runnable linkage triggers `horsies_cancel_owned_orphan`,
+  which re-verifies the linkage under its own lock and lets the task run if
+  a runnable link exists after all
+
+Set the flag to `false` to leave orphans CLAIMED for inspection instead.
 
 ### Workflow Task Recovery
 

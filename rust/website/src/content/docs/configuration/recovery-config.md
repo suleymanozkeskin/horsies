@@ -39,6 +39,7 @@ let config = AppConfig {
 | `auto_requeue_stale_claimed` | `bool` | `true` | Requeue tasks stuck in CLAIMED |
 | `claimed_stale_threshold_ms` | `u64` | 120,000 | Ms before CLAIMED task is stale |
 | `auto_fail_stale_running` | `bool` | `true` | Fail tasks stuck in RUNNING |
+| `auto_terminate_orphaned_workflow_tasks` | `bool` | `true` | Cancel workflow tasks with no runnable `workflow_tasks` linkage (reaper sweep + pre-start check); `false` leaves them CLAIMED for inspection |
 | `running_stale_threshold_ms` | `u64` | 300,000 | Ms before RUNNING task is stale |
 | `check_interval_ms` | `u64` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `u64` | 30,000 | RUNNING task heartbeat frequency |

@@ -456,7 +456,7 @@ mod catalog_tests {
     }
 
     /// (function, rendered argument list, rendered result type).
-    const EXPECTED_SIGNATURES: [(&str, &str, &str); 16] = [
+    pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str); 16] = [
         (
             "horsies_terminalization_miss",
             "p_task_id character varying, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone",
@@ -707,5 +707,53 @@ mod catalog_tests {
             .expect("query");
         let err = decode_outcome_row(&row).unwrap_err();
         assert!(err.to_string().contains("row shape"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    //! The count pin: fifteen lifecycle commands, fifteen kinds, sixteen
+    //! installed functions (the operations plus the shared miss classifier).
+    //! `catalog_tests` ties EXPECTED_SIGNATURES to the installed database
+    //! program; the vocabulary unit tests tie `function_name_of` to the
+    //! variant names; this anchor ties the two ends together so a command,
+    //! function, or kind cannot be added or removed alone.
+    use super::catalog_tests::EXPECTED_SIGNATURES;
+    use crate::core::lifecycle::TerminalizationKind;
+
+    const COMMAND_FUNCTIONS: [&str; 15] = [
+        "horsies_complete_locked_task",
+        "horsies_complete_task_fused",
+        "horsies_fail_locked_task",
+        "horsies_fail_stale_task",
+        "horsies_expire_owned_claim",
+        "horsies_expire_pending_tasks",
+        "horsies_cancel_locked_task",
+        "horsies_cancel_owned_orphan",
+        "horsies_cancel_orphaned_tasks",
+        "horsies_abandon_owned_node",
+        "horsies_abandon_owned_nodes",
+        "horsies_abandon_nodes_of_paused_workflows",
+        "horsies_cancel_owned_node",
+        "horsies_cancel_owned_nodes",
+        "horsies_cancel_nodes_of_cancelled_workflow",
+    ];
+
+    #[test]
+    fn commands_functions_and_kinds_agree() {
+        assert_eq!(COMMAND_FUNCTIONS.len(), TerminalizationKind::ALL.len());
+
+        let mut expected: Vec<&str> = EXPECTED_SIGNATURES
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert_eq!(expected.len(), COMMAND_FUNCTIONS.len() + 1, "operations + miss classifier");
+        assert!(expected.contains(&"horsies_terminalization_miss"));
+        expected.retain(|name| *name != "horsies_terminalization_miss");
+        expected.sort_unstable();
+
+        let mut commands: Vec<&str> = COMMAND_FUNCTIONS.to_vec();
+        commands.sort_unstable();
+        assert_eq!(expected, commands, "catalog signatures name exactly the command functions");
     }
 }
