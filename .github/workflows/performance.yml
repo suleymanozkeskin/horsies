@@ -13,6 +13,7 @@ on:
           - full
           - staged-lookup
           - storage-qualification
+          - uuid-index
           - operational-maintenance
 
 permissions: {}
@@ -827,7 +828,9 @@ jobs:
         run: docker compose -f tests/fixtures/perf/compose.yaml down -v
 
   uuid-index-qualification:
-    if: inputs.suite == 'storage-qualification'
+    if: >-
+      inputs.suite == 'storage-qualification'
+      || inputs.suite == 'uuid-index'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
