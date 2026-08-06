@@ -353,6 +353,7 @@ pub fn spawn_reaper(
         let check_interval = Duration::from_millis(config.check_interval_ms);
         let mut next_retention_cleanup = tokio::time::Instant::now()
             + Duration::from_secs(config.retention_sweep_interval_s);
+        let mut orphan_state = OrphanSweepState::default();
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -373,10 +374,10 @@ pub fn spawn_reaper(
                             tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
                         GatePass::Ungated => {
-                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
+                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup, &mut orphan_state).await;
                         }
                         GatePass::Held(tx) => {
-                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup).await;
+                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup, &mut orphan_state).await;
                             release_gate(tx).await;
                         }
                     }
@@ -471,6 +472,7 @@ async fn run_reaper_pass(
     pool: &PgPool,
     config: &RecoveryConfig,
     next_retention_cleanup: &mut tokio::time::Instant,
+    orphan_state: &mut OrphanSweepState,
 ) {
     if config.auto_fail_stale_running {
         let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
@@ -514,6 +516,51 @@ async fn run_reaper_pass(
                 tracing::error!(error = %e, "reaper: failed to requeue stale claimed tasks");
             }
             _ => {}
+        }
+    }
+
+    // Cancel orphaned workflow tasks (no live workflow_task linkage). These
+    // cannot reach RUNNING, so the requeue above skips them and they would
+    // otherwise stay CLAIMED forever; cancelling frees claim budget and lets
+    // retention sweep them.
+    if config.auto_terminate_orphaned_workflow_tasks && !orphan_state.disabled {
+        match terminate_orphaned_workflow_tasks(pool).await {
+            Ok(count) => {
+                orphan_state.permanent_failures = 0;
+                if count > 0 {
+                    tracing::warn!(
+                        count,
+                        "reaper cancelled orphaned workflow task(s) (no live \
+                         workflow_task linkage)",
+                    );
+                }
+            }
+            Err(e) if e.is_retryable() => {
+                orphan_state.permanent_failures = 0;
+                tracing::warn!(
+                    error = %e,
+                    "reaper orphan sweep transient failure (will retry next cycle)",
+                );
+            }
+            Err(e) => {
+                orphan_state.permanent_failures += 1;
+                if orphan_state.permanent_failures >= ORPHAN_SWEEP_MAX_PERMANENT_FAILURES {
+                    orphan_state.disabled = true;
+                    tracing::error!(
+                        error = %e,
+                        failures = orphan_state.permanent_failures,
+                        "reaper orphan sweep disabled after consecutive permanent \
+                         failures; requires deploy or manual intervention",
+                    );
+                } else {
+                    tracing::error!(
+                        error = %e,
+                        failures = orphan_state.permanent_failures,
+                        max = ORPHAN_SWEEP_MAX_PERMANENT_FAILURES,
+                        "reaper orphan sweep permanent failure",
+                    );
+                }
+            }
         }
     }
 
@@ -777,6 +824,45 @@ async fn process_single_stale_task(
 const EXPIRE_BATCH_SIZE: i32 = 500;
 /// Max batches per reaper pass, bounding work and trigger-NOTIFY volume.
 const EXPIRE_MAX_BATCHES_PER_PASS: u32 = 200;
+
+/// Orphan-sweep bounds: same batch/pass convention as pending expiry.
+const ORPHAN_BATCH_SIZE: i32 = 500;
+const ORPHAN_MAX_BATCHES_PER_PASS: u32 = 200;
+/// Consecutive permanent failures before the orphan sweep disables itself.
+const ORPHAN_SWEEP_MAX_PERMANENT_FAILURES: u32 = 3;
+
+/// Per-reaper state for the orphan sweep's disable-after-permanent-failures
+/// guard: a sweep that keeps failing non-retryably (a contract breach, not a
+/// network blip) stops burning every cycle on it.
+#[derive(Default)]
+struct OrphanSweepState {
+    permanent_failures: u32,
+    disabled: bool,
+}
+
+/// Cancel orphaned workflow tasks in bounded batches.
+///
+/// A discovery batch reports one row per transition it made, and every row
+/// of a discovery batch is APPLIED — anything else is a contract breach
+/// surfaced as an error by the adapter. Early-stops on a short batch.
+async fn terminate_orphaned_workflow_tasks(
+    pool: &PgPool,
+) -> Result<u64, crate::broker::BrokerError> {
+    let command = crate::core::lifecycle::TerminalizationCommand::CancelOrphanedTasks {
+        batch_size: crate::core::lifecycle::BatchSize::new(ORPHAN_BATCH_SIZE)
+            .expect("ORPHAN_BATCH_SIZE is positive"),
+    };
+    let mut total: u64 = 0;
+    for _ in 0..ORPHAN_MAX_BATCHES_PER_PASS {
+        let cancelled = crate::broker::terminalization::terminalize(pool, &command).await?;
+        let affected = cancelled.len() as u64;
+        total += affected;
+        if affected < ORPHAN_BATCH_SIZE as u64 {
+            break;
+        }
+    }
+    Ok(total)
+}
 
 /// Expire unclaimed PENDING tasks whose `good_until` has passed.
 ///

@@ -2102,7 +2102,7 @@ async fn filter_nonrunnable_does_not_touch_other_workers_paused_task() {
     set_workflow_status(&pool, &wf_id, "PAUSED").await;
 
     let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
         .await
         .unwrap();
 
@@ -2165,7 +2165,7 @@ async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
     set_workflow_status(&pool, &wf_id, "CANCELLED").await;
 
     let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
         .await
         .unwrap();
 
@@ -2196,7 +2196,7 @@ async fn filter_nonrunnable_cancels_own_paused_task() {
     set_workflow_status(&pool, &wf_id, "PAUSED").await;
 
     let filtered = broker
-        .filter_non_runnable_workflow_tasks(&[task_id.clone()], "worker-this")
+        .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "worker-this")
         .await
         .unwrap();
 

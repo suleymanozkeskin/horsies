@@ -170,15 +170,6 @@ SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 // horsies_fail_locked_task); the legacy COMPLETE/FINALIZE/FAIL statements
 // are gone.
 
-const CANCEL_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'CANCELLED',
-    terminal_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-  AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-RETURNING id";
-
 // retry_count is derived from the row being CAS-updated (same idiom as
 // FINALIZE_TASK_COMPLETED_SQL's ctx CTE), not passed by the caller: the
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
@@ -293,86 +284,12 @@ JOIN horsies_workflow_tasks wt ON wt.task_id = t.id \
 JOIN horsies_workflows w ON w.id = wt.workflow_id \
 WHERE t.id = ANY($1) AND w.status IN ('PAUSED', 'CANCELLED')";
 
-/// Cancel tasks belonging to CANCELLED workflows.
-const CANCEL_CANCELLED_WORKFLOW_HORSIES_TASKS_SQL: &str = "\
-UPDATE horsies_tasks \
-SET status = 'CANCELLED', \
-    claimed = FALSE, \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    terminal_at = NOW(), \
-    updated_at = NOW() \
-WHERE id = ANY($1) AND status IN ('CLAIMED', 'PENDING')";
-
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
 UPDATE horsies_workflow_tasks \
 SET status = 'SKIPPED', \
     completed_at = NOW() \
 WHERE task_id = ANY($1) AND status IN ('PENDING', 'READY', 'ENQUEUED')";
-
-/// Cancel this worker's CLAIMED-but-not-started tasks in PAUSED workflows
-/// (post-claim batch filter). The row is moved to terminal CANCELLED — not back
-/// to PENDING — so it cannot be re-claimed and run as a duplicate after the
-/// workflow resumes (resume enqueues a fresh row for the node, whose
-/// workflow_task is reset to READY with task_id=NULL). Ownership-scoped so a
-/// worker cannot touch another worker's claim; returns the affected ids so only
-/// those workflow_task rows are reset.
-const CANCEL_PAUSED_OWNED_TASKS_SQL: &str = "\
-UPDATE horsies_tasks \
-SET status = 'CANCELLED', \
-    claimed = FALSE, \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    finalizing_at = NULL, \
-    finalizing_by_worker_id = NULL, \
-    error_code = 'TASK_CANCELLED', \
-    failed_reason = 'Workflow paused before task start', \
-    terminal_at = NOW(), \
-    updated_at = NOW() \
-WHERE id = ANY($1) \
-  AND status = 'CLAIMED' \
-  AND claimed_by_worker_id = $2 \
-RETURNING id";
-
-/// Cancel this worker's CLAIMED tasks in CANCELLED workflows (post-claim batch
-/// filter). Ownership-scoped; returns the affected ids so only those
-/// workflow_task rows are skipped.
-const CANCEL_CANCELLED_OWNED_TASKS_SQL: &str = "\
-UPDATE horsies_tasks \
-SET status = 'CANCELLED', \
-    claimed = FALSE, \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    terminal_at = NOW(), \
-    updated_at = NOW() \
-WHERE id = ANY($1) \
-  AND status = 'CLAIMED' \
-  AND claimed_by_worker_id = $2 \
-RETURNING id";
-
-/// Cancel claimed-but-not-started tasks of a PAUSED workflow (pre-start handler).
-/// Moves CLAIMED rows to terminal CANCELLED so they cannot run as duplicates of
-/// the node after resume; the node is reset to READY separately. Not
-/// ownership-scoped: the caller reached this only after `set_running` declined to
-/// start the task because its workflow is PAUSED.
-const CANCEL_PAUSED_TASKS_SQL: &str = "\
-UPDATE horsies_tasks \
-SET status = 'CANCELLED', \
-    claimed = FALSE, \
-    claimed_at = NULL, \
-    claimed_by_worker_id = NULL, \
-    claim_expires_at = NULL, \
-    finalizing_at = NULL, \
-    finalizing_by_worker_id = NULL, \
-    error_code = 'TASK_CANCELLED', \
-    failed_reason = 'Workflow paused before task start', \
-    terminal_at = NOW(), \
-    updated_at = NOW() \
-WHERE id = ANY($1) AND status = 'CLAIMED'";
 
 /// Unclaim a single task, guarded by worker identity to prevent races.
 ///
@@ -1270,19 +1187,38 @@ impl PostgresBroker {
         })
     }
 
-    /// Cancel a task. Returns `true` if the task was actually cancelled
-    /// (not already in a terminal state).
-    pub async fn cancel(&self, task_id: &str) -> Result<bool, BrokerError> {
-        let result: Option<ClaimedId> = sqlx::query_as(CANCEL_SQL)
-            .bind(task_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+    /// Operator cancellation of a plain (non-workflow) task.
+    ///
+    /// Runs through `horsies_cancel_locked_task`: the effective source set is
+    /// `permitted_source_statuses` ∩ {PENDING, CLAIMED, RUNNING} — whether a
+    /// task already running may be cancelled is the operator's explicit
+    /// choice, carried here rather than implied. Terminal rows are never
+    /// overwritten; an applied cancel records `error_code = 'TASK_CANCELLED'`,
+    /// `failed_reason = 'Cancelled via monitoring API'`, and `failed_at`, and
+    /// clears the claim. Returns `true` if the task was cancelled.
+    pub async fn cancel(
+        &self,
+        task_id: &str,
+        permitted_source_statuses: &[crate::core::types::status::TaskStatus],
+    ) -> Result<bool, BrokerError> {
+        let outcomes = crate::broker::terminalization::terminalize(
+            &self.pool,
+            &crate::core::lifecycle::TerminalizationCommand::CancelLockedTask {
+                task_id: task_id.to_owned(),
+                fence: crate::core::lifecycle::CallerHoldsRowLock,
+                permitted_source_statuses: permitted_source_statuses.to_vec(),
+            },
+        )
+        .await?;
 
-        if result.is_some() {
+        let cancelled = matches!(
+            outcomes.first(),
+            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
+        );
+        if cancelled {
             tracing::debug!(task_id, "task cancelled");
         }
-        Ok(result.is_some())
+        Ok(cancelled)
     }
 
     /// Requeue a task for retry (transactional variant).
@@ -1625,48 +1561,85 @@ impl PostgresBroker {
         &self,
         task_id: &str,
         workflow_status: &str,
+        worker_id: &str,
+        claimed_at: Option<DateTime<Utc>>,
     ) -> Result<(), BrokerError> {
+        use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
+
         let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
         let task_ids = vec![task_id.to_owned()];
+        let fence = OwnedClaim {
+            worker_id: worker_id.to_owned(),
+            claimed_at,
+        };
 
-        match workflow_status {
+        // Both arms carry the OwnedClaim fence: a stale dispatch cannot end a
+        // row the same worker re-claimed. The coupled node write commits only
+        // with a transition that applied (or was already applied by the same
+        // event class, whose coupled write is then proven committed).
+        let (command, applied) = match workflow_status {
             "PAUSED" => {
-                // Cancel the claimed-but-not-started row (terminal) instead of
-                // returning it to PENDING, then reset the node to READY so resume
-                // enqueues a fresh row. Prevents the abandoned row from running as
-                // a duplicate after resume (parity with horsies PR #96).
-                sqlx::query(CANCEL_PAUSED_TASKS_SQL)
-                    .bind(&task_ids)
-                    .execute(tx.as_mut())
-                    .await
-                    .map_err(BrokerError::Database)?;
-
-                sqlx::query(RESET_WORKFLOW_TASKS_SQL)
-                    .bind(&task_ids)
-                    .execute(tx.as_mut())
-                    .await
-                    .map_err(BrokerError::Database)?;
+                // Abandon the claimed-but-not-started row (terminal) instead
+                // of returning it to PENDING, then reset the node to READY so
+                // resume enqueues a fresh row (parity with horsies PR #96).
+                let command = TerminalizationCommand::AbandonOwnedNode {
+                    task_id: task_id.to_owned(),
+                    fence,
+                };
+                let outcomes =
+                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
+                let applied = matches!(
+                    outcomes.first(),
+                    Some(
+                        TerminalizationOutcome::Applied { .. }
+                            | TerminalizationOutcome::AlreadyApplied { .. }
+                    )
+                );
+                if applied {
+                    sqlx::query(RESET_WORKFLOW_TASKS_SQL)
+                        .bind(&task_ids)
+                        .execute(tx.as_mut())
+                        .await
+                        .map_err(BrokerError::Database)?;
+                }
+                ("abandon", applied)
             }
             "CANCELLED" => {
-                sqlx::query(CANCEL_CANCELLED_WORKFLOW_HORSIES_TASKS_SQL)
-                    .bind(&task_ids)
-                    .execute(tx.as_mut())
-                    .await
-                    .map_err(BrokerError::Database)?;
-
-                sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
-                    .bind(&task_ids)
-                    .execute(tx.as_mut())
-                    .await
-                    .map_err(BrokerError::Database)?;
+                // A row already requeued to PENDING is accepted: it carries no
+                // claim to fence, and the workflow's cancellation — final,
+                // unlike a pause — is the guard (the Python carve-out).
+                let command = TerminalizationCommand::CancelOwnedNode {
+                    task_id: task_id.to_owned(),
+                    fence,
+                    accepts_requeued_pending: true,
+                };
+                let outcomes =
+                    crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
+                let applied = matches!(
+                    outcomes.first(),
+                    Some(
+                        TerminalizationOutcome::Applied { .. }
+                            | TerminalizationOutcome::AlreadyApplied { .. }
+                    )
+                );
+                if applied {
+                    sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
+                        .bind(&task_ids)
+                        .execute(tx.as_mut())
+                        .await
+                        .map_err(BrokerError::Database)?;
+                }
+                ("cancel", applied)
             }
             _ => return Ok(()),
-        }
+        };
 
         tx.commit().await.map_err(BrokerError::Database)?;
         tracing::info!(
             task_id,
             workflow_status,
+            arm = command,
+            applied,
             "handled workflow stop before task start"
         );
         Ok(())
@@ -1686,16 +1659,17 @@ impl PostgresBroker {
     /// PR #51).
     pub async fn filter_non_runnable_workflow_tasks(
         &self,
-        task_ids: &[String],
+        claims: &[(String, Option<DateTime<Utc>>)],
         worker_id: &str,
     ) -> Result<Vec<String>, BrokerError> {
-        if task_ids.is_empty() {
+        if claims.is_empty() {
             return Ok(Vec::new());
         }
+        let task_ids: Vec<String> = claims.iter().map(|(id, _)| id.clone()).collect();
 
         // Find which claimed tasks belong to PAUSED or CANCELLED workflows.
         let rows: Vec<(String, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
-            .bind(task_ids)
+            .bind(&task_ids)
             .fetch_all(&self.pool)
             .await
             .map_err(BrokerError::Database)?;
@@ -1710,22 +1684,46 @@ impl PostgresBroker {
             }
         }
 
-        // PAUSED: cancel this worker's own claimed-but-not-started rows (terminal),
-        // then reset the workflow_task rows we owned to READY so resume enqueues a
-        // fresh row. The cancelled row is never re-claimable, so it can't run as a
-        // duplicate of the node after resume.
+        // Each batch fences pairwise on (task_id, claimed_at): the batch came
+        // from claim rows that can span claim transactions, so generations
+        // travel with their ids. The coupled node writes commit in the same
+        // transaction as the transitions they prove (C15): a crash between
+        // the task-cancel and the node write would otherwise leave a terminal
+        // CANCELLED task linked to a live node, which recovery Case 1.7 then
+        // completes as a node failure.
+        let generation_of = |id: &String| {
+            claims
+                .iter()
+                .find(|(claim_id, _)| claim_id == id)
+                .and_then(|(_, claimed_at)| *claimed_at)
+        };
+
+        // PAUSED: abandon this worker's own claimed-but-not-started rows
+        // (terminal), then reset the nodes of applied rows to READY so resume
+        // enqueues a fresh row. The cancelled row is never re-claimable, so
+        // it can't run as a duplicate of the node after resume.
         if !paused_ids.is_empty() {
-            // One transaction: a crash between the task-cancel and the node-reset
-            // would otherwise leave a terminal CANCELLED task linked to a live
-            // node, which recovery Case 1.7 then completes as a node failure (C15).
+            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
+                worker_id.to_owned(),
+                paused_ids
+                    .iter()
+                    .map(|id| (id.clone(), generation_of(id)))
+                    .collect(),
+            )
+            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
             let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_PAUSED_OWNED_TASKS_SQL)
-                .bind(&paused_ids)
-                .bind(worker_id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(BrokerError::Database)?;
-            let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
+            let outcomes = crate::broker::terminalization::terminalize_in_tx(
+                &mut tx,
+                &crate::core::lifecycle::TerminalizationCommand::AbandonOwnedNodes { fence },
+            )
+            .await?;
+            let owned: Vec<String> = outcomes
+                .iter()
+                .filter(|o| {
+                    matches!(o, crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
+                })
+                .map(|o| o.task_id().to_owned())
+                .collect();
 
             if !owned.is_empty() {
                 sqlx::query(RESET_WORKFLOW_TASKS_SQL)
@@ -1738,23 +1736,34 @@ impl PostgresBroker {
 
             tracing::debug!(
                 count = owned.len(),
-                "cancelled own claimed-but-not-started tasks belonging to PAUSED workflows",
+                "abandoned own claimed-but-not-started tasks belonging to PAUSED workflows",
             );
         }
 
-        // CANCELLED: hard-cancel this worker's own claimed rows and skip only the
-        // workflow_task rows we owned.
+        // CANCELLED: cancel this worker's own claimed rows and skip only the
+        // nodes of rows whose transition applied.
         if !cancelled_ids.is_empty() {
-            // Same atomicity requirement as the PAUSED branch: task-cancel and
-            // node-skip must commit together (C15).
+            let fence = crate::core::lifecycle::OwnedClaimBatch::new(
+                worker_id.to_owned(),
+                cancelled_ids
+                    .iter()
+                    .map(|id| (id.clone(), generation_of(id)))
+                    .collect(),
+            )
+            .map_err(|e| BrokerError::TerminalizationContract(e.to_string()))?;
             let mut tx = self.pool.begin().await.map_err(BrokerError::Database)?;
-            let cancelled: Vec<(String,)> = sqlx::query_as(CANCEL_CANCELLED_OWNED_TASKS_SQL)
-                .bind(&cancelled_ids)
-                .bind(worker_id)
-                .fetch_all(&mut *tx)
-                .await
-                .map_err(BrokerError::Database)?;
-            let owned: Vec<String> = cancelled.into_iter().map(|(id,)| id).collect();
+            let outcomes = crate::broker::terminalization::terminalize_in_tx(
+                &mut tx,
+                &crate::core::lifecycle::TerminalizationCommand::CancelOwnedNodes { fence },
+            )
+            .await?;
+            let owned: Vec<String> = outcomes
+                .iter()
+                .filter(|o| {
+                    matches!(o, crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
+                })
+                .map(|o| o.task_id().to_owned())
+                .collect();
 
             if !owned.is_empty() {
                 sqlx::query(SKIP_CANCELLED_WORKFLOW_TASKS_SQL)
@@ -4120,7 +4129,7 @@ mod filter_non_runnable_tests {
         .expect("insert task");
 
         let filtered = broker
-            .filter_non_runnable_workflow_tasks(std::slice::from_ref(&task_id), "w1")
+            .filter_non_runnable_workflow_tasks(&[(task_id.clone(), None)], "w1")
             .await
             .expect("filter");
         assert_eq!(filtered, vec![task_id.clone()], "paused task must be filtered");
@@ -4325,7 +4334,10 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "PENDING", None, None).await;
 
-        let applied = broker.cancel(&id).await.expect("cancel");
+        let applied = broker
+            .cancel(&id, &[crate::core::types::status::TaskStatus::Pending])
+            .await
+            .expect("cancel");
         assert!(applied);
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;

@@ -23,13 +23,11 @@ const TERMINAL_SET_MARKERS: [&str; 4] = [
 
 /// (file relative to src/, expected terminal-writer statement count).
 ///
-/// Shrinks as call sites cut over to the terminalization operations; a
-/// count going UP means a new legacy writer, which is structurally
-/// rejected.
-const ALLOWLIST: [(&str, usize); 2] = [
-    ("broker/postgres.rs", 5),
-    ("workflow_engine/lifecycle.rs", 2),
-];
+/// Terminal form: NO production statement in `src/**` may set a terminal
+/// status on `horsies_tasks` — every terminal transition executes through
+/// the operations installed by migration 0032. A new terminal writer
+/// belongs in that schema module, never inline.
+const ALLOWLIST: [(&str, usize); 0] = [];
 
 fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).expect("read src dir") {

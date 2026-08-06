@@ -20,6 +20,14 @@ pub struct RecoveryConfig {
     #[serde(default = "default_true")]
     pub auto_fail_stale_running: bool,
 
+    /// Cancel orphaned workflow tasks — claimed or pending rows whose
+    /// workflow_task linkage is no longer in a runnable state, so they can
+    /// never legitimately reach RUNNING. `true` (default): the reaper sweeps
+    /// them CANCELLED and the pre-start check cancels one it is handed;
+    /// `false`: orphans are left CLAIMED for inspection.
+    #[serde(default = "default_true")]
+    pub auto_terminate_orphaned_workflow_tasks: bool,
+
     /// Milliseconds without runner heartbeat before RUNNING task is stale (1s–2hr).
     #[serde(default = "default_running_stale_threshold")]
     pub running_stale_threshold_ms: u64,
@@ -137,6 +145,7 @@ impl Default for RecoveryConfig {
             auto_requeue_stale_claimed: true,
             claimed_stale_threshold_ms: 120_000,
             auto_fail_stale_running: true,
+            auto_terminate_orphaned_workflow_tasks: true,
             running_stale_threshold_ms: 300_000,
             finalizing_stale_threshold_ms: 300_000,
             crashed_worker_recovery_grace_ms: 10_000,

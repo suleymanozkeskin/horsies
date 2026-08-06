@@ -753,10 +753,15 @@ impl Worker {
         // JOIN query in that case (P5). `is_workflow_task` is carried on each
         // claimed row.
         if claimed_rows.iter().any(|r| r.is_workflow_task) {
-            let all_ids: Vec<String> = claimed_rows.iter().map(|r| r.id.clone()).collect();
+            // The claim generations travel with their ids: one batch can span
+            // claim transactions, so each task fences on its own claimed_at.
+            let claims: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = claimed_rows
+                .iter()
+                .map(|r| (r.id.clone(), r.claimed_at))
+                .collect();
             let filtered_ids = self
                 .broker
-                .filter_non_runnable_workflow_tasks(&all_ids, &self.worker_id)
+                .filter_non_runnable_workflow_tasks(&claims, &self.worker_id)
                 .await?;
             if !filtered_ids.is_empty() {
                 let filtered_set: std::collections::HashSet<&str> =
@@ -851,6 +856,10 @@ impl Worker {
                 let task_id = row.id.clone();
                 let task_name = row.task_name.clone();
                 let worker_id = self.worker_id.clone();
+                let orphan_self_heal = self
+                    .app_config
+                    .recovery
+                    .auto_terminate_orphaned_workflow_tasks;
                 let hostname = self.hostname.clone();
                 let payload_policy = self.app_config.payload.clone();
                 self.tracker.spawn(async move {
@@ -866,6 +875,7 @@ impl Worker {
                         hostname,
                         task_error,
                         payload_policy,
+                        orphan_self_heal,
                     )
                     .await
                     {

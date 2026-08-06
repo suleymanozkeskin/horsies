@@ -205,6 +205,7 @@ where
 /// `claimed_at` is the claim generation this dispatch was born from; it
 /// fences `set_running`, the pre-start expiry, and the failure-path unclaim
 /// so none of them can act on a row the same worker re-claimed (C10).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn confirm_ownership_and_set_running(
     broker: &PostgresBroker,
     task_id: &str,
@@ -213,42 +214,89 @@ pub(crate) async fn confirm_ownership_and_set_running(
     hostname: &str,
     is_workflow_task: bool,
     claimed_at: Option<chrono::DateTime<Utc>>,
+    orphan_self_heal: bool,
 ) -> OwnershipOutcome {
+    // Workflow tasks: the node RUNNING handoff precedes the task transition,
+    // while the row is still CLAIMED. The match set is idempotent across
+    // crash-replays (a node already RUNNING matches again). Zero matched rows
+    // is the free orphan signal: no workflow_task linkage in a runnable state
+    // means this row can never legitimately progress — with self-heal on, the
+    // still-CLAIMED row is cancelled through `horsies_cancel_owned_orphan`,
+    // which re-verifies the linkage under its own lock and refuses (leaving
+    // the task to run) when a runnable link exists after all. A transient
+    // handoff failure stays non-fatal: the update is informational
+    // (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED workflow_task), so the
+    // task proceeds. Gated on `is_workflow_task`: a plain task pays no round
+    // trip here (P1).
+    if is_workflow_task {
+        match sqlx::query(
+            "UPDATE horsies_workflow_tasks \
+             SET status = 'RUNNING' \
+             WHERE task_id = $1 \
+               AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')",
+        )
+        .bind(task_id)
+        .execute(broker.pool())
+        .await
+        {
+            Ok(result) if result.rows_affected() == 0 && orphan_self_heal => {
+                match terminalize(
+                    broker.pool(),
+                    &TerminalizationCommand::CancelOwnedOrphan {
+                        task_id: task_id.to_owned(),
+                        fence: OwnedClaim {
+                            worker_id: worker_id.to_owned(),
+                            claimed_at,
+                        },
+                    },
+                )
+                .await
+                {
+                    Ok(outcomes)
+                        if matches!(
+                            outcomes.first(),
+                            Some(TerminalizationOutcome::Applied { .. })
+                        ) =>
+                    {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            "workflow task orphaned (no runnable workflow_task \
+                             linkage); cancelled before start",
+                        );
+                        return OwnershipOutcome::Aborted;
+                    }
+                    Ok(_) => {
+                        // Refused: a runnable link exists after all (e.g. a
+                        // crash-replay whose node moved between statements),
+                        // or ownership moved — set_running below re-judges.
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            error = %e,
+                            "orphan check failed; proceeding to set_running",
+                        );
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "failed to update workflow task to RUNNING; proceeding with \
+                     execution (workflow_task left as-is, which completion \
+                     tolerates)",
+                );
+            }
+        }
+    }
+
     match broker
         .set_running(task_id, worker_id, pid, hostname, "worker", claimed_at)
         .await
     {
-        Ok(Some(running)) => {
-            // `set_running` has already durably committed the CLAIMED → RUNNING
-            // flip on horsies_tasks. The workflow_task RUNNING status is purely
-            // informational (COMPLETE_WORKFLOW_TASK_SQL accepts an ENQUEUED
-            // workflow_task), so a transient failure of this update must NOT
-            // fail the task closed before it ever runs. Log and proceed.
-            //
-            // Gate on `is_workflow_task`: for a plain task this UPDATE matches
-            // zero rows, so running it unconditionally added a full round trip to
-            // every task start's critical path (P1). The column is set at enqueue
-            // (migration 0017) precisely to route workflow work without this cost.
-            if is_workflow_task {
-                if let Err(e) = sqlx::query(
-                    "UPDATE horsies_workflow_tasks \
-                     SET status = 'RUNNING' \
-                     WHERE task_id = $1 AND status = 'ENQUEUED'",
-                )
-                .bind(task_id)
-                .execute(broker.pool())
-                .await
-                {
-                    tracing::warn!(
-                        task_id = %task_id,
-                        error = %e,
-                        "failed to update workflow task to RUNNING; proceeding with execution \
-                         (workflow_task left ENQUEUED, which completion tolerates)",
-                    );
-                }
-            }
-            OwnershipOutcome::Running(running)
-        }
+        Ok(Some(running)) => OwnershipOutcome::Running(running),
         Ok(None) => {
             match broker
                 .expire_claimed_task_before_start(task_id, worker_id)
@@ -278,8 +326,10 @@ pub(crate) async fn confirm_ownership_and_set_running(
                         workflow_status = %wf_status,
                         "skipping task - workflow is stopped",
                     );
-                    if let Err(e) =
-                        handle_workflow_stop_with_retry(broker, task_id, wf_status).await
+                    if let Err(e) = handle_workflow_stop_with_retry(
+                        broker, task_id, wf_status, worker_id, claimed_at,
+                    )
+                    .await
                     {
                         tracing::error!(
                             task_id = %task_id,
@@ -319,12 +369,14 @@ async fn handle_workflow_stop_with_retry(
     broker: &PostgresBroker,
     task_id: &str,
     workflow_status: &str,
+    worker_id: &str,
+    claimed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<(), crate::broker::BrokerError> {
     let mut last_err: Option<crate::broker::BrokerError> = None;
 
     for attempt in 1..=PRESTART_DB_RETRY_ATTEMPTS {
         match broker
-            .handle_workflow_stop_before_start(task_id, workflow_status)
+            .handle_workflow_stop_before_start(task_id, workflow_status, worker_id, claimed_at)
             .await
         {
             Ok(()) => return Ok(()),
@@ -1279,6 +1331,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     hostname: String,
     task_error: TaskError,
     payload_policy: PayloadPolicy,
+    orphan_self_heal: bool,
 ) -> Option<Phase2Work> {
     let task_id = row.id.clone();
     let queue_name = row.queue_name.clone();
@@ -1293,6 +1346,7 @@ pub(crate) async fn finalize_pre_execution_failure(
         &hostname,
         is_workflow_task,
         row.claimed_at,
+        orphan_self_heal,
     )
     .await
     {
@@ -1378,6 +1432,7 @@ pub(crate) async fn execute_and_finalize(
         &hostname,
         is_workflow_task,
         row.claimed_at,
+        recovery.auto_terminate_orphaned_workflow_tasks,
     )
     .await
     {
@@ -2065,7 +2120,7 @@ mod set_running_gate_tests {
         seed_claimed(&pool, &task_id, true).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true, None).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true, None, false).await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let node_status: String =
@@ -2090,7 +2145,7 @@ mod set_running_gate_tests {
         seed_claimed(&pool, &task_id, false).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false, None).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false, None, false).await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")

@@ -53,26 +53,13 @@ WHERE workflow_id = $1
   AND status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
 FOR UPDATE";
 
-/// Step 1: Cancel not-yet-started horsies_tasks for ENQUEUED workflow_tasks.
-///
-/// A backing task may briefly be RUNNING while its workflow_task is still
-/// ENQUEUED (between the task-claim RUNNING update and the workflow_task
-/// RUNNING handoff). User code runs only after that handoff, so this state is
-/// still cancellable — RUNNING is included alongside PENDING/CLAIMED.
-const CANCEL_ENQUEUED_HORSIES_TASKS_SQL: &str = "\
-UPDATE horsies_tasks t
-SET status = 'CANCELLED',
-    claimed = FALSE,
-    claimed_at = NULL,
-    claimed_by_worker_id = NULL,
-    claim_expires_at = NULL,
-    terminal_at = NOW(),
-    updated_at = NOW()
-FROM horsies_workflow_tasks wt
-WHERE wt.workflow_id = $1
-  AND wt.task_id = t.id
-  AND wt.status = 'ENQUEUED'
-  AND t.status IN ('PENDING', 'CLAIMED', 'RUNNING')";
+// Step 1 of workflow cancellation — cancelling not-yet-started backing tasks
+// of ENQUEUED workflow_tasks — is `horsies_cancel_nodes_of_cancelled_workflow`
+// (broker/terminalization.rs): the workflow's CANCELLED status is verified
+// in-statement, so the function runs after the status flip in the same
+// transaction. A backing task may briefly be RUNNING while its node is still
+// ENQUEUED; user code runs only after the node's own RUNNING handoff, so
+// that state is still cancellable.
 
 /// Step 2: Skip PENDING/READY workflow_tasks (not ENQUEUED or RUNNING).
 const SKIP_PENDING_READY_TASKS_SQL: &str = "\
@@ -167,36 +154,14 @@ UPDATE horsies_workflows
 SET status = 'PAUSED', updated_at = NOW()
 WHERE id = $1 AND status = 'RUNNING'";
 
-/// Cancel any CLAIMED-but-not-started backing task rows of the given (paused)
-/// workflows, and reset their workflow_task nodes to READY so resume enqueues a
-/// fresh row. Proactively closes the window where a task already CLAIMED at pause
-/// time (e.g. sitting in a worker prefetch buffer, or claimed by a since-dead
-/// worker) could later run outside the paused workflow. Parity with horsies PR
-/// #96 (`CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL`).
-const CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL: &str = "\
-WITH cancelled AS (
-    UPDATE horsies_tasks t
-    SET status = 'CANCELLED',
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        error_code = 'TASK_CANCELLED',
-        failed_reason = 'Workflow paused before task start',
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM horsies_workflow_tasks wt
-    WHERE wt.task_id = t.id
-      AND wt.workflow_id = ANY($1)
-      AND wt.status IN ('ENQUEUED', 'RUNNING')
-      AND t.status = 'CLAIMED'
-    RETURNING t.id
-)
+/// Reset the abandoned nodes of just-cancelled backing rows to READY, so
+/// resume enqueues a fresh row for each. Runs in the same transaction as
+/// `horsies_abandon_nodes_of_paused_workflows`, whose applied outcomes name
+/// the rows this reset targets.
+const RESET_ABANDONED_NODES_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
 SET status = 'READY', task_id = NULL, started_at = NULL
-WHERE wt.task_id IN (SELECT id FROM cancelled)
+WHERE wt.task_id = ANY($1)
   AND wt.status IN ('ENQUEUED', 'RUNNING')";
 
 /// Find PAUSED child workflows of a given parent.
@@ -394,11 +359,19 @@ async fn cancel_one_workflow_in_tx(
     }
 
     // Cancel not-yet-started horsies_tasks (PENDING/CLAIMED/RUNNING) for
-    // ENQUEUED wf_tasks, so workers cannot pick them up after we commit.
-    sqlx::query(CANCEL_ENQUEUED_HORSIES_TASKS_SQL)
-        .bind(workflow_id)
-        .execute(&mut *tx)
-        .await?;
+    // ENQUEUED wf_tasks, so workers cannot pick them up after we commit. The
+    // function verifies the workflow's CANCELLED status in-statement, so it
+    // must follow the flip above; the #176 lock order (workflow row first,
+    // then task rows) is preserved because this transaction already holds
+    // both.
+    crate::broker::terminalization::terminalize_in_tx(
+        &mut tx,
+        &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
+            workflow_ids: vec![workflow_id.to_owned()],
+        },
+    )
+    .await
+    .map_err(WorkflowError::Broker)?;
     // Skip PENDING/READY wf_tasks (not ENQUEUED or RUNNING).
     sqlx::query(SKIP_PENDING_READY_TASKS_SQL)
         .bind(workflow_id)
@@ -462,12 +435,30 @@ async fn pause_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, 
     paused_ids.extend(cascade_pause_to_children(pool, workflow_id).await?);
 
     // Claimed-but-not-started backing task rows cannot safely remain claimable
-    // after their workflow_task is reset to READY for resume. Cancel the
-    // abandoned rows and let resume enqueue fresh ones (parity with horsies #96).
-    sqlx::query(CANCEL_CLAIMED_TASKS_FOR_PAUSED_WORKFLOWS_SQL)
-        .bind(&paused_ids)
-        .execute(pool)
-        .await?;
+    // after their workflow_task is reset to READY for resume. Abandon the
+    // claimed rows through the workflow-scoped operation (which verifies the
+    // workflows are PAUSED in-statement and reaches claims other workers
+    // hold) and reset their nodes in the same transaction (C15).
+    let mut tx = pool.begin().await?;
+    let outcomes = crate::broker::terminalization::terminalize_in_tx(
+        &mut tx,
+        &crate::core::lifecycle::TerminalizationCommand::AbandonNodesOfPausedWorkflows {
+            workflow_ids: paused_ids,
+        },
+    )
+    .await
+    .map_err(WorkflowError::Broker)?;
+    let abandoned: Vec<String> = outcomes
+        .iter()
+        .map(|outcome| outcome.task_id().to_owned())
+        .collect();
+    if !abandoned.is_empty() {
+        sqlx::query(RESET_ABANDONED_NODES_SQL)
+            .bind(&abandoned)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
 
     Ok(true)
 }
