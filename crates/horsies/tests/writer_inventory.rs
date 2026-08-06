@@ -26,9 +26,8 @@ const TERMINAL_SET_MARKERS: [&str; 4] = [
 /// Shrinks as call sites cut over to the terminalization operations; a
 /// count going UP means a new legacy writer, which is structurally
 /// rejected.
-const ALLOWLIST: [(&str, usize); 3] = [
+const ALLOWLIST: [(&str, usize); 2] = [
     ("broker/postgres.rs", 5),
-    ("worker/recovery.rs", 1),
     ("workflow_engine/lifecycle.rs", 2),
 ];
 

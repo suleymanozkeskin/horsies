@@ -83,20 +83,12 @@ WHERE id = $1
   AND status = 'RUNNING'
   AND (good_until IS NULL OR $3 < good_until)";
 
-/// SQL: Mark a single stale task as FAILED with a structured result payload.
-const FAIL_SINGLE_STALE_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'FAILED',
-    failed_at = NOW(),
-    failed_reason = $2,
-    result = $3,
-    error_code = $4,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    terminal_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-AND status = 'RUNNING'";
+// The terminal stale-failure statement is `horsies_fail_stale_task`
+// (broker/terminalization.rs): the function re-captures heartbeat/finalizing
+// state under its own lock and judges staleness authoritatively, so the
+// Phase 1 scan and the locked re-check here are advisory — a heartbeat
+// landing between scan and call refuses with STALENESS evidence instead of
+// failing a live task.
 
 /// Row from Phase 1 scan — just the task ID.
 #[derive(Debug, FromRow)]
@@ -549,7 +541,7 @@ pub async fn mark_stale_running_as_failed(
     threshold_secs: f64,
     finalizing_threshold_secs: f64,
     scan_limit: i64,
-) -> Result<u64, sqlx::Error> {
+) -> Result<u64, crate::broker::BrokerError> {
     // Phase 1: Scan for stale task IDs (no row locks). A task that is actively
     // finalizing (finalizing_at set within finalizing_threshold_secs) is skipped.
     // Bounded by `scan_limit`: Phase 2 processes candidates serially, one
@@ -608,8 +600,8 @@ async fn process_single_stale_task(
     finalizing_threshold_secs: f64,
     threshold_ms: u64,
     error_code_str: &str,
-) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+) -> Result<bool, crate::broker::BrokerError> {
+    let mut tx = pool.begin().await.map_err(crate::broker::BrokerError::Database)?;
 
     // Re-acquire row with full context. Returns None if the task is no longer
     // RUNNING, if a fresh heartbeat arrived after the Phase 1 scan, or if the
@@ -707,7 +699,9 @@ async fn process_single_stale_task(
     }
 
     {
-        // Failure path: upsert attempt (will_retry=false), mark FAILED.
+        // Failure path: the operation re-judges staleness from its own
+        // capture (authoritative); the attempt row is written only for a
+        // transition that applied, in the same transaction.
         let task_error = TaskError {
             error_code: Some(OperationalErrorCode::WorkerCrashed.into()),
             message: Some(failed_reason.clone()),
@@ -729,6 +723,30 @@ async fn process_single_stale_task(
             r#"{"__type":"err","value":{"message":"serialization failed"}}"#.to_owned()
         });
 
+        let command = crate::core::lifecycle::TerminalizationCommand::FailStaleTask {
+            task_id: task_id.to_owned(),
+            stale_after_ms: threshold_ms as i32,
+            finalizing_stale_after_ms: (finalizing_threshold_secs * 1000.0) as i32,
+            result_json,
+            error_code: error_code_str.to_owned(),
+            failed_reason: failed_reason.clone(),
+        };
+        let outcomes =
+            crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
+
+        let applied = matches!(
+            outcomes.first(),
+            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
+        );
+        if !applied {
+            // The authoritative capture disagreed with the advisory scan
+            // (e.g. a heartbeat landed in between): nothing was failed, so
+            // no attempt row either. Evidence is logged at the adapter
+            // boundary.
+            tx.rollback().await.map_err(crate::broker::BrokerError::Database)?;
+            return Ok(false);
+        }
+
         sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
             .bind(task_id)
             .bind(attempt_num)
@@ -744,17 +762,10 @@ async fn process_single_stale_task(
             .bind(row.worker_pid)
             .bind(row.worker_process_name.as_deref())
             .execute(&mut *tx)
-            .await?;
+            .await
+            .map_err(crate::broker::BrokerError::Database)?;
 
-        sqlx::query(FAIL_SINGLE_STALE_SQL)
-            .bind(task_id)
-            .bind(&failed_reason)
-            .bind(&result_json)
-            .bind(error_code_str)
-            .execute(&mut *tx)
-            .await?;
-
-        tx.commit().await?;
+        tx.commit().await.map_err(crate::broker::BrokerError::Database)?;
 
         tracing::info!(task_id, "stale RUNNING task marked FAILED");
     }
