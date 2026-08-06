@@ -1023,6 +1023,9 @@ async def test_binding_swap_lock_conflict_returns_typed_busy_without_queueing(
 
     blocker = await engine.connect()
     try:
+        blocker_pid = int(
+            (await blocker.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+        )
         await blocker.execute(
             text(
                 f'LOCK TABLE ONLY {schema.sql}."{parent_name}" '
@@ -1037,11 +1040,24 @@ async def test_binding_swap_lock_conflict_returns_typed_busy_without_queueing(
             ),
             timeout=1.0,
         )
-        assert busy == ReplacementSwapBusy(
-            job_id=job_id,
-            lock_mode=ReplacementSwapLockMode.PARENT,
-            relation_names=(f'{schema.name}.{parent_name}',),
+        assert isinstance(busy, ReplacementSwapBusy)
+        assert busy.job_id == job_id
+        assert busy.lock_mode is ReplacementSwapLockMode.PARENT
+        assert busy.relation_names == (f'{schema.name}.{parent_name}',)
+        assert len(busy.blockers) == 1
+        observed_blocker = busy.blockers[0]
+        assert observed_blocker.pid == blocker_pid
+        assert observed_blocker.state == 'idle in transaction'
+        assert observed_blocker.transaction_age_seconds is not None
+        assert observed_blocker.transaction_age_seconds >= 0
+        assert observed_blocker.query is not None
+        assert observed_blocker.query.startswith('LOCK TABLE ONLY')
+        assert observed_blocker.backend_type == 'client backend'
+        assert observed_blocker.relation_name == (
+            f'{schema.name}.{parent_name}'
         )
+        assert observed_blocker.held_lock_mode == 'ShareLock'
+        assert observed_blocker.granted is True
         await connection.rollback()
     finally:
         await blocker.rollback()

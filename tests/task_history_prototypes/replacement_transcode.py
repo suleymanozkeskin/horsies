@@ -145,10 +145,24 @@ class ReplacementSwap:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplacementSwapBlocker:
+    pid: int
+    state: str | None
+    transaction_age_seconds: float | None
+    query: str | None
+    backend_type: str
+    application_name: str
+    relation_name: str
+    held_lock_mode: str
+    granted: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ReplacementSwapBusy:
     job_id: str
     lock_mode: ReplacementSwapLockMode
     relation_names: tuple[str, ...]
+    blockers: tuple[ReplacementSwapBlocker, ...] = ()
 
 
 type ReplacementSwapOutcome = ReplacementSwap | ReplacementSwapBusy
@@ -1105,14 +1119,95 @@ async def _try_replacement_swap_locks(
     except DBAPIError as error:
         if _sqlstate(error) != '55P03':
             raise
+        qualified_relation_names = tuple(
+            f'{schema.name}.{name}' for name in relation_names
+        )
         return ReplacementSwapBusy(
             job_id=job_id,
             lock_mode=lock_mode,
-            relation_names=tuple(
-                f'{schema.name}.{name}' for name in relation_names
+            relation_names=qualified_relation_names,
+            blockers=await _replacement_swap_blockers(
+                connection,
+                lock_mode=lock_mode,
+                relation_names=qualified_relation_names,
             ),
         )
     return None
+
+
+async def _replacement_swap_blockers(
+    connection: AsyncConnection,
+    *,
+    lock_mode: ReplacementSwapLockMode,
+    relation_names: tuple[str, ...],
+) -> tuple[ReplacementSwapBlocker, ...]:
+    await connection.execute(text('SELECT pg_stat_clear_snapshot()'))
+    rows = (
+        await connection.execute(
+            text(
+                """
+                WITH requested AS (
+                    SELECT relation_name,
+                           to_regclass(relation_name)::oid AS relation_oid
+                    FROM unnest(CAST(:relation_names AS text[]))
+                         AS names(relation_name)
+                )
+                SELECT locks.pid,
+                       activity.state,
+                       EXTRACT(
+                           EPOCH FROM clock_timestamp() - activity.xact_start
+                       )::double precision AS transaction_age_seconds,
+                       LEFT(activity.query, 2048) AS query,
+                       activity.backend_type,
+                       activity.application_name,
+                       requested.relation_name,
+                       locks.mode AS held_lock_mode,
+                       locks.granted
+                FROM requested
+                JOIN pg_locks AS locks
+                  ON locks.locktype = 'relation'
+                 AND locks.relation = requested.relation_oid
+                JOIN pg_stat_activity AS activity ON activity.pid = locks.pid
+                WHERE locks.pid <> pg_backend_pid()
+                  AND locks.granted
+                  AND (
+                      CAST(:requested_mode AS text) = 'ACCESS_EXCLUSIVE'
+                      OR locks.mode = ANY(CAST(:share_conflicts AS text[]))
+                  )
+                ORDER BY locks.pid, requested.relation_name, locks.mode
+                """
+            ),
+            {
+                'relation_names': list(relation_names),
+                'requested_mode': lock_mode.value,
+                'share_conflicts': [
+                    'RowExclusiveLock',
+                    'ShareUpdateExclusiveLock',
+                    'ShareRowExclusiveLock',
+                    'ExclusiveLock',
+                    'AccessExclusiveLock',
+                ],
+            },
+        )
+    ).all()
+    return tuple(
+        ReplacementSwapBlocker(
+            pid=int(row.pid),
+            state=row.state,
+            transaction_age_seconds=(
+                None
+                if row.transaction_age_seconds is None
+                else float(row.transaction_age_seconds)
+            ),
+            query=row.query,
+            backend_type=str(row.backend_type),
+            application_name=str(row.application_name),
+            relation_name=str(row.relation_name),
+            held_lock_mode=str(row.held_lock_mode),
+            granted=bool(row.granted),
+        )
+        for row in rows
+    )
 
 
 def _sqlstate(error: DBAPIError) -> str | None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -17,6 +18,9 @@ from tests.task_history_prototypes.evidence import (
     evidence_json,
 )
 from tests.task_history_prototypes.identity_evidence import collect_identity_evidence
+from tests.task_history_prototypes.qualification_io import (
+    QualificationProgressReporter,
+)
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
 )
@@ -80,6 +84,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--warm-observations', type=int, default=100)
     parser.add_argument('--cold-observations', type=int, default=10)
     parser.add_argument('--bootstrap-resamples', type=int, default=200)
+    parser.add_argument('--partial-evidence-path', type=Path)
+    parser.add_argument('--progress-fd', type=int)
     parser.add_argument(
         '--payload-shape',
         type=PayloadShape,
@@ -93,15 +99,41 @@ def main(argv: list[str] | None = None) -> int:
 
     if arguments.rows <= 0:
         parser.error('--rows must be positive')
+    if arguments.scenario not in {
+        'identity-lookup',
+        'replacement-archive-transcode',
+    } and (
+        arguments.partial_evidence_path is not None
+        or arguments.progress_fd is not None
+    ):
+        parser.error(
+            '--partial-evidence-path and --progress-fd currently require '
+            '--scenario identity-lookup or replacement-archive-transcode'
+        )
+    if (
+        arguments.scenario == 'replacement-archive-transcode'
+        and arguments.progress_fd is not None
+    ):
+        parser.error(
+            '--progress-fd currently requires --scenario identity-lookup'
+        )
     if arguments.apply_schema:
         apply_schema(arguments.dsn)
 
-    evidence = asyncio.run(_run(arguments))
-    print(evidence_json(evidence))
+    progress = QualificationProgressReporter.from_fd(arguments.progress_fd)
+    try:
+        evidence = asyncio.run(_run(arguments, progress=progress))
+        print(evidence_json(evidence))
+    finally:
+        progress.close()
     return 0
 
 
-async def _run(arguments: argparse.Namespace) -> object:
+async def _run(
+    arguments: argparse.Namespace,
+    *,
+    progress: QualificationProgressReporter | None = None,
+) -> object:
     engine = create_async_engine(arguments.dsn)
     try:
         async with engine.connect() as connection:
@@ -174,6 +206,8 @@ async def _run(arguments: argparse.Namespace) -> object:
                         ),
                         bootstrap_resamples=arguments.bootstrap_resamples,
                         seed=arguments.seed,
+                        checkpoint_path=arguments.partial_evidence_path,
+                        progress=progress,
                     )
                 case 'pending-locator':
                     return await collect_pending_locator_evidence(
@@ -214,6 +248,7 @@ async def _run(arguments: argparse.Namespace) -> object:
                         batch_size=arguments.batch_size,
                         payload_bytes=arguments.result_bytes,
                         attempts_per_task=arguments.attempts_per_task,
+                        failure_evidence_path=arguments.partial_evidence_path,
                     )
                 case _:
                     raise AssertionError('argparse accepted an unknown scenario')

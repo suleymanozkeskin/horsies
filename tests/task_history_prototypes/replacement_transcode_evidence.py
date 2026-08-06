@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 from sqlalchemy import text
@@ -19,6 +20,7 @@ from tests.task_history_prototypes.replacement_transcode import (
     ReplacementCopyBatch,
     ReplacementReadyForVerification,
     ReplacementSwap,
+    ReplacementSwapBlocker,
     ReplacementSwapBusy,
     ReplacementTranscodePlan,
     ReplacementVerification,
@@ -43,6 +45,7 @@ from tests.task_history_prototypes.schema import (
     install_archive_candidates,
     remove_archive_candidates,
 )
+from tests.task_history_prototypes.qualification_io import AtomicEvidenceWriter
 from tests.task_history_prototypes.transcode import (
     TRANSCODE_MINIMUM_ROWS_PER_SECOND,
     ArchiveComponent,
@@ -126,6 +129,7 @@ class ReplacementArchiveTranscodeEvidence:
     swap_busy_attempts: int
     swap_busy_seconds: float
     swap_retry_sleep_seconds: float
+    collector_connection: ReplacementCollectorConnectionProof
     maintenance_seconds: float
     copied_rows_per_second: float
     verification: ReplacementVerification
@@ -147,6 +151,54 @@ class _ReplacementSwapExecution:
     retry_sleep_seconds: float
 
 
+@dataclass(frozen=True, slots=True)
+class ReplacementCollectorSession:
+    pid: int
+    state: str | None
+    transaction_age_seconds: float | None
+    query: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementCollectorConnectionProof:
+    application_name: str
+    backend_pid: int
+    closed_reader_sessions: tuple[ReplacementCollectorSession, ...]
+    remaining_reader_sessions: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementSwapRetryFailure:
+    job_id: str
+    attempts: int
+    busy_attempts: int
+    busy_seconds: float
+    retry_sleep_seconds: float
+    blockers: tuple[ReplacementSwapBlocker, ...]
+    last_busy: ReplacementSwapBusy
+
+
+class ReplacementSwapRetryExhausted(RuntimeError):
+    def __init__(self, failure: ReplacementSwapRetryFailure) -> None:
+        self.failure = failure
+        super().__init__(
+            'replacement binding swap remained busy after '
+            f'{failure.attempts} non-queuing attempts: '
+            f'{failure.last_busy!r}'
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementArchiveTranscodeFailureEvidence:
+    status: str
+    scenario: str
+    conditions: EvidenceConditions
+    component: ArchiveComponent
+    workload: dict[str, int]
+    collector_connection: ReplacementCollectorConnectionProof
+    failure: ReplacementSwapRetryFailure
+
+
 async def collect_replacement_archive_transcode_evidence(
     connection: AsyncConnection,
     *,
@@ -161,6 +213,7 @@ async def collect_replacement_archive_transcode_evidence(
     batch_size: int,
     payload_bytes: int,
     attempts_per_task: int,
+    failure_evidence_path: Path | None = None,
 ) -> ReplacementArchiveTranscodeEvidence:
     validate_archive_transcode_workload(
         run_kind=run_kind,
@@ -168,6 +221,16 @@ async def collect_replacement_archive_transcode_evidence(
         batch_size=batch_size,
         payload_bytes=payload_bytes,
         attempts_per_task=attempts_per_task,
+    )
+    previous_application_name = str(
+        (
+            await connection.execute(
+                text("SELECT current_setting('application_name')")
+            )
+        ).scalar_one()
+    )
+    collector_application_name = (
+        f'horsies_history_replacement_{uuid4().hex}'
     )
     conditions = await collect_operational_conditions(
         connection,
@@ -290,14 +353,42 @@ async def collect_replacement_archive_transcode_evidence(
             raise RuntimeError(
                 'replacement content verification failed before binding swap: '
                 f'{pre_swap_verification!r}'
-            )
+        )
         await connection.commit()
 
-        swap_execution = await execute_replacement_binding_swap(
-            connection,
-            schema,
-            job_id=job_id,
+        await connection.execute(
+            text("SELECT set_config('application_name', :name, false)"),
+            {'name': collector_application_name},
         )
+        await connection.commit()
+        collector_connection = await close_collector_owned_readers(
+            connection,
+            application_name=collector_application_name,
+        )
+        try:
+            swap_execution = await execute_replacement_binding_swap(
+                connection,
+                schema,
+                job_id=job_id,
+            )
+        except ReplacementSwapRetryExhausted as error:
+            AtomicEvidenceWriter(failure_evidence_path).write(
+                ReplacementArchiveTranscodeFailureEvidence(
+                    status='execution_failure',
+                    scenario='replacement-archive-transcode',
+                    conditions=conditions,
+                    component=component,
+                    workload={
+                        'rows': rows,
+                        'batch_size': batch_size,
+                        'payload_bytes': payload_bytes,
+                        'attempts_per_task': attempts_per_task,
+                    },
+                    collector_connection=collector_connection,
+                    failure=error.failure,
+                )
+            )
+            raise
         peak_bytes = max(
             peak_bytes,
             await replacement_storage_bytes(
@@ -384,6 +475,7 @@ async def collect_replacement_archive_transcode_evidence(
             swap_busy_attempts=swap_execution.busy_attempts,
             swap_busy_seconds=swap_execution.busy_seconds,
             swap_retry_sleep_seconds=swap_execution.retry_sleep_seconds,
+            collector_connection=collector_connection,
             maintenance_seconds=maintenance_seconds,
             copied_rows_per_second=copied_rows_per_second,
             verification=verification,
@@ -403,8 +495,16 @@ async def collect_replacement_archive_transcode_evidence(
         )
     finally:
         await connection.rollback()
-        await remove_archive_candidates(connection, schema)
-        await connection.commit()
+        try:
+            await remove_archive_candidates(connection, schema)
+            await connection.commit()
+        finally:
+            await connection.rollback()
+            await connection.execute(
+                text("SELECT set_config('application_name', :name, false)"),
+                {'name': previous_application_name},
+            )
+            await connection.commit()
 
 
 async def execute_replacement_binding_swap(
@@ -416,6 +516,9 @@ async def execute_replacement_binding_swap(
     busy_attempts = 0
     busy_seconds = 0.0
     retry_sleep_seconds = 0.0
+    observed_blockers: dict[
+        tuple[int, str, str], ReplacementSwapBlocker
+    ] = {}
     for attempt in range(1, REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS + 1):
         attempt_started = time.perf_counter()
         outcome = await swap_verified_replacement_partitions(
@@ -440,14 +543,121 @@ async def execute_replacement_binding_swap(
                 await connection.rollback()
                 busy_attempts += 1
                 busy_seconds += time.perf_counter() - attempt_started
+                for blocker in outcome.blockers:
+                    observed_blockers[
+                        (
+                            blocker.pid,
+                            blocker.relation_name,
+                            blocker.held_lock_mode,
+                        )
+                    ] = blocker
                 if attempt == REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS:
-                    raise RuntimeError(
-                        'replacement binding swap remained busy after '
-                        f'{attempt} non-queuing attempts: {outcome!r}'
+                    raise ReplacementSwapRetryExhausted(
+                        ReplacementSwapRetryFailure(
+                            job_id=job_id,
+                            attempts=attempt,
+                            busy_attempts=busy_attempts,
+                            busy_seconds=busy_seconds,
+                            retry_sleep_seconds=retry_sleep_seconds,
+                            blockers=tuple(observed_blockers.values()),
+                            last_busy=outcome,
+                        )
                     )
                 await asyncio.sleep(REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS)
                 retry_sleep_seconds += REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS
     raise AssertionError('replacement binding-swap retry loop was not exhaustive')
+
+
+async def close_collector_owned_readers(
+    connection: AsyncConnection,
+    *,
+    application_name: str,
+) -> ReplacementCollectorConnectionProof:
+    backend_pid = int(
+        (await connection.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+    )
+    sessions = await _collector_owned_reader_sessions(
+        connection,
+        application_name=application_name,
+        backend_pid=backend_pid,
+    )
+    for session in sessions:
+        terminated = (
+            await connection.execute(
+                text('SELECT pg_terminate_backend(:pid)'),
+                {'pid': session.pid},
+            )
+        ).scalar_one()
+        if not terminated:
+            raise RuntimeError(
+                f'collector-owned reader pid {session.pid} could not be closed'
+            )
+    remaining: tuple[ReplacementCollectorSession, ...] = ()
+    for _ in range(20):
+        remaining = await _collector_owned_reader_sessions(
+            connection,
+            application_name=application_name,
+            backend_pid=backend_pid,
+        )
+        if not remaining:
+            break
+        await asyncio.sleep(0.05)
+    if remaining:
+        raise RuntimeError(
+            'collector-owned reader sessions remained before binding swap: '
+            f'{remaining!r}'
+        )
+    return ReplacementCollectorConnectionProof(
+        application_name=application_name,
+        backend_pid=backend_pid,
+        closed_reader_sessions=sessions,
+        remaining_reader_sessions=0,
+    )
+
+
+async def _collector_owned_reader_sessions(
+    connection: AsyncConnection,
+    *,
+    application_name: str,
+    backend_pid: int,
+) -> tuple[ReplacementCollectorSession, ...]:
+    await connection.execute(text('SELECT pg_stat_clear_snapshot()'))
+    rows = (
+        await connection.execute(
+            text(
+                """
+                SELECT pid,
+                       state,
+                       EXTRACT(
+                           EPOCH FROM clock_timestamp() - xact_start
+                       )::double precision AS transaction_age_seconds,
+                       LEFT(query, 2048) AS query
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND application_name = :application_name
+                  AND pid <> :backend_pid
+                ORDER BY pid
+                """
+            ),
+            {
+                'application_name': application_name,
+                'backend_pid': backend_pid,
+            },
+        )
+    ).all()
+    return tuple(
+        ReplacementCollectorSession(
+            pid=int(row.pid),
+            state=row.state,
+            transaction_age_seconds=(
+                None
+                if row.transaction_age_seconds is None
+                else float(row.transaction_age_seconds)
+            ),
+            query=row.query,
+        )
+        for row in rows
+    )
 
 
 async def _measure_plain_copy_hash_control(

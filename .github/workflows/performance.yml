@@ -98,6 +98,7 @@ jobs:
               attempts=21
             fi
             output="$output_dir/${component,,}.json"
+            partial_output="$output.partial.json"
             candidate_output="$output.candidate"
             error_log="$output.stderr"
             if ! uv run python -m tests.task_history_prototypes \
@@ -113,8 +114,13 @@ jobs:
               --batch-size 100000 \
               --result-bytes 200 \
               --attempts-per-task "$attempts" \
+              --partial-evidence-path "$partial_output" \
               --demo-quiesced > "$candidate_output" 2> "$error_log"
             then
+              failure_evidence=null
+              if [[ -s "$partial_output" ]]; then
+                failure_evidence="$(jq -c . "$partial_output")"
+              fi
               jq -n \
                 --arg component "$component" \
                 --arg commit '${{ github.sha }}' \
@@ -123,6 +129,7 @@ jobs:
                 --arg host_description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
                 --arg storage_description 'GitHub-hosted runner Docker overlay2 storage' \
                 --argjson attempts_per_task "$attempts" \
+                --argjson failure_evidence "$failure_evidence" \
                 --rawfile error "$error_log" \
                 '{
                   status: "execution_failure",
@@ -165,6 +172,7 @@ jobs:
                     swap_lock_attempts_maximum: 120,
                     swap_retry_backoff_seconds: 0.25
                   },
+                  failure_evidence: $failure_evidence,
                   error: $error
                 }' > "$output"
               failures=1
@@ -241,14 +249,19 @@ jobs:
       # exit status is nonzero if execution fails or any lookup cell across
       # every candidate and posture reports a verdict other than PASS.
       - name: Identity lookup boundary qualification
+        timeout-minutes: 345
         shell: bash
         run: |
           output_dir=/tmp/task-history-identity-pg${{ matrix.postgres }}
           mkdir -p "$output_dir"
           output="$output_dir/identity_lookup.json"
+          partial_output="$output_dir/identity_lookup.partial.json"
           candidate_output="$output.candidate"
           error_log="$output.stderr"
-          if ! uv run python -m tests.task_history_prototypes \
+          exec 3>&1
+          set +e
+          timeout --foreground --signal=TERM --kill-after=30s 330m \
+            uv run python -m tests.task_history_prototypes \
             --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
             --commit '${{ github.sha }}' \
             --run-kind gate \
@@ -264,14 +277,24 @@ jobs:
             --warm-observations 10000 \
             --cold-observations 10000 \
             --bootstrap-resamples 1000 \
+            --partial-evidence-path "$partial_output" \
+            --progress-fd 3 \
             --demo-quiesced > "$candidate_output" 2> "$error_log"
-          then
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            partial_evidence=null
+            if [[ -s "$partial_output" ]]; then
+              partial_evidence="$(jq -c . "$partial_output")"
+            fi
             jq -n \
               --arg commit '${{ github.sha }}' \
               --arg postgres_major '${{ matrix.postgres }}' \
               --arg server_image '${{ matrix.image }}' \
               --arg host_description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
               --arg storage_description 'GitHub-hosted runner Docker overlay2 storage' \
+              --argjson collector_status "$collector_status" \
+              --argjson partial_evidence "$partial_evidence" \
               --rawfile error "$error_log" \
               '{
                 status: "execution_failure",
@@ -304,9 +327,12 @@ jobs:
                   attached_finite_leaves: 512,
                   keyed_percent: 10,
                   warm_observations_per_category: 10000,
-                  cold_observations_per_category: 10000,
+                  cold_observation_ladder: [500, 2000, 10000],
+                  cold_observations_maximum: 10000,
                   bootstrap_resamples: 1000
                 },
+                collector_exit_status: $collector_status,
+                partial_evidence: $partial_evidence,
                 error: $error
               }' > "$output"
             exit 1

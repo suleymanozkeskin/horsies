@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -26,6 +27,12 @@ from tests.task_history_prototypes.measurements import (
     RelationFootprint,
     partition_tree_footprint,
     relation_footprint,
+)
+from tests.task_history_prototypes.qualification_io import (
+    AtomicEvidenceWriter,
+    QualificationProgress,
+    QualificationProgressReporter,
+    bounded_observation_milestones,
 )
 from tests.task_history_prototypes.schema import (
     PrototypeSchema,
@@ -59,6 +66,12 @@ class AbsoluteVerdict(StrEnum):
     PASS = 'PASS'
     FAIL = 'FAIL'
     INCONCLUSIVE = 'INCONCLUSIVE'
+
+
+class IdentityCheckpointStatus(StrEnum):
+    RUNNING = 'running'
+    EXECUTION_FAILURE = 'execution_failure'
+    COMPLETE = 'complete'
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,11 +108,200 @@ class IdentityCandidateEvidence:
 class IdentityEvidence:
     conditions: EvidenceConditions
     warm_observations_per_category: int
-    cold_observations_per_category: int
+    cold_observation_ladder: tuple[int, ...]
+    cold_observations_maximum: int
     bootstrap_resamples: int
     ballast_bytes: int
     seed: int
     candidates: tuple[IdentityCandidateEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityActiveCell:
+    candidate: IdentityCandidate
+    candidate_index: int
+    candidate_total: int
+    category: LookupCategory
+    category_index: int
+    category_total: int
+    posture: LookupPosture
+    cell_index: int
+    cell_total: int
+    rung: int | None
+    observations_completed: int
+    observation_target: int
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityFinalizedCell:
+    candidate: IdentityCandidate
+    candidate_index: int
+    candidate_total: int
+    cell_index: int
+    cell_total: int
+    result: LookupLatency
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityPartialEvidence:
+    status: IdentityCheckpointStatus
+    conditions: EvidenceConditions
+    workload: dict[str, int | tuple[int, ...]]
+    ballast_bytes: int | None
+    finalized_cells: tuple[IdentityFinalizedCell, ...]
+    active_cell: IdentityActiveCell | None
+
+
+@dataclass(slots=True)
+class _IdentityRunObserver:
+    conditions: EvidenceConditions
+    workload: dict[str, int | tuple[int, ...]]
+    writer: AtomicEvidenceWriter
+    progress: QualificationProgressReporter
+    ballast_bytes: int | None = None
+    finalized_cells: list[IdentityFinalizedCell] = field(
+        default_factory=lambda: []
+    )
+    active_cell: IdentityActiveCell | None = None
+
+    def checkpoint(
+        self,
+        status: IdentityCheckpointStatus = IdentityCheckpointStatus.RUNNING,
+    ) -> None:
+        self.writer.write(
+            IdentityPartialEvidence(
+                status=status,
+                conditions=self.conditions,
+                workload=self.workload,
+                ballast_bytes=self.ballast_bytes,
+                finalized_cells=tuple(self.finalized_cells),
+                active_cell=self.active_cell,
+            )
+        )
+
+    def emit_phase(
+        self,
+        phase: str,
+        status: str,
+        *,
+        candidate: IdentityCandidate | None = None,
+        candidate_index: int | None = None,
+        candidate_total: int | None = None,
+        live_rows: int | None = None,
+        finite_history_rows: int | None = None,
+        forever_history_rows: int | None = None,
+    ) -> None:
+        self.progress.emit(
+            QualificationProgress(
+                scenario='identity-lookup',
+                phase=phase,
+                status=status,
+                candidate=None if candidate is None else candidate.value,
+                candidate_index=candidate_index,
+                candidate_total=candidate_total,
+                live_rows=live_rows,
+                finite_history_rows=finite_history_rows,
+                forever_history_rows=forever_history_rows,
+            )
+        )
+
+    def start_cell(
+        self,
+        *,
+        candidate: IdentityCandidate,
+        candidate_index: int,
+        category: LookupCategory,
+        posture: LookupPosture,
+        cell_index: int,
+        rung: int | None,
+        observations_completed: int,
+        observation_target: int,
+    ) -> None:
+        self.active_cell = IdentityActiveCell(
+            candidate=candidate,
+            candidate_index=candidate_index,
+            candidate_total=len(IdentityCandidate),
+            category=category,
+            category_index=tuple(LookupCategory).index(category) + 1,
+            category_total=len(LookupCategory),
+            posture=posture,
+            cell_index=cell_index,
+            cell_total=len(LookupCategory) * len(LookupPosture),
+            rung=rung,
+            observations_completed=observations_completed,
+            observation_target=observation_target,
+        )
+        self.checkpoint()
+        self._emit_cell('started')
+
+    def record_observations(self, completed: int) -> None:
+        if self.active_cell is None:
+            raise AssertionError('observation progress requires an active cell')
+        active = self.active_cell
+        self.active_cell = IdentityActiveCell(
+            candidate=active.candidate,
+            candidate_index=active.candidate_index,
+            candidate_total=active.candidate_total,
+            category=active.category,
+            category_index=active.category_index,
+            category_total=active.category_total,
+            posture=active.posture,
+            cell_index=active.cell_index,
+            cell_total=active.cell_total,
+            rung=active.rung,
+            observations_completed=completed,
+            observation_target=active.observation_target,
+        )
+        self._emit_cell('running')
+
+    def finalize_cell(self, result: LookupLatency) -> None:
+        if self.active_cell is None:
+            raise AssertionError('cell finalization requires an active cell')
+        active = self.active_cell
+        if result.observations != active.observations_completed:
+            raise AssertionError('finalized observations differ from checkpoint')
+        self.finalized_cells.append(
+            IdentityFinalizedCell(
+                candidate=active.candidate,
+                candidate_index=active.candidate_index,
+                candidate_total=active.candidate_total,
+                cell_index=active.cell_index,
+                cell_total=active.cell_total,
+                result=result,
+            )
+        )
+        self._emit_cell(result.verdict.value)
+        self.active_cell = None
+        self.checkpoint()
+
+    def report_interim(self, verdict: AbsoluteVerdict) -> None:
+        if verdict is not AbsoluteVerdict.INCONCLUSIVE:
+            raise ValueError('only an inconclusive cell may advance a rung')
+        self._emit_cell(verdict.value)
+
+    def _emit_cell(self, status: str) -> None:
+        if self.active_cell is None:
+            raise AssertionError('cell progress requires an active cell')
+        active = self.active_cell
+        self.progress.emit(
+            QualificationProgress(
+                scenario='identity-lookup',
+                phase='lookup-cell',
+                status=status,
+                candidate=active.candidate.value,
+                candidate_index=active.candidate_index,
+                candidate_total=active.candidate_total,
+                category=active.category.value,
+                category_index=active.category_index,
+                category_total=active.category_total,
+                posture=active.posture.value,
+                cell_index=active.cell_index,
+                cell_total=active.cell_total,
+                rung=active.rung,
+                observations=active.observations_completed,
+                observation_target=active.observation_target,
+            )
+        )
 
 
 _PREPARED_BUDGETS = {
@@ -126,6 +328,7 @@ _COLD_BUDGETS = {
     LookupCategory.PURGED_IDENTITY: 150.0,
     LookupCategory.NEVER_SEEN: 150.0,
 }
+BOUNDARY_COLD_OBSERVATION_LADDER = (500, 2_000, 10_000)
 
 
 async def collect_identity_evidence(
@@ -146,6 +349,8 @@ async def collect_identity_evidence(
     cold_observations_per_category: int,
     bootstrap_resamples: int,
     seed: int,
+    checkpoint_path: Path | None = None,
+    progress: QualificationProgressReporter | None = None,
 ) -> IdentityEvidence:
     _validate_workload(
         live_rows=live_rows,
@@ -157,6 +362,10 @@ async def collect_identity_evidence(
         cold_observations_per_category=cold_observations_per_category,
         bootstrap_resamples=bootstrap_resamples,
         run_kind=run_kind,
+    )
+    cold_observation_ladder = _cold_observation_ladder(
+        run_kind,
+        maximum=cold_observations_per_category,
     )
     conditions = await collect_conditions(
         connection,
@@ -175,6 +384,25 @@ async def collect_identity_evidence(
             'for every unprepared and buffer-cold observation'
         ),
     )
+    observer = _IdentityRunObserver(
+        conditions=conditions,
+        workload={
+            'live_rows': live_rows,
+            'finite_history_rows': finite_history_rows,
+            'forever_history_rows': forever_history_rows,
+            'attached_finite_leaves': attached_finite_leaves,
+            'keyed_percent': keyed_percent,
+            'warm_observations_per_category': warm_observations_per_category,
+            'cold_observation_ladder': cold_observation_ladder,
+            'cold_observations_maximum': cold_observations_per_category,
+            'bootstrap_resamples': bootstrap_resamples,
+            'seed': seed,
+        },
+        writer=AtomicEvidenceWriter(checkpoint_path),
+        progress=progress or QualificationProgressReporter(),
+    )
+    observer.checkpoint()
+    observer.emit_phase('schema', 'started')
     schema = PrototypeSchema(f'history_identity_evidence_{uuid4().hex[:8]}')
     await install_archive_candidates(connection, schema)
     await install_identity_candidates(connection, schema)
@@ -184,41 +412,90 @@ async def collect_identity_evidence(
         target_leaf_count=attached_finite_leaves,
     )
     await connection.commit()
+    observer.emit_phase('schema', 'complete')
     try:
         ballast_bytes = await _install_ballast(connection, schema)
+        observer.ballast_bytes = ballast_bytes
+        observer.checkpoint()
+        observer.emit_phase('ballast', 'complete')
         candidates: list[IdentityCandidateEvidence] = []
-        for candidate in IdentityCandidate:
+        for candidate_index, candidate in enumerate(IdentityCandidate, start=1):
+            observer.emit_phase(
+                'candidate',
+                'started',
+                candidate=candidate,
+                candidate_index=candidate_index,
+                candidate_total=len(IdentityCandidate),
+            )
             measured = await _measure_identity_candidate(
                 connection,
                 schema,
                 candidate=candidate,
+                candidate_index=candidate_index,
                 live_rows=live_rows,
                 finite_history_rows=finite_history_rows,
                 forever_history_rows=forever_history_rows,
                 attached_finite_leaves=attached_finite_leaves,
                 keyed_percent=keyed_percent,
                 warm_observations_per_category=warm_observations_per_category,
-                cold_observations_per_category=cold_observations_per_category,
+                cold_observation_ladder=cold_observation_ladder,
                 ballast_bytes=ballast_bytes,
                 bootstrap_resamples=bootstrap_resamples,
                 seed=seed,
+                observer=observer,
             )
             candidates.append(measured)
+            observer.emit_phase(
+                'candidate',
+                'complete',
+                candidate=candidate,
+                candidate_index=candidate_index,
+                candidate_total=len(IdentityCandidate),
+            )
             await _truncate_candidate(connection, schema, candidate)
             await connection.commit()
-        return IdentityEvidence(
+        evidence = IdentityEvidence(
             conditions=conditions,
             warm_observations_per_category=warm_observations_per_category,
-            cold_observations_per_category=cold_observations_per_category,
+            cold_observation_ladder=cold_observation_ladder,
+            cold_observations_maximum=cold_observations_per_category,
             bootstrap_resamples=bootstrap_resamples,
             ballast_bytes=ballast_bytes,
             seed=seed,
             candidates=tuple(candidates),
         )
+    except BaseException:
+        observer.checkpoint(IdentityCheckpointStatus.EXECUTION_FAILURE)
+        raise
     finally:
-        await connection.rollback()
-        await remove_archive_candidates(connection, schema)
-        await connection.commit()
+        try:
+            await connection.rollback()
+            await remove_archive_candidates(connection, schema)
+            await connection.commit()
+        except BaseException:
+            observer.checkpoint(IdentityCheckpointStatus.EXECUTION_FAILURE)
+            raise
+    observer.checkpoint(IdentityCheckpointStatus.COMPLETE)
+    observer.emit_phase('qualification', 'complete')
+    return evidence
+
+
+def _cold_observation_ladder(
+    run_kind: EvidenceRunKind,
+    *,
+    maximum: int,
+) -> tuple[int, ...]:
+    match run_kind:
+        case EvidenceRunKind.SMOKE:
+            return (maximum,)
+        case EvidenceRunKind.GATE:
+            if maximum != BOUNDARY_COLD_OBSERVATION_LADDER[-1]:
+                raise ValueError(
+                    'identity gate evidence requires the declared '
+                    '500/2,000/10,000 buffer-cold observation ladder with '
+                    '10,000 as its maximum'
+                )
+            return BOUNDARY_COLD_OBSERVATION_LADDER
 
 
 def _validate_workload(
@@ -264,11 +541,6 @@ def _validate_workload(
                 'identity gate evidence requires 10,000 warm observations '
                 'per category'
             )
-        if cold_observations_per_category < 10_000:
-            raise ValueError(
-                'identity gate evidence requires 10,000 buffer-cold '
-                'observations per category'
-            )
         if bootstrap_resamples < 1_000:
             raise ValueError('identity gate evidence requires 1,000 resamples')
 
@@ -278,16 +550,18 @@ async def _measure_identity_candidate(
     schema: PrototypeSchema,
     *,
     candidate: IdentityCandidate,
+    candidate_index: int,
     live_rows: int,
     finite_history_rows: int,
     forever_history_rows: int,
     attached_finite_leaves: int,
     keyed_percent: int,
     warm_observations_per_category: int,
-    cold_observations_per_category: int,
+    cold_observation_ladder: tuple[int, ...],
     ballast_bytes: int,
     bootstrap_resamples: int,
     seed: int,
+    observer: _IdentityRunObserver,
 ) -> IdentityCandidateEvidence:
     prefix = _storage_prefix(candidate)
     await _truncate_candidate(connection, schema, candidate)
@@ -326,7 +600,7 @@ async def _measure_identity_candidate(
         keyed_percent=keyed_percent,
     )
     purged_ids = _sample_ids(
-        count=max(warm_observations_per_category, cold_observations_per_category),
+        count=max(warm_observations_per_category, cold_observation_ladder[-1]),
         upper=finite_history_rows,
         leaves=attached_finite_leaves,
         seed=seed + 9,
@@ -334,6 +608,16 @@ async def _measure_identity_candidate(
     await _remove_purged_history(connection, schema, candidate, purged_ids)
     await connection.commit()
     load_seconds = time.perf_counter() - started
+    observer.emit_phase(
+        'seed',
+        'complete',
+        candidate=candidate,
+        candidate_index=candidate_index,
+        candidate_total=len(IdentityCandidate),
+        live_rows=live_rows,
+        finite_history_rows=finite_history_rows,
+        forever_history_rows=forever_history_rows,
+    )
     await _analyze_candidate(connection, schema, candidate)
     await connection.commit()
 
@@ -352,7 +636,7 @@ async def _measure_identity_candidate(
         forever_history_rows=forever_history_rows,
         leaves=attached_finite_leaves,
         warm_count=warm_observations_per_category,
-        cold_count=cold_observations_per_category,
+        cold_count=cold_observation_ladder[-1],
         purged_ids=purged_ids,
         seed=seed,
     )
@@ -361,12 +645,14 @@ async def _measure_identity_candidate(
         connection,
         schema,
         candidate=candidate,
+        candidate_index=candidate_index,
         identifiers=identifiers,
         warm_observations_per_category=warm_observations_per_category,
-        cold_observations_per_category=cold_observations_per_category,
+        cold_observation_ladder=cold_observation_ladder,
         ballast_bytes=ballast_bytes,
         bootstrap_resamples=bootstrap_resamples,
         bootstrap_seed=seed,
+        observer=observer,
     )
     return IdentityCandidateEvidence(
         candidate=candidate,
@@ -875,12 +1161,14 @@ async def _measure_lookups(
     schema: PrototypeSchema,
     *,
     candidate: IdentityCandidate,
+    candidate_index: int,
     identifiers: dict[LookupCategory, tuple[str, ...]],
     warm_observations_per_category: int,
-    cold_observations_per_category: int,
+    cold_observation_ladder: tuple[int, ...],
     ballast_bytes: int,
     bootstrap_resamples: int,
     bootstrap_seed: int,
+    observer: _IdentityRunObserver,
 ) -> tuple[LookupLatency, ...]:
     prepared_name = f'{schema.name}_{candidate.value}_lookup'
     await connection.execute(
@@ -896,21 +1184,46 @@ async def _measure_lookups(
     )
     results: list[LookupLatency] = []
     try:
-        for category, task_ids in identifiers.items():
+        for category_index, (category, task_ids) in enumerate(
+            identifiers.items()
+        ):
+            prepared_cell_index = category_index * len(LookupPosture) + 1
+            observer.start_cell(
+                candidate=candidate,
+                candidate_index=candidate_index,
+                category=category,
+                posture=LookupPosture.PREPARED_WARM,
+                cell_index=prepared_cell_index,
+                rung=None,
+                observations_completed=0,
+                observation_target=warm_observations_per_category,
+            )
             prepared = await _prepared_timings(
                 connection,
                 prepared_name,
                 task_ids[:warm_observations_per_category],
+                observer=observer,
             )
-            results.append(
-                _latency_result(
-                    category,
-                    LookupPosture.PREPARED_WARM,
-                    prepared,
-                    _PREPARED_BUDGETS[category],
-                    resamples=bootstrap_resamples,
-                    seed=bootstrap_seed,
-                )
+            prepared_result = _latency_result(
+                category,
+                LookupPosture.PREPARED_WARM,
+                prepared,
+                _PREPARED_BUDGETS[category],
+                resamples=bootstrap_resamples,
+                seed=bootstrap_seed,
+            )
+            observer.finalize_cell(prepared_result)
+            results.append(prepared_result)
+
+            observer.start_cell(
+                candidate=candidate,
+                candidate_index=candidate_index,
+                category=category,
+                posture=LookupPosture.UNPREPARED_WARM,
+                cell_index=prepared_cell_index + 1,
+                rung=None,
+                observations_completed=0,
+                observation_target=warm_observations_per_category,
             )
             unprepared = await _unprepared_timings(
                 connection,
@@ -918,35 +1231,34 @@ async def _measure_lookups(
                 candidate,
                 category,
                 task_ids[:warm_observations_per_category],
+                observer=observer,
             )
-            results.append(
-                _latency_result(
-                    category,
-                    LookupPosture.UNPREPARED_WARM,
-                    unprepared,
-                    _UNPREPARED_BUDGETS[category],
-                    resamples=bootstrap_resamples,
-                    seed=bootstrap_seed + 1,
-                )
+            unprepared_result = _latency_result(
+                category,
+                LookupPosture.UNPREPARED_WARM,
+                unprepared,
+                _UNPREPARED_BUDGETS[category],
+                resamples=bootstrap_resamples,
+                seed=bootstrap_seed + 1,
             )
-            cold = await _cold_timings(
+            observer.finalize_cell(unprepared_result)
+            results.append(unprepared_result)
+
+            cold_result = await _measure_cold_ladder(
                 connection,
                 schema,
                 candidate,
+                candidate_index,
                 category,
-                task_ids[:cold_observations_per_category],
+                prepared_cell_index + 2,
+                task_ids,
+                cold_observation_ladder,
                 ballast_bytes=ballast_bytes,
+                bootstrap_resamples=bootstrap_resamples,
+                bootstrap_seed=bootstrap_seed + 2,
+                observer=observer,
             )
-            results.append(
-                _latency_result(
-                    category,
-                    LookupPosture.BUFFER_COLD,
-                    cold,
-                    _COLD_BUDGETS[category],
-                    resamples=bootstrap_resamples,
-                    seed=bootstrap_seed + 2,
-                )
-            )
+            results.append(cold_result)
     finally:
         await connection.execute(text(f'DEALLOCATE {prepared_name}'))
     return tuple(results)
@@ -956,13 +1268,18 @@ async def _prepared_timings(
     connection: AsyncConnection,
     statement_name: str,
     task_ids: tuple[str, ...],
+    *,
+    observer: _IdentityRunObserver,
 ) -> list[float]:
     samples: list[float] = []
-    for task_id in task_ids:
+    milestones = bounded_observation_milestones(len(task_ids))
+    for observation, task_id in enumerate(task_ids, start=1):
         _validate_task_id(task_id)
         started = time.perf_counter_ns()
         await connection.execute(text(f"EXECUTE {statement_name}('{task_id}')"))
         samples.append((time.perf_counter_ns() - started) / 1_000_000)
+        if observation in milestones:
+            observer.record_observations(observation)
     return samples
 
 
@@ -972,8 +1289,11 @@ async def _unprepared_timings(
     candidate: IdentityCandidate,
     category: LookupCategory,
     task_ids: tuple[str, ...],
+    *,
+    observer: _IdentityRunObserver,
 ) -> list[float]:
     samples: list[float] = []
+    milestones = bounded_observation_milestones(len(task_ids))
     for observation, task_id in enumerate(task_ids):
         started = time.perf_counter_ns()
         await connection.execute(
@@ -991,7 +1311,68 @@ async def _unprepared_timings(
             {'task_id': task_id},
         )
         samples.append((time.perf_counter_ns() - started) / 1_000_000)
+        completed = observation + 1
+        if completed in milestones:
+            observer.record_observations(completed)
     return samples
+
+
+async def _measure_cold_ladder(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    candidate: IdentityCandidate,
+    candidate_index: int,
+    category: LookupCategory,
+    cell_index: int,
+    task_ids: tuple[str, ...],
+    observation_ladder: tuple[int, ...],
+    *,
+    ballast_bytes: int,
+    bootstrap_resamples: int,
+    bootstrap_seed: int,
+    observer: _IdentityRunObserver,
+) -> LookupLatency:
+    samples: list[float] = []
+    for rung_index, target in enumerate(observation_ladder, start=1):
+        observer.start_cell(
+            candidate=candidate,
+            candidate_index=candidate_index,
+            category=category,
+            posture=LookupPosture.BUFFER_COLD,
+            cell_index=cell_index,
+            rung=rung_index,
+            observations_completed=len(samples),
+            observation_target=target,
+        )
+        samples.extend(
+            await _cold_timings(
+                connection,
+                schema,
+                candidate,
+                category,
+                task_ids[len(samples) : target],
+                observation_offset=len(samples),
+                observation_target=target,
+                ballast_bytes=ballast_bytes,
+                observer=observer,
+            )
+        )
+        result = _latency_result(
+            category,
+            LookupPosture.BUFFER_COLD,
+            samples,
+            _COLD_BUDGETS[category],
+            resamples=bootstrap_resamples,
+            seed=bootstrap_seed,
+        )
+        if result.verdict is not AbsoluteVerdict.INCONCLUSIVE:
+            observer.finalize_cell(result)
+            return result
+        if target == observation_ladder[-1]:
+            observer.finalize_cell(result)
+            return result
+        observer.report_interim(AbsoluteVerdict.INCONCLUSIVE)
+    raise AssertionError('cold observation ladder must contain a rung')
 
 
 async def _cold_timings(
@@ -1001,12 +1382,19 @@ async def _cold_timings(
     category: LookupCategory,
     task_ids: tuple[str, ...],
     *,
+    observation_offset: int,
+    observation_target: int,
     ballast_bytes: int,
+    observer: _IdentityRunObserver,
 ) -> list[float]:
     if ballast_bytes <= 0:
         raise RuntimeError('buffer-cold measurement requires non-empty ballast')
     samples: list[float] = []
-    for observation, task_id in enumerate(task_ids):
+    milestones = _bounded_range_milestones(
+        observation_offset,
+        observation_target,
+    )
+    for observation, task_id in enumerate(task_ids, start=observation_offset):
         await connection.execute(
             text(
                 f"""
@@ -1034,7 +1422,20 @@ async def _cold_timings(
             {'task_id': task_id},
         )
         samples.append((time.perf_counter_ns() - started) / 1_000_000)
+        completed = observation + 1
+        if completed in milestones:
+            observer.record_observations(completed)
     return samples
+
+
+def _bounded_range_milestones(start: int, target: int) -> set[int]:
+    if not 0 <= start < target:
+        raise ValueError('observation range must advance')
+    remaining = target - start
+    return {
+        start + max(1, round(remaining * index / 10))
+        for index in range(1, 11)
+    }
 
 
 def _latency_result(

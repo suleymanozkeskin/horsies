@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from io import StringIO
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -29,16 +32,21 @@ from tests.task_history_prototypes.identity_evidence import (
     collect_identity_evidence,
 )
 from tests.task_history_prototypes.measurements import relation_footprint
+from tests.task_history_prototypes.qualification_io import (
+    QualificationProgressReporter,
+)
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
 )
 from tests.task_history_prototypes.replacement_transcode import (
     ReplacementSwap,
+    ReplacementSwapBlocker,
     ReplacementSwapBusy,
     ReplacementSwapLockMode,
     ReplacementSwapOutcome,
 )
 from tests.task_history_prototypes.replacement_transcode_evidence import (
+    ReplacementSwapRetryExhausted,
     collect_replacement_archive_transcode_evidence,
     replacement_throughput_passed,
 )
@@ -241,9 +249,12 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
     engine: AsyncEngine,
     broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(identity_evidence, 'collect_conditions', _test_conditions)
     monkeypatch.setattr(identity_evidence, '_install_ballast', _small_ballast)
+    checkpoint = tmp_path / 'identity.partial.json'
+    progress_stream = StringIO()
     async with engine.connect() as connection:
         evidence = await collect_identity_evidence(
             connection,
@@ -262,6 +273,8 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
             cold_observations_per_category=1,
             bootstrap_resamples=20,
             seed=20260805,
+            checkpoint_path=checkpoint,
+            progress=QualificationProgressReporter(progress_stream),
         )
 
     assert tuple(candidate.candidate for candidate in evidence.candidates) == tuple(
@@ -280,6 +293,15 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
         assert candidate.live_footprint.total_bytes > 0
         assert candidate.history_footprint.total_bytes > 0
     assert evidence.conditions.demo_quiesced is True
+    assert evidence.cold_observation_ladder == (1,)
+    assert evidence.cold_observations_maximum == 1
+    partial = json.loads(checkpoint.read_text())
+    assert partial['status'] == 'complete'
+    assert partial['active_cell'] is None
+    assert len(partial['finalized_cells']) == 54
+    progress = progress_stream.getvalue()
+    assert 'phase=seed status=complete candidate=no_directory' in progress
+    assert 'phase=qualification status=complete' in progress
 
 
 async def test_pending_locator_evidence_compares_wide_and_compact_shapes(
@@ -428,6 +450,12 @@ async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
     assert evidence.swap_busy_attempts == 0
     assert evidence.swap_busy_seconds == 0
     assert evidence.swap_retry_sleep_seconds == 0
+    assert evidence.collector_connection.application_name.startswith(
+        'horsies_history_replacement_'
+    )
+    assert evidence.collector_connection.backend_pid > 0
+    assert evidence.collector_connection.closed_reader_sessions == ()
+    assert evidence.collector_connection.remaining_reader_sessions == 0
     assert evidence.maintenance_seconds >= evidence.swap_lock_seconds
     assert evidence.maintenance_duration_passed is True
     assert evidence.swap_window_passed is True
@@ -507,6 +535,87 @@ async def test_binding_swap_retry_policy_is_bounded_and_typed(
     assert delays == [0.250, 0.250]
 
 
+async def test_retry_exhaustion_writes_structured_blocker_evidence(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'collect_operational_conditions',
+        _test_operational_conditions,
+    )
+    blocker = ReplacementSwapBlocker(
+        pid=4711,
+        state='idle in transaction',
+        transaction_age_seconds=42.5,
+        query='SELECT result FROM history',
+        backend_type='client backend',
+        application_name='external-reader',
+        relation_name='archive.history_finite',
+        held_lock_mode='AccessShareLock',
+        granted=True,
+    )
+    failure = replacement_transcode_evidence.ReplacementSwapRetryFailure(
+        job_id='job-failed',
+        attempts=120,
+        busy_attempts=120,
+        busy_seconds=1.25,
+        retry_sleep_seconds=29.75,
+        blockers=(blocker,),
+        last_busy=ReplacementSwapBusy(
+            job_id='job-failed',
+            lock_mode=ReplacementSwapLockMode.PARENT,
+            relation_names=('archive.history_finite',),
+            blockers=(blocker,),
+        ),
+    )
+
+    async def exhaust_swap(
+        _connection: AsyncConnection,
+        _schema: PrototypeSchema,
+        *,
+        job_id: str,
+    ) -> object:
+        assert job_id
+        raise ReplacementSwapRetryExhausted(failure)
+
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'execute_replacement_binding_swap',
+        exhaust_swap,
+    )
+    failure_path = tmp_path / 'replacement-failure.json'
+    async with engine.connect() as connection:
+        with pytest.raises(ReplacementSwapRetryExhausted):
+            await collect_replacement_archive_transcode_evidence(
+                connection,
+                commit='test-head',
+                run_kind=EvidenceRunKind.SMOKE,
+                server_image='test-image',
+                host_description='test host',
+                storage_description='test storage',
+                demo_quiesced=True,
+                component=ArchiveComponent.HISTORY_ROW,
+                rows=100,
+                batch_size=17,
+                payload_bytes=200,
+                attempts_per_task=4,
+                failure_evidence_path=failure_path,
+            )
+
+    preserved = json.loads(failure_path.read_text(encoding='utf-8'))
+    assert preserved['status'] == 'execution_failure'
+    assert preserved['failure']['attempts'] == 120
+    observed = preserved['failure']['last_busy']['blockers'][0]
+    assert observed['pid'] == 4711
+    assert observed['state'] == 'idle in transaction'
+    assert observed['transaction_age_seconds'] == 42.5
+    assert observed['query'] == 'SELECT result FROM history'
+    assert preserved['failure']['blockers'] == [observed]
+
+
 async def test_binding_swap_retry_policy_exhaustion_fails_with_last_busy(
     engine: AsyncEngine,
     broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
@@ -549,7 +658,7 @@ async def test_binding_swap_retry_policy_exhaustion_fails_with_last_busy(
     )
     async with engine.connect() as connection:
         with pytest.raises(
-            RuntimeError,
+            ReplacementSwapRetryExhausted,
             match='remained busy after 3 non-queuing attempts',
         ) as raised:
             await replacement_transcode_evidence.execute_replacement_binding_swap(
@@ -560,3 +669,48 @@ async def test_binding_swap_retry_policy_exhaustion_fails_with_last_busy(
 
     assert attempts == 3
     assert "relation_names=('archive.history',)" in str(raised.value)
+    assert raised.value.failure.attempts == 3
+    assert raised.value.failure.busy_attempts == 3
+    assert raised.value.failure.last_busy.relation_names == ('archive.history',)
+
+
+async def test_collector_closes_only_its_own_extra_reader_sessions(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+) -> None:
+    application_name = 'horsies_history_replacement_test_owner'
+    owner = await engine.connect()
+    reader = await engine.connect()
+    try:
+        await owner.execute(
+            text("SELECT set_config('application_name', :name, false)"),
+            {'name': application_name},
+        )
+        await owner.commit()
+        await reader.execute(
+            text("SELECT set_config('application_name', :name, false)"),
+            {'name': application_name},
+        )
+        await reader.commit()
+        reader_pid = int(
+            (await reader.execute(text('SELECT pg_backend_pid()'))).scalar_one()
+        )
+        await reader.execute(text('SELECT 1'))
+
+        proof = (
+            await replacement_transcode_evidence.close_collector_owned_readers(
+                owner,
+                application_name=application_name,
+            )
+        )
+
+        assert proof.application_name == application_name
+        assert proof.backend_pid != reader_pid
+        assert len(proof.closed_reader_sessions) == 1
+        assert proof.closed_reader_sessions[0].pid == reader_pid
+        assert proof.closed_reader_sessions[0].state == 'idle in transaction'
+        assert proof.remaining_reader_sessions == 0
+    finally:
+        await reader.invalidate()
+        await reader.close()
+        await owner.close()
