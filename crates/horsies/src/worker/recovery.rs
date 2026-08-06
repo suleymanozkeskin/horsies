@@ -233,9 +233,17 @@ WHERE id IN (
 // idx_horsies_tasks_retention (migrations/0025_retention_indexes.sql): the
 // planner can only serve the eligibility predicate from the partial index
 // while it can prove the status predicate implies the index predicate.
+//
+// task_attempts are purged set-wise in the purged_attempts CTE rather than
+// left to the FK ON DELETE CASCADE: RI triggers are row-level, so the cascade
+// issues one child DELETE per doomed task inside this statement's transaction
+// — costlier in aggregate than the parent delete itself. The CTE removes the
+// whole child set in one indexed statement; the cascade trigger still fires
+// per parent row but finds nothing, and remains the correctness net for
+// non-retention deletes. rows_affected reports the top-level DELETE only, so
+// the batching loop keeps counting parent rows.
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
-DELETE FROM horsies_tasks
-WHERE id IN (
+WITH doomed AS (
     SELECT t.id
     FROM horsies_tasks t
     WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
@@ -248,15 +256,14 @@ WHERE id IN (
             AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
       )
     LIMIT $2
-    FOR UPDATE SKIP LOCKED
-)";
-
-/// Retention cleanup interval (1 hour), matching Python's `_RETENTION_CLEANUP_INTERVAL_S`.
-const RETENTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(3600);
-
-/// Rows per retention DELETE batch. Bounds per-transaction WAL, row locks,
-/// and task_attempts cascade volume.
-const RETENTION_DELETE_BATCH_SIZE: i64 = 5_000;
+    FOR UPDATE OF t SKIP LOCKED
+),
+purged_attempts AS (
+    DELETE FROM horsies_task_attempts
+    WHERE task_id IN (SELECT id FROM doomed)
+)
+DELETE FROM horsies_tasks
+WHERE id IN (SELECT id FROM doomed)";
 
 /// Max stale-RUNNING candidates a single reaper pass processes. Phase 2 handles
 /// each in its own transaction under the cluster-wide reaper gate, so this bounds
@@ -282,7 +289,8 @@ pub fn spawn_reaper(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let check_interval = Duration::from_millis(config.check_interval_ms);
-        let mut next_retention_cleanup = tokio::time::Instant::now() + RETENTION_CLEANUP_INTERVAL;
+        let mut next_retention_cleanup = tokio::time::Instant::now()
+            + Duration::from_secs(config.retention_sweep_interval_s);
 
         tracing::info!(
             auto_requeue_claimed = config.auto_requeue_stale_claimed,
@@ -447,10 +455,11 @@ async fn run_reaper_pass(
         }
     }
 
-    // Retention cleanup (runs every RETENTION_CLEANUP_INTERVAL).
+    // Retention cleanup (runs every retention_sweep_interval_s).
     if tokio::time::Instant::now() >= *next_retention_cleanup {
         run_retention_cleanup(pool, config).await;
-        *next_retention_cleanup = tokio::time::Instant::now() + RETENTION_CLEANUP_INTERVAL;
+        *next_retention_cleanup =
+            tokio::time::Instant::now() + Duration::from_secs(config.retention_sweep_interval_s);
     }
 }
 
@@ -753,8 +762,8 @@ pub async fn requeue_stale_claimed(pool: &PgPool, threshold_secs: f64) -> Result
 ///
 /// Always runs at least one batch; stops when a batch comes back short
 /// (backlog drained) or the pass deadline is reached (backlog resumes next
-/// pass). Bounded batches keep per-transaction WAL, row locks, and
-/// task_attempts cascade volume flat regardless of backlog size.
+/// pass). Bounded batches keep per-transaction WAL and row locks flat
+/// regardless of backlog size.
 async fn delete_expired_in_batches(
     pool: &PgPool,
     sql: &str,
@@ -792,13 +801,15 @@ async fn delete_expired_in_batches(
 /// Order matters: workflow_tasks before workflows (FK constraint).
 /// Deletes run in bounded batches under a shared pass time budget.
 ///
-/// Normally called by the reaper loop on a 1-hour interval.
+/// Normally called by the reaper loop every `retention_sweep_interval_s`.
 pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
     let mut deleted_heartbeats: u64 = 0;
     let mut deleted_worker_states: u64 = 0;
     let mut deleted_workflow_tasks: u64 = 0;
     let mut deleted_workflows: u64 = 0;
     let mut deleted_tasks: u64 = 0;
+
+    let batch_size = i64::from(config.retention_delete_batch_size);
 
     // Shared wall-clock budget across the five statements. A backlog that
     // outlives the budget resumes next pass.
@@ -810,7 +821,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 pool,
                 DELETE_EXPIRED_HEARTBEATS_SQL,
                 hours,
-                RETENTION_DELETE_BATCH_SIZE,
+                batch_size,
                 deadline,
             )
             .await?;
@@ -821,7 +832,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 pool,
                 DELETE_EXPIRED_WORKER_STATES_SQL,
                 hours,
-                RETENTION_DELETE_BATCH_SIZE,
+                batch_size,
                 deadline,
             )
             .await?;
@@ -835,7 +846,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 pool,
                 DELETE_EXPIRED_WORKFLOW_TASKS_SQL,
                 hours,
-                RETENTION_DELETE_BATCH_SIZE,
+                batch_size,
                 deadline,
             )
             .await?;
@@ -844,7 +855,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 pool,
                 DELETE_EXPIRED_WORKFLOWS_SQL,
                 hours,
-                RETENTION_DELETE_BATCH_SIZE,
+                batch_size,
                 deadline,
             )
             .await?;
@@ -853,7 +864,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 pool,
                 DELETE_EXPIRED_TASKS_SQL,
                 hours,
-                RETENTION_DELETE_BATCH_SIZE,
+                batch_size,
                 deadline,
             )
             .await?;
@@ -968,6 +979,10 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
+
+    /// Batch size for direct retention-statement tests (the default
+    /// `RecoveryConfig::retention_delete_batch_size`).
+    const TEST_RETENTION_BATCH: i64 = 500;
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -1240,7 +1255,7 @@ mod tests {
         // live-backing-task guard should hold the linkage back.
         sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
             .bind("0")
-            .bind(RETENTION_DELETE_BATCH_SIZE)
+            .bind(TEST_RETENTION_BATCH)
             .execute(&pool)
             .await
             .unwrap();
@@ -1258,7 +1273,7 @@ mod tests {
             .unwrap();
         sqlx::query(DELETE_EXPIRED_WORKFLOW_TASKS_SQL)
             .bind("0")
-            .bind(RETENTION_DELETE_BATCH_SIZE)
+            .bind(TEST_RETENTION_BATCH)
             .execute(&pool)
             .await
             .unwrap();
@@ -1270,7 +1285,7 @@ mod tests {
 
         sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
-            .bind(RETENTION_DELETE_BATCH_SIZE)
+            .bind(TEST_RETENTION_BATCH)
             .execute(&pool)
             .await
             .unwrap();
@@ -1356,7 +1371,11 @@ mod tests {
     /// The planner must serve the tasks retention eligibility predicate from
     /// idx_horsies_tasks_retention (migration 0025). Catches a drifted
     /// COALESCE expression or a regression to bound-array status params,
-    /// either of which silently falls back to a full heap scan.
+    /// either of which silently falls back to a full heap scan. The plan must
+    /// also carry the set-wise attempts purge as its own Delete node — the FK
+    /// cascade form cannot produce one (row-level triggers never appear as
+    /// plan nodes), so this assertion is the revert-proof for the
+    /// purged_attempts CTE (parity with horsies PR #204).
     #[tokio::test]
     #[serial]
     async fn retention_delete_uses_retention_index() {
@@ -1395,7 +1414,7 @@ mod tests {
         let plan_rows: Vec<(String,)> =
             sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_SQL))
                 .bind("240")
-                .bind(RETENTION_DELETE_BATCH_SIZE)
+                .bind(TEST_RETENTION_BATCH)
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap();
@@ -1410,8 +1429,91 @@ mod tests {
             plan.contains("idx_horsies_tasks_retention"),
             "eligibility predicate must be served by the retention index; plan:\n{plan}",
         );
+        assert!(
+            plan.contains("Delete on horsies_task_attempts"),
+            "attempts must be purged set-wise in the statement, not via FK cascade; plan:\n{plan}",
+        );
 
         sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_explain_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// The purged_attempts CTE removes a doomed task's attempt history in the
+    /// same statement, leaves survivors' history intact, and reports parent
+    /// rows only in rows_affected (parity with horsies PR #204).
+    #[tokio::test]
+    #[serial]
+    async fn retention_delete_purges_attempts_set_wise() {
+        let pool = test_pool().await;
+
+        let doomed_id = Uuid::new_v4().to_string();
+        let survivor_id = Uuid::new_v4().to_string();
+
+        // Doomed: terminal, aged out. Survivor: terminal but in-window.
+        for (id, completed_at_expr) in [
+            (&doomed_id, "NOW() - INTERVAL '2 hours'"),
+            (&survivor_id, "NOW()"),
+        ] {
+            sqlx::query(&format!(
+                "INSERT INTO horsies_tasks (
+                    id, task_name, queue_name, priority, args, kwargs, status,
+                    sent_at, created_at, updated_at, completed_at,
+                    retry_count, max_retries, enqueue_sha
+                ) VALUES (
+                    $1, 'ret_attempts_task', 'default', 100, '[]', '{{}}', 'COMPLETED',
+                    {expr}, {expr}, {expr}, {expr}, 0, 0, $1
+                )",
+                expr = completed_at_expr,
+            ))
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO horsies_task_attempts (
+                    task_id, attempt, outcome, will_retry, started_at, finished_at
+                ) VALUES ($1, 1, 'COMPLETED', FALSE, NOW(), NOW())",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // hours = 1 → only the doomed task qualifies by age.
+        let deleted = sqlx::query(DELETE_EXPIRED_TASKS_SQL)
+            .bind("1")
+            .bind(TEST_RETENTION_BATCH)
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(deleted, 1, "rows_affected counts parent rows only");
+
+        let attempts_for = |pool: PgPool, id: String| async move {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1",
+            )
+            .bind(&id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        };
+        assert_eq!(
+            attempts_for(pool.clone(), doomed_id.clone()).await,
+            0,
+            "doomed task's attempt history must be purged",
+        );
+        assert_eq!(
+            attempts_for(pool.clone(), survivor_id.clone()).await,
+            1,
+            "survivor's attempt history must be intact",
+        );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&survivor_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1467,7 +1569,7 @@ mod tests {
             let plan_rows: Vec<(String,)> =
                 sqlx::query_as(&format!("EXPLAIN (ANALYZE, BUFFERS) {delete_sql}"))
                     .bind("240")
-                    .bind(RETENTION_DELETE_BATCH_SIZE)
+                    .bind(TEST_RETENTION_BATCH)
                     .fetch_all(&mut *tx)
                     .await
                     .unwrap();
@@ -1524,7 +1626,7 @@ mod tests {
         let plan_rows: Vec<(String,)> =
             sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_HEARTBEATS_SQL))
                 .bind("1")
-                .bind(RETENTION_DELETE_BATCH_SIZE)
+                .bind(TEST_RETENTION_BATCH)
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap();

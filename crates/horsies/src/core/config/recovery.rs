@@ -71,6 +71,16 @@ pub struct RecoveryConfig {
     /// How long to keep terminal task/workflow rows in hours. None disables pruning.
     #[serde(default = "default_terminal_record_retention")]
     pub terminal_record_retention_hours: Option<u32>,
+
+    /// Seconds between retention sweep passes (30s–24h). Frequent small
+    /// sweeps keep each pass short instead of accumulating an hourly spike.
+    #[serde(default = "default_retention_sweep_interval")]
+    pub retention_sweep_interval_s: u64,
+
+    /// Rows per retention DELETE batch (50–10_000). Bounds per-statement
+    /// duration, row locks, and WAL; each batch commits independently.
+    #[serde(default = "default_retention_delete_batch_size")]
+    pub retention_delete_batch_size: u32,
 }
 
 fn default_true() -> bool {
@@ -106,6 +116,12 @@ fn default_worker_state_retention() -> Option<u32> {
 fn default_terminal_record_retention() -> Option<u32> {
     Some(24 * 30)
 }
+fn default_retention_sweep_interval() -> u64 {
+    300
+}
+fn default_retention_delete_batch_size() -> u32 {
+    500
+}
 
 impl Default for RecoveryConfig {
     fn default() -> Self {
@@ -123,6 +139,8 @@ impl Default for RecoveryConfig {
             heartbeat_retention_hours: Some(24),
             worker_state_retention_hours: Some(24 * 7),
             terminal_record_retention_hours: Some(24 * 30),
+            retention_sweep_interval_s: 300,
+            retention_delete_batch_size: 500,
         }
     }
 }
@@ -157,14 +175,14 @@ pub enum RecoveryConfigError {
         minimum: u64,
     },
 
-    #[error("{field} ({value}ms) must be >= {min}ms")]
+    #[error("{field} ({value}) must be >= {min}")]
     BelowMinimum {
         field: &'static str,
         value: u64,
         min: u64,
     },
 
-    #[error("{field} ({value}ms) must be <= {max}ms")]
+    #[error("{field} ({value}) must be <= {max}")]
     AboveMaximum {
         field: &'static str,
         value: u64,
@@ -282,6 +300,36 @@ impl RecoveryConfig {
                 field: "claimed_stale_threshold_ms",
                 value: self.claimed_stale_threshold_ms,
                 max: 3_600_000,
+            });
+        }
+
+        // Retention sweep cadence (seconds) and batch size (rows).
+        if self.retention_sweep_interval_s < 30 {
+            errors.push(RecoveryConfigError::BelowMinimum {
+                field: "retention_sweep_interval_s",
+                value: self.retention_sweep_interval_s,
+                min: 30,
+            });
+        }
+        if self.retention_sweep_interval_s > 86_400 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "retention_sweep_interval_s",
+                value: self.retention_sweep_interval_s,
+                max: 86_400,
+            });
+        }
+        if self.retention_delete_batch_size < 50 {
+            errors.push(RecoveryConfigError::BelowMinimum {
+                field: "retention_delete_batch_size",
+                value: u64::from(self.retention_delete_batch_size),
+                min: 50,
+            });
+        }
+        if self.retention_delete_batch_size > 10_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "retention_delete_batch_size",
+                value: u64::from(self.retention_delete_batch_size),
+                max: 10_000,
             });
         }
 
@@ -580,6 +628,101 @@ mod tests {
             errors[0],
             RecoveryConfigError::AboveMaximum {
                 field: "worker_state_snapshot_interval_ms",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retention_sweep_and_batch_defaults() {
+        assert_eq!(RecoveryConfig::default().retention_sweep_interval_s, 300);
+        assert_eq!(RecoveryConfig::default().retention_delete_batch_size, 500);
+        let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
+        assert_eq!(from_empty.retention_sweep_interval_s, 300);
+        assert_eq!(from_empty.retention_delete_batch_size, 500);
+    }
+
+    #[test]
+    fn retention_sweep_interval_bounds() {
+        let at_min = RecoveryConfig {
+            retention_sweep_interval_s: 30,
+            ..Default::default()
+        };
+        assert!(at_min.validate().is_empty());
+
+        let at_max = RecoveryConfig {
+            retention_sweep_interval_s: 86_400,
+            ..Default::default()
+        };
+        assert!(at_max.validate().is_empty());
+
+        let below = RecoveryConfig {
+            retention_sweep_interval_s: 29,
+            ..Default::default()
+        };
+        let errors = below.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::BelowMinimum {
+                field: "retention_sweep_interval_s",
+                ..
+            }
+        ));
+
+        let above = RecoveryConfig {
+            retention_sweep_interval_s: 86_401,
+            ..Default::default()
+        };
+        let errors = above.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::AboveMaximum {
+                field: "retention_sweep_interval_s",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn retention_delete_batch_size_bounds() {
+        let at_min = RecoveryConfig {
+            retention_delete_batch_size: 50,
+            ..Default::default()
+        };
+        assert!(at_min.validate().is_empty());
+
+        let at_max = RecoveryConfig {
+            retention_delete_batch_size: 10_000,
+            ..Default::default()
+        };
+        assert!(at_max.validate().is_empty());
+
+        let below = RecoveryConfig {
+            retention_delete_batch_size: 49,
+            ..Default::default()
+        };
+        let errors = below.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::BelowMinimum {
+                field: "retention_delete_batch_size",
+                ..
+            }
+        ));
+
+        let above = RecoveryConfig {
+            retention_delete_batch_size: 10_001,
+            ..Default::default()
+        };
+        let errors = above.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            errors[0],
+            RecoveryConfigError::AboveMaximum {
+                field: "retention_delete_batch_size",
                 ..
             }
         ));

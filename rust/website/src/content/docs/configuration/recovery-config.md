@@ -46,6 +46,8 @@ let config = AppConfig {
 | `heartbeat_retention_hours` | `Option<u32>` | `Some(24)` | Hours to keep heartbeat rows; `None` disables pruning |
 | `worker_state_retention_hours` | `Option<u32>` | `Some(168)` (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
 | `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
+| `retention_sweep_interval_s` | `u64` | `300` | Seconds between retention sweep passes (30s–24h). Frequent small sweeps keep each pass short instead of accumulating an hourly spike |
+| `retention_delete_batch_size` | `u32` | `500` | Rows per retention DELETE batch (50–10,000). Bounds per-statement duration, row locks, and WAL; each batch commits independently |
 
 All time values for thresholds and intervals are in milliseconds. Retention values are in hours.
 
@@ -129,7 +131,7 @@ RecoveryConfig {
 
 ## Retention Cleanup
 
-The reaper loop automatically prunes old rows every hour. Three categories are cleaned independently:
+The reaper loop automatically prunes old rows every `retention_sweep_interval_s` seconds (default 5 minutes), deleting in batches of `retention_delete_batch_size` rows (default 500) under a shared 60-second pass budget. A doomed task's `horsies_task_attempts` history is purged set-wise in the same statement. Three categories are cleaned independently:
 
 | Category | Config field | Default | What gets deleted |
 |----------|-------------|---------|-------------------|

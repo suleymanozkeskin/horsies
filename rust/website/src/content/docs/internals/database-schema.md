@@ -232,14 +232,14 @@ broker.health_check().await?;
 
 ## Automatic Retention Cleanup
 
-The worker's reaper loop prunes old rows automatically every hour based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
+The worker's reaper loop prunes old rows automatically every `retention_sweep_interval_s` seconds (default 5 minutes) based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
 
 | Table | Config field | Default | Condition |
 |-------|-------------|---------|-----------|
 | `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
 | `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
 | `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
-| `horsies_task_attempts` | -- | -- | Cascade-deleted when parent task row is deleted |
+| `horsies_task_attempts` | -- | -- | Purged set-wise in the same statement that deletes the parent task rows (the FK cascade remains as the net for non-retention deletes) |
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Parent workflow is terminal and older than threshold |
 

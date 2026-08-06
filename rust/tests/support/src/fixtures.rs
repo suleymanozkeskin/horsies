@@ -49,6 +49,8 @@ pub fn fast_recovery_app_config() -> AppConfig {
         heartbeat_retention_hours: Some(1),
         worker_state_retention_hours: Some(1),
         terminal_record_retention_hours: Some(1),
+        retention_sweep_interval_s: 30,
+        retention_delete_batch_size: 500,
     };
     config
 }
