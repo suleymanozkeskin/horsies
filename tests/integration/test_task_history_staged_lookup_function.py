@@ -189,6 +189,89 @@ class TestLookupOutcomes:
                 assert await publisher.references_leaf(connection, leaf_name)
 
 
+class TestPublicationAtomicity:
+    """Identity, provenance, and manifest regenerate as one publication.
+
+    Same discipline as the false-absence regression: the disable — a
+    provenance function regenerated alone from a stale single-class
+    manifest — is verified statically before its behavioral divergence
+    counts, and the publisher's one-transaction regeneration of both
+    functions plus the manifest is what restores agreement.
+    """
+
+    @pytest.mark.asyncio
+    async def test_publisher_keeps_both_functions_in_agreement(
+        self, history_schema: HistorySchema
+    ) -> None:
+        from horsies.core.history.reads.lookup_generation import (
+            render_staged_provenance_function,
+        )
+
+        async with history_schema.engine.begin() as connection:
+            row_a, row_b = await seed_two_classes(connection)
+
+            # Baseline: both functions see both classes' rows.
+            provenance = (
+                await connection.execute(
+                    text(
+                        'SELECT found, status FROM '
+                        'horsies_task_provenance_staged('
+                        'CAST(:task_id AS uuid))'
+                    ),
+                    {'task_id': row_b},
+                )
+            ).one()
+            assert provenance.found and provenance.status == 'COMPLETED'
+
+            # Disable: regenerate ONLY provenance from a single-class
+            # manifest — the divergence a partial publication would cause.
+            stale_manifest = manifest_from_catalog(
+                await read_attached_leaf_rows(connection, CLASS_A)
+            )
+            stale_body = render_staged_provenance_function(stale_manifest)
+            leaf_b = daily_leaf_name(
+                f'horsies_task_history_{CLASS_B}',
+                day_bounds(datetime.now(UTC) - timedelta(days=1))[0],
+            )
+            assert leaf_b not in stale_body
+            await connection.execute(text(stale_body))
+
+            # Divergence: identity still finds B's row, provenance does not.
+            assert isinstance(
+                await lookup_task_identity(connection, row_b),
+                HistoryTaskIdentity,
+            )
+            diverged = (
+                await connection.execute(
+                    text(
+                        'SELECT found FROM horsies_task_provenance_staged('
+                        'CAST(:task_id AS uuid))'
+                    ),
+                    {'task_id': row_b},
+                )
+            ).one()
+            assert not diverged.found
+
+            # Restore: one republish regenerates both plus the manifest.
+            await StagedLoaderPublisher().republish(connection)
+            restored = (
+                await connection.execute(
+                    text(
+                        'SELECT found, terminalization_kind FROM '
+                        'horsies_task_provenance_staged('
+                        'CAST(:task_id AS uuid))'
+                    ),
+                    {'task_id': row_b},
+                )
+            ).one()
+            assert restored.found
+            assert restored.terminalization_kind == 'COMPLETE_FUSED'
+            assert isinstance(
+                await lookup_task_identity(connection, row_a),
+                HistoryTaskIdentity,
+            )
+
+
 class TestFalseAbsenceSeamRegression:
     """Revert-proof: a class-scoped manifest loses other classes' rows."""
 
