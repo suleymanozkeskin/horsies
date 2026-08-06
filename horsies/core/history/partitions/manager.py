@@ -63,7 +63,6 @@ from .catalog import (
     daily_leaf_name,
     database_now,
     leaf_id_index_name,
-    read_attached_leaf_rows,
     read_leaf_catalog_row,
     read_leaf_physical_state,
     read_retention_class,
@@ -296,7 +295,7 @@ async def create_daily_leaf(
                 leaf_name, parent_name, class_key,
                 lower_anchor, upper_anchor,
                 index_schema_version, id_index_name, partition_bound,
-                min_birth_at, created_at
+                min_birth_at, min_birth_verified, created_at
             ) VALUES (
                 :leaf_name, :parent_name, :class_key,
                 :lower, :upper,
@@ -304,7 +303,7 @@ async def create_daily_leaf(
                 (SELECT pg_get_expr(c.relpartbound, c.oid)
                  FROM pg_class AS c
                  WHERE c.oid = to_regclass(:leaf_name)),
-                NULL, statement_timestamp()
+                NULL, TRUE, statement_timestamp()
             )
             """
         ),
@@ -322,9 +321,7 @@ async def create_daily_leaf(
         text(f'CREATE INDEX {id_index_name} ON {leaf.leaf_name} (task_id)')
     )
     await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
-    await publisher.republish(
-        connection, await read_attached_leaf_rows(connection, leaf.class_key)
-    )
+    await publisher.republish(connection)
     return LeafCreated(leaf_name=leaf.leaf_name, id_index_name=id_index_name)
 
 
@@ -431,9 +428,7 @@ async def detach_expired_leaf(
                 )
             )
             await _record_detached(connection, leaf.leaf_name)
-            await publisher.republish(
-                connection, await read_attached_leaf_rows(connection, leaf.class_key)
-            )
+            await publisher.republish(connection)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
         finally:
             await connection.rollback()
@@ -470,10 +465,7 @@ async def finalize_interrupted_detach(
             match inspection:
                 case LeafDetached():
                     await _record_detached(connection, leaf.leaf_name)
-                    await publisher.republish(
-                        connection,
-                        await read_attached_leaf_rows(connection, leaf.class_key),
-                    )
+                    await publisher.republish(connection)
                     return await inspect_leaf(
                         connection, InspectHistoryLeaf(leaf=leaf)
                     )
@@ -495,9 +487,7 @@ async def finalize_interrupted_detach(
                 )
             )
             await _record_detached(connection, leaf.leaf_name)
-            await publisher.republish(
-                connection, await read_attached_leaf_rows(connection, leaf.class_key)
-            )
+            await publisher.republish(connection)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
         finally:
             await connection.rollback()

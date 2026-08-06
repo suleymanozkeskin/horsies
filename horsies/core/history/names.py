@@ -13,12 +13,21 @@ from __future__ import annotations
 
 from typing import Final
 
+# Owned by the existing live schema program.
+LIVE_TASKS: Final = 'horsies_tasks'
+
 # Owned by the frozen-DDL module (retention classes, pending, quarantine).
 RETENTION_CLASSES: Final = 'horsies_retention_classes'
 WORKFLOW_PHASE2_PENDING: Final = 'horsies_workflow_phase2_pending'
 WORKFLOW_PHASE2_QUARANTINE: Final = 'horsies_workflow_phase2_quarantine'
 TASK_HISTORY_PARENT: Final = 'horsies_task_history'
+TASK_HISTORY_FOREVER: Final = 'horsies_task_history_forever'
 
 # Owned by the partition manager.
 LEAF_CATALOG: Final = 'horsies_task_history_leaf_catalog'
 LEAF_LOCK_KEY_FUNCTION: Final = 'horsies_task_history_leaf_lock_key'
+
+# Owned by the staged lookup loader.
+TASK_LOOKUP_FUNCTION: Final = 'horsies_task_lookup_staged'
+TASK_LOOKUP_TYPE: Final = 'horsies_task_lookup'
+TASK_LOOKUP_MANIFEST: Final = 'horsies_task_lookup_manifest'

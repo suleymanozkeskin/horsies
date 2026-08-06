@@ -44,6 +44,7 @@ CREATE TABLE {LEAF_CATALOG} (
     id_index_name text NOT NULL,
     partition_bound text NOT NULL,
     min_birth_at timestamptz,
+    min_birth_verified boolean NOT NULL,
     created_at timestamptz NOT NULL,
     detached_at timestamptz,
     dropped_at timestamptz,
@@ -100,6 +101,7 @@ class LeafCatalogRow:
     id_index_name: str
     partition_bound: str
     min_birth_at: datetime | None
+    min_birth_verified: bool
     created_at: datetime
     detached_at: datetime | None
     dropped_at: datetime | None
@@ -185,7 +187,8 @@ async def read_leaf_catalog_row(
                 SELECT leaf_name, parent_name, class_key,
                        lower_anchor, upper_anchor,
                        index_schema_version, id_index_name, partition_bound,
-                       min_birth_at, created_at, detached_at, dropped_at
+                       min_birth_at, min_birth_verified,
+                       created_at, detached_at, dropped_at
                 FROM {LEAF_CATALOG}
                 WHERE leaf_name = :leaf_name
                 """
@@ -212,6 +215,7 @@ async def read_leaf_catalog_row(
         id_index_name=id_index_name,
         partition_bound=_required_str(row.partition_bound, 'partition_bound'),
         min_birth_at=_optional_datetime(row.min_birth_at, 'min_birth_at'),
+        min_birth_verified=_required_bool(row.min_birth_verified, 'min_birth_verified'),
         created_at=_required_datetime(row.created_at, 'created_at'),
         detached_at=_optional_datetime(row.detached_at, 'detached_at'),
         dropped_at=_optional_datetime(row.dropped_at, 'dropped_at'),
@@ -222,20 +226,42 @@ async def read_attached_leaf_rows(
     connection: AsyncConnection,
     class_key: str,
 ) -> tuple[LeafCatalogRow, ...]:
-    """Catalog rows the manager believes are attached, oldest first."""
+    """Catalog rows of one class the manager believes attached, oldest first."""
+    return await _read_attached(connection, class_key=class_key)
+
+
+async def read_all_attached_leaf_rows(
+    connection: AsyncConnection,
+) -> tuple[LeafCatalogRow, ...]:
+    """Every attached catalog row across all classes, oldest first.
+
+    The staged lookup function is regenerated from this complete set: a
+    per-class manifest would drop every other class's leaves from the
+    function and turn their retained rows into false absence.
+    """
+    return await _read_attached(connection, class_key=None)
+
+
+async def _read_attached(
+    connection: AsyncConnection,
+    *,
+    class_key: str | None,
+) -> tuple[LeafCatalogRow, ...]:
+    class_filter = 'AND class_key = :class_key' if class_key is not None else ''
+    parameters = {'class_key': class_key} if class_key is not None else {}
     rows = (
         await connection.execute(
             text(
                 f"""
                 SELECT leaf_name
                 FROM {LEAF_CATALOG}
-                WHERE class_key = :class_key
-                  AND detached_at IS NULL
+                WHERE detached_at IS NULL
                   AND dropped_at IS NULL
-                ORDER BY lower_anchor
+                  {class_filter}
+                ORDER BY lower_anchor, leaf_name
                 """
             ),
-            {'class_key': class_key},
+            parameters,
         )
     ).all()
     manifest: list[LeafCatalogRow] = []
@@ -316,6 +342,12 @@ def _optional_str(value: Any, column: str) -> str | None:
     if value is None:
         return None
     return _required_str(value, column)
+
+
+def _required_bool(value: Any, column: str) -> bool:
+    if not isinstance(value, bool):
+        raise HistoryContractError(f'{column} did not decode as boolean')
+    return value
 
 
 def _required_int(value: Any, column: str) -> int:

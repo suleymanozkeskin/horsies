@@ -20,23 +20,23 @@ exists so the drop path has no optional-dependency branch.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from .catalog import LeafCatalogRow
-
 
 class LoaderPublication(Protocol):
-    """What the partition manager requires of the staged-loader owner."""
+    """What the partition manager requires of the staged-loader owner.
 
-    async def republish(
-        self,
-        connection: AsyncConnection,
-        manifest: Sequence[LeafCatalogRow],
-    ) -> None:
-        """Regenerate the staged lookup function from the attached manifest."""
+    `republish` takes no manifest: the loader probes the finite leaves of
+    every retention class, so the publisher assembles the complete attached
+    set from the catalog itself inside the caller's transaction. A manifest
+    scoped to the mutating class would silently drop every other class's
+    leaves from the regenerated function — false absence by construction.
+    """
+
+    async def republish(self, connection: AsyncConnection) -> None:
+        """Regenerate the staged lookup function from the full catalog."""
         ...
 
     async def references_leaf(
@@ -57,11 +57,7 @@ class UnpublishedLoader:
     proceed while the function still references the relation.
     """
 
-    async def republish(
-        self,
-        connection: AsyncConnection,
-        manifest: Sequence[LeafCatalogRow],
-    ) -> None:
+    async def republish(self, connection: AsyncConnection) -> None:
         return None
 
     async def references_leaf(
