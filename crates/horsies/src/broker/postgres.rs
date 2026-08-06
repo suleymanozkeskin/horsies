@@ -165,17 +165,16 @@ hb AS (
 )
 SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 
-// Success and terminal-failure finalization run through the terminalization
-// operations (broker/terminalization.rs → horsies_complete_task_fused /
-// horsies_fail_locked_task); the legacy COMPLETE/FINALIZE/FAIL statements
-// are gone.
+// Terminal transitions (COMPLETED/FAILED/CANCELLED/EXPIRED) run through the
+// terminalization operations — broker/terminalization.rs and the functions
+// installed by migration 0032.
 
-// retry_count is derived from the row being CAS-updated (same idiom as
-// FINALIZE_TASK_COMPLETED_SQL's ctx CTE), not passed by the caller: the
+// retry_count is derived from the row being CAS-updated (the same idiom as
+// horsies_complete_task_fused's ctx CTE), not passed by the caller: the
 // ownership CAS makes the claim-time snapshot provably equal to the row, so
 // self-incrementing removes the snapshot from the written value entirely.
-// The optional `started_at` fence ($4) scopes the CAS to a claim generation;
-// see `COMPLETE_SQL` (C10). `NULL` disables it.
+// The optional `started_at` fence ($4) scopes the CAS to a claim generation
+// (C10); `NULL` disables it.
 const REQUEUE_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'PENDING',
