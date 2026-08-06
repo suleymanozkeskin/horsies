@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::broker::PostgresConfig;
+use super::payload::PayloadPolicy;
 use super::queue::{CustomQueueConfig, QueueMode};
 use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
@@ -43,6 +44,10 @@ pub struct AppConfig {
     /// orphaned CLAIMED tasks after dispatch failure + requeue DB error.
     #[serde(default = "default_max_claim_renew_age_ms")]
     pub max_claim_renew_age_ms: u32,
+
+    /// Payload-size guardrail applied at the encode boundaries.
+    #[serde(default)]
+    pub payload: PayloadPolicy,
 
     /// Recovery configuration.
     #[serde(default)]
@@ -98,6 +103,8 @@ pub enum AppConfigError {
     Resilience(String),
     #[error("{0}")]
     Schedule(String),
+    #[error("{0}")]
+    Payload(String),
 }
 
 impl AppConfig {
@@ -129,6 +136,7 @@ impl AppConfig {
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: default_max_claim_renew_age_ms(),
+            payload: PayloadPolicy::default(),
             recovery: RecoveryConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
@@ -421,6 +429,11 @@ impl AppConfig {
             errors.push(AppConfigError::Resilience(e.to_string()));
         }
 
+        // Payload guardrail validation
+        for e in self.payload.validate() {
+            errors.push(AppConfigError::Payload(e));
+        }
+
         errors
     }
 }
@@ -481,6 +494,7 @@ mod tests {
     #[test]
     fn valid_default_mode() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
@@ -511,6 +525,7 @@ mod tests {
 
         // DEFAULT mode: only "default" is declared.
         let mut config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
@@ -547,6 +562,7 @@ mod tests {
     #[test]
     fn custom_queues_in_default_mode() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "high".to_owned(),
@@ -570,6 +586,7 @@ mod tests {
     #[test]
     fn missing_custom_queues_in_custom_mode() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
             broker: valid_broker(),
@@ -589,6 +606,7 @@ mod tests {
     #[test]
     fn prefetch_without_lease() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
@@ -608,6 +626,7 @@ mod tests {
     #[test]
     fn cluster_cap_with_prefetch_conflict() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
@@ -628,6 +647,7 @@ mod tests {
     #[test]
     fn multiple_errors_collected() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: None,
             broker: PostgresConfig {
@@ -658,6 +678,7 @@ mod tests {
     #[test]
     fn queue_priority_out_of_range_rejected() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "bad".to_owned(),
@@ -685,6 +706,7 @@ mod tests {
     #[test]
     fn queue_priority_101_rejected() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![CustomQueueConfig {
                 name: "over".to_owned(),
@@ -747,6 +769,7 @@ mod tests {
     #[test]
     fn format_for_logging_masks_password() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {
@@ -782,6 +805,7 @@ mod tests {
 
     fn default_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),

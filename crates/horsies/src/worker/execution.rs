@@ -19,6 +19,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
+use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -701,6 +702,7 @@ pub(crate) async fn schedule_retry_for_task(
 ///
 /// Returns `Ok(FinalizeOutcome)` on success, `Err(FinalizeError)` on DB failure.
 /// The error carries stage information for phase-aware retry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn persist_terminal_state(
     broker: &PostgresBroker,
     task_id: &str,
@@ -709,6 +711,7 @@ pub(crate) async fn persist_terminal_state(
     running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
+    payload_policy: &PayloadPolicy,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let pid = std::process::id() as i32;
     let process_name = format!("worker-{}", pid);
@@ -724,6 +727,17 @@ pub(crate) async fn persist_terminal_state(
 
     match result {
         TaskResult::Ok(ref result_bytes) => {
+            // Warn-only: results are never rejected over size (the work is
+            // done; destroying it would convert a size concern into data
+            // loss). The success payload bytes are measured as produced; the
+            // persisted envelope adds only a constant wrapper. Parity with
+            // horsies PR #208.
+            enforce_payload_policy(
+                payload_policy,
+                &row.task_name,
+                PayloadKind::Result,
+                result_bytes.len(),
+            );
             persist_ok_result(
                 broker,
                 task_id,
@@ -795,6 +809,8 @@ pub(crate) async fn persist_terminal_state(
                 hostname,
                 pid,
                 &process_name,
+                &row.task_name,
+                payload_policy,
             )
             .await
         }
@@ -1006,6 +1022,7 @@ async fn persist_ok_result(
 }
 
 /// Persist a terminal task failure atomically.
+#[allow(clippy::too_many_arguments)]
 async fn persist_err_terminal(
     broker: &PostgresBroker,
     task_id: &str,
@@ -1017,9 +1034,19 @@ async fn persist_err_terminal(
     hostname: &str,
     pid: i32,
     process_name: &str,
+    task_name: &str,
+    payload_policy: &PayloadPolicy,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let wrapped = TaskResult::<serde_json::Value>::Err(task_error.clone());
     let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
+    // Warn-only: error envelopes can carry oversized data too; measured on
+    // the exact persisted string, already in hand. Parity with horsies PR #208.
+    enforce_payload_policy(
+        payload_policy,
+        task_name,
+        PayloadKind::Result,
+        wrapped_json.len(),
+    );
     let error_code_str = task_error.error_code.as_ref().map(|c| c.to_string());
     let error_msg = task_error.message.as_deref();
 
@@ -1218,6 +1245,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     worker_id: String,
     hostname: String,
     task_error: TaskError,
+    payload_policy: PayloadPolicy,
 ) -> Option<Phase2Work> {
     let task_id = row.id.clone();
     let queue_name = row.queue_name.clone();
@@ -1256,6 +1284,7 @@ pub(crate) async fn finalize_pre_execution_failure(
         &running,
         &worker_id,
         &hostname,
+        &payload_policy,
     )
     .await
     {
@@ -1296,6 +1325,7 @@ pub(crate) async fn execute_and_finalize(
     worker_id: String,
     hostname: String,
     recovery: RecoveryConfig,
+    payload_policy: PayloadPolicy,
 ) -> Option<Phase2Work> {
     let task_id = row.id.clone();
     let queue_name = row.queue_name.clone();
@@ -1379,6 +1409,7 @@ pub(crate) async fn execute_and_finalize(
         &running,
         &worker_id,
         &hostname,
+        &payload_policy,
     )
     .await;
 
@@ -1421,6 +1452,7 @@ pub(crate) async fn run_phase2(
 /// Run Phase 1 with bounded retries.
 ///
 /// Returns `Some(outcome)` on success, `None` if retries exhausted or non-retryable.
+#[allow(clippy::too_many_arguments)]
 async fn retry_phase1(
     broker: &PostgresBroker,
     task_id: &str,
@@ -1429,6 +1461,7 @@ async fn retry_phase1(
     running: &SetRunningRow,
     worker_id: &str,
     hostname: &str,
+    payload_policy: &PayloadPolicy,
 ) -> Option<FinalizeOutcome> {
     // First attempt.
     match persist_terminal_state(
@@ -1439,6 +1472,7 @@ async fn retry_phase1(
         running,
         worker_id,
         hostname,
+        payload_policy,
     )
     .await
     {
@@ -1480,6 +1514,7 @@ async fn retry_phase1(
             running,
             worker_id,
             hostname,
+            payload_policy,
         )
         .await
         {

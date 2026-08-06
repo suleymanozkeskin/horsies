@@ -478,6 +478,7 @@ mod tests {
 
     fn valid_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {

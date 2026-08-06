@@ -669,6 +669,26 @@ async fn enqueue_scheduled_task(
         Some(serde_json::to_string(&schedule.kwargs)?)
     };
 
+    // Schedule args/kwargs are static config, so a violation repeats on every
+    // fire — the warn rate-limit collapses that to one line and the reject
+    // surfaces per-slot through the schedule's normal enqueue-failure
+    // logging. Parity with horsies PR #208.
+    let encoded_len =
+        args_json.as_deref().map_or(0, str::len) + kwargs_json.as_deref().map_or(0, str::len);
+    if let Some(oversize) = crate::core::config::payload::enforce_payload_policy(
+        &app_config.payload,
+        &schedule.task_name,
+        crate::core::config::payload::PayloadKind::Kwargs,
+        encoded_len,
+    ) {
+        return Err(format!(
+            "payload for schedule '{}' is {} bytes, exceeding payload.reject_bytes={:?}; \
+             slot not enqueued",
+            schedule.name, oversize, app_config.payload.reject_bytes,
+        )
+        .into());
+    }
+
     let queue = schedule.queue_name.as_deref().unwrap_or("default");
     let priority = resolve_queue_priority(app_config, queue);
 
@@ -735,6 +755,7 @@ mod tests {
 
     fn default_app_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {

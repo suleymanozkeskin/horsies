@@ -22,6 +22,7 @@ use horsies::{
 
 fn app_config_from_url(url: &str) -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Default,
         custom_queues: None,
         broker: PostgresConfig {

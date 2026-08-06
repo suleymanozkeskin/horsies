@@ -9,9 +9,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::broker::{compute_enqueue_sha, TaskHandle};
+use crate::core::config::payload::{enforce_payload_policy, PayloadKind};
 use crate::core::{
-    ErrorCode, HorsiesError, QueueMode, RegisteredTask, TaskNode, TaskOptions, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, WorkerResilienceConfig,
+    ErrorCode, HorsiesError, PayloadPolicy, QueueMode, RegisteredTask, TaskNode, TaskOptions,
+    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, WorkerResilienceConfig,
 };
 
 use crate::lazy_broker::LazyBroker;
@@ -163,6 +164,7 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
             self.app.core.suppress_sends_handle(),
             self.app.core.config().resend_on_transient_err,
             self.app.core.config().resilience.clone(),
+            self.app.core.config().payload.clone(),
         );
         self.app.store_task_handle(&handle)?;
         Ok(handle)
@@ -182,6 +184,7 @@ pub struct TaskFunction<A, T> {
     suppress_sends: Arc<AtomicBool>,
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
+    payload_policy: PayloadPolicy,
     _phantom: PhantomData<fn(A) -> T>,
 }
 
@@ -191,6 +194,7 @@ pub struct TaskFunctionSendOptions<'a, A, T> {
 }
 
 impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         task_name: String,
         broker: Arc<LazyBroker>,
@@ -200,6 +204,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         suppress_sends: Arc<AtomicBool>,
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
+        payload_policy: PayloadPolicy,
     ) -> Self {
         Self {
             task_name,
@@ -210,6 +215,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             suppress_sends,
             resend_on_transient_err,
             resilience,
+            payload_policy,
             _phantom: PhantomData,
         }
     }
@@ -277,6 +283,33 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
     ) -> TaskSendResult<TaskHandle<T>> {
         self.check_suppression()?;
         let (args_json, kwargs_json) = serialize_args::<A>(&self.task_name, &args)?;
+        let pre_task_id = Uuid::new_v4().to_string();
+
+        // Payload guardrail at the encode boundary: the check is one integer
+        // comparison on the already-serialized parts (args + kwargs; Rust's
+        // wire keeps both forms). Reject fails closed before any row is
+        // written. Parity with horsies PR #208.
+        let encoded_len = args_json.as_deref().map_or(0, str::len)
+            + kwargs_json.as_deref().map_or(0, str::len);
+        if let Some(oversize) = enforce_payload_policy(
+            &self.payload_policy,
+            &self.task_name,
+            PayloadKind::Kwargs,
+            encoded_len,
+        ) {
+            return Err(TaskSendError {
+                code: TaskSendErrorCode::PayloadTooLarge,
+                message: format!(
+                    "payload for {} is {} bytes, exceeding payload.reject_bytes={:?}; \
+                     nothing was enqueued. Pass a reference to external storage or \
+                     raise the limit.",
+                    self.task_name, oversize, self.payload_policy.reject_bytes,
+                ),
+                retryable: false,
+                task_id: Some(pre_task_id),
+                payload: None,
+            });
+        }
 
         let (good_until, task_options_json) = self.resolve_send_options(good_until_mode)?;
         let sent_at = Utc::now();
@@ -284,7 +317,6 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         let enqueued_at = delay.map(|d| {
             sent_at + chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::zero())
         });
-        let pre_task_id = Uuid::new_v4().to_string();
 
         let enqueue_sha = compute_enqueue_sha(
             &self.task_name,
@@ -594,6 +626,7 @@ impl<A, T> Clone for TaskFunction<A, T> {
             suppress_sends: Arc::clone(&self.suppress_sends),
             resend_on_transient_err: self.resend_on_transient_err,
             resilience: self.resilience.clone(),
+            payload_policy: self.payload_policy.clone(),
             _phantom: PhantomData,
         }
     }
@@ -732,6 +765,7 @@ mod tests {
 
     fn valid_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {
@@ -781,7 +815,42 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             false,
             config.resilience,
+            config.payload,
         )
+    }
+
+    /// An enqueue whose serialized payload exceeds payload.reject_bytes fails
+    /// closed with PAYLOAD_TOO_LARGE before the broker is touched (the broker
+    /// URL here is unreachable — reaching it would error differently or
+    /// hang). Parity with horsies PR #208.
+    #[tokio::test]
+    async fn send_rejects_oversized_payload_before_broker() {
+        let config = valid_config();
+        let tf: TaskFunction<Args, i32> = TaskFunction::new(
+            "oversize_task".to_owned(),
+            Arc::new(LazyBroker::new(config.broker)),
+            "default".to_owned(),
+            100,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            false,
+            config.resilience,
+            crate::core::PayloadPolicy {
+                warn_bytes: None,
+                reject_bytes: Some(4),
+            },
+        );
+        let err = tf
+            .send(Args {
+                a: 1_000_000,
+                b: 2_000_000,
+            })
+            .await
+            .expect_err("oversized payload must be rejected");
+        assert_eq!(err.code, TaskSendErrorCode::PayloadTooLarge);
+        assert!(!err.retryable);
+        assert!(err.task_id.is_some(), "task_id reported for diagnostics");
+        assert!(err.payload.is_none(), "no envelope kept for replay");
     }
 
     #[test]
@@ -1218,6 +1287,7 @@ mod tests {
 
     fn custom_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![
                 CustomQueueConfig {

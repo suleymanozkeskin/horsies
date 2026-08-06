@@ -31,6 +31,7 @@ fn broker_config() -> PostgresConfig {
 /// DEFAULT mode — single implicit "default" queue.
 pub fn default_mode_config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Default,
         custom_queues: None,
         broker: broker_config(),
@@ -48,6 +49,7 @@ pub fn default_mode_config() -> AppConfig {
 /// CUSTOM mode with two queues: "fast" (priority 1) and "slow" (priority 50).
 pub fn custom_mode_config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig {

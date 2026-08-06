@@ -53,8 +53,9 @@ pub use crate::core::{
     CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory, ErrorCode,
     HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
     IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
-    OperationalErrorCode, OutcomeCode, PostgresConfig, PostgresConfigError, QueueMode,
-    RecoveryConfig, RecoveryConfigError, RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
+    OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
+    QueueMode, RecoveryConfig, RecoveryConfigError,
+    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
     ResilienceConfigError, ResolvedEnqueue, RetrievalCode, RetryPolicy, RetryPolicyError,
     ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError, SubWorkflowNode,
     SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
@@ -728,6 +729,7 @@ mod tests {
 
     fn valid_config() -> AppConfig {
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {
@@ -906,6 +908,7 @@ mod tests {
     #[test]
     fn proc_macro_with_queue() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),
@@ -1247,6 +1250,7 @@ mod tests {
     #[test]
     fn proc_macro_with_task_options() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),
@@ -1266,6 +1270,7 @@ mod tests {
     #[test]
     fn proc_macro_node_carries_queue_and_priority() {
         let config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![crate::core::CustomQueueConfig {
                 name: "critical".into(),

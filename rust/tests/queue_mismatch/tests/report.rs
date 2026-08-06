@@ -26,6 +26,7 @@ fn broker() -> PostgresConfig {
 
 fn default_config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Default,
         custom_queues: None,
         broker: broker(),
@@ -42,6 +43,7 @@ fn default_config() -> AppConfig {
 
 fn custom_config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig {

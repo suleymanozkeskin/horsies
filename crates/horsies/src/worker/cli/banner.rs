@@ -344,6 +344,7 @@ mod tests {
         use crate::core::config::recovery::RecoveryConfig;
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://localhost/test"),
@@ -379,6 +380,7 @@ mod tests {
         use crate::core::config::recovery::RecoveryConfig;
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://user:secret@localhost/test"),
@@ -444,6 +446,7 @@ mod tests {
             .unwrap();
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://localhost/test"),

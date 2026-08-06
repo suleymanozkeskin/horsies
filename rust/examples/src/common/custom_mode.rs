@@ -17,6 +17,7 @@ pub const LOW: &str = "low";
 /// Cluster-wide concurrency cap: 50
 pub fn app_config(db_url: &str) -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig {

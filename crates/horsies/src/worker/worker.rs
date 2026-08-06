@@ -852,6 +852,7 @@ impl Worker {
                 let task_name = row.task_name.clone();
                 let worker_id = self.worker_id.clone();
                 let hostname = self.hostname.clone();
+                let payload_policy = self.app_config.payload.clone();
                 self.tracker.spawn(async move {
                     let reason = format!("task '{}' not registered", task_name);
                     let task_error = TaskError::builtin(
@@ -864,6 +865,7 @@ impl Worker {
                         worker_id,
                         hostname,
                         task_error,
+                        payload_policy,
                     )
                     .await
                     {
@@ -886,6 +888,7 @@ impl Worker {
         let worker_id = self.worker_id.clone();
         let hostname = self.hostname.clone();
         let recovery = self.app_config.recovery.clone();
+        let payload_policy = self.app_config.payload.clone();
 
         // Mark this task in-dispatch until the spawned execution finishes, so the
         // buffered probe won't re-fetch it while it is still CLAIMED (P7).
@@ -904,6 +907,7 @@ impl Worker {
                 worker_id,
                 hostname,
                 recovery,
+                payload_policy,
             )
             .await;
 
@@ -1573,6 +1577,7 @@ mod tests {
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
         )
         .await;
 
@@ -1797,6 +1802,7 @@ mod tests {
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
         )
         .await
         .expect("terminal success should produce phase 2 work");
@@ -1848,6 +1854,7 @@ mod tests {
             "worker-1".to_owned(),
             "localhost".to_owned(),
             RecoveryConfig::default(),
+            crate::core::config::payload::PayloadPolicy::default(),
         )
         .await
         .expect("terminal success should produce phase 2 work");
@@ -2155,6 +2162,7 @@ mod tests {
             },
             "worker-1",
             "localhost",
+            &crate::core::config::payload::PayloadPolicy::default(),
         )
         .await
         else {
@@ -2279,6 +2287,7 @@ mod tests {
         );
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: pg_config,
@@ -2345,6 +2354,7 @@ mod tests {
             .expect("register");
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {

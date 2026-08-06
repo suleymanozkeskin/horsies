@@ -160,6 +160,7 @@ mod tests {
         };
 
         AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Custom,
             custom_queues: Some(vec![
                 CustomQueueConfig {
@@ -261,6 +262,7 @@ mod tests {
         use crate::core::{PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig};
 
         let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {

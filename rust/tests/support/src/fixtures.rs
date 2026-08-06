@@ -8,6 +8,7 @@ use crate::db;
 /// Build a default `AppConfig` for tests (DEFAULT queue mode, local DB).
 pub fn default_app_config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Default,
         custom_queues: None,
         broker: PostgresConfig {

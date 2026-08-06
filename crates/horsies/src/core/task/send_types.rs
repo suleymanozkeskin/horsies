@@ -15,6 +15,10 @@ pub enum TaskSendErrorCode {
     EnqueueFailed,
     /// Task ID collision with different payload SHA. Non-retryable.
     PayloadMismatch,
+    /// Serialized payload exceeded `payload.reject_bytes`; nothing was
+    /// written. Non-retryable — shrink the payload (pass a reference to
+    /// external storage) or raise the configured limit.
+    PayloadTooLarge,
 }
 
 impl std::fmt::Display for TaskSendErrorCode {
@@ -24,6 +28,7 @@ impl std::fmt::Display for TaskSendErrorCode {
             Self::ValidationFailed => write!(f, "VALIDATION_FAILED"),
             Self::EnqueueFailed => write!(f, "ENQUEUE_FAILED"),
             Self::PayloadMismatch => write!(f, "PAYLOAD_MISMATCH"),
+            Self::PayloadTooLarge => write!(f, "PAYLOAD_TOO_LARGE"),
         }
     }
 }

@@ -11,6 +11,7 @@ use horsies_examples::common;
 
 fn config() -> AppConfig {
     AppConfig {
+        payload: horsies::PayloadPolicy::default(),
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
             CustomQueueConfig {

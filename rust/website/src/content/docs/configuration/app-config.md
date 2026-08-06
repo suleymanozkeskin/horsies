@@ -27,6 +27,7 @@ let mut app = Horsies::new(config)?;
 | `prefetch_buffer` | `u32` | `0` | 0 = hard cap mode, >0 = soft cap with prefetch |
 | `claim_lease_ms` | `Option<u32>` | `None` | Claim lease duration (required if prefetch_buffer > 0; optional override in hard cap mode) |
 | `max_claim_renew_age_ms` | `u32` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
+| `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn at 1 MiB, rejection off) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `Option<ScheduleConfig>` | `None` | Scheduled task configuration |
@@ -119,6 +120,36 @@ let config = AppConfig {
 ```
 
 See [Recovery Config](recovery-config.md) for all options.
+
+## Payload Guardrail
+
+`payload` bounds serialized task payloads at the encode boundaries. The check compares the length of the already-serialized JSON — one integer comparison per enqueue/result, no extra serialization pass.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `warn_bytes` | `Option<u64>` | `Some(1_048_576)` (1 MiB) | Log a structured warning when a payload exceeds this size, rate-limited to once per (task_name, kind) per process. `None` disables |
+| `reject_bytes` | `Option<u64>` | `None` (off) | Fail an enqueue closed (`PAYLOAD_TOO_LARGE`, nothing written) when its payload exceeds this size. Results are never rejected — the work is done, and destroying it would convert a size concern into data loss |
+
+Per-boundary coverage:
+
+| Boundary | Warn | Reject |
+|----------|------|--------|
+| `send` / `schedule` (args + kwargs) | yes | yes |
+| Scheduler slot enqueue (static schedule args/kwargs) | yes | yes (slot not enqueued, logged via the schedule's enqueue-failure path) |
+| Worker terminal result (success payload and error envelope) | yes | never |
+| Workflow-node enqueue (args_from-merged kwargs) | not checked — the upstream result that becomes these kwargs was already measured at its producer's finalize | no |
+
+```rust
+use horsies::PayloadPolicy;
+
+let config = AppConfig {
+    payload: PayloadPolicy {
+        warn_bytes: Some(512 * 1024),      // warn at 512 KiB
+        reject_bytes: Some(4 * 1024 * 1024), // reject enqueues over 4 MiB
+    },
+    ..AppConfig::for_database_url("postgresql://...")
+};
+```
 
 ## Resilience Configuration
 
