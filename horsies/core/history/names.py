@@ -27,6 +27,9 @@ TASK_HISTORY_FOREVER: Final = 'horsies_task_history_forever'
 LEAF_CATALOG: Final = 'horsies_task_history_leaf_catalog'
 LEAF_LOCK_KEY_FUNCTION: Final = 'horsies_task_history_leaf_lock_key'
 
+# Owned by the keyed-enqueue reservation operations.
+KEY_RESERVATIONS: Final = 'horsies_key_reservations'
+
 # Owned by the staged lookup loader.
 TASK_LOOKUP_FUNCTION: Final = 'horsies_task_lookup_staged'
 TASK_LOOKUP_TYPE: Final = 'horsies_task_lookup'
