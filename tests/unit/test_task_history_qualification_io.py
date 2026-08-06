@@ -9,12 +9,17 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from tests.task_history_prototypes import identity_evidence
-from tests.task_history_prototypes.evidence import EvidenceConditions, EvidenceRunKind
+from tests.task_history_prototypes.evidence import (
+    EvidenceConditions,
+    EvidenceRunKind,
+    refresh_cumulative_statistics,
+)
 from tests.task_history_prototypes.identity_evidence import (
     AbsoluteVerdict,
     IdentityCandidate,
@@ -55,6 +60,28 @@ def _conditions() -> EvidenceConditions:
         cache_posture='test-cache',
         prepared_posture='test-prepared',
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('force_flush_available', (False, True))
+async def test_statistics_refresh_is_compatible_with_both_collector_models(
+    force_flush_available: bool,
+) -> None:
+    capability = MagicMock()
+    capability.scalar_one.return_value = force_flush_available
+    connection = AsyncMock(spec=AsyncConnection)
+    connection.execute.side_effect = [capability, *[MagicMock()] * 2]
+
+    await refresh_cumulative_statistics(cast(AsyncConnection, connection))
+
+    statements = [str(call.args[0]) for call in connection.execute.call_args_list]
+    assert len(statements) == 3
+    assert 'to_regprocedure' in statements[0]
+    assert 'pg_stat_clear_snapshot' in statements[-1]
+    assert (
+        'SELECT pg_catalog.pg_stat_force_next_flush()' in statements
+    ) is force_flush_available
+    assert ('SELECT pg_sleep(0.6)' in statements) is not force_flush_available
 
 
 def _lookup_result(

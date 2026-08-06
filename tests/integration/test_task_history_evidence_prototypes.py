@@ -24,6 +24,7 @@ from tests.task_history_prototypes.evidence import (
     PayloadShape,
     collect_attempt_storage_evidence,
     collect_operational_conditions,
+    refresh_cumulative_statistics,
 )
 from tests.task_history_prototypes.identity_evidence import (
     IdentityCandidate,
@@ -58,6 +59,33 @@ from tests.task_history_prototypes.transcode_evidence import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+async def test_cumulative_statistics_refresh_supports_server_collector(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        await refresh_cumulative_statistics(connection)
+        version = int(
+            (
+                await connection.execute(
+                    text("SELECT current_setting('server_version_num')")
+                )
+            ).scalar_one()
+        )
+        force_flush_available = bool(
+            (
+                await connection.execute(
+                    text(
+                        "SELECT to_regprocedure("
+                        "'pg_catalog.pg_stat_force_next_flush()'"
+                        ") IS NOT NULL"
+                    )
+                )
+            ).scalar_one()
+        )
+
+    assert force_flush_available is (version >= 150_000)
 
 
 @pytest.mark.parametrize(

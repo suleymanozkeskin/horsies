@@ -166,6 +166,33 @@ async def collect_operational_conditions(
     )
 
 
+async def refresh_cumulative_statistics(
+    connection: AsyncConnection,
+) -> None:
+    """Publish this backend's pending counters and discard cached snapshots."""
+    force_flush_available = bool(
+        (
+            await connection.execute(
+                text(
+                    "SELECT to_regprocedure("
+                    "'pg_catalog.pg_stat_force_next_flush()'"
+                    ") IS NOT NULL"
+                )
+            )
+        ).scalar_one()
+    )
+    if force_flush_available:
+        await connection.execute(
+            text('SELECT pg_catalog.pg_stat_force_next_flush()')
+        )
+    else:
+        # PostgreSQL 14 reports per-backend counters to its collector before
+        # going idle, at most once per 500 ms. This command spans that interval;
+        # the following command boundary publishes the pending counters.
+        await connection.execute(text('SELECT pg_sleep(0.6)'))
+    await connection.execute(text('SELECT pg_stat_clear_snapshot()'))
+
+
 async def _collect_conditions(
     connection: AsyncConnection,
     *,

@@ -17,6 +17,7 @@ from tests.task_history_prototypes.evidence import (
     EvidenceConditions,
     EvidenceRunKind,
     collect_operational_conditions,
+    refresh_cumulative_statistics,
 )
 from tests.task_history_prototypes.identity_schema import (
     install_identity_candidates,
@@ -765,7 +766,7 @@ async def _relation_statistics(
     schema: PrototypeSchema,
     relation: str,
 ) -> tuple[int, int, int]:
-    await connection.execute(text('SELECT pg_stat_force_next_flush()'))
+    await refresh_cumulative_statistics(connection)
     row = (
         await connection.execute(
             text(

@@ -15,6 +15,7 @@ from tests.task_history_prototypes.evidence import (
     EvidenceConditions,
     EvidenceRunKind,
     collect_operational_conditions,
+    refresh_cumulative_statistics,
 )
 from tests.task_history_prototypes.measurements import (
     RelationFootprint,
@@ -218,7 +219,7 @@ async def _measure_candidate(
     end_lsn = (
         await connection.execute(text('SELECT pg_current_wal_insert_lsn()'))
     ).scalar_one()
-    await connection.execute(text('SELECT pg_stat_force_next_flush()'))
+    await refresh_cumulative_statistics(connection)
     await connection.commit()
     wal_lsn_bytes = int(
         (
