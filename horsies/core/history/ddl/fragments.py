@@ -19,6 +19,7 @@ reference, never by redefinition.
 
 from __future__ import annotations
 
+from ..identity.reservations import reservation_function_fragments
 from ..names import WORKFLOW_PHASE2_PENDING
 from ..partitions.catalog import LEAF_CATALOG_DDL, LEAF_LOCK_KEY_FUNCTION_DDL
 from ..reads.lookup_generation import (
@@ -54,6 +55,7 @@ def frozen_fragments() -> tuple[str, ...]:
         WORKFLOW_PHASE2_PENDING_DDL,
         *WORKFLOW_PHASE2_PENDING_INDEX_DDL,
         KEY_RESERVATIONS_DDL,
+        *reservation_function_fragments(),
     )
 
 
