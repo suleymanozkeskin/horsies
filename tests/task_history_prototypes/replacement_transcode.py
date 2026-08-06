@@ -68,11 +68,11 @@ class ReplacementTranscodePlan:
     relation_count: int
     peak_additional_disk_budget_bytes: int
     wal_budget_bytes: int
-    rewrite_duration_limit_seconds: float
+    metadata_copy_duration_limit_seconds: float | None
     rollback_copied_rows: int
     rollback_peak_additional_disk_budget_bytes: int
     rollback_wal_budget_bytes: int
-    rollback_duration_limit_seconds: float
+    rollback_metadata_copy_duration_limit_seconds: float | None
     reversible: bool
 
 
@@ -166,12 +166,31 @@ class _ReplacementRelation:
     partition_bound: str
     partition_constraint: str
     replacement_relation_name: str
+    replacement_relation_oid: int | None
     backup_relation_name: str
     state: str
     row_count: int
     transformed_rows: int
     rows_copied: int
     last_source_ctid: str | None
+    source_mutation_generation: int
+    replacement_mutation_generation: int
+    verified_source_generation: int | None
+    verified_replacement_generation: int | None
+    verified_source_filenode: int | None
+    verified_replacement_filenode: int | None
+    verified_source_schema_signature: str | None
+    verified_replacement_schema_signature: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RelationVerificationToken:
+    source_generation: int
+    replacement_generation: int
+    source_filenode: int
+    replacement_filenode: int
+    source_schema_signature: str
+    replacement_schema_signature: str
 
 
 async def install_replacement_archive_transcode_prototype(
@@ -455,7 +474,11 @@ async def plan_replacement_archive_transcode(
             },
         )
 
-    duration = copied_rows / TRANSCODE_MINIMUM_ROWS_PER_SECOND
+    metadata_duration = (
+        copied_rows / TRANSCODE_MINIMUM_ROWS_PER_SECOND
+        if component is ArchiveComponent.HISTORY_ROW
+        else None
+    )
     return ReplacementTranscodePlan(
         job_id=job_id,
         component=component,
@@ -478,7 +501,7 @@ async def plan_replacement_archive_transcode(
             numerator=3,
             denominator=2,
         ),
-        rewrite_duration_limit_seconds=duration,
+        metadata_copy_duration_limit_seconds=metadata_duration,
         rollback_copied_rows=copied_rows,
         rollback_peak_additional_disk_budget_bytes=ratio_ceiling(
             relation_bytes,
@@ -490,7 +513,7 @@ async def plan_replacement_archive_transcode(
             numerator=3,
             denominator=2,
         ),
-        rollback_duration_limit_seconds=duration,
+        rollback_metadata_copy_duration_limit_seconds=metadata_duration,
         reversible=True,
     )
 
@@ -787,14 +810,38 @@ async def verify_replacement_archive_transcode(
     for relation in relations:
         source = _qualified(schema, relation.source_relation_name)
         replacement = _qualified(schema, relation.replacement_relation_name)
-        if not await _source_binding_matches(connection, schema, relation):
+        initial_token = await _relation_verification_token(
+            connection,
+            schema,
+            relation=relation,
+            lock_record=False,
+        )
+        if initial_token is None or not await _source_binding_matches(
+            connection,
+            schema,
+            relation,
+        ) or not await _replacement_binding_matches(
+            connection,
+            schema,
+            relation,
+        ):
             changed += 1
+            await _clear_relation_verification(
+                connection,
+                schema,
+                relation=relation,
+            )
             continue
         observed_source = (
             await connection.execute(text(f'SELECT count(*) FROM {source}'))
         ).scalar_one()
         if observed_source != relation.row_count:
             changed += 1
+            await _clear_relation_verification(
+                connection,
+                schema,
+                relation=relation,
+            )
             continue
         columns = await _relation_columns(connection, relation.source_relation_oid)
         mismatch = await _replacement_mismatch_count(
@@ -809,32 +856,89 @@ async def verify_replacement_archive_transcode(
             target_codec=job.target_codec,
         )
         mismatches += mismatch
-        invalid_targets += await _invalid_component_rows_in_relation(
+        relation_invalid_targets = await _invalid_component_rows_in_relation(
             connection,
             schema,
             relation_name=relation.replacement_relation_name,
             component=ArchiveComponent(job.component),
             version=job.target_version,
         )
-        if mismatch == 0:
+        invalid_targets += relation_invalid_targets
+        final_token = await _relation_verification_token(
+            connection,
+            schema,
+            relation=relation,
+            lock_record=True,
+        )
+        stable = final_token is not None and final_token == initial_token
+        if not stable:
+            changed += 1
+        if (
+            final_token is not None
+            and mismatch == 0
+            and relation_invalid_targets == 0
+            and stable
+        ):
             await connection.execute(
                 text(
                     f"""
                     UPDATE {schema.sql}.archive_replacement_relations
-                    SET state = 'VERIFIED', verified_at = statement_timestamp()
+                    SET state = 'VERIFIED',
+                        verified_at = statement_timestamp(),
+                        verified_source_generation = :source_generation,
+                        verified_replacement_generation =
+                            :replacement_generation,
+                        verified_source_filenode = :source_filenode,
+                        verified_replacement_filenode = :replacement_filenode,
+                        verified_source_schema_signature =
+                            :source_schema_signature,
+                        verified_replacement_schema_signature =
+                            :replacement_schema_signature
                     WHERE job_id = :job_id
                       AND relation_ordinal = :ordinal
                     """
                 ),
-                {'job_id': job_id, 'ordinal': relation.relation_ordinal},
+                {
+                    'job_id': job_id,
+                    'ordinal': relation.relation_ordinal,
+                    'source_generation': final_token.source_generation,
+                    'replacement_generation': (
+                        final_token.replacement_generation
+                    ),
+                    'source_filenode': final_token.source_filenode,
+                    'replacement_filenode': final_token.replacement_filenode,
+                    'source_schema_signature': (
+                        final_token.source_schema_signature
+                    ),
+                    'replacement_schema_signature': (
+                        final_token.replacement_schema_signature
+                    ),
+                },
+            )
+        else:
+            await _clear_relation_verification(
+                connection,
+                schema,
+                relation=relation,
             )
     verified = changed == 0 and mismatches == 0 and invalid_targets == 0
-    if verified and state is not ReplacementJobState.VERIFIED:
+    if verified:
         await connection.execute(
             text(
                 f"""
                 UPDATE {schema.sql}.archive_replacement_jobs
                 SET state = 'VERIFIED', verified_at = statement_timestamp()
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    else:
+        await connection.execute(
+            text(
+                f"""
+                UPDATE {schema.sql}.archive_replacement_jobs
+                SET state = 'COPIED', verified_at = NULL
                 WHERE job_id = :job_id
                 """
             ),
@@ -865,11 +969,8 @@ async def swap_verified_replacement_partitions(
     state = ReplacementJobState(job.state)
     if state in {ReplacementJobState.SWAPPED, ReplacementJobState.COMPLETE}:
         return ReplacementSwap(job_id, job.relation_count)
-    if state not in {
-        ReplacementJobState.COPIED,
-        ReplacementJobState.VERIFIED,
-    }:
-        raise ValueError('replacement relations must be copied before binding swap')
+    if state is not ReplacementJobState.VERIFIED:
+        raise ValueError('replacement relations must be verified before binding swap')
     await _require_active_job_maintenance(connection, schema, job)
     relations = await _replacement_relations(connection, schema, job_id)
     for parent_name in sorted({row.parent_relation_name for row in relations}):
@@ -886,19 +987,19 @@ async def swap_verified_replacement_partitions(
                 'IN SHARE MODE'
             )
         )
-    locked_verification = await verify_replacement_archive_transcode(
-        connection,
-        schema,
-        job_id=job_id,
-    )
-    if not locked_verification.verified:
+    changed = 0
+    for relation in relations:
+        if not await _verified_relation_token_matches(
+            connection,
+            schema,
+            relation=relation,
+        ):
+            changed += 1
+    if changed:
         raise RuntimeError(
             'replacement verification changed before binding swap: '
-            'source_relations_changed='
-            f'{locked_verification.source_relations_changed}, '
-            'replacement_row_mismatches='
-            f'{locked_verification.replacement_row_mismatches}, '
-            f'invalid_target_rows={locked_verification.invalid_target_rows}'
+            f'source_relations_changed={changed}, '
+            'replacement_row_mismatches=0, invalid_target_rows=0'
         )
     for relation in relations:
         source = _qualified(schema, relation.source_relation_name)
@@ -970,6 +1071,12 @@ async def finalize_replacement_archive_transcode(
         return verification
     relations = await _replacement_relations(connection, schema, job_id)
     for relation in relations:
+        await connection.execute(
+            text(
+                f'DROP TRIGGER archive_replacement_target_guard ON '
+                f'{_qualified(schema, relation.source_relation_name)}'
+            )
+        )
         await connection.execute(
             text(f'DROP TABLE {_qualified(schema, relation.backup_relation_name)}')
         )
@@ -1123,6 +1230,11 @@ async def _prepare_replacement_relation(
             kind=ReplacementCopyRejectionKind.SOURCE_CORRUPT,
             observed_rows=invalid,
         )
+    await _install_source_mutation_guards(
+        connection,
+        schema,
+        relation_name=relation.source_relation_name,
+    )
     replacement = _qualified(schema, relation.replacement_relation_name)
     await connection.execute(
         text(
@@ -1130,6 +1242,38 @@ async def _prepare_replacement_relation(
             f'(LIKE {source} INCLUDING ALL '
             f'EXCLUDING CONSTRAINTS EXCLUDING INDEXES)'
         )
+    )
+    replacement_oid = int(
+        (
+            await connection.execute(
+                text('SELECT CAST(:relation_name AS regclass)::oid::bigint'),
+                {
+                    'relation_name': (
+                        f'{schema.name}.{relation.replacement_relation_name}'
+                    )
+                },
+            )
+        ).scalar_one()
+    )
+    await connection.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.archive_replacement_relations
+            SET replacement_relation_oid = :replacement_oid
+            WHERE job_id = :job_id
+              AND relation_ordinal = :ordinal
+            """
+        ),
+        {
+            'replacement_oid': replacement_oid,
+            'job_id': job.job_id,
+            'ordinal': relation.relation_ordinal,
+        },
+    )
+    await _install_replacement_mutation_guards(
+        connection,
+        schema,
+        relation_name=relation.replacement_relation_name,
     )
     await connection.execute(
         text(
@@ -1150,6 +1294,53 @@ async def _prepare_replacement_relation(
         {'job_id': job.job_id, 'ordinal': relation.relation_ordinal},
     )
     return None
+
+
+async def _install_source_mutation_guards(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation_name: str,
+) -> None:
+    relation = _qualified(schema, relation_name)
+    function = f'{schema.sql}.archive_replacement_note_mutation()'
+    await connection.execute(
+        text(
+            f"""
+            CREATE TRIGGER archive_replacement_source_row_guard
+            AFTER INSERT OR UPDATE OR DELETE ON {relation}
+            FOR EACH ROW EXECUTE FUNCTION {function}
+            """
+        )
+    )
+    await connection.execute(
+        text(
+            f"""
+            CREATE TRIGGER archive_replacement_source_truncate_guard
+            AFTER TRUNCATE ON {relation}
+            FOR EACH STATEMENT EXECUTE FUNCTION {function}
+            """
+        )
+    )
+
+
+async def _install_replacement_mutation_guards(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation_name: str,
+) -> None:
+    relation = _qualified(schema, relation_name)
+    await connection.execute(
+        text(
+            f"""
+            CREATE TRIGGER archive_replacement_target_guard
+            AFTER INSERT OR UPDATE OR DELETE OR TRUNCATE ON {relation}
+            FOR EACH STATEMENT EXECUTE FUNCTION
+                {schema.sql}.archive_replacement_note_mutation()
+            """
+        )
+    )
 
 
 async def _replacement_mismatch_count(
@@ -1253,6 +1444,15 @@ async def _post_swap_verification(
     job: _ReplacementJob,
 ) -> ReplacementVerification:
     component = ArchiveComponent(job.component)
+    relations = await _replacement_relations(connection, schema, job.job_id)
+    changed = 0
+    for relation in relations:
+        if not await _post_swap_relation_token_matches(
+            connection,
+            schema,
+            relation=relation,
+        ):
+            changed += 1
     source_remaining = (
         await decoder_retirement_status(
             connection,
@@ -1261,19 +1461,13 @@ async def _post_swap_verification(
             version=job.source_version,
         )
     ).rows_requiring_decoder
-    invalid_targets = await _invalid_component_rows(
-        connection,
-        schema,
-        component=component,
-        version=job.target_version,
-    )
     return ReplacementVerification(
         job_id=job.job_id,
-        verified=source_remaining == 0 and invalid_targets == 0,
-        source_relations_changed=0,
+        verified=changed == 0 and source_remaining == 0,
+        source_relations_changed=changed,
         replacement_row_mismatches=0,
         source_rows_remaining_after_swap=source_remaining,
-        invalid_target_rows=invalid_targets,
+        invalid_target_rows=0,
         copied_rows_completed=job.copied_rows_completed,
         copied_rows_total=job.copied_rows_total,
         wal_bytes=None,
@@ -1285,20 +1479,25 @@ async def _completed_verification(
     schema: PrototypeSchema,
     job: _ReplacementJob,
 ) -> ReplacementVerification:
-    verification = await _post_swap_verification(connection, schema, job)
     if job.wal_bytes is None:
         raise RuntimeError('completed replacement transcode has no WAL measurement')
+    source_remaining = (
+        await decoder_retirement_status(
+            connection,
+            schema,
+            component=ArchiveComponent(job.component),
+            version=job.source_version,
+        )
+    ).rows_requiring_decoder
     return ReplacementVerification(
-        job_id=verification.job_id,
-        verified=verification.verified,
-        source_relations_changed=verification.source_relations_changed,
-        replacement_row_mismatches=verification.replacement_row_mismatches,
-        source_rows_remaining_after_swap=(
-            verification.source_rows_remaining_after_swap
-        ),
-        invalid_target_rows=verification.invalid_target_rows,
-        copied_rows_completed=verification.copied_rows_completed,
-        copied_rows_total=verification.copied_rows_total,
+        job_id=job.job_id,
+        verified=source_remaining == 0,
+        source_relations_changed=0,
+        replacement_row_mismatches=0,
+        source_rows_remaining_after_swap=source_remaining,
+        invalid_target_rows=0,
+        copied_rows_completed=job.copied_rows_completed,
+        copied_rows_total=job.copied_rows_total,
         wal_bytes=job.wal_bytes,
     )
 
@@ -1461,6 +1660,7 @@ def _replacement_relation_from_row(
     row: RowMapping,
 ) -> _ReplacementRelation:
     cursor = row['last_source_ctid']
+    replacement_oid = row['replacement_relation_oid']
     return _ReplacementRelation(
         job_id=str(row['job_id']),
         relation_ordinal=int(row['relation_ordinal']),
@@ -1471,12 +1671,49 @@ def _replacement_relation_from_row(
         partition_bound=str(row['partition_bound']),
         partition_constraint=str(row['partition_constraint']),
         replacement_relation_name=str(row['replacement_relation_name']),
+        replacement_relation_oid=(
+            None if replacement_oid is None else int(replacement_oid)
+        ),
         backup_relation_name=str(row['backup_relation_name']),
         state=str(row['state']),
         row_count=int(row['row_count']),
         transformed_rows=int(row['transformed_rows']),
         rows_copied=int(row['rows_copied']),
         last_source_ctid=None if cursor is None else str(cursor),
+        source_mutation_generation=int(row['source_mutation_generation']),
+        replacement_mutation_generation=int(
+            row['replacement_mutation_generation']
+        ),
+        verified_source_generation=(
+            None
+            if row['verified_source_generation'] is None
+            else int(row['verified_source_generation'])
+        ),
+        verified_replacement_generation=(
+            None
+            if row['verified_replacement_generation'] is None
+            else int(row['verified_replacement_generation'])
+        ),
+        verified_source_filenode=(
+            None
+            if row['verified_source_filenode'] is None
+            else int(row['verified_source_filenode'])
+        ),
+        verified_replacement_filenode=(
+            None
+            if row['verified_replacement_filenode'] is None
+            else int(row['verified_replacement_filenode'])
+        ),
+        verified_source_schema_signature=(
+            None
+            if row['verified_source_schema_signature'] is None
+            else str(row['verified_source_schema_signature'])
+        ),
+        verified_replacement_schema_signature=(
+            None
+            if row['verified_replacement_schema_signature'] is None
+            else str(row['verified_replacement_schema_signature'])
+        ),
     )
 
 
@@ -1511,6 +1748,323 @@ async def _source_binding_matches(
     return observed is not None and (
         observed.source_oid == relation.source_relation_oid
         and observed.parent_oid == relation.parent_relation_oid
+    )
+
+
+async def _replacement_binding_matches(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    relation: _ReplacementRelation,
+) -> bool:
+    if relation.replacement_relation_oid is None:
+        return False
+    observed = (
+        await connection.execute(
+            text(
+                """
+                SELECT relation.oid::bigint AS relation_oid
+                FROM pg_class AS relation
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid = relation.relnamespace
+                WHERE namespace.nspname = :schema_name
+                  AND relation.relname = :relation_name
+                """
+            ),
+            {
+                'schema_name': schema.name,
+                'relation_name': relation.replacement_relation_name,
+            },
+        )
+    ).scalar_one_or_none()
+    return observed == relation.replacement_relation_oid
+
+
+async def _relation_verification_token(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation: _ReplacementRelation,
+    lock_record: bool,
+) -> _RelationVerificationToken | None:
+    if relation.replacement_relation_oid is None:
+        return None
+    lock_clause = 'FOR UPDATE' if lock_record else ''
+    row = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT source_mutation_generation,
+                       replacement_mutation_generation,
+                       pg_relation_filenode(
+                           CAST(source_relation_oid AS oid)
+                       )::bigint AS source_filenode,
+                       pg_relation_filenode(
+                           CAST(replacement_relation_oid AS oid)
+                       )::bigint AS replacement_filenode
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                  AND relation_ordinal = :ordinal
+                {lock_clause}
+                """
+            ),
+            {
+                'job_id': relation.job_id,
+                'ordinal': relation.relation_ordinal,
+            },
+        )
+    ).one_or_none()
+    if (
+        row is None
+        or row.source_filenode is None
+        or row.replacement_filenode is None
+    ):
+        return None
+    source_schema_signature = await _relation_schema_signature(
+        connection,
+        relation.source_relation_oid,
+    )
+    replacement_schema_signature = await _relation_schema_signature(
+        connection,
+        relation.replacement_relation_oid,
+    )
+    if (
+        source_schema_signature is None
+        or replacement_schema_signature is None
+    ):
+        return None
+    return _RelationVerificationToken(
+        source_generation=int(row.source_mutation_generation),
+        replacement_generation=int(row.replacement_mutation_generation),
+        source_filenode=int(row.source_filenode),
+        replacement_filenode=int(row.replacement_filenode),
+        source_schema_signature=source_schema_signature,
+        replacement_schema_signature=replacement_schema_signature,
+    )
+
+
+async def _relation_schema_signature(
+    connection: AsyncConnection,
+    relation_oid: int,
+) -> str | None:
+    return (
+        await connection.execute(
+            text(
+                """
+                SELECT encode(sha256(convert_to(
+                    jsonb_build_object(
+                        'relation', jsonb_build_array(
+                            relation.relkind,
+                            relation.relpersistence,
+                            relation.relam,
+                            relation.reloptions
+                        ),
+                        'columns', COALESCE((
+                            SELECT jsonb_agg(
+                                jsonb_build_array(
+                                    attribute.attnum,
+                                    attribute.attname,
+                                    attribute.atttypid,
+                                    attribute.atttypmod,
+                                    attribute.attcollation,
+                                    attribute.attnotnull,
+                                    attribute.attidentity,
+                                    attribute.attgenerated,
+                                    pg_get_expr(defaults.adbin, defaults.adrelid)
+                                ) ORDER BY attribute.attnum
+                            )
+                            FROM pg_attribute AS attribute
+                            LEFT JOIN pg_attrdef AS defaults
+                              ON defaults.adrelid = attribute.attrelid
+                             AND defaults.adnum = attribute.attnum
+                            WHERE attribute.attrelid = relation.oid
+                              AND attribute.attnum > 0
+                              AND NOT attribute.attisdropped
+                        ), '[]'::jsonb),
+                        'constraints', COALESCE((
+                            SELECT jsonb_agg(
+                                jsonb_build_array(
+                                    constraints.conname,
+                                    constraints.contype,
+                                    constraints.convalidated,
+                                    pg_get_constraintdef(
+                                        constraints.oid,
+                                        false
+                                    )
+                                ) ORDER BY constraints.conname
+                            )
+                            FROM pg_constraint AS constraints
+                            WHERE constraints.conrelid = relation.oid
+                        ), '[]'::jsonb),
+                        'indexes', COALESCE((
+                            SELECT jsonb_agg(
+                                jsonb_build_array(
+                                    indexes.indisvalid,
+                                    indexes.indisready,
+                                    pg_get_indexdef(indexes.indexrelid)
+                                ) ORDER BY indexes.indexrelid
+                            )
+                            FROM pg_index AS indexes
+                            WHERE indexes.indrelid = relation.oid
+                        ), '[]'::jsonb),
+                        'triggers', COALESCE((
+                            SELECT jsonb_agg(
+                                jsonb_build_array(
+                                    triggers.tgenabled,
+                                    pg_get_triggerdef(triggers.oid, false)
+                                ) ORDER BY triggers.tgname
+                            )
+                            FROM pg_trigger AS triggers
+                            WHERE triggers.tgrelid = relation.oid
+                              AND NOT triggers.tgisinternal
+                        ), '[]'::jsonb)
+                    )::text,
+                    'UTF8'
+                )), 'hex')
+                FROM pg_class AS relation
+                WHERE relation.oid = CAST(:relation_oid AS oid)
+                """
+            ),
+            {'relation_oid': relation_oid},
+        )
+    ).scalar_one_or_none()
+
+
+async def _clear_relation_verification(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation: _ReplacementRelation,
+) -> None:
+    await connection.execute(
+        text(
+            f"""
+            UPDATE {schema.sql}.archive_replacement_relations
+            SET state = 'COPIED',
+                verified_at = NULL,
+                verified_source_generation = NULL,
+                verified_replacement_generation = NULL,
+                verified_source_filenode = NULL,
+                verified_replacement_filenode = NULL,
+                verified_source_schema_signature = NULL,
+                verified_replacement_schema_signature = NULL
+            WHERE job_id = :job_id
+              AND relation_ordinal = :ordinal
+            """
+        ),
+        {
+            'job_id': relation.job_id,
+            'ordinal': relation.relation_ordinal,
+        },
+    )
+
+
+async def _verified_relation_token_matches(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation: _ReplacementRelation,
+) -> bool:
+    if relation.state != ReplacementRelationState.VERIFIED.value:
+        return False
+    expected = (
+        relation.verified_source_generation,
+        relation.verified_replacement_generation,
+        relation.verified_source_filenode,
+        relation.verified_replacement_filenode,
+        relation.verified_source_schema_signature,
+        relation.verified_replacement_schema_signature,
+    )
+    if any(value is None for value in expected):
+        return False
+    if not await _source_binding_matches(connection, schema, relation):
+        return False
+    if not await _replacement_binding_matches(connection, schema, relation):
+        return False
+    observed = await _relation_verification_token(
+        connection,
+        schema,
+        relation=relation,
+        lock_record=True,
+    )
+    return observed is not None and (
+        observed.source_generation == relation.verified_source_generation
+        and observed.replacement_generation
+        == relation.verified_replacement_generation
+        and observed.source_filenode == relation.verified_source_filenode
+        and observed.replacement_filenode
+        == relation.verified_replacement_filenode
+        and observed.source_schema_signature
+        == relation.verified_source_schema_signature
+        and observed.replacement_schema_signature
+        == relation.verified_replacement_schema_signature
+    )
+
+
+async def _post_swap_relation_token_matches(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    relation: _ReplacementRelation,
+) -> bool:
+    expected = (
+        relation.verified_source_generation,
+        relation.verified_replacement_generation,
+        relation.verified_source_filenode,
+        relation.verified_replacement_filenode,
+        relation.replacement_relation_oid,
+        relation.verified_source_schema_signature,
+        relation.verified_replacement_schema_signature,
+    )
+    if any(value is None for value in expected):
+        return False
+    row = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT relations.source_mutation_generation,
+                       relations.replacement_mutation_generation,
+                       canonical.oid::bigint AS canonical_oid,
+                       backup.oid::bigint AS backup_oid,
+                       inheritance.inhparent::bigint AS parent_oid,
+                       pg_relation_filenode(canonical.oid)::bigint
+                           AS canonical_filenode,
+                       pg_relation_filenode(backup.oid)::bigint
+                           AS backup_filenode
+                FROM {schema.sql}.archive_replacement_relations AS relations
+                JOIN pg_class AS canonical
+                  ON canonical.relname = relations.source_relation_name
+                JOIN pg_namespace AS canonical_namespace
+                  ON canonical_namespace.oid = canonical.relnamespace
+                 AND canonical_namespace.nspname = :schema_name
+                JOIN pg_class AS backup
+                  ON backup.relname = relations.backup_relation_name
+                JOIN pg_namespace AS backup_namespace
+                  ON backup_namespace.oid = backup.relnamespace
+                 AND backup_namespace.nspname = :schema_name
+                JOIN pg_inherits AS inheritance
+                  ON inheritance.inhrelid = canonical.oid
+                WHERE relations.job_id = :job_id
+                  AND relations.relation_ordinal = :ordinal
+                  AND relations.state = 'SWAPPED'
+                FOR UPDATE OF relations
+                """
+            ),
+            {
+                'schema_name': schema.name,
+                'job_id': relation.job_id,
+                'ordinal': relation.relation_ordinal,
+            },
+        )
+    ).one_or_none()
+    return row is not None and (
+        row.source_mutation_generation == relation.verified_source_generation
+        and row.replacement_mutation_generation
+        == relation.verified_replacement_generation
+        and row.canonical_oid == relation.replacement_relation_oid
+        and row.backup_oid == relation.source_relation_oid
+        and row.parent_oid == relation.parent_relation_oid
+        and row.canonical_filenode == relation.verified_replacement_filenode
+        and row.backup_filenode == relation.verified_source_filenode
     )
 
 
@@ -1825,6 +2379,7 @@ def _replacement_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             partition_bound text NOT NULL,
             partition_constraint text NOT NULL,
             replacement_relation_name text NOT NULL,
+            replacement_relation_oid bigint,
             backup_relation_name text NOT NULL,
             state text NOT NULL CHECK (
                 state IN (
@@ -1839,6 +2394,24 @@ def _replacement_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             ),
             relation_bytes bigint NOT NULL CHECK (relation_bytes >= 0),
             last_source_ctid tid,
+            source_mutation_generation bigint NOT NULL DEFAULT 0 CHECK (
+                source_mutation_generation >= 0
+            ),
+            replacement_mutation_generation bigint NOT NULL DEFAULT 0 CHECK (
+                replacement_mutation_generation >= 0
+            ),
+            verified_source_generation bigint CHECK (
+                verified_source_generation IS NULL
+                OR verified_source_generation >= 0
+            ),
+            verified_replacement_generation bigint CHECK (
+                verified_replacement_generation IS NULL
+                OR verified_replacement_generation >= 0
+            ),
+            verified_source_filenode bigint,
+            verified_replacement_filenode bigint,
+            verified_source_schema_signature text,
+            verified_replacement_schema_signature text,
             prepared_at timestamptz,
             copied_at timestamptz,
             verified_at timestamptz,
@@ -1865,4 +2438,46 @@ def _replacement_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
                 )
         )
         """,
+        f"""
+        CREATE FUNCTION {namespace}.archive_replacement_note_mutation()
+        RETURNS trigger
+        LANGUAGE plpgsql
+        AS $function$
+        DECLARE
+            changed_rows integer;
+        BEGIN
+            UPDATE {namespace}.archive_replacement_relations
+            SET source_mutation_generation =
+                    source_mutation_generation
+                    + CASE WHEN source_relation_oid = TG_RELID
+                           THEN 1 ELSE 0 END,
+                replacement_mutation_generation =
+                    replacement_mutation_generation
+                    + CASE WHEN replacement_relation_oid = TG_RELID
+                           THEN 1 ELSE 0 END
+            WHERE state <> 'COMPLETE'
+              AND (
+                    source_relation_oid = TG_RELID
+                    OR replacement_relation_oid = TG_RELID
+                  );
+            GET DIAGNOSTICS changed_rows = ROW_COUNT;
+            IF changed_rows <> 1 THEN
+                RAISE EXCEPTION
+                    'archive replacement mutation guard has % owners for %',
+                    changed_rows, TG_RELID;
+            END IF;
+            RETURN NULL;
+        END
+        $function$
+        """,
     )
+
+
+# The operational evidence collector uses the executor's physical-copy
+# primitives so its control differs only in payload transformation.
+replacement_column_list = _column_list
+replacement_component_source_condition = _component_source_condition
+replacement_constraint_definition = _constraint_definition
+replacement_identifier = _identifier
+replacement_qualified_relation = _qualified
+replacement_relation_columns = _relation_columns

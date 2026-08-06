@@ -135,6 +135,9 @@ jobs:
                     host_description: $host_description,
                     storage_description: $storage_description,
                     demo_quiesced: true,
+                    durability_mode: "operational",
+                    cache_posture: "explicit checkpoint; payload controls receive an untimed source validation warmup before the paired control and candidate; replacement relations use committed task-ID batches",
+                    prepared_posture: "parameterized seed and durable replacement-copy program",
                     fsync: "on",
                     synchronous_commit: "on",
                     full_page_writes: "on",
@@ -154,6 +157,12 @@ jobs:
                     payload_bytes: 200,
                     attempts_per_task: $attempts_per_task
                   },
+                  budgets: {
+                    metadata_tasks_per_second_minimum: 20000,
+                    payload_control_ratio_minimum: 0.5,
+                    maintenance_seconds_maximum: 600,
+                    swap_lock_seconds_maximum: 2
+                  },
                   error: $error
                 }' > "$output"
               failures=1
@@ -164,7 +173,8 @@ jobs:
               .verification.verified
               and .decoder_retirement_ready
               and .throughput_passed
-              and .duration_passed
+              and .maintenance_duration_passed
+              and .swap_window_passed
               and .wal_passed
               and .peak_disk_passed
             ' "$output"

@@ -14,6 +14,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from tests.task_history_prototypes import replacement_transcode
 from tests.task_history_prototypes.archive import (
     ARCHIVE_CODEC,
     ARCHIVE_VERSION,
@@ -702,16 +703,15 @@ async def test_replacement_mutation_blocks_verification_and_swap(
     )
     assert verification.verified is False
     assert verification.replacement_row_mismatches == 1
-    with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
+    with pytest.raises(
+        ValueError,
+        match='must be verified before binding swap',
+    ):
         await swap_verified_replacement_partitions(
             connection,
             schema,
             job_id=job_id,
         )
-    message = str(raised.value)
-    assert 'source_relations_changed=0' in message
-    assert 'replacement_row_mismatches=1' in message
-    assert 'invalid_target_rows=0' in message
 
 
 async def test_source_mutation_after_verification_blocks_locked_swap(
@@ -739,6 +739,18 @@ async def test_source_mutation_after_verification_blocks_locked_swap(
         )
     ).verified
     await connection.commit()
+    verified_generation = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT verified_source_generation
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalar_one()
     await connection.execute(
         text(
             f"""
@@ -750,6 +762,19 @@ async def test_source_mutation_after_verification_blocks_locked_swap(
         {'task_id': seeded[0].task_id},
     )
     await connection.commit()
+    current_generation = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT source_mutation_generation
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalar_one()
+    assert current_generation == verified_generation + 1
 
     with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
         await swap_verified_replacement_partitions(
@@ -758,8 +783,8 @@ async def test_source_mutation_after_verification_blocks_locked_swap(
             job_id=job_id,
         )
     message = str(raised.value)
-    assert 'source_relations_changed=0' in message
-    assert 'replacement_row_mismatches=1' in message
+    assert 'source_relations_changed=1' in message
+    assert 'replacement_row_mismatches=0' in message
     assert 'invalid_target_rows=0' in message
     await connection.rollback()
     assert (
@@ -767,6 +792,174 @@ async def test_source_mutation_after_verification_blocks_locked_swap(
             text(f'SELECT count(*) FROM {schema.sql}.history_aggregate')
         )
     ).scalar_one() == 1
+
+
+async def test_replacement_mutation_after_verification_blocks_locked_swap(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+) -> None:
+    connection, schema, _ = replacement_schema
+    await _seed_history(connection, schema, finite_rows=1, forever_rows=0)
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.RESULT,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    await _copy_all(connection, schema, job_id=job_id, batch_size=10)
+    assert (
+        await verify_replacement_archive_transcode(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    ).verified
+    await connection.commit()
+    relation = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT replacement_relation_name,
+                       verified_replacement_generation
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).one()
+    await connection.execute(
+        text(
+            f'UPDATE {schema.sql}."{relation.replacement_relation_name}" '
+            "SET task_name = 'changed.after.verification'"
+        )
+    )
+    await connection.commit()
+    current_generation = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT replacement_mutation_generation
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalar_one()
+    assert current_generation == relation.verified_replacement_generation + 1
+
+    with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
+        await swap_verified_replacement_partitions(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    message = str(raised.value)
+    assert 'source_relations_changed=1' in message
+    assert 'replacement_row_mismatches=0' in message
+    assert 'invalid_target_rows=0' in message
+
+
+async def test_binding_swap_does_not_repeat_content_verification(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, schema, _ = replacement_schema
+    await _seed_history(connection, schema, finite_rows=1, forever_rows=1)
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.ATTEMPTS,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    await _copy_all(connection, schema, job_id=job_id, batch_size=10)
+    assert (
+        await verify_replacement_archive_transcode(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    ).verified
+    await connection.commit()
+
+    async def reject_content_rescan(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError('binding swap repeated content verification')
+
+    monkeypatch.setattr(
+        replacement_transcode,
+        'verify_replacement_archive_transcode',
+        reject_content_rescan,
+    )
+    swapped = await swap_verified_replacement_partitions(
+        connection,
+        schema,
+        job_id=job_id,
+    )
+    assert swapped.relations_swapped == 2
+
+
+async def test_schema_drift_after_verification_blocks_locked_swap(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+) -> None:
+    connection, schema, _ = replacement_schema
+    await _seed_history(connection, schema, finite_rows=1, forever_rows=0)
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.RESULT,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    await _copy_all(connection, schema, job_id=job_id, batch_size=10)
+    assert (
+        await verify_replacement_archive_transcode(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    ).verified
+    await connection.commit()
+    replacement_name = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT replacement_relation_name
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalar_one()
+    await connection.execute(
+        text(
+            f'ALTER TABLE {schema.sql}."{replacement_name}" '
+            'ADD COLUMN drift_marker text'
+        )
+    )
+    await connection.commit()
+
+    with pytest.raises(RuntimeError, match='changed before binding swap') as raised:
+        await swap_verified_replacement_partitions(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    assert 'source_relations_changed=1' in str(raised.value)
 
 
 async def test_binding_swap_is_atomic_and_replayable_after_commit(

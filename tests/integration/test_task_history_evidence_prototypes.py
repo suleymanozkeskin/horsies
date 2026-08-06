@@ -34,6 +34,7 @@ from tests.task_history_prototypes.recovery_evidence import (
 )
 from tests.task_history_prototypes.replacement_transcode_evidence import (
     collect_replacement_archive_transcode_evidence,
+    replacement_throughput_passed,
 )
 from tests.task_history_prototypes.schema import PrototypeSchema
 from tests.task_history_prototypes.transcode import ArchiveComponent
@@ -42,6 +43,29 @@ from tests.task_history_prototypes.transcode_evidence import (
 )
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+
+
+@pytest.mark.parametrize(
+    ('component', 'candidate', 'control', 'passed'),
+    (
+        (ArchiveComponent.HISTORY_ROW, 19_999.0, None, False),
+        (ArchiveComponent.HISTORY_ROW, 20_000.0, None, True),
+        (ArchiveComponent.RESULT, 499.0, 1_000.0, False),
+        (ArchiveComponent.ATTEMPTS, 500.0, 1_000.0, True),
+        (ArchiveComponent.RERUN_INPUT, 1_000.0, None, False),
+    ),
+)
+async def test_replacement_throughput_contract_is_component_exhaustive(
+    component: ArchiveComponent,
+    candidate: float,
+    control: float | None,
+    passed: bool,
+) -> None:
+    assert replacement_throughput_passed(
+        component=component,
+        candidate_rows_per_second=candidate,
+        control_rows_per_second=control,
+    ) is passed
 
 
 async def test_operational_evidence_rejects_micro_durability(
@@ -392,4 +416,25 @@ async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
     assert evidence.verification.source_rows_remaining_after_swap == 0
     assert evidence.decoder_retirement_ready is True
     assert evidence.peak_additional_bytes >= 0
+    assert evidence.copy_storage_probe_seconds >= 0
     assert evidence.swap_lock_seconds >= 0
+    assert evidence.maintenance_seconds >= evidence.swap_lock_seconds
+    assert evidence.maintenance_duration_passed is True
+    assert evidence.swap_window_passed is True
+    assert evidence.budgets.metadata_tasks_per_second_minimum == 20_000
+    assert evidence.budgets.payload_control_ratio_minimum == 0.5
+    assert evidence.budgets.maintenance_seconds_maximum == 600
+    assert evidence.budgets.swap_lock_seconds_maximum == 2.0
+    if component is ArchiveComponent.HISTORY_ROW:
+        assert evidence.control is None
+        assert evidence.candidate_control_ratio is None
+    else:
+        assert evidence.control is not None
+        assert evidence.control.copied_rows == 100
+        assert evidence.control.payload_bytes_hashed == evidence.plan.payload_bytes
+        assert evidence.control.batches == 6
+        assert evidence.control.copy_seconds > 0
+        assert evidence.control.copied_rows_per_second > 0
+        assert evidence.control.payload_bytes_per_second > 0
+        assert evidence.candidate_control_ratio is not None
+        assert evidence.candidate_control_ratio > 0
