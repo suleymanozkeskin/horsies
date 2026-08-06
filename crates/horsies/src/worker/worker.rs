@@ -399,6 +399,13 @@ impl Worker {
         // Main-loop claim error backoff.
         let mut claim_backoff = RetryBackoff::from_config(&self.app_config.resilience);
 
+        // A fatal claim error (non-retryable, or retryable with the backoff
+        // exhausted) breaks the loop and is returned after graceful shutdown so
+        // the process exits non-zero for a supervisor restart — the same
+        // discipline as Python's run_forever re-raise and the ServiceLoopDied
+        // path below.
+        let mut fatal_claim_error: Option<WorkerError> = None;
+
         // Main loop.
         loop {
             if self.cancel.is_cancelled() {
@@ -434,12 +441,14 @@ impl Worker {
                             attempts = claim_backoff.attempts(),
                             "retryable claim error, max retries exhausted — shutting down",
                         );
+                        fatal_claim_error = Some(e);
                         break;
                     } else {
                         tracing::error!(
                             error = %e,
                             "non-retryable claim error — shutting down",
                         );
+                        fatal_claim_error = Some(e);
                         break;
                     }
                 }
@@ -491,6 +500,13 @@ impl Worker {
 
         // Graceful shutdown: wait for in-flight tasks.
         self.shutdown().await;
+
+        // A fatal claim error broke the loop; surface it so the process exits
+        // non-zero for a supervisor restart. In-flight tasks were still
+        // drained above.
+        if let Some(e) = fatal_claim_error {
+            return Err(e);
+        }
 
         // A service-loop death fired the token to get here; surface it so the
         // process exits non-zero instead of reporting a clean shutdown
@@ -2365,7 +2381,11 @@ mod tests {
             .await
             .expect("run() must exit after the fatal claim error, not hang")
             .expect("run task join");
-        assert!(result.is_ok(), "run() returns Ok after draining: {result:?}");
+        assert!(
+            result.is_err(),
+            "run() must return the fatal claim error so the process exits \
+             non-zero for a supervisor restart: {result:?}",
+        );
 
         assert!(
             cancel.is_cancelled(),
