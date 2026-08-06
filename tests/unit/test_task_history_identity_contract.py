@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.task_history_prototypes import identity_schema
 from tests.task_history_prototypes.identity import (
     CANDIDATE_IDEMPOTENCY_WINDOW_DEFAULT,
     CANDIDATE_IDEMPOTENCY_WINDOW_MAX,
@@ -86,3 +87,49 @@ def test_every_request_semantic_changes_fingerprint(field: str, value: object) -
 def test_rerun_source_and_root_are_atomic_command_fields() -> None:
     with pytest.raises(ValueError, match='present together'):
         replace(_command(), rerun_of_task_id='source-task')
+
+
+def test_staged_lookup_renders_all_512_static_leaf_probes() -> None:
+    leaves = tuple(
+        f'key_registry_history_finite_{year}'
+        for year in range(2537, 2025, -1)
+    )
+    rendered = identity_schema.render_staged_lookup_prototype(
+        'prototype_schema',
+        'key_registry',
+        leaves,
+    )
+    assert rendered.count('key_registry_history_finite_') == 512
+    assert rendered.index(leaves[0]) < rendered.index(leaves[-1])
+    assert len(rendered.encode()) == 223_525
+    assert 'EXECUTE' not in rendered
+
+
+@pytest.mark.parametrize(
+    ('prefix', 'leaves', 'message'),
+    [
+        ('combined', ('combined_history_finite_2026',), 'non-directory'),
+        ('key_registry', (), 'at least one'),
+        (
+            'key_registry',
+            (
+                'key_registry_history_finite_2026',
+                'key_registry_history_finite_2026',
+            ),
+            'distinct',
+        ),
+        ('key_registry', ('key_registry_history_finite_2026;drop',), 'invalid'),
+        ('key_registry', ('no_directory_history_finite_2026',), 'invalid'),
+    ],
+)
+def test_staged_lookup_rejects_ambiguous_or_unsafe_manifests(
+    prefix: str,
+    leaves: tuple[str, ...],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        identity_schema.render_staged_lookup_prototype(
+            'prototype_schema',
+            prefix,
+            leaves,
+        )

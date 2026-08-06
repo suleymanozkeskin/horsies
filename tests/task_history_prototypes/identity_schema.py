@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+from typing import Literal
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -13,6 +17,8 @@ from tests.task_history_prototypes.schema import PrototypeSchema
 
 _BASE_LOOKUP_LEAVES = 2
 _MAX_LOOKUP_LEAVES = 512
+_IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
+_STAGED_LOOKUP_PREFIXES = frozenset({'no_directory', 'key_registry'})
 _CANDIDATE_WINDOW_MAX_SECONDS = int(
     CANDIDATE_IDEMPOTENCY_WINDOW_MAX.total_seconds()
 )
@@ -68,6 +74,25 @@ async def extend_identity_history_leaves(
                         """
                     )
                 )
+
+
+async def install_staged_lookup_prototype(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    prefix: Literal['no_directory', 'key_registry'],
+    newest_first_leaf_names: Sequence[str],
+) -> None:
+    """Install a one-call lookup with static, catalog-generated leaf probes."""
+    await connection.execute(
+        text(
+            render_staged_lookup_prototype(
+                schema.sql,
+                prefix,
+                newest_first_leaf_names,
+            )
+        )
+    )
 
 
 def _identity_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
@@ -739,6 +764,81 @@ def _fanout_lookup_function(namespace: str, prefix: str) -> str:
             ROW(FALSE, NULL, NULL, NULL, NULL)::{namespace}.task_lookup
         )
     $function$
+    """
+
+
+def render_staged_lookup_prototype(
+    namespace: str,
+    prefix: str,
+    newest_first_leaf_names: Sequence[str],
+) -> str:
+    if prefix not in _STAGED_LOOKUP_PREFIXES:
+        raise ValueError('staged lookup requires a non-directory candidate')
+    if not newest_first_leaf_names:
+        raise ValueError('staged lookup requires at least one finite leaf')
+    leaf_names = tuple(newest_first_leaf_names)
+    if len(set(leaf_names)) != len(leaf_names):
+        raise ValueError('staged lookup finite leaves must be distinct')
+    expected_leaf_prefix = f'{prefix}_history_finite_'
+    for leaf_name in leaf_names:
+        if (
+            _IDENTIFIER.fullmatch(leaf_name) is None
+            or not leaf_name.startswith(expected_leaf_prefix)
+        ):
+            raise ValueError(f'invalid staged lookup leaf name: {leaf_name!r}')
+
+    finite_probes = '\n'.join(
+        _staged_relation_probe(
+            namespace,
+            leaf_name,
+            location='HISTORY',
+        )
+        for leaf_name in leaf_names
+    )
+    return f"""
+    CREATE OR REPLACE FUNCTION {namespace}.lookup_{prefix}_staged(
+        p_task_id varchar(36)
+    )
+    RETURNS {namespace}.task_lookup
+    LANGUAGE plpgsql
+    STABLE
+    AS $function$
+    DECLARE
+        v_task_id varchar(36);
+        v_fingerprint_version smallint;
+        v_fingerprint bytea;
+    BEGIN
+        {_staged_relation_probe(namespace, f'{prefix}_live', location='LIVE')}
+        {_staged_relation_probe(
+            namespace,
+            f'{prefix}_history_forever',
+            location='HISTORY',
+        )}
+        {finite_probes}
+        RETURN ROW(FALSE, NULL, NULL, NULL, NULL)
+            ::{namespace}.task_lookup;
+    END
+    $function$
+    """
+
+
+def _staged_relation_probe(
+    namespace: str,
+    relation: str,
+    *,
+    location: Literal['LIVE', 'HISTORY'],
+) -> str:
+    return f"""
+        SELECT task_id, fingerprint_version, command_fingerprint
+        INTO v_task_id, v_fingerprint_version, v_fingerprint
+        FROM {namespace}.{relation}
+        WHERE task_id = p_task_id;
+        IF FOUND THEN
+            RETURN ROW(
+                TRUE, '{location}', v_task_id,
+                v_fingerprint_version, v_fingerprint
+            )::{namespace}.task_lookup;
+        END IF;
     """
 
 

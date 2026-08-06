@@ -24,6 +24,7 @@ from tests.task_history_prototypes.identity import (
 from tests.task_history_prototypes.identity_schema import (
     extend_identity_history_leaves,
     install_identity_candidates,
+    install_staged_lookup_prototype,
 )
 from tests.task_history_prototypes.schema import (
     PrototypeSchema,
@@ -950,6 +951,166 @@ async def test_point_lookup_distinguishes_live_history_and_absence(
         None,
         None,
     )
+
+
+async def test_staged_lookup_uses_static_newest_first_leaf_probes(
+    identity_schema: AsyncConnection,
+) -> None:
+    schema = _schema(identity_schema)
+    await extend_identity_history_leaves(
+        identity_schema,
+        schema,
+        target_leaf_count=8,
+    )
+    newest_first_leaves = tuple(
+        f'key_registry_history_finite_{year}'
+        for year in range(2033, 2025, -1)
+    )
+    await install_staged_lookup_prototype(
+        identity_schema,
+        schema,
+        prefix='key_registry',
+        newest_first_leaf_names=newest_first_leaves,
+    )
+
+    identifiers = {
+        'live': str(uuid4()),
+        'forever': str(uuid4()),
+        'recent': str(uuid4()),
+        'oldest': str(uuid4()),
+    }
+    fingerprint = bytes.fromhex('01' * 32)
+    await identity_schema.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.key_registry_live (
+                task_id, task_name, fingerprint_version,
+                command_fingerprint, retention_class_key, created_at
+            ) VALUES (
+                :live, 'prototype.task', 1, :fingerprint,
+                'finite_30d_v1', '2026-08-05T00:00:00Z'
+            )
+            """
+        ),
+        {**identifiers, 'fingerprint': fingerprint},
+    )
+    await identity_schema.execute(
+        text(
+            f"""
+            INSERT INTO {schema.sql}.key_registry_history (
+                task_id, task_name, fingerprint_version,
+                command_fingerprint, retention_class_key, terminal_at
+            ) VALUES
+                (:forever, 'prototype.task', 1, :fingerprint,
+                 'forever', '2026-08-05T00:00:00Z'),
+                (:recent, 'prototype.task', 1, :fingerprint,
+                 'finite_30d_v1', '2033-06-01T00:00:00Z'),
+                (:oldest, 'prototype.task', 1, :fingerprint,
+                 'finite_30d_v1', '2026-06-01T00:00:00Z')
+            """
+        ),
+        {**identifiers, 'fingerprint': fingerprint},
+    )
+    await identity_schema.commit()
+
+    async def lookup_with_relation_locks(
+        task_id: str,
+    ) -> tuple[
+        tuple[bool, str | None, str | None, int | None, bytes | None],
+        set[str],
+    ]:
+        located = await _lookup(
+            identity_schema,
+            'key_registry_staged',
+            task_id,
+        )
+        locked = {
+            row.relname
+            for row in (
+                await identity_schema.execute(
+                    text(
+                        """
+                        SELECT relation.relname
+                        FROM pg_locks AS held
+                        JOIN pg_class AS relation
+                          ON relation.oid = held.relation
+                        JOIN pg_namespace AS namespace
+                          ON namespace.oid = relation.relnamespace
+                        WHERE held.pid = pg_backend_pid()
+                          AND namespace.nspname = :schema
+                          AND relation.relkind IN ('r', 'p')
+                        """
+                    ),
+                    {'schema': schema.name},
+                )
+            ).all()
+        }
+        await identity_schema.rollback()
+        return located, locked
+
+    all_finite_leaves = set(newest_first_leaves)
+    expected_locks = {
+        'live': {'key_registry_live'},
+        'forever': {
+            'key_registry_live',
+            'key_registry_history_forever',
+        },
+        'recent': {
+            'key_registry_live',
+            'key_registry_history_forever',
+            newest_first_leaves[0],
+        },
+        'oldest': {
+            'key_registry_live',
+            'key_registry_history_forever',
+            *all_finite_leaves,
+        },
+    }
+    for kind, task_id in identifiers.items():
+        located, locked = await lookup_with_relation_locks(task_id)
+        assert located == (
+            True,
+            'LIVE' if kind == 'live' else 'HISTORY',
+            task_id,
+            1,
+            fingerprint,
+        )
+        assert locked == expected_locks[kind]
+
+    absent, absent_locks = await lookup_with_relation_locks(str(uuid4()))
+    assert absent == (False, None, None, None, None)
+    assert absent_locks == {
+        'key_registry_live',
+        'key_registry_history_forever',
+        *all_finite_leaves,
+    }
+
+    definition = (
+        await identity_schema.execute(
+            text(
+                """
+                SELECT pg_get_functiondef(
+                    to_regprocedure(
+                        :signature
+                    )
+                )
+                """
+            ),
+            {
+                'signature': (
+                    f'{schema.name}.lookup_key_registry_staged(character varying)'
+                )
+            },
+        )
+    ).scalar_one()
+    assert 'EXECUTE' not in definition
+    live_position = definition.index('key_registry_live')
+    forever_position = definition.index('key_registry_history_forever')
+    newest_position = definition.index(newest_first_leaves[0])
+    oldest_position = definition.index(newest_first_leaves[-1])
+    assert live_position < forever_position < newest_position < oldest_position
+    assert definition.count('key_registry_history_finite_') == 8
+    assert 'key_registry_history\n' not in definition
 
 
 async def test_lookup_leaf_generator_reaches_declared_count(
