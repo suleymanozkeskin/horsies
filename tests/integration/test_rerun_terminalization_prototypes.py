@@ -20,14 +20,20 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.brokers.postgres import PostgresBroker
+from tests.perf.counters import Counts
+from tests.perf.statistics import Verdict
 from tests.task_history_prototypes.rerun_terminalization_evidence import (
     INLINE_BOUND_BYTES,
     InstalledComparison,
+    PayloadShape,
     RerunInputDisposition,
     StructuralViolation,
     assert_candidate_structure,
+    compare_wal,
     deployed_task_index_definitions,
     install_rerun_terminalization_prototype,
+    install_statement_counters,
+    measure_cell,
     stored_history_form,
 )
 from tests.task_history_prototypes.schema import (
@@ -45,6 +51,33 @@ _WORKER = 'worker-1'
 _RESULT = '{"ok": "' + 'x' * 184 + '"}'
 _ENVELOPE = b'{"v":"' + b'q' * (INLINE_BOUND_BYTES - 8) + b'"}'
 _FINITE_CLASS = 'finite_30d_v1'
+
+# Small enough to run in a review loop, large enough that the interleaving,
+# the discarded warm-up block and the counters are all genuinely exercised.
+# The gate run declares its own, far larger, counts.
+_DRIVER_OBSERVATIONS = 40
+_DRIVER_BLOCK_SIZE = 20
+_DRIVER_RESAMPLES = 200
+
+# The deliberately tightened WAL limit the detection control runs under:
+# no proportional allowance and a one-byte floor, which the candidate
+# necessarily exceeds because it copies the envelope into history.
+_TIGHTENED_WAL_FRACTION = 0.0
+_TIGHTENED_WAL_FLOOR_BYTES = 1
+
+
+def _counts(*, wal_bytes: int, terminal_rows: int) -> Counts:
+    return Counts(
+        client_statements=terminal_rows,
+        nested_statements=0,
+        client_rows=terminal_rows,
+        nested_rows=0,
+        terminal_rows=terminal_rows,
+        wal_records=terminal_rows,
+        wal_bytes=wal_bytes,
+        wal_fpi=0,
+        write_transactions=terminal_rows,
+    )
 
 
 async def _install(
@@ -398,3 +431,151 @@ class TestDetectionControl:
         )
 
         assert outcome.passed
+
+
+class TestMeasurementDriver:
+    """The driver has to produce a judged cell before any of it means anything."""
+
+    async def test_honest_cell_reports_every_budget_it_judged(
+        self,
+        installed: tuple[AsyncConnection, InstalledComparison],
+    ) -> None:
+        connection, comparison = installed
+        await install_statement_counters(connection)
+
+        cell = await measure_cell(
+            connection,
+            comparison,
+            payload_shape=PayloadShape.COMPRESSIBLE,
+            attempts_per_task=1,
+            observations=_DRIVER_OBSERVATIONS,
+            block_size=_DRIVER_BLOCK_SIZE,
+            resamples=_DRIVER_RESAMPLES,
+            seed=20260806,
+        )
+
+        assert cell.observations_per_side == _DRIVER_OBSERVATIONS
+        assert len(cell.baseline.samples_ms) == _DRIVER_OBSERVATIONS
+        assert len(cell.candidate.samples_ms) == _DRIVER_OBSERVATIONS
+        # p50, the p95 lock envelope, and p99 are each judged.
+        assert {round(c.percentile) for c in cell.comparisons} == {50, 95, 99}
+        assert cell.structural.passed
+        assert all(outcome.passed for outcome in cell.exact_counts)
+
+    async def test_exact_counts_are_one_statement_per_observation(
+        self,
+        installed: tuple[AsyncConnection, InstalledComparison],
+    ) -> None:
+        connection, comparison = installed
+        await install_statement_counters(connection)
+
+        cell = await measure_cell(
+            connection,
+            comparison,
+            payload_shape=PayloadShape.COMPRESSIBLE,
+            attempts_per_task=1,
+            observations=_DRIVER_OBSERVATIONS,
+            block_size=_DRIVER_BLOCK_SIZE,
+            resamples=_DRIVER_RESAMPLES,
+            seed=20260806,
+        )
+
+        for outcome in cell.exact_counts:
+            assert outcome.client_statements == _DRIVER_OBSERVATIONS
+            assert outcome.write_transactions >= _DRIVER_OBSERVATIONS
+            assert outcome.violations == ()
+
+    async def test_candidate_records_more_wal_per_task_than_the_baseline(
+        self,
+        installed: tuple[AsyncConnection, InstalledComparison],
+    ) -> None:
+        # Not a budget assertion: the candidate copies a 64 KiB envelope into
+        # history and deletes a live row, so a measurement reporting no extra
+        # WAL at all would mean the probe never attributed the candidate's work.
+        connection, comparison = installed
+        await install_statement_counters(connection)
+
+        cell = await measure_cell(
+            connection,
+            comparison,
+            payload_shape=PayloadShape.INCOMPRESSIBLE,
+            attempts_per_task=1,
+            observations=_DRIVER_OBSERVATIONS,
+            block_size=_DRIVER_BLOCK_SIZE,
+            resamples=_DRIVER_RESAMPLES,
+            seed=20260806,
+        )
+
+        assert cell.wal.candidate_bytes_per_task > 0
+        assert cell.wal.baseline_bytes_per_task > 0
+        # Regression: bracketing the counter probe once around the whole run
+        # instead of once per block handed each side the sum of both, and the
+        # two sides then reported byte-identical WAL. Equality here is the
+        # signature of that conflation, not a plausible measurement.
+        assert (
+            cell.wal.candidate_bytes_per_task
+            != cell.wal.baseline_bytes_per_task
+        )
+        assert cell.wal.delta_bytes_per_task > INLINE_BOUND_BYTES / 2
+
+
+class TestWalDetectionControl:
+    """The WAL comparison must fail when it is deliberately given no room."""
+
+    async def test_tightened_threshold_fails_and_declares_what_it_used(
+        self,
+        installed: tuple[AsyncConnection, InstalledComparison],
+    ) -> None:
+        connection, comparison = installed
+        await install_statement_counters(connection)
+
+        cell = await measure_cell(
+            connection,
+            comparison,
+            payload_shape=PayloadShape.COMPRESSIBLE,
+            attempts_per_task=1,
+            observations=_DRIVER_OBSERVATIONS,
+            block_size=_DRIVER_BLOCK_SIZE,
+            resamples=_DRIVER_RESAMPLES,
+            seed=20260806,
+            wal_fraction=_TIGHTENED_WAL_FRACTION,
+            wal_floor_bytes=_TIGHTENED_WAL_FLOOR_BYTES,
+        )
+
+        assert cell.wal.verdict is Verdict.FAIL
+        assert cell.verdict is Verdict.FAIL
+        # The control is only reproducible if the artifact says what it used.
+        assert cell.wal.fraction == _TIGHTENED_WAL_FRACTION
+        assert cell.wal.floor_bytes == _TIGHTENED_WAL_FLOOR_BYTES
+        assert cell.wal.limit_bytes == float(_TIGHTENED_WAL_FLOOR_BYTES)
+        assert cell.wal.deliberately_tightened
+
+    def test_declared_budget_is_not_marked_as_tightened(self) -> None:
+        # Guards the flag itself: if it read true under the declared budget,
+        # every artifact would claim to be a control.
+        comparison = compare_wal(
+            baseline=_counts(wal_bytes=1_000, terminal_rows=10),
+            candidate=_counts(wal_bytes=1_200, terminal_rows=10),
+        )
+
+        assert not comparison.deliberately_tightened
+        assert comparison.verdict is Verdict.PASS
+
+    def test_the_same_measurement_passes_under_the_declared_budget(
+        self,
+        installed: tuple[AsyncConnection, InstalledComparison],
+    ) -> None:
+        # Isolates the tightening from the workload: same counts, two limits.
+        baseline = _counts(wal_bytes=100_000, terminal_rows=100)
+        candidate = _counts(wal_bytes=140_000, terminal_rows=100)
+
+        declared = compare_wal(baseline=baseline, candidate=candidate)
+        tightened = compare_wal(
+            baseline=baseline,
+            candidate=candidate,
+            fraction=_TIGHTENED_WAL_FRACTION,
+            floor_bytes=_TIGHTENED_WAL_FLOOR_BYTES,
+        )
+
+        assert declared.verdict is Verdict.PASS
+        assert tightened.verdict is Verdict.FAIL

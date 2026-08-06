@@ -17,6 +17,9 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
+from random import Random
+from time import perf_counter
+from uuid import uuid4
 from enum import StrEnum
 
 from sqlalchemy import text
@@ -24,6 +27,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
+from tests.perf.counters import Counts
+from tests.perf.statistics import (
+    Budget,
+    Comparison,
+    Verdict,
+    compare,
+    percentile_ms,
+    worst,
+)
 from tests.task_history_prototypes.schema import PrototypeSchema
 
 
@@ -999,3 +1011,660 @@ async def assert_candidate_structure(
         violations.append(StructuralViolation.WRONG_RETENTION_CLASS)
 
     return StructuralOutcome(task_id=task_id, violations=tuple(violations))
+
+
+# --------------------------------------------------------------------------
+# Server-side counts.
+#
+# The statements below are the ones tests/perf/counters.py issues, restated
+# because that module's probe is synchronous and this collector is not. They
+# are pinned against their originals by
+# tests/unit/test_rerun_terminalization_counter_sql.py, so the restatement
+# cannot drift from the counting contract it reuses. The `Counts` shape itself
+# is imported rather than redeclared.
+# --------------------------------------------------------------------------
+
+COUNTER_RESET_SQL = 'SELECT pg_stat_statements_reset()'
+
+COUNTER_READ_SQL = """
+    SELECT
+        COALESCE(SUM(calls) FILTER (WHERE toplevel), 0)      AS client_statements,
+        COALESCE(SUM(calls) FILTER (WHERE NOT toplevel), 0)  AS nested_statements,
+        COALESCE(SUM(rows) FILTER (WHERE toplevel), 0)       AS client_rows,
+        COALESCE(SUM(rows) FILTER (WHERE NOT toplevel), 0)   AS nested_rows,
+        COALESCE(SUM(wal_records) FILTER (WHERE toplevel), 0) AS wal_records,
+        COALESCE(SUM(wal_bytes) FILTER (WHERE toplevel), 0)  AS wal_bytes,
+        COALESCE(SUM(wal_fpi) FILTER (WHERE toplevel), 0)    AS wal_fpi
+    FROM pg_stat_statements
+    WHERE query NOT LIKE '%pg_stat%'
+      AND query NOT LIKE '%pg_snapshot%'
+"""
+
+COUNTER_WRITE_TRANSACTIONS_SQL = (
+    'SELECT pg_snapshot_xmax(pg_current_snapshot())::text::bigint'
+)
+
+
+class AsyncCounterProbe:
+    """Brackets one measured block and reports what the server counted."""
+
+    def __init__(self, connection: AsyncConnection) -> None:
+        self._connection = connection
+        self._transactions_at_start: int | None = None
+
+    async def begin(self) -> None:
+        await self._connection.execute(text(COUNTER_RESET_SQL))
+        self._transactions_at_start = await self._read_write_transactions()
+
+    async def finish(self, *, terminal_rows: int) -> Counts:
+        if self._transactions_at_start is None:
+            raise RerunTerminalizationError('probe finished before it began')
+        write_transactions = (
+            await self._read_write_transactions() - self._transactions_at_start
+        )
+        row = (
+            await self._connection.execute(text(COUNTER_READ_SQL))
+        ).one()
+        self._transactions_at_start = None
+        return Counts(
+            client_statements=int(row.client_statements),
+            nested_statements=int(row.nested_statements),
+            client_rows=int(row.client_rows),
+            nested_rows=int(row.nested_rows),
+            terminal_rows=terminal_rows,
+            wal_records=int(row.wal_records),
+            wal_bytes=int(row.wal_bytes),
+            wal_fpi=int(row.wal_fpi),
+            write_transactions=write_transactions,
+        )
+
+    async def _read_write_transactions(self) -> int:
+        return int(
+            (
+                await self._connection.execute(
+                    text(COUNTER_WRITE_TRANSACTIONS_SQL)
+                )
+            ).scalar_one()
+        )
+
+
+async def install_statement_counters(connection: AsyncConnection) -> None:
+    """Make the statement view available before anything is counted."""
+    await connection.execute(
+        text('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+    )
+    await connection.commit()
+
+
+# --------------------------------------------------------------------------
+# Declared budgets.
+#
+# Single-row terminalization at a 200-byte result and 1-4 attempts: p50 within
+# the greater of +25% or 1.00 ms, p99 within the greater of +30% or 3.00 ms,
+# the p95 statement-to-commit lock envelope within the greater of +30% or
+# 3.00 ms and at most 25 ms absolute through a 64 KiB result, and WAL per
+# terminal task within the greater of +50% or 4 KiB.
+#
+# The fractions are named constants rather than literals inside the comparison
+# so the detection control can tighten one deliberately and the artifact can
+# report the tightened value it was tightened to.
+# --------------------------------------------------------------------------
+
+P50_BUDGET = Budget(fraction=1.25, floor_ms=1.00)
+P99_BUDGET = Budget(fraction=1.30, floor_ms=3.00)
+LOCK_P95_BUDGET = Budget(fraction=1.30, floor_ms=3.00)
+ABSOLUTE_LOCK_P95_LIMIT_MS = 25.0
+WAL_FRACTION = 0.50
+WAL_FLOOR_BYTES = 4096
+
+_DEFAULT_BLOCK_SIZE = 100
+
+MEASURED_WORKER_ID = 'rerun-gate-worker'
+MEASURED_ERROR_CODE = 'RERUN_GATE_FAILURE'
+FINITE_RETENTION_CLASS = 'finite_30d_v1'
+
+
+@dataclass(frozen=True, slots=True)
+class WalComparison:
+    """WAL bytes per terminal task, judged against its declared allowance."""
+
+    baseline_bytes_per_task: float
+    candidate_bytes_per_task: float
+    delta_bytes_per_task: float
+    fraction: float
+    floor_bytes: int
+    limit_bytes: float
+    verdict: Verdict
+
+    @property
+    def deliberately_tightened(self) -> bool:
+        """Whether this comparison ran under something other than the budget."""
+        return (
+            self.fraction != WAL_FRACTION
+            or self.floor_bytes != WAL_FLOOR_BYTES
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AbsoluteLockEnvelope:
+    """The candidate's own p95 lock envelope against its absolute ceiling.
+
+    Measured as statement start through commit return. That is an upper bound
+    on the interval the transition actually holds its locks, since it also
+    contains the client round trips; a candidate that passes here has not been
+    flattered by the measurement.
+    """
+
+    candidate_p95_ms: float
+    limit_ms: float
+    verdict: Verdict
+
+
+@dataclass(frozen=True, slots=True)
+class ExactCountOutcome:
+    """Statement and transaction counts, which admit no confidence interval."""
+
+    side: PairedSide
+    observations: int
+    client_statements: int
+    write_transactions: int
+    violations: tuple[str, ...]
+
+    @property
+    def passed(self) -> bool:
+        return not self.violations
+
+
+@dataclass(frozen=True, slots=True)
+class SideMeasurement:
+    """One side's timings and what the server counted while they ran."""
+
+    side: PairedSide
+    samples_ms: tuple[float, ...]
+    counts: Counts
+
+
+def _payload_of(size: int, shape: PayloadShape, *, seed: int) -> bytes:
+    """A JSON envelope of an exact size that does or does not compress."""
+    if size < 8:
+        raise PreparedEnvelopeError('envelope size must be at least 8 bytes')
+    body_size = size - 8
+    match shape:
+        case PayloadShape.COMPRESSIBLE:
+            body = 'x' * body_size
+        case PayloadShape.INCOMPRESSIBLE:
+            alphabet = (
+                '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+                'abcdefghijklmnopqrstuvwxyz'
+            )
+            generator = Random(seed)
+            body = ''.join(generator.choices(alphabet, k=body_size))
+    payload = f'{{"v":"{body}"}}'.encode()
+    if len(payload) != size:
+        raise PreparedEnvelopeError(
+            'envelope generator did not preserve the requested size'
+        )
+    return payload
+
+
+async def seed_side(
+    connection: AsyncConnection,
+    comparison: InstalledComparison,
+    *,
+    side: PairedSide,
+    task_ids: list[str],
+    envelope: bytes,
+    attempts_per_task: int,
+) -> None:
+    """Seed one side's live rows, outside the measured statement and WAL window.
+
+    Seeding runs before the counter probe opens, so its own statements and WAL
+    are attributed to nobody. Both sides receive the same row shape and the same
+    prepared envelope; only the transition under measurement differs.
+    """
+    validate_prepared_envelope(envelope)
+    relations = (
+        comparison.baseline
+        if side is PairedSide.BASELINE
+        else comparison.candidate
+    )
+    digest = sha256(envelope).digest()
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {relations.live_tasks} (
+                id, task_name, queue_name, priority, status,
+                args, kwargs, enqueue_sha, is_workflow_task,
+                claimed, claimed_by_worker_id, claimed_at, started_at,
+                retention_class_key, input_digest,
+                retain_rerun_input, prepared_rerun_input_disposition,
+                prepared_rerun_input_version, prepared_rerun_input_codec,
+                prepared_rerun_input_content_type,
+                prepared_rerun_input_digest, prepared_rerun_input_inline
+            )
+            SELECT
+                candidate_id, 'prototype.rerun', 'default', 100, 'RUNNING',
+                '[]', '{{}}', repeat('a', 64), FALSE,
+                TRUE, :worker, NOW(), NOW(),
+                :retention_class, :digest,
+                TRUE, 'INLINE', 1, 'json-utf8', 'application/json',
+                :digest, :envelope
+            FROM unnest(CAST(:task_ids AS varchar[])) AS candidate_id
+            """
+        ),
+        {
+            'worker': MEASURED_WORKER_ID,
+            'retention_class': FINITE_RETENTION_CLASS,
+            'digest': digest,
+            'envelope': envelope,
+            'task_ids': task_ids,
+        },
+    )
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {relations.live_attempts} (
+                task_id, attempt, outcome, will_retry,
+                started_at, finished_at, worker_id
+            )
+            SELECT candidate_id, attempt_number, 'FAILED', FALSE,
+                   NOW(), NOW(), :worker
+            FROM unnest(CAST(:task_ids AS varchar[])) AS candidate_id
+            CROSS JOIN generate_series(1, :attempts) AS attempt_number
+            """
+        ),
+        {
+            'worker': MEASURED_WORKER_ID,
+            'task_ids': task_ids,
+            'attempts': attempts_per_task,
+        },
+    )
+    await connection.commit()
+
+
+async def _run_block(
+    connection: AsyncConnection,
+    comparison: InstalledComparison,
+    *,
+    side: PairedSide,
+    task_ids: list[str],
+    result_json: str,
+) -> list[float]:
+    """One block of observations, each timed statement start through commit."""
+    samples: list[float] = []
+    match side:
+        case PairedSide.BASELINE:
+            statement = text(
+                baseline_statement_text(
+                    relation=comparison.baseline.live_tasks
+                )
+            )
+            for task_id in task_ids:
+                started = perf_counter()
+                await connection.execute(
+                    statement,
+                    {
+                        'id': task_id,
+                        'wid': MEASURED_WORKER_ID,
+                        'result_json': result_json,
+                        'error_code': MEASURED_ERROR_CODE,
+                    },
+                )
+                await connection.commit()
+                samples.append((perf_counter() - started) * 1000.0)
+        case PairedSide.CANDIDATE:
+            statement = text(
+                f'SELECT * FROM {comparison.schema.sql}'
+                '.candidate_fail_locked_task('
+                ':task_id, :worker, :result, :error_code, NULL)'
+            )
+            for task_id in task_ids:
+                started = perf_counter()
+                await connection.execute(
+                    statement,
+                    {
+                        'task_id': task_id,
+                        'worker': MEASURED_WORKER_ID,
+                        'result': result_json,
+                        'error_code': MEASURED_ERROR_CODE,
+                    },
+                )
+                await connection.commit()
+                samples.append((perf_counter() - started) * 1000.0)
+    return samples
+
+
+def _exact_counts(
+    side: PairedSide,
+    counts: Counts,
+    *,
+    observations: int,
+) -> ExactCountOutcome:
+    """Judge the counts the operation contract fixes exactly.
+
+    Sampling noise does not create count tolerance: one client statement and
+    one write transaction per operation is a contract, not a target. Write
+    transactions are counted from a global identity sequence, so background
+    work can only inflate them; a count below the observation count means the
+    measured operation did not commit every time it claimed to.
+    """
+    violations: list[str] = []
+    if counts.client_statements != observations:
+        violations.append(
+            f'{side.value} client statements {counts.client_statements} != '
+            f'{observations}'
+        )
+    if counts.write_transactions < observations:
+        violations.append(
+            f'{side.value} write transactions {counts.write_transactions} < '
+            f'{observations}'
+        )
+    return ExactCountOutcome(
+        side=side,
+        observations=observations,
+        client_statements=counts.client_statements,
+        write_transactions=counts.write_transactions,
+        violations=tuple(violations),
+    )
+
+
+def compare_wal(
+    *,
+    baseline: Counts,
+    candidate: Counts,
+    fraction: float = WAL_FRACTION,
+    floor_bytes: int = WAL_FLOOR_BYTES,
+) -> WalComparison:
+    """Judge WAL per terminal task against the greater of a share and a floor.
+
+    `fraction` and `floor_bytes` are arguments rather than constants read
+    inside so a detection control can tighten one deliberately; whatever value
+    was used travels in the result, which is what makes such a control
+    reproducible rather than an anecdote.
+    """
+    baseline_per_task = baseline.wal_bytes_per_row
+    candidate_per_task = candidate.wal_bytes_per_row
+    limit = max(baseline_per_task * fraction, float(floor_bytes))
+    delta = candidate_per_task - baseline_per_task
+    return WalComparison(
+        baseline_bytes_per_task=baseline_per_task,
+        candidate_bytes_per_task=candidate_per_task,
+        delta_bytes_per_task=delta,
+        fraction=fraction,
+        floor_bytes=floor_bytes,
+        limit_bytes=limit,
+        verdict=Verdict.PASS if delta <= limit else Verdict.FAIL,
+    )
+
+
+def judge_absolute_lock_envelope(
+    candidate_samples: list[float],
+    *,
+    limit_ms: float = ABSOLUTE_LOCK_P95_LIMIT_MS,
+) -> AbsoluteLockEnvelope:
+    """The candidate's own p95 envelope against its absolute ceiling."""
+    observed = percentile_ms(candidate_samples, 95.0)
+    return AbsoluteLockEnvelope(
+        candidate_p95_ms=observed,
+        limit_ms=limit_ms,
+        verdict=Verdict.PASS if observed <= limit_ms else Verdict.FAIL,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class CellResult:
+    """One (payload shape, attempt depth) verdict and everything behind it."""
+
+    payload_shape: PayloadShape
+    attempts_per_task: int
+    envelope_bytes: int
+    observations_per_side: int
+    block_size: int
+    resamples: int
+    seed: int
+    baseline: SideMeasurement
+    candidate: SideMeasurement
+    comparisons: tuple[Comparison, ...]
+    absolute_lock_envelope: AbsoluteLockEnvelope
+    wal: WalComparison
+    exact_counts: tuple[ExactCountOutcome, ...]
+    structural: StructuralOutcome
+    verdict: Verdict
+
+
+def _total_counts(blocks: list[Counts]) -> Counts:
+    """Sum one side's per-block counts into the side's total."""
+    return Counts(
+        client_statements=sum(b.client_statements for b in blocks),
+        nested_statements=sum(b.nested_statements for b in blocks),
+        client_rows=sum(b.client_rows for b in blocks),
+        nested_rows=sum(b.nested_rows for b in blocks),
+        terminal_rows=sum(b.terminal_rows for b in blocks),
+        wal_records=sum(b.wal_records for b in blocks),
+        wal_bytes=sum(b.wal_bytes for b in blocks),
+        wal_fpi=sum(b.wal_fpi for b in blocks),
+        write_transactions=sum(b.write_transactions for b in blocks),
+    )
+
+
+async def _measure_interleaved(
+    connection: AsyncConnection,
+    comparison: InstalledComparison,
+    *,
+    envelope: bytes,
+    attempts_per_task: int,
+    observations: int,
+    block_size: int,
+    result_json: str,
+) -> tuple[SideMeasurement, SideMeasurement, str]:
+    """Alternate blocks between the two sides until both are complete.
+
+    Interleaving rather than running one side and then the other: a machine
+    that drifts — a checkpoint, a busier host, a cache that filled — would
+    otherwise donate the drift entirely to whichever side ran second. One
+    warm-up block per side is run and discarded before counting starts, so a
+    cold cache is not attributed to the side that happened to go first.
+
+    Returns both sides plus one candidate task id retained for the post-commit
+    structural check.
+    """
+    blocks = -(-observations // block_size)
+    ids = {
+        side: [
+            f'{side.value[:4]}-{uuid4()}'[:36]
+            for _ in range((blocks + 1) * block_size)
+        ]
+        for side in PairedSide
+    }
+    for side in PairedSide:
+        await seed_side(
+            connection,
+            comparison,
+            side=side,
+            task_ids=ids[side],
+            envelope=envelope,
+            attempts_per_task=attempts_per_task,
+        )
+
+    cursors = {side: 0 for side in PairedSide}
+
+    # Warm-up: one block per side, discarded.
+    for side in PairedSide:
+        warm = ids[side][cursors[side] : cursors[side] + block_size]
+        cursors[side] += block_size
+        await _run_block(
+            connection,
+            comparison,
+            side=side,
+            task_ids=warm,
+            result_json=result_json,
+        )
+
+    samples: dict[PairedSide, list[float]] = {side: [] for side in PairedSide}
+    blocks_counted: dict[PairedSide, list[Counts]] = {
+        side: [] for side in PairedSide
+    }
+    # The statement view is server-wide and the probe resets it, so a block is
+    # the unit of attribution: bracket each block, and the counts belong to the
+    # side that just ran. Resetting once and reading at the end would hand each
+    # side the sum of both, which reads as two sides that write identical WAL.
+    probe = AsyncCounterProbe(connection)
+    retained_candidate_id = ''
+
+    for _ in range(blocks):
+        for side in PairedSide:
+            block_ids = ids[side][cursors[side] : cursors[side] + block_size]
+            cursors[side] += block_size
+            if side is PairedSide.CANDIDATE and not retained_candidate_id:
+                retained_candidate_id = block_ids[0]
+            await probe.begin()
+            block_samples = await _run_block(
+                connection,
+                comparison,
+                side=side,
+                task_ids=block_ids,
+                result_json=result_json,
+            )
+            samples[side] += block_samples
+            blocks_counted[side].append(
+                await probe.finish(terminal_rows=len(block_samples))
+            )
+
+    return (
+        SideMeasurement(
+            side=PairedSide.BASELINE,
+            samples_ms=tuple(samples[PairedSide.BASELINE]),
+            counts=_total_counts(blocks_counted[PairedSide.BASELINE]),
+        ),
+        SideMeasurement(
+            side=PairedSide.CANDIDATE,
+            samples_ms=tuple(samples[PairedSide.CANDIDATE]),
+            counts=_total_counts(blocks_counted[PairedSide.CANDIDATE]),
+        ),
+        retained_candidate_id,
+    )
+
+
+async def measure_cell(
+    connection: AsyncConnection,
+    comparison: InstalledComparison,
+    *,
+    payload_shape: PayloadShape,
+    attempts_per_task: int,
+    observations: int,
+    block_size: int = _DEFAULT_BLOCK_SIZE,
+    resamples: int,
+    seed: int,
+    envelope_bytes: int = INLINE_BOUND_BYTES,
+    result_bytes: int = 200,
+    wal_fraction: float = WAL_FRACTION,
+    wal_floor_bytes: int = WAL_FLOOR_BYTES,
+) -> CellResult:
+    """Measure one (payload shape, attempt depth) cell and judge every budget.
+
+    A cell is an independent verdict. Compressible and incompressible envelopes
+    are not averaged with one another and neither are attempt depths, because a
+    budget met on one shape says nothing about the other.
+
+    The exact requirements are judged alongside the sampled ones and outrank
+    them: a cell that met every latency budget while writing the envelope twice,
+    leaving the live row behind, or issuing a second client statement has failed
+    regardless of what the intervals said.
+    """
+    if observations <= 0:
+        raise RerunTerminalizationError('observations must be positive')
+    if block_size <= 0:
+        raise RerunTerminalizationError('block size must be positive')
+    if resamples <= 0:
+        raise RerunTerminalizationError('bootstrap resamples must be positive')
+    if attempts_per_task <= 0:
+        raise RerunTerminalizationError('attempts per task must be positive')
+
+    envelope = _payload_of(envelope_bytes, payload_shape, seed=seed)
+    result_json = _payload_of(
+        result_bytes,
+        PayloadShape.COMPRESSIBLE,
+        seed=seed + 1,
+    ).decode()
+
+    baseline, candidate, retained_id = await _measure_interleaved(
+        connection,
+        comparison,
+        envelope=envelope,
+        attempts_per_task=attempts_per_task,
+        observations=observations,
+        block_size=block_size,
+        result_json=result_json,
+    )
+
+    comparisons = tuple(
+        compare(
+            baseline=list(baseline.samples_ms),
+            candidate=list(candidate.samples_ms),
+            percentile=percentile,
+            budget=budget,
+            resamples=resamples,
+            seed=seed,
+        )
+        for percentile, budget in (
+            (50.0, P50_BUDGET),
+            (95.0, LOCK_P95_BUDGET),
+            (99.0, P99_BUDGET),
+        )
+    )
+    absolute_lock = judge_absolute_lock_envelope(list(candidate.samples_ms))
+    wal = compare_wal(
+        baseline=baseline.counts,
+        candidate=candidate.counts,
+        fraction=wal_fraction,
+        floor_bytes=wal_floor_bytes,
+    )
+    exact_counts = (
+        _exact_counts(
+            PairedSide.BASELINE,
+            baseline.counts,
+            observations=len(baseline.samples_ms),
+        ),
+        _exact_counts(
+            PairedSide.CANDIDATE,
+            candidate.counts,
+            observations=len(candidate.samples_ms),
+        ),
+    )
+    structural = await assert_candidate_structure(
+        connection,
+        comparison,
+        task_id=retained_id,
+        expected_envelope=envelope,
+        expected_retention_class=FINITE_RETENTION_CLASS,
+    )
+
+    exact_failed = (
+        not structural.passed
+        or any(not outcome.passed for outcome in exact_counts)
+    )
+    sampled_verdict = worst(
+        [
+            *(comparison_result.verdict for comparison_result in comparisons),
+            absolute_lock.verdict,
+            wal.verdict,
+        ]
+    )
+
+    return CellResult(
+        payload_shape=payload_shape,
+        attempts_per_task=attempts_per_task,
+        envelope_bytes=envelope_bytes,
+        observations_per_side=len(candidate.samples_ms),
+        block_size=block_size,
+        resamples=resamples,
+        seed=seed,
+        baseline=baseline,
+        candidate=candidate,
+        comparisons=comparisons,
+        absolute_lock_envelope=absolute_lock,
+        wal=wal,
+        exact_counts=exact_counts,
+        structural=structural,
+        verdict=Verdict.FAIL if exact_failed else sampled_verdict,
+    )
