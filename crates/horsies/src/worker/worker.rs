@@ -1654,16 +1654,39 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
+        use crate::broker::terminalization::terminalize;
+        use crate::core::lifecycle::{
+            PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
+        };
+
+        let complete_as = |task_id: &str, worker: &str| TerminalizationCommand::CompleteLockedTask {
+            task_id: task_id.to_owned(),
+            fence: PriorLockedRead { worker_id: worker.to_owned() },
+            result_json: "{}".to_owned(),
+        };
+        let fail_as = |task_id: &str, worker: &str, reason: Option<&str>| {
+            TerminalizationCommand::FailLockedTask {
+                task_id: task_id.to_owned(),
+                fence: PriorLockedRead { worker_id: worker.to_owned() },
+                result_json: "{}".to_owned(),
+                error_code: reason.is_none().then(|| "X".to_owned()),
+                failed_reason: reason.map(str::to_owned),
+            }
+        };
+        let applied = |outcomes: &[TerminalizationOutcome]| {
+            matches!(outcomes, [TerminalizationOutcome::Applied { .. }])
+        };
+
         // complete: stale owner rejected, current owner applies.
         let t_complete = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_complete, "worker-2").await;
         assert!(
-            !broker.complete(&t_complete, Some("{}"), "worker-1").await.unwrap(),
+            !applied(&terminalize(&pool, &complete_as(&t_complete, "worker-1")).await.unwrap()),
             "stale owner must not complete the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "RUNNING");
         assert!(
-            broker.complete(&t_complete, Some("{}"), "worker-2").await.unwrap(),
+            applied(&terminalize(&pool, &complete_as(&t_complete, "worker-2")).await.unwrap()),
             "current owner must complete its own task"
         );
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "COMPLETED");
@@ -1672,11 +1695,11 @@ mod tests {
         let t_fail = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_fail, "worker-2").await;
         assert!(
-            !broker.fail(&t_fail, Some("{}"), Some("X"), "worker-1").await.unwrap(),
+            !applied(&terminalize(&pool, &fail_as(&t_fail, "worker-1", None)).await.unwrap()),
             "stale owner must not fail the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "RUNNING");
-        assert!(broker.fail(&t_fail, Some("{}"), Some("X"), "worker-2").await.unwrap());
+        assert!(applied(&terminalize(&pool, &fail_as(&t_fail, "worker-2", None)).await.unwrap()));
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "FAILED");
 
         // requeue: stale owner rejected, current owner applies.
@@ -1690,15 +1713,21 @@ mod tests {
         assert!(broker.requeue(&t_requeue, Some(Utc::now()), "worker-2").await.unwrap());
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
 
-        // fail_worker: stale owner rejected, current owner applies.
+        // worker-crash failure (failed_reason carried): stale owner rejected,
+        // current owner applies. Same operation as task failure — they differ
+        // only in whether a failure reason travels.
         let t_worker = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_worker, "worker-2").await;
         assert!(
-            !broker.fail_worker(&t_worker, "crash", "worker-1").await.unwrap(),
+            !applied(
+                &terminalize(&pool, &fail_as(&t_worker, "worker-1", Some("crash"))).await.unwrap()
+            ),
             "stale owner must not worker-fail the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "RUNNING");
-        assert!(broker.fail_worker(&t_worker, "crash", "worker-2").await.unwrap());
+        assert!(applied(
+            &terminalize(&pool, &fail_as(&t_worker, "worker-2", Some("crash"))).await.unwrap()
+        ));
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "FAILED");
     }
 

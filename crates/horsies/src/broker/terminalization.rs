@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::core::lifecycle::operations::{equivalence_class_of, function_name_of, kind_of};
+use crate::core::lifecycle::operations::{equivalence_class_of, function_name_of};
 use crate::core::lifecycle::outcomes::decode_outcome_row;
 use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, TerminalizationOutcome};
 
@@ -415,12 +415,6 @@ pub async fn classify_locked_read_miss_in_tx(
     let outcome = outcomes.remove(0);
     log_terminalization_outcome(operation, &outcome);
     Ok(outcome)
-}
-
-/// The kind a command's function hardcodes — re-exported here so call sites
-/// that classify misses name the same vocabulary the adapter executes.
-pub fn requested_kind_of(command: &TerminalizationCommand) -> TerminalizationKind {
-    kind_of(command)
 }
 
 #[cfg(test)]

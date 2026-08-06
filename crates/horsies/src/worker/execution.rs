@@ -18,8 +18,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+use crate::broker::terminalization::{
+    classify_locked_read_miss_in_tx, terminalize, terminalize_in_tx,
+};
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
+use crate::core::lifecycle::{
+    OwnedClaim, PriorLockedRead, TerminalizationCommand, TerminalizationKind,
+    TerminalizationOutcome,
+};
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
@@ -54,6 +61,9 @@ pub(crate) enum FinalizeOutcome {
     Terminal {
         result_json: String,
         is_success: bool,
+        /// Phase 1 already fired the capacity wake (the fused success path
+        /// notifies in-statement); Phase 2 must not wake capacity twice.
+        capacity_notified: bool,
     },
     /// Task was requeued for retry. No workflow callback needed.
     Retried,
@@ -72,6 +82,8 @@ pub(crate) struct Phase2Work {
     pub is_success: bool,
     pub queue_name: String,
     pub is_workflow_task: bool,
+    /// Phase 1 already woke queue capacity; Phase 2 skips its notify.
+    pub capacity_notified: bool,
 }
 
 /// Outcome of retry scheduling (mirrors Python's `_schedule_retry` return).
@@ -715,7 +727,6 @@ pub(crate) async fn persist_terminal_state(
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let pid = std::process::id() as i32;
     let process_name = format!("worker-{}", pid);
-    let task_started_at = running.started_at;
     let attempt_num = running.retry_count + 1;
     let now = Utc::now();
     let worker = WorkerProcessInfo {
@@ -742,8 +753,6 @@ pub(crate) async fn persist_terminal_state(
                 broker,
                 task_id,
                 result_bytes,
-                attempt_num,
-                task_started_at,
                 now,
                 worker_id,
                 hostname,
@@ -751,6 +760,7 @@ pub(crate) async fn persist_terminal_state(
                 &process_name,
                 row.is_workflow_task,
                 &row.queue_name,
+                row.claimed_at,
             )
             .await
         }
@@ -802,8 +812,6 @@ pub(crate) async fn persist_terminal_state(
                 broker,
                 task_id,
                 task_error,
-                attempt_num,
-                task_started_at,
                 now,
                 worker_id,
                 hostname,
@@ -811,6 +819,7 @@ pub(crate) async fn persist_terminal_state(
                 &process_name,
                 &row.task_name,
                 payload_policy,
+                row.claimed_at,
             )
             .await
         }
@@ -818,12 +827,11 @@ pub(crate) async fn persist_terminal_state(
 }
 
 /// Persist a successful task result (or serialization fallback) atomically.
+#[allow(clippy::too_many_arguments)]
 async fn persist_ok_result(
     broker: &PostgresBroker,
     task_id: &str,
     result_bytes: &[u8],
-    attempt_num: i32,
-    task_started_at: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
     worker_id: &str,
     hostname: &str,
@@ -831,6 +839,7 @@ async fn persist_ok_result(
     process_name: &str,
     is_workflow_task: bool,
     queue_name: &str,
+    claimed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     // Wrap the task's result bytes via `&RawValue`: parsing validates the JSON
     // exactly like the previous full `Value` parse, but the adjacently-tagged
@@ -853,35 +862,74 @@ async fn persist_ok_result(
             ),
         };
 
-    // Plain (non-workflow) ok result: one fused statement (lock + attempt + CAS +
-    // capacity notify) finalizes it with no Phase 2. Workflow tasks keep the
-    // multi-statement path so Phase 2 can run the workflow callback. Parity with
-    // horsies PR #134.
-    if is_success && !is_workflow_task {
-        let channel = format!("task_queue_{}", queue_name);
-        let payload = format!("capacity:{}", task_id);
+    // ALL success routes through the fused operation: one statement that
+    // locks the RUNNING row under the full OwnedClaim fence (worker +
+    // claimed_at generation), writes the attempt from the locked row's own
+    // context, transitions, and fires the capacity wake. Plain tasks are
+    // fully finalized (no Phase 2); workflow tasks still produce Phase 2
+    // work for the workflow callback, with the capacity wake already fired.
+    if is_success {
+        let command = TerminalizationCommand::CompleteTaskFused {
+            task_id: task_id.to_owned(),
+            fence: OwnedClaim {
+                worker_id: worker_id.to_owned(),
+                claimed_at,
+            },
+            result_json: wrapped_json.clone(),
+            notify_channel: format!("task_queue_{}", queue_name),
+            notify_payload: format!("capacity:{}", task_id),
+        };
         let tx_result = finalize_with_retry(task_id, "complete-fused", || async {
-            broker
-                .finalize_completed_fused(
-                    task_id,
-                    Some(&wrapped_json),
-                    worker_id,
-                    &channel,
-                    &payload,
-                    Some(task_started_at),
-                )
-                .await
+            terminalize(broker.pool(), &command).await
         })
         .await;
 
         return match tx_result {
-            Ok(true) => Ok(FinalizeOutcome::Finalized),
-            Ok(false) => Err(FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task_id.to_owned(),
-                message: "finalize (complete-fused) aborted: task no longer RUNNING".to_owned(),
-                retryable: false,
-            }),
+            Ok(outcomes) => match outcomes.into_iter().next() {
+                Some(TerminalizationOutcome::Applied { .. }) => {
+                    if is_workflow_task {
+                        Ok(FinalizeOutcome::Terminal {
+                            result_json: wrapped_json,
+                            is_success: true,
+                            capacity_notified: true,
+                        })
+                    } else {
+                        Ok(FinalizeOutcome::Finalized)
+                    }
+                }
+                Some(TerminalizationOutcome::AlreadyApplied { .. }) => {
+                    // A crash-replay found its own class already committed.
+                    // The committed row is authoritative: reload it so Phase 2
+                    // replays the persisted result, not this attempt's.
+                    if is_workflow_task {
+                        let (result_json, committed_success) =
+                            load_persisted_task_result(broker.pool(), task_id).await?;
+                        Ok(FinalizeOutcome::Terminal {
+                            result_json,
+                            is_success: committed_success,
+                            capacity_notified: false,
+                        })
+                    } else {
+                        Ok(FinalizeOutcome::Finalized)
+                    }
+                }
+                Some(
+                    outcome @ (TerminalizationOutcome::LostClaim { .. }
+                    | TerminalizationOutcome::SourceStateConflict { .. }
+                    | TerminalizationOutcome::TaskAbsent { .. }),
+                ) => Err(FinalizeError {
+                    stage: FinalizeStage::Phase1Persist,
+                    task_id: task_id.to_owned(),
+                    message: format!("finalize (complete-fused) refused: {:?}", outcome),
+                    retryable: false,
+                }),
+                None => Err(FinalizeError {
+                    stage: FinalizeStage::Phase1Persist,
+                    task_id: task_id.to_owned(),
+                    message: "finalize (complete-fused) returned no outcome".to_owned(),
+                    retryable: false,
+                }),
+            },
             Err(e) => Err(FinalizeError {
                 stage: FinalizeStage::Phase1Persist,
                 task_id: task_id.to_owned(),
@@ -891,198 +939,133 @@ async fn persist_ok_result(
         };
     }
 
-    if is_success {
-        let tx_result = finalize_with_retry(task_id, "complete", || async {
-            let mut tx = broker
-                .pool()
-                .begin()
-                .await
-                .map_err(crate::broker::BrokerError::Database)?;
-            let applied = broker
-                .complete_in_tx(
-                    &mut tx,
-                    task_id,
-                    Some(&wrapped_json),
-                    worker_id,
-                    Some(task_started_at),
-                )
-                .await?;
-            if applied {
-                broker
-                    .upsert_task_attempt(
-                        &mut tx,
-                        task_id,
-                        attempt_num,
-                        "COMPLETED",
-                        false,
-                        task_started_at,
-                        now,
-                        None,
-                        None,
-                        None,
-                        Some(worker_id),
-                        Some(hostname),
-                        Some(pid),
-                        Some(process_name),
-                    )
-                    .await?;
-            }
-            tx.commit()
-                .await
-                .map_err(crate::broker::BrokerError::Database)?;
-            Ok::<bool, crate::broker::BrokerError>(applied)
-        })
-        .await;
-
-        match tx_result {
-            Ok(true) => Ok(FinalizeOutcome::Terminal {
-                result_json: wrapped_json,
-                is_success: true,
-            }),
-            Ok(false) => {
-                // Task no longer RUNNING (reaper reclaimed). Not retryable.
-                Err(FinalizeError {
-                    stage: FinalizeStage::Phase1Persist,
-                    task_id: task_id.to_owned(),
-                    message: "finalize (complete) aborted: task no longer RUNNING".to_owned(),
-                    retryable: false,
-                })
-            }
-            Err(e) => Err(FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task_id.to_owned(),
-                message: format!("finalize (complete) failed after retries: {}", e),
-                retryable: e.is_retryable(),
-            }),
-        }
-    } else {
-        let ser_error_code = OperationalErrorCode::WorkerSerializationError.to_string();
-        let tx_result = finalize_with_retry(task_id, "fail/serialization", || async {
-            let mut tx = broker
-                .pool()
-                .begin()
-                .await
-                .map_err(crate::broker::BrokerError::Database)?;
-            let applied = broker
-                .fail_in_tx(
-                    &mut tx,
-                    task_id,
-                    Some(&wrapped_json),
-                    Some(&ser_error_code),
-                    worker_id,
-                    Some(task_started_at),
-                )
-                .await?;
-            if applied {
-                broker
-                    .upsert_task_attempt(
-                        &mut tx,
-                        task_id,
-                        attempt_num,
-                        "FAILED",
-                        false,
-                        task_started_at,
-                        now,
-                        Some(&ser_error_code),
-                        Some("serialization error"),
-                        None,
-                        Some(worker_id),
-                        Some(hostname),
-                        Some(pid),
-                        Some(process_name),
-                    )
-                    .await?;
-            }
-            tx.commit()
-                .await
-                .map_err(crate::broker::BrokerError::Database)?;
-            Ok::<bool, crate::broker::BrokerError>(applied)
-        })
-        .await;
-
-        match tx_result {
-            Ok(true) => Ok(FinalizeOutcome::Terminal {
-                result_json: wrapped_json,
-                is_success: false,
-            }),
-            Ok(false) => Err(FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task_id.to_owned(),
-                message: "finalize (fail/serialization) aborted: task no longer RUNNING".to_owned(),
-                retryable: false,
-            }),
-            Err(e) => Err(FinalizeError {
-                stage: FinalizeStage::Phase1Persist,
-                task_id: task_id.to_owned(),
-                message: format!("finalize (fail/serialization) failed after retries: {}", e),
-                retryable: e.is_retryable(),
-            }),
-        }
-    }
+    // Serialization fallback: the produced bytes are not valid JSON, so the
+    // task fails through the same locked shape as every terminal failure.
+    let ser_error_code = OperationalErrorCode::WorkerSerializationError.to_string();
+    persist_failure_locked(
+        broker,
+        task_id,
+        "fail/serialization",
+        &wrapped_json,
+        Some(&ser_error_code),
+        Some("serialization error"),
+        now,
+        worker_id,
+        hostname,
+        pid,
+        process_name,
+        claimed_at,
+    )
+    .await
 }
 
-/// Persist a terminal task failure atomically.
+/// Row context read under the failure path's generation-fenced lock.
+///
+/// The attempt row is written from these columns rather than from dispatch
+/// metadata: the committed row is what the transition proves, and the two
+/// can differ after a requeue/re-claim.
+#[derive(sqlx::FromRow)]
+struct LockedFailContext {
+    retry_count: Option<i32>,
+    started_at: Option<chrono::DateTime<Utc>>,
+    worker_hostname: Option<String>,
+    worker_pid: Option<i32>,
+    worker_process_name: Option<String>,
+}
+
+/// Terminal failure through the locked shape: a generation-fenced locking
+/// read, the fail operation under that lock, and the attempt row from the
+/// locked row's own context — one transaction. A read that matches nothing
+/// is classified by the shared miss classifier and never mutates.
 #[allow(clippy::too_many_arguments)]
-async fn persist_err_terminal(
+async fn persist_failure_locked(
     broker: &PostgresBroker,
     task_id: &str,
-    task_error: &TaskError,
-    attempt_num: i32,
-    task_started_at: chrono::DateTime<Utc>,
+    label: &'static str,
+    wrapped_json: &str,
+    error_code: Option<&str>,
+    error_message: Option<&str>,
     now: chrono::DateTime<Utc>,
     worker_id: &str,
     hostname: &str,
     pid: i32,
     process_name: &str,
-    task_name: &str,
-    payload_policy: &PayloadPolicy,
+    claimed_at: Option<chrono::DateTime<Utc>>,
 ) -> Result<FinalizeOutcome, FinalizeError> {
-    let wrapped = TaskResult::<serde_json::Value>::Err(task_error.clone());
-    let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
-    // Warn-only: error envelopes can carry oversized data too; measured on
-    // the exact persisted string, already in hand. Parity with horsies PR #208.
-    enforce_payload_policy(
-        payload_policy,
-        task_name,
-        PayloadKind::Result,
-        wrapped_json.len(),
-    );
-    let error_code_str = task_error.error_code.as_ref().map(|c| c.to_string());
-    let error_msg = task_error.message.as_deref();
-
-    let tx_result = finalize_with_retry(task_id, "fail", || async {
+    let tx_result = finalize_with_retry(task_id, label, || async {
         let mut tx = broker
             .pool()
             .begin()
             .await
             .map_err(crate::broker::BrokerError::Database)?;
-        let applied = broker
-            .fail_in_tx(
+
+        let locked: Option<LockedFailContext> = sqlx::query_as(
+            "SELECT retry_count, started_at, worker_hostname, worker_pid,
+                    worker_process_name
+             FROM horsies_tasks
+             WHERE id = $1
+               AND status = 'RUNNING'
+               AND claimed_by_worker_id = $2
+               AND ($3::timestamptz IS NULL OR claimed_at = $3)
+             FOR UPDATE",
+        )
+        .bind(task_id)
+        .bind(worker_id)
+        .bind(claimed_at)
+        .fetch_optional(tx.as_mut())
+        .await
+        .map_err(crate::broker::BrokerError::Database)?;
+
+        let Some(context) = locked else {
+            // The fenced read matched nothing: same worker may already own a
+            // newer generation, so invoking the operation would be unsafe.
+            // Classify without mutating; the outcome is logged at the adapter
+            // boundary.
+            let _outcome = classify_locked_read_miss_in_tx(
                 &mut tx,
                 task_id,
-                Some(&wrapped_json),
-                error_code_str.as_deref(),
+                TerminalizationKind::FailRunning,
                 worker_id,
-                Some(task_started_at),
+                claimed_at,
             )
             .await?;
+            tx.commit()
+                .await
+                .map_err(crate::broker::BrokerError::Database)?;
+            return Ok::<bool, crate::broker::BrokerError>(false);
+        };
+
+        let command = TerminalizationCommand::FailLockedTask {
+            task_id: task_id.to_owned(),
+            fence: PriorLockedRead {
+                worker_id: worker_id.to_owned(),
+            },
+            result_json: wrapped_json.to_owned(),
+            error_code: error_code.map(str::to_owned),
+            failed_reason: None,
+        };
+        let outcomes = terminalize_in_tx(&mut tx, &command).await?;
+        let applied = matches!(
+            outcomes.first(),
+            Some(TerminalizationOutcome::Applied { .. })
+        );
         if applied {
             broker
                 .upsert_task_attempt(
                     &mut tx,
                     task_id,
-                    attempt_num,
+                    context.retry_count.unwrap_or(0) + 1,
                     "FAILED",
                     false,
-                    task_started_at,
+                    context.started_at.unwrap_or(now),
                     now,
-                    error_code_str.as_deref(),
-                    error_msg,
+                    error_code,
+                    error_message,
                     None,
                     Some(worker_id),
-                    Some(hostname),
-                    Some(pid),
-                    Some(process_name),
+                    context.worker_hostname.as_deref().or(Some(hostname)),
+                    context.worker_pid.or(Some(pid)),
+                    context.worker_process_name.as_deref().or(Some(process_name)),
                 )
                 .await?;
         }
@@ -1095,22 +1078,67 @@ async fn persist_err_terminal(
 
     match tx_result {
         Ok(true) => Ok(FinalizeOutcome::Terminal {
-            result_json: wrapped_json,
+            result_json: wrapped_json.to_owned(),
             is_success: false,
+            capacity_notified: false,
         }),
         Ok(false) => Err(FinalizeError {
             stage: FinalizeStage::Phase1Persist,
             task_id: task_id.to_owned(),
-            message: "finalize (fail) aborted: task no longer RUNNING".to_owned(),
+            message: format!("finalize ({label}) aborted: fenced read matched nothing"),
             retryable: false,
         }),
         Err(e) => Err(FinalizeError {
             stage: FinalizeStage::Phase1Persist,
             task_id: task_id.to_owned(),
-            message: format!("finalize (fail) failed after retries: {}", e),
+            message: format!("finalize ({label}) failed after retries: {}", e),
             retryable: e.is_retryable(),
         }),
     }
+}
+
+/// Persist a terminal task failure atomically through the locked shape.
+#[allow(clippy::too_many_arguments)]
+async fn persist_err_terminal(
+    broker: &PostgresBroker,
+    task_id: &str,
+    task_error: &TaskError,
+    now: chrono::DateTime<Utc>,
+    worker_id: &str,
+    hostname: &str,
+    pid: i32,
+    process_name: &str,
+    task_name: &str,
+    payload_policy: &PayloadPolicy,
+    claimed_at: Option<chrono::DateTime<Utc>>,
+) -> Result<FinalizeOutcome, FinalizeError> {
+    let wrapped = TaskResult::<serde_json::Value>::Err(task_error.clone());
+    let wrapped_json = serde_json::to_string(&wrapped).unwrap_or_else(|_| "{}".to_owned());
+    // Warn-only: error envelopes can carry oversized data too; measured on
+    // the exact persisted string, already in hand. Parity with horsies PR #208.
+    enforce_payload_policy(
+        payload_policy,
+        task_name,
+        PayloadKind::Result,
+        wrapped_json.len(),
+    );
+    let error_code_str = task_error.error_code.as_ref().map(|c| c.to_string());
+
+    persist_failure_locked(
+        broker,
+        task_id,
+        "fail",
+        &wrapped_json,
+        error_code_str.as_deref(),
+        task_error.message.as_deref(),
+        now,
+        worker_id,
+        hostname,
+        pid,
+        process_name,
+        claimed_at,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,6 +1175,7 @@ pub(crate) async fn finalize_workflow_phase(
     is_success: bool,
     queue_name: &str,
     is_workflow_task: bool,
+    capacity_notified: bool,
 ) -> Result<(), FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
@@ -1170,8 +1199,12 @@ pub(crate) async fn finalize_workflow_phase(
         })?;
     }
 
-    // Capacity notification — non-fatal if it fails.
-    notify_worker_capacity(pool, queue_name, task_id).await;
+    // Capacity notification — non-fatal if it fails. Skipped when Phase 1's
+    // fused statement already fired the wake in the same commit as the
+    // transition (waking twice would be harmless but wasteful).
+    if !capacity_notified {
+        notify_worker_capacity(pool, queue_name, task_id).await;
+    }
 
     Ok(())
 }
@@ -1271,6 +1304,7 @@ pub(crate) async fn finalize_pre_execution_failure(
                 is_success: false,
                 queue_name,
                 is_workflow_task,
+                capacity_notified: false,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1291,12 +1325,14 @@ pub(crate) async fn finalize_pre_execution_failure(
         Some(FinalizeOutcome::Terminal {
             result_json,
             is_success,
+            capacity_notified,
         }) => Some(Phase2Work {
             task_id,
             result_json,
             is_success,
             queue_name,
             is_workflow_task,
+            capacity_notified,
         }),
         Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
@@ -1353,6 +1389,7 @@ pub(crate) async fn execute_and_finalize(
                 is_success: false,
                 queue_name,
                 is_workflow_task,
+                capacity_notified: false,
             });
         }
         OwnershipOutcome::Aborted => return None,
@@ -1417,12 +1454,14 @@ pub(crate) async fn execute_and_finalize(
         Some(FinalizeOutcome::Terminal {
             result_json,
             is_success,
+            capacity_notified,
         }) => Some(Phase2Work {
             task_id,
             result_json,
             is_success,
             queue_name,
             is_workflow_task,
+            capacity_notified,
         }),
         Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
@@ -1445,6 +1484,7 @@ pub(crate) async fn run_phase2(
         work.is_success,
         &work.queue_name,
         work.is_workflow_task,
+        work.capacity_notified,
     )
     .await;
 }
@@ -1551,6 +1591,7 @@ async fn retry_phase1(
 ///
 /// If the initial call fails, reloads the persisted task result from DB
 /// (since Phase 1 already committed) and replays.
+#[allow(clippy::too_many_arguments)]
 async fn retry_phase2(
     pool: &sqlx::PgPool,
     workflow_registry: &WorkflowSpecRegistry,
@@ -1559,6 +1600,7 @@ async fn retry_phase2(
     is_success: bool,
     queue_name: &str,
     is_workflow_task: bool,
+    capacity_notified: bool,
 ) {
     // First attempt with the in-memory result.
     match finalize_workflow_phase(
@@ -1569,6 +1611,7 @@ async fn retry_phase2(
         is_success,
         queue_name,
         is_workflow_task,
+        capacity_notified,
     )
     .await
     {
@@ -1628,6 +1671,7 @@ async fn retry_phase2(
             reloaded_success,
             queue_name,
             is_workflow_task,
+            capacity_notified,
         )
         .await
         {

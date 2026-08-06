@@ -165,124 +165,10 @@ hb AS (
 )
 SELECT id, started_at, retry_count, max_retries, good_until FROM upd";
 
-// The optional `started_at` fence ($4) scopes the CAS to a specific claim
-// generation: `set_running` returns the attempt's `started_at`, and threading it
-// here rejects a stale finalize from an attempt the reaper already requeued and
-// the same worker re-claimed (a new `started_at`). `NULL` disables the fence,
-// preserving the worker+status-only behavior for callers that do not pass it (C10).
-const COMPLETE_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'COMPLETED',
-    completed_at = NOW(),
-    result = $2,
-    error_code = NULL,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    terminal_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'RUNNING'
-  AND claimed_by_worker_id = $3
-  AND ($4::timestamptz IS NULL OR started_at = $4)
-RETURNING id";
-
-/// Fused ok-path finalization for plain (non-workflow) tasks: one statement that
-/// locks the RUNNING row, upserts the COMPLETED attempt from the locked row's own
-/// columns, CASes the task to COMPLETED, and fires the capacity wake. Empty result
-/// = status/ownership changed (reaper reclaim) → nothing written. Parity with
-/// horsies PR #134. Attempt fields are computed in SQL (`COALESCE(retry_count,0)+1`,
-/// `COALESCE(started_at, clock_timestamp())`, `clock_timestamp()`) — identical to
-/// the values the multi-statement path binds.
-const FINALIZE_TASK_COMPLETED_SQL: &str = "\
-WITH ctx AS (
-    SELECT id, retry_count, started_at, claimed_by_worker_id,
-           worker_hostname, worker_pid, worker_process_name,
-           clock_timestamp() AS db_now
-    FROM horsies_tasks
-    WHERE id = $1
-      AND status = 'RUNNING'
-      AND claimed_by_worker_id = $2
-      AND ($6::timestamptz IS NULL OR started_at = $6)
-    FOR UPDATE
-),
-attempt AS (
-    INSERT INTO horsies_task_attempts (
-        task_id, attempt, outcome, will_retry,
-        started_at, finished_at,
-        error_code, error_message, failed_reason,
-        worker_id, worker_hostname, worker_pid, worker_process_name
-    )
-    SELECT ctx.id, COALESCE(ctx.retry_count, 0) + 1, 'COMPLETED', FALSE,
-           COALESCE(ctx.started_at, ctx.db_now), ctx.db_now,
-           NULL, NULL, NULL,
-           ctx.claimed_by_worker_id, ctx.worker_hostname, ctx.worker_pid,
-           ctx.worker_process_name
-    FROM ctx
-    ON CONFLICT (task_id, attempt) DO UPDATE SET
-        outcome = EXCLUDED.outcome,
-        will_retry = EXCLUDED.will_retry,
-        started_at = EXCLUDED.started_at,
-        finished_at = EXCLUDED.finished_at,
-        error_code = EXCLUDED.error_code,
-        error_message = EXCLUDED.error_message,
-        failed_reason = EXCLUDED.failed_reason,
-        worker_id = EXCLUDED.worker_id,
-        worker_hostname = EXCLUDED.worker_hostname,
-        worker_pid = EXCLUDED.worker_pid,
-        worker_process_name = EXCLUDED.worker_process_name
-),
-upd AS (
-    UPDATE horsies_tasks t
-    SET status = 'COMPLETED',
-        completed_at = NOW(),
-        result = $3,
-        error_code = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        terminal_at = NOW(),
-        updated_at = NOW()
-    FROM ctx
-    WHERE t.id = ctx.id
-    RETURNING t.id AS id
-)
-SELECT upd.id, pg_notify($4, $5)
-FROM upd";
-
-/// Task failure: sets result and error_code (user/task error path).
-///
-/// The optional `started_at` fence ($5) scopes the CAS to a claim generation;
-/// see `COMPLETE_SQL` (C10). `NULL` disables it.
-const FAIL_TASK_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'FAILED',
-    failed_at = NOW(),
-    result = $2,
-    error_code = $3,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    terminal_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'RUNNING'
-  AND claimed_by_worker_id = $4
-  AND ($5::timestamptz IS NULL OR started_at = $5)
-RETURNING id";
-
-/// Worker failure: sets failed_reason, clears error_code (worker crash path).
-const FAIL_WORKER_SQL: &str = "\
-UPDATE horsies_tasks
-SET status = 'FAILED',
-    failed_at = NOW(),
-    failed_reason = $2,
-    error_code = NULL,
-    finalizing_at = NULL,
-    finalizing_by_worker_id = NULL,
-    terminal_at = NOW(),
-    updated_at = NOW()
-WHERE id = $1
-  AND status = 'RUNNING'
-  AND claimed_by_worker_id = $3
-RETURNING id";
+// Success and terminal-failure finalization run through the terminalization
+// operations (broker/terminalization.rs → horsies_complete_task_fused /
+// horsies_fail_locked_task); the legacy COMPLETE/FINALIZE/FAIL statements
+// are gone.
 
 const CANCEL_SQL: &str = "\
 UPDATE horsies_tasks
@@ -1391,194 +1277,6 @@ impl PostgresBroker {
         .map_err(BrokerError::Database)?;
 
         Ok(updated.map(|_| result_json))
-    }
-
-    /// Mark a task as completed (transactional variant).
-    ///
-    /// `started_at` fences the CAS to a specific claim generation (`Some` from the
-    /// attempt's `set_running`); `None` disables the fence (C10).
-    pub async fn complete_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: &str,
-        result_json: Option<&str>,
-        worker_id: &str,
-        started_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
-            .bind(task_id)
-            .bind(result_json)
-            .bind(worker_id)
-            .bind(started_at)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id, "task completed");
-        } else {
-            tracing::warn!(
-                task_id,
-                "task completion skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
-    /// Fused ok-path finalization for a plain (non-workflow) task: lock the RUNNING
-    /// row, upsert its COMPLETED attempt, CAS to COMPLETED, and fire the capacity
-    /// wake — one statement, one autocommit transaction (parity with horsies PR
-    /// #134). Returns `true` when applied; `false` when the row is no longer
-    /// RUNNING/owned by this worker (reaper reclaim), in which case nothing was
-    /// written and the capacity notify did not fire.
-    pub async fn finalize_completed_fused(
-        &self,
-        task_id: &str,
-        result_json: Option<&str>,
-        worker_id: &str,
-        notify_channel: &str,
-        notify_payload: &str,
-        started_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(FINALIZE_TASK_COMPLETED_SQL)
-            .bind(task_id)
-            .bind(worker_id)
-            .bind(result_json)
-            .bind(notify_channel)
-            .bind(notify_payload)
-            .bind(started_at)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-        Ok(row.is_some())
-    }
-
-    /// Mark a task as completed with its serialized result.
-    ///
-    /// Returns `true` if the update was applied (task was RUNNING).
-    /// Returns `false` if the task was no longer RUNNING (e.g., already
-    /// marked FAILED by the stale-task reaper).
-    pub async fn complete(
-        &self,
-        task_id: &str,
-        result_json: Option<&str>,
-        worker_id: &str,
-    ) -> Result<bool, BrokerError> {
-        // No claim-generation fence on the direct (non-execution) path.
-        let row: Option<ClaimedId> = sqlx::query_as(COMPLETE_SQL)
-            .bind(task_id)
-            .bind(result_json)
-            .bind(worker_id)
-            .bind(None::<DateTime<Utc>>)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id, "task completed");
-        } else {
-            tracing::warn!(
-                task_id,
-                "task completion skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
-    /// Mark a task as FAILED (transactional variant).
-    ///
-    /// `started_at` fences the CAS to a specific claim generation (`Some` from the
-    /// attempt's `set_running`); `None` disables the fence (C10).
-    pub async fn fail_in_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        task_id: &str,
-        result_json: Option<&str>,
-        error_code: Option<&str>,
-        worker_id: &str,
-        started_at: Option<DateTime<Utc>>,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
-            .bind(task_id)
-            .bind(result_json)
-            .bind(error_code)
-            .bind(worker_id)
-            .bind(started_at)
-            .fetch_optional(tx.as_mut())
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id, "task failed");
-        } else {
-            tracing::warn!(
-                task_id,
-                "task failure skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
-    /// Mark a task as FAILED due to a task/user error.
-    ///
-    /// Sets `result` and `error_code`. Does NOT set `failed_reason`
-    /// (that is for worker crashes via [`fail_worker`]).
-    pub async fn fail(
-        &self,
-        task_id: &str,
-        result_json: Option<&str>,
-        error_code: Option<&str>,
-        worker_id: &str,
-    ) -> Result<bool, BrokerError> {
-        // No claim-generation fence on the direct (non-execution) path.
-        let row: Option<ClaimedId> = sqlx::query_as(FAIL_TASK_SQL)
-            .bind(task_id)
-            .bind(result_json)
-            .bind(error_code)
-            .bind(worker_id)
-            .bind(None::<DateTime<Utc>>)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id, "task failed");
-        } else {
-            tracing::warn!(
-                task_id,
-                "task failure skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
-    }
-
-    /// Mark a task as FAILED due to a worker crash.
-    ///
-    /// Sets `failed_reason` and clears `error_code`. Does NOT set `result`
-    /// (that is for task errors via [`fail`]).
-    pub async fn fail_worker(
-        &self,
-        task_id: &str,
-        failed_reason: &str,
-        worker_id: &str,
-    ) -> Result<bool, BrokerError> {
-        let row: Option<ClaimedId> = sqlx::query_as(FAIL_WORKER_SQL)
-            .bind(task_id)
-            .bind(failed_reason)
-            .bind(worker_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
-
-        if row.is_some() {
-            tracing::debug!(task_id, "task failed (worker crash)");
-        } else {
-            tracing::warn!(
-                task_id,
-                "worker failure skipped: task no longer RUNNING or not owned by this worker"
-            );
-        }
-        Ok(row.is_some())
     }
 
     /// Cancel a task. Returns `true` if the task was actually cancelled
@@ -3733,12 +3431,40 @@ mod horsies_claim_tests {
 
 #[cfg(test)]
 mod fused_finalize_tests {
-    //! Behavior pins for the fused ok-path finalize (parity with horsies PR #134):
-    //! one statement CASes the RUNNING row to COMPLETED, writes the COMPLETED
-    //! attempt from the locked row, and (on a real row) fires the capacity notify.
+    //! Behavior pins for the fused ok-path finalize (parity with horsies PR
+    //! #134, re-anchored on `horsies_complete_task_fused`): one statement
+    //! locks the RUNNING row, writes the COMPLETED attempt from the locked
+    //! row, transitions, and fires the capacity notify.
     use super::*;
+    use crate::broker::terminalization::terminalize;
+    use crate::core::lifecycle::{OwnedClaim, TerminalizationCommand, TerminalizationOutcome};
     use serial_test::serial;
     use uuid::Uuid;
+
+    async fn fused(
+        pool: &sqlx::PgPool,
+        task_id: &str,
+        worker: &str,
+        claimed_at: Option<DateTime<Utc>>,
+        result_json: &str,
+    ) -> Vec<TerminalizationOutcome> {
+        terminalize(
+            pool,
+            &TerminalizationCommand::CompleteTaskFused {
+                task_id: task_id.to_owned(),
+                fence: OwnedClaim { worker_id: worker.to_owned(), claimed_at },
+                result_json: result_json.to_owned(),
+                notify_channel: "task_queue_default".to_owned(),
+                notify_payload: format!("capacity:{task_id}"),
+            },
+        )
+        .await
+        .expect("terminalize")
+    }
+
+    fn applied(outcomes: &[TerminalizationOutcome]) -> bool {
+        matches!(outcomes, [TerminalizationOutcome::Applied { .. }])
+    }
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -3766,14 +3492,15 @@ mod fused_finalize_tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs,
                 status, sent_at, enqueued_at, started_at, max_retries, retry_count,
-                enqueue_sha, claimed_by_worker_id, worker_hostname, worker_pid,
-                worker_process_name, is_workflow_task, created_at, updated_at,
-                terminal_at
+                enqueue_sha, claimed_by_worker_id, claimed_at, worker_hostname,
+                worker_pid, worker_process_name, is_workflow_task, created_at,
+                updated_at, terminal_at
             ) VALUES (
                 $1, 'fused_task', 'default', 0, '[]', '{}',
                 $2, NOW(), NOW(), NOW(), 3, $4,
-                $1, $3, 'host1', 123,
-                'worker-123', FALSE, NOW(), NOW(),
+                $1, $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
+                123, 'worker-123', FALSE, NOW(),
+                NOW(),
                 CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
                      THEN NOW() END
             )",
@@ -3809,11 +3536,8 @@ mod fused_finalize_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 1).await;
 
-        let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":7}"), "w1", "task_queue_default", "capacity:x", None)
-            .await
-            .expect("fused finalize");
-        assert!(applied, "RUNNING owned task must finalize");
+        let outcomes = fused(&pool, &id, "w1", None, "{\"Ok\":7}").await;
+        assert!(applied(&outcomes), "RUNNING owned task must finalize");
 
         let (status, result): (String, Option<String>) =
             sqlx::query_as("SELECT status, result FROM horsies_tasks WHERE id = $1")
@@ -3847,11 +3571,8 @@ mod fused_finalize_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "COMPLETED", Some("w1"), 0).await;
 
-        let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w1", "task_queue_default", "capacity:x", None)
-            .await
-            .expect("fused finalize");
-        assert!(!applied, "non-RUNNING row must not be touched");
+        let outcomes = fused(&pool, &id, "w1", None, "{\"Ok\":1}").await;
+        assert!(!applied(&outcomes), "non-RUNNING row must not be touched");
 
         let attempts: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
@@ -3873,11 +3594,11 @@ mod fused_finalize_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
 
-        let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w2", "task_queue_default", "capacity:x", None)
-            .await
-            .expect("fused finalize");
-        assert!(!applied, "ownership mismatch must not finalize");
+        let outcomes = fused(&pool, &id, "w2", None, "{\"Ok\":1}").await;
+        assert!(
+            matches!(outcomes.as_slice(), [TerminalizationOutcome::LostClaim { .. }]),
+            "ownership mismatch must not finalize"
+        );
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(&id)
@@ -3890,39 +3611,33 @@ mod fused_finalize_tests {
     }
 
     /// C10: the fused finalize must be fenced to a claim generation. A stale
-    /// finalize carrying an earlier attempt's `started_at` must not complete a
-    /// task the same worker re-claimed (new `started_at`) after a reaper requeue.
+    /// finalize carrying an earlier attempt's `claimed_at` must not complete
+    /// a task the same worker re-claimed (new `claimed_at`) after a reaper
+    /// requeue.
     #[tokio::test]
     #[serial]
-    async fn fused_finalize_fenced_by_started_at() {
+    async fn fused_finalize_fenced_by_claimed_at() {
         let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), 0).await;
 
-        // The current claim generation is the row's actual started_at.
+        // The current claim generation is the row's actual claimed_at.
         let current: DateTime<Utc> =
-            sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
+            sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
                 .bind(&id)
                 .fetch_one(&pool)
                 .await
-                .expect("started_at");
+                .expect("claimed_at");
         let stale = current - chrono::Duration::minutes(1);
 
         // Stale generation: fenced out, row stays RUNNING.
-        let applied = broker
-            .finalize_completed_fused(
-                &id,
-                Some("{\"Ok\":1}"),
-                "w1",
-                "task_queue_default",
-                "capacity:x",
-                Some(stale),
-            )
-            .await
-            .expect("fused finalize");
-        assert!(!applied, "stale started_at must be fenced out");
+        let outcomes = fused(&pool, &id, "w1", Some(stale), "{\"Ok\":1}").await;
+        assert!(
+            matches!(outcomes.as_slice(), [TerminalizationOutcome::LostClaim { .. }]),
+            "stale claimed_at must be fenced out"
+        );
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(&id)
             .fetch_one(&pool)
@@ -3931,18 +3646,8 @@ mod fused_finalize_tests {
         assert_eq!(status, "RUNNING", "row must stay RUNNING under a stale fence");
 
         // Current generation: finalizes.
-        let applied = broker
-            .finalize_completed_fused(
-                &id,
-                Some("{\"Ok\":2}"),
-                "w1",
-                "task_queue_default",
-                "capacity:x",
-                Some(current),
-            )
-            .await
-            .expect("fused finalize");
-        assert!(applied, "matching started_at must finalize");
+        let outcomes = fused(&pool, &id, "w1", Some(current), "{\"Ok\":2}").await;
+        assert!(applied(&outcomes), "matching claimed_at must finalize");
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(&id)
             .fetch_one(&pool)
@@ -4606,11 +4311,25 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
 
-        let applied = broker
-            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w1", "task_queue_default", "capacity:x", None)
-            .await
-            .expect("finalize");
-        assert!(applied);
+        let outcomes = crate::broker::terminalization::terminalize(
+            &pool,
+            &crate::core::lifecycle::TerminalizationCommand::CompleteTaskFused {
+                task_id: id.clone(),
+                fence: crate::core::lifecycle::OwnedClaim {
+                    worker_id: "w1".to_owned(),
+                    claimed_at: None,
+                },
+                result_json: "{\"Ok\":1}".to_owned(),
+                notify_channel: "task_queue_default".to_owned(),
+                notify_payload: format!("capacity:{id}"),
+            },
+        )
+        .await
+        .expect("finalize");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ));
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;
         assert_eq!(status, "COMPLETED");
@@ -4627,11 +4346,22 @@ mod terminal_at_stamp_tests {
         let id = Uuid::new_v4().to_string();
         seed(&pool, &id, "RUNNING", Some("w1"), None).await;
 
-        let applied = broker
-            .fail(&id, Some("{\"Err\":{}}"), Some("TASK_ERROR"), "w1")
-            .await
-            .expect("fail");
-        assert!(applied);
+        let outcomes = crate::broker::terminalization::terminalize(
+            &pool,
+            &crate::core::lifecycle::TerminalizationCommand::FailLockedTask {
+                task_id: id.clone(),
+                fence: crate::core::lifecycle::PriorLockedRead { worker_id: "w1".to_owned() },
+                result_json: "{\"Err\":{}}".to_owned(),
+                error_code: Some("TASK_ERROR".to_owned()),
+                failed_reason: None,
+            },
+        )
+        .await
+        .expect("fail");
+        assert!(matches!(
+            outcomes.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ));
 
         let (status, terminal_at) = terminal_at_of(&pool, &id).await;
         assert_eq!(status, "FAILED");
