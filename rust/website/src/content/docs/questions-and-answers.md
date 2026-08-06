@@ -25,15 +25,26 @@ See [error handling](../tasks/error-handling) for the full taxonomy.
 
 ## Why PostgreSQL only?
 
-**Because PostgreSQL is a powerful database which can cover the needs of most applications.**
+Correctness and performance.
 
-The PostgreSQL broker is a deliberate architectural decision, not a compromise. It trades peak throughput — which most applications rarely need — for structured data control in the queue system, which is always better to have. Your tasks, results, state, and coordination live in a real database with schemas, indexes, transactions, and queryability.
+### Correctness:
 
-PostgreSQL handles task storage, LISTEN/NOTIFY for real-time dispatch, advisory locks for coordination, and heartbeat tracking. All in a single database with a single source of truth.
+Every guarantee horsies makes is a Postgres primitive:
 
-If you have throughput levels which your PostgreSQL instance can't handle, use a dedicated broker.
+- **Claiming**: one server-side function under `FOR UPDATE SKIP LOCKED`; a claim-generation fence rejects stale attempts, including a worker re-claiming its own requeued task. Double execution and phantom retries are impossible states, not tuned-away ones.
+- **Finalization**: row lock → immutable attempt-history append → state transition, one transaction.
+- **Recovery**: all state is rows and timestamps; the reaper reconstructs and repairs after a worker dies mid-flight — nothing in-flight exists only in a broker's memory.
+- **Workflows**: fan-in resolution, completion checks, subworkflow cascades, and orphan self-heal are multi-row transitions under a documented lock order.
+- **Dispatch**: LISTEN/NOTIFY push — no polling loop between enqueue and execution.
+- **Inspection**: task history is plain tables — SQL, `EXPLAIN`, your existing backups. See [operational indexes](../internals/operational-indexes) for query-shape guidance.
 
-Here `moderate` and `high` throughput is also relative to your postgres instance ( e.g. you will not get the same performance from a PlanetScale Postgres vs Heroku Postgres )
+A message broker can approximate the first three with visibility timeouts and acks; it cannot express them as invariants. That is the reason for the Postgres requirement, operating one less service is absolutely not a selling point. In fact, we strongly recommend running a dedicated Postgres instance for your worker.
+
+### Postgres is performant:
+
+It scales with your Postgres instance (a PlanetScale Postgres and a Heroku Postgres will not perform the same); even with a cross-machine deployment, app server and managed Postgres in the same region, holds per-statement p99 in the low single-digit milliseconds across the claim/dispatch/finalize hot path.
+
+Measured numbers: [performance](../internals/performance).
 
 ## Is it ergonomic for devs?
 

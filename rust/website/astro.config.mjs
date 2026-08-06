@@ -125,10 +125,18 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Operations',
+					items: [
+						{ label: 'Autovacuum Tuning', slug: 'operations/autovacuum-tuning' },
+					],
+				},
+				{
 					label: 'Internals',
 					items: [
 						{ label: 'Database Schema', slug: 'internals/database-schema' },
 						{ label: 'Serialization', slug: 'internals/serialization' },
+						{ label: 'Performance', slug: 'internals/performance' },
+						{ label: 'Operational Indexes', slug: 'internals/operational-indexes' },
 					],
 				},
 				],
