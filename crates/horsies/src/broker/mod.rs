@@ -9,6 +9,11 @@ pub mod postgres;
 pub mod result_types;
 pub mod row;
 pub mod shared_listener;
+// Dark until the per-operation cutovers: the adapter and the installed
+// functions ship before any call site moves. The allow comes off with the
+// first cutover commit.
+#[allow(dead_code)]
+pub mod terminalization;
 
 pub use bound_handle::TaskHandle;
 pub use error::{is_retryable_sqlx_error, BrokerError};

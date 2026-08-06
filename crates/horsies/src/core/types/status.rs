@@ -63,6 +63,23 @@ impl std::fmt::Display for TaskStatus {
     }
 }
 
+impl std::str::FromStr for TaskStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PENDING" => Ok(Self::Pending),
+            "CLAIMED" => Ok(Self::Claimed),
+            "RUNNING" => Ok(Self::Running),
+            "COMPLETED" => Ok(Self::Completed),
+            "FAILED" => Ok(Self::Failed),
+            "CANCELLED" => Ok(Self::Cancelled),
+            "EXPIRED" => Ok(Self::Expired),
+            other => Err(format!("not a task status: {other:?}")),
+        }
+    }
+}
+
 /// Outcome of a single task execution attempt.
 ///
 /// Recorded in `horsies_task_attempts.outcome`.

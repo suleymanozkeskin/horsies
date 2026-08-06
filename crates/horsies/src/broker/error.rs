@@ -39,6 +39,12 @@ pub enum BrokerError {
     /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
     #[error("shared listener closed")]
     ListenerClosed,
+
+    /// A terminalization operation violated its wire contract: an undecodable
+    /// outcome row, a wrong row count, or a broken ordinal set. Infrastructure
+    /// failure, never a task outcome.
+    #[error("terminalization contract violation: {0}")]
+    TerminalizationContract(String),
 }
 
 impl BrokerError {
@@ -56,7 +62,8 @@ impl BrokerError {
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
             | Self::PayloadMismatch { .. }
-            | Self::EnqueueConflictUnverifiable { .. } => false,
+            | Self::EnqueueConflictUnverifiable { .. }
+            | Self::TerminalizationContract(_) => false,
         }
     }
 }
