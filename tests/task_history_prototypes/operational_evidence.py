@@ -96,12 +96,159 @@ class PartitionLifecycleMeasurement:
     forever_read_passed: bool
 
 
+
+# Dropping a 512-leaf schema in one statement asks PostgreSQL to hold a lock on
+# every relation and index it will remove, which exhausts the lock table at
+# production-shaped settings. Raising `max_locks_per_transaction` to make the
+# single statement fit would change the measured environment, so the disposal
+# is bounded instead: leaves go first, in batches, each batch its own
+# transaction, and only the remainder reaches `DROP SCHEMA`.
+_DISPOSAL_BATCH = 32
+_DISPOSAL_MAX_PASSES = 64
+
+
+@dataclass(frozen=True, slots=True)
+class CleanupOutcome:
+    """What disposing of the disposable schema achieved, and what it did not.
+
+    Cleanup is harness hygiene, not a measured property, so a failure here is
+    recorded rather than raised: evidence that was already collected must
+    survive a schema that would not drop.
+    """
+
+    schema: str
+    leaves_dropped: int
+    batches: int
+    passes: int
+    schema_dropped: bool
+    warning: str | None
+
+    @property
+    def clean(self) -> bool:
+        return self.schema_dropped and self.warning is None
+
+
+async def _leaf_partitions(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+) -> tuple[str, ...]:
+    """Partitions in this schema that are not themselves partitioned.
+
+    Leaf-most first: dropping a sub-partitioned parent would cascade to
+    children and take the same wide lock set the batching exists to avoid.
+    """
+    rows = (
+        await connection.execute(
+            text(
+                """
+                SELECT child.relname AS name
+                FROM pg_inherits AS inheritance
+                JOIN pg_class AS child ON child.oid = inheritance.inhrelid
+                JOIN pg_namespace AS namespace
+                    ON namespace.oid = child.relnamespace
+                WHERE namespace.nspname = :schema
+                  AND child.relkind = 'r'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pg_inherits AS grandchild
+                      WHERE grandchild.inhparent = child.oid
+                  )
+                ORDER BY child.relname
+                """
+            ),
+            {'schema': schema.name},
+        )
+    ).all()
+    return tuple(str(row.name) for row in rows)
+
+
+async def dispose_evidence_schema(
+    engine: AsyncEngine,
+    schema: PrototypeSchema,
+    *,
+    batch_size: int = _DISPOSAL_BATCH,
+) -> CleanupOutcome:
+    """Remove the disposable schema without ever discarding evidence.
+
+    Every failure mode returns an outcome carrying the reason. The caller has
+    already measured what it came to measure by the time this runs, and a
+    cleanup that raised would destroy that work — which is exactly what
+    happened when a single `DROP SCHEMA ... CASCADE` over 512 leaves exhausted
+    the lock table on both supported majors.
+    """
+    leaves_dropped = 0
+    batches = 0
+    passes = 0
+    try:
+        for _ in range(_DISPOSAL_MAX_PASSES):
+            async with engine.connect() as connection:
+                leaves = await _leaf_partitions(connection, schema)
+            if not leaves:
+                break
+            passes += 1
+            for start in range(0, len(leaves), batch_size):
+                batch = leaves[start : start + batch_size]
+                async with engine.connect() as connection:
+                    for name in batch:
+                        await connection.execute(
+                            text(
+                                f'DROP TABLE IF EXISTS '
+                                f'{schema.sql}."{name}" CASCADE'
+                            )
+                        )
+                    await connection.commit()
+                leaves_dropped += len(batch)
+                batches += 1
+        else:
+            return CleanupOutcome(
+                schema=schema.name,
+                leaves_dropped=leaves_dropped,
+                batches=batches,
+                passes=passes,
+                schema_dropped=False,
+                warning=(
+                    f'{_DISPOSAL_MAX_PASSES} disposal passes did not exhaust '
+                    f'the partitions in {schema.name}'
+                ),
+            )
+        async with engine.connect() as connection:
+            await remove_archive_candidates(connection, schema)
+            await connection.commit()
+    except Exception as error:
+        # Deliberately broad. The contract of this function is that evidence
+        # already collected survives, so no failure of the disposal may leave
+        # here as an exception — a narrower clause would let an unanticipated
+        # error reinstate exactly the defect this replaced. The class name is
+        # recorded so the artifact says what went wrong rather than only that
+        # something did.
+        return CleanupOutcome(
+            schema=schema.name,
+            leaves_dropped=leaves_dropped,
+            batches=batches,
+            passes=passes,
+            schema_dropped=False,
+            warning=(
+                f'disposal of {schema.name} failed after {leaves_dropped} '
+                f'leaves in {batches} batches: {error.__class__.__name__}: '
+                f'{error}'
+            ),
+        )
+    return CleanupOutcome(
+        schema=schema.name,
+        leaves_dropped=leaves_dropped,
+        batches=batches,
+        passes=passes,
+        schema_dropped=True,
+        warning=None,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class OperationalMaintenanceEvidence:
     conditions: EvidenceConditions
     workload: dict[str, int]
     registry: RegistryMaintenanceMeasurement
     partitions: PartitionLifecycleMeasurement
+    cleanup: CleanupOutcome
     verdict: bool
 
 
@@ -215,25 +362,37 @@ async def collect_operational_maintenance_evidence(
             and partitions.forever_freeze_passed
             and partitions.forever_read_passed
         )
-        return OperationalMaintenanceEvidence(
-            conditions=conditions,
-            workload={
-                'registry_rows': registry_rows,
-                'registry_batch_size': registry_batch_size,
-                'history_rows': history_rows,
-                'forever_rows': forever_rows,
-                'attached_leaves': attached_leaves,
-                'observation_seconds': observation_seconds,
-            },
-            registry=registry,
-            partitions=partitions,
-            verdict=verdict,
-        )
     finally:
-        async with engine.connect() as connection:
-            await connection.rollback()
-            await remove_archive_candidates(connection, schema)
-            await connection.commit()
+        # Disposal runs after measurement and cannot discard it. The previous
+        # shape returned the evidence from inside the `try` and cleaned up in
+        # `finally`, so a cleanup that raised replaced a completed return value
+        # with an exception: the measurements ran, a verdict was computed, and
+        # the evidence was destroyed on the way out.
+        cleanup = await dispose_evidence_schema(engine, schema)
+
+    reporter.emit(
+        QualificationProgress(
+            scenario='operational-maintenance',
+            phase='cleanup',
+            status='clean' if cleanup.clean else 'warned',
+            observations=cleanup.leaves_dropped,
+        )
+    )
+    return OperationalMaintenanceEvidence(
+        conditions=conditions,
+        workload={
+            'registry_rows': registry_rows,
+            'registry_batch_size': registry_batch_size,
+            'history_rows': history_rows,
+            'forever_rows': forever_rows,
+            'attached_leaves': attached_leaves,
+            'observation_seconds': observation_seconds,
+        },
+        registry=registry,
+        partitions=partitions,
+        cleanup=cleanup,
+        verdict=verdict,
+    )
 
 
 async def _measure_registry(
