@@ -66,6 +66,7 @@ SET status = 'CANCELLED',
     claimed_at = NULL,
     claimed_by_worker_id = NULL,
     claim_expires_at = NULL,
+    terminal_at = NOW(),
     updated_at = NOW()
 FROM horsies_workflow_tasks wt
 WHERE wt.workflow_id = $1
@@ -184,6 +185,7 @@ WITH cancelled AS (
         finalizing_by_worker_id = NULL,
         error_code = 'TASK_CANCELLED',
         failed_reason = 'Workflow paused before task start',
+        terminal_at = NOW(),
         updated_at = NOW()
     FROM horsies_workflow_tasks wt
     WHERE wt.task_id = t.id

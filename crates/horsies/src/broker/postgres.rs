@@ -178,6 +178,7 @@ SET status = 'COMPLETED',
     error_code = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    terminal_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
@@ -238,6 +239,7 @@ upd AS (
         error_code = NULL,
         finalizing_at = NULL,
         finalizing_by_worker_id = NULL,
+        terminal_at = NOW(),
         updated_at = NOW()
     FROM ctx
     WHERE t.id = ctx.id
@@ -258,6 +260,7 @@ SET status = 'FAILED',
     error_code = $3,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    terminal_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
@@ -274,6 +277,7 @@ SET status = 'FAILED',
     error_code = NULL,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    terminal_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
   AND status = 'RUNNING'
@@ -283,6 +287,7 @@ RETURNING id";
 const CANCEL_SQL: &str = "\
 UPDATE horsies_tasks
 SET status = 'CANCELLED',
+    terminal_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
   AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
@@ -410,6 +415,7 @@ SET status = 'CANCELLED', \
     claimed_at = NULL, \
     claimed_by_worker_id = NULL, \
     claim_expires_at = NULL, \
+    terminal_at = NOW(), \
     updated_at = NOW() \
 WHERE id = ANY($1) AND status IN ('CLAIMED', 'PENDING')";
 
@@ -438,6 +444,7 @@ SET status = 'CANCELLED', \
     finalizing_by_worker_id = NULL, \
     error_code = 'TASK_CANCELLED', \
     failed_reason = 'Workflow paused before task start', \
+    terminal_at = NOW(), \
     updated_at = NOW() \
 WHERE id = ANY($1) \
   AND status = 'CLAIMED' \
@@ -454,6 +461,7 @@ SET status = 'CANCELLED', \
     claimed_at = NULL, \
     claimed_by_worker_id = NULL, \
     claim_expires_at = NULL, \
+    terminal_at = NOW(), \
     updated_at = NOW() \
 WHERE id = ANY($1) \
   AND status = 'CLAIMED' \
@@ -476,6 +484,7 @@ SET status = 'CANCELLED', \
     finalizing_by_worker_id = NULL, \
     error_code = 'TASK_CANCELLED', \
     failed_reason = 'Workflow paused before task start', \
+    terminal_at = NOW(), \
     updated_at = NOW() \
 WHERE id = ANY($1) AND status = 'CLAIMED'";
 
@@ -1362,6 +1371,7 @@ impl PostgresBroker {
                  failed_at = NOW(), \
                  result = $1, \
                  error_code = $2, \
+                 terminal_at = NOW(), \
                  updated_at = NOW() \
              WHERE id = $3 \
                AND status = 'CLAIMED' \
@@ -2156,6 +2166,7 @@ impl PostgresBroker {
                  failed_at = NOW(), \
                  result = $1, \
                  error_code = $2, \
+                 terminal_at = NOW(), \
                  updated_at = NOW() \
              WHERE status = 'PENDING' \
                AND good_until IS NOT NULL \
@@ -4492,5 +4503,197 @@ mod filter_non_runnable_tests {
             .execute(&pool)
             .await
             .ok();
+    }
+}
+
+#[cfg(test)]
+mod terminal_at_stamp_tests {
+    //! Every terminal transition stamps `terminal_at` in the same statement
+    //! (parity with horsies PR #219 / schema v17); live transitions leave it
+    //! NULL. One pin per status family through the legacy writers; the
+    //! writer-inventory scan (tests/writer_inventory.rs) covers the rest
+    //! structurally.
+    use super::*;
+    use serial_test::serial;
+    use uuid::Uuid;
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|p| p.join(".env").exists());
+        let pw = root
+            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
+            .and_then(|c| {
+                c.lines()
+                    .filter_map(|l| l.trim().split_once('='))
+                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
+                    .map(|(_, v)| v.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    }
+
+    async fn connect() -> PostgresBroker {
+        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
+        broker
+    }
+
+    /// Seed a task in `status`, optionally claimed by `worker`, with
+    /// `good_until` offset seconds from now (negative = already passed).
+    async fn seed(
+        pool: &sqlx::PgPool,
+        id: &str,
+        status: &str,
+        worker: Option<&str>,
+        good_until_offset_s: Option<i64>,
+    ) {
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs,
+                status, sent_at, enqueued_at, started_at, max_retries, retry_count,
+                enqueue_sha, claimed_by_worker_id, claimed, good_until,
+                is_workflow_task, created_at, updated_at
+            ) VALUES (
+                $1, 'terminal_at_task', 'default', 0, '[]', '{}',
+                $2, NOW(), NOW(), NOW(), 3, 0,
+                $1, $3, $3 IS NOT NULL, NOW() + $4 * INTERVAL '1 second',
+                FALSE, NOW(), NOW()
+            )",
+        )
+        .bind(id)
+        .bind(status)
+        .bind(worker)
+        .bind(good_until_offset_s)
+        .execute(pool)
+        .await
+        .expect("seed task");
+    }
+
+    async fn terminal_at_of(pool: &sqlx::PgPool, id: &str) -> (String, Option<DateTime<Utc>>) {
+        sqlx::query_as("SELECT status, terminal_at FROM horsies_tasks WHERE id = $1")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .expect("read task")
+    }
+
+    async fn cleanup(pool: &sqlx::PgPool, id: &str) {
+        sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(id)
+            .execute(pool)
+            .await
+            .expect("cleanup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn completed_row_gets_terminal_at() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+
+        let applied = broker
+            .finalize_completed_fused(&id, Some("{\"Ok\":1}"), "w1", "task_queue_default", "capacity:x", None)
+            .await
+            .expect("finalize");
+        assert!(applied);
+
+        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
+        assert_eq!(status, "COMPLETED");
+        assert!(terminal_at.is_some(), "COMPLETED row must carry terminal_at");
+
+        cleanup(&pool, &id).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_row_gets_terminal_at() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+
+        let applied = broker
+            .fail(&id, Some("{\"Err\":{}}"), Some("TASK_ERROR"), "w1")
+            .await
+            .expect("fail");
+        assert!(applied);
+
+        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
+        assert_eq!(status, "FAILED");
+        assert!(terminal_at.is_some(), "FAILED row must carry terminal_at");
+
+        cleanup(&pool, &id).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cancelled_row_gets_terminal_at() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "PENDING", None, None).await;
+
+        let applied = broker.cancel(&id).await.expect("cancel");
+        assert!(applied);
+
+        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
+        assert_eq!(status, "CANCELLED");
+        assert!(terminal_at.is_some(), "CANCELLED row must carry terminal_at");
+
+        cleanup(&pool, &id).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn expired_row_gets_terminal_at() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "CLAIMED", Some("w1"), Some(-60)).await;
+
+        let expired = broker
+            .expire_claimed_task_before_start(&id, "w1", None)
+            .await
+            .expect("expire");
+        assert!(expired.is_some());
+
+        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
+        assert_eq!(status, "EXPIRED");
+        assert!(terminal_at.is_some(), "EXPIRED row must carry terminal_at");
+
+        cleanup(&pool, &id).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn requeue_leaves_terminal_at_null() {
+        let broker = connect().await;
+        let pool = broker.pool().clone();
+        let id = Uuid::new_v4().to_string();
+        seed(&pool, &id, "RUNNING", Some("w1"), None).await;
+
+        let applied = broker
+            .requeue(&id, Some(Utc::now()), "w1")
+            .await
+            .expect("requeue");
+        assert!(applied);
+
+        let (status, terminal_at) = terminal_at_of(&pool, &id).await;
+        assert_eq!(status, "PENDING");
+        assert!(terminal_at.is_none(), "live transition must not stamp terminal_at");
+
+        cleanup(&pool, &id).await;
     }
 }

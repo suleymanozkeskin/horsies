@@ -93,6 +93,7 @@ SET status = 'FAILED',
     error_code = $4,
     finalizing_at = NULL,
     finalizing_by_worker_id = NULL,
+    terminal_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
 AND status = 'RUNNING'";
@@ -782,6 +783,7 @@ SET status = 'EXPIRED',
     failed_at = NOW(),
     result = $1,
     error_code = 'TASK_EXPIRED',
+    terminal_at = NOW(),
     updated_at = NOW()
 FROM (
     SELECT id FROM horsies_tasks

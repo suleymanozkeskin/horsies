@@ -1,0 +1,23 @@
+-- Canonical terminal instant on horsies_tasks (parity with horsies PR #219 /
+-- schema v17).
+
+-- Additive: the column and the fifteen writer SET clauses only (the writers
+-- stamp terminal_at = NOW() in the same statement as the terminal status).
+-- Backfill and the CHECK constraint tying terminal_at to terminal status
+-- both ship in the next migration, together.
+--
+-- The constraint cannot ship here: migrations apply at worker startup, so a
+-- release running old workers alongside a new worker's migration would leave
+-- the old workers writing terminal statuses with terminal_at NULL against a
+-- constraint their SQL cannot satisfy, failing their finalize statements.
+-- NOT VALID does not help — it skips existing rows but still enforces new
+-- writes. This release ships as a stop-the-world upgrade (stop all workers,
+-- migrate, restart on the new version); the file split is kept so 0030/0031
+-- mirror Python's v17/v18 ledger.
+--
+-- The backfill is deferred with the constraint rather than run here, because
+-- rows terminalized by not-yet-restarted workers during the upgrade window
+-- would be written after a backfill here had already passed over them.
+-- Backfilling in the migration that installs the constraint covers the
+-- window in one pass.
+ALTER TABLE horsies_tasks ADD COLUMN IF NOT EXISTS terminal_at TIMESTAMPTZ;
