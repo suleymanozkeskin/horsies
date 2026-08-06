@@ -1723,7 +1723,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', result = '{}' WHERE id = $1")
+        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', result = '{}', terminal_at = NOW() WHERE id = $1")
             .bind(&task_id)
             .execute(&pool)
             .await

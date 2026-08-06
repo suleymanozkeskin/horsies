@@ -1034,10 +1034,10 @@ mod cap_tests {
         // Terminal task row whose Phase 2 has "not yet run": completed_at = NOW().
         sqlx::query(
             "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, enqueued_at, completed_at, result, max_retries, retry_count, enqueue_sha,
-                is_workflow_task, created_at, updated_at)
+                sent_at, enqueued_at, completed_at, terminal_at, result, max_retries, retry_count,
+                enqueue_sha, is_workflow_task, created_at, updated_at)
              VALUES ($1, 'grace_task', 'default', 0, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), '{\"Ok\":1}', 0, 0, $1, TRUE, NOW(), NOW())",
+                NOW(), NOW(), NOW(), NOW(), '{\"Ok\":1}', 0, 0, $1, TRUE, NOW(), NOW())",
         )
         .bind(&task_id)
         .execute(&pool)

@@ -853,7 +853,7 @@ async fn test_task_cancelled() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
     // Cancel directly in DB before worker picks it up.
-    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
+    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED', terminal_at = NOW() WHERE id = $1")
         .bind(&task_id)
         .execute(&pool)
         .await
@@ -1672,7 +1672,7 @@ async fn test_task_cancelled_get_result() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
     // Cancel directly in DB.
-    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED' WHERE id = $1")
+    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED', terminal_at = NOW() WHERE id = $1")
         .bind(&task_id)
         .execute(&pool)
         .await

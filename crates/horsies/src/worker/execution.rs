@@ -1872,10 +1872,14 @@ mod replay_reload_tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status, result,
-                sent_at, created_at, updated_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             ) VALUES (
                 $1, 'replay_reload_task', 'default', 100, '[]', '{}', $2, $3,
-                NOW(), NOW(), NOW(), 0, 0, $1
+                NOW(), NOW(), NOW(),
+                CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                     THEN NOW() END,
+                0, 0, $1
             )",
         )
         .bind(task_id)

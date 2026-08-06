@@ -81,7 +81,8 @@ pub async fn complete_task(
         TaskResult::Ok(_) => {
             sqlx::query(
                 "UPDATE horsies_tasks SET status = 'COMPLETED', completed_at = NOW(), \
-                 result = $2, error_code = NULL, updated_at = NOW() WHERE id = $1",
+                 result = $2, error_code = NULL, terminal_at = NOW(), updated_at = NOW() \
+                 WHERE id = $1",
             )
             .bind(&task_id)
             .bind(&result_str)
@@ -93,7 +94,8 @@ pub async fn complete_task(
             let error_code = err.error_code.as_ref().map(|c| c.to_string());
             sqlx::query(
                 "UPDATE horsies_tasks SET status = 'FAILED', failed_at = NOW(), \
-                 result = $2, error_code = $3, updated_at = NOW() WHERE id = $1",
+                 result = $2, error_code = $3, terminal_at = NOW(), updated_at = NOW() \
+                 WHERE id = $1",
             )
             .bind(&task_id)
             .bind(&result_str)
@@ -181,8 +183,10 @@ pub async fn insert_task(
 ) {
     sqlx::query(
         "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, status, \
-         enqueued_at, enqueue_sha, created_at, updated_at) \
-         VALUES ($1, $2, $3, 100, $4, NOW(), 'test-sha', NOW(), NOW())",
+         enqueued_at, enqueue_sha, created_at, updated_at, terminal_at) \
+         VALUES ($1, $2, $3, 100, $4, NOW(), 'test-sha', NOW(), NOW(), \
+                 CASE WHEN $4 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') \
+                      THEN NOW() END)",
     )
     .bind(task_id)
     .bind(task_name)

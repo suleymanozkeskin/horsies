@@ -1422,7 +1422,7 @@ mod tests {
 
         // Backing task becomes terminal → workflow and linkage sweep together
         // in one statement.
-        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '2 hours' WHERE id = $1")
+        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '2 hours', terminal_at = NOW() - INTERVAL '2 hours' WHERE id = $1")
             .bind(&task_id)
             .execute(&pool)
             .await
@@ -1671,12 +1671,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, completed_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             )
             SELECT
                 'ret-idx-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g
             FROM generate_series(1, 500) g",
         )
         .execute(&pool)
@@ -1685,11 +1687,12 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, completed_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             )
             SELECT
                 'ret-idx-recent-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-idx-recent-' || g
+                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-idx-recent-' || g
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)
@@ -1774,11 +1777,11 @@ mod tests {
             sqlx::query(&format!(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs, status,
-                    sent_at, created_at, updated_at, completed_at,
+                    sent_at, created_at, updated_at, completed_at, terminal_at,
                     retry_count, max_retries, enqueue_sha
                 ) VALUES (
                     $1, 'ret_attempts_task', 'default', 100, '[]', '{{}}', 'COMPLETED',
-                    {expr}, {expr}, {expr}, {expr}, 0, 0, $1
+                    {expr}, {expr}, {expr}, {expr}, {expr}, 0, 0, $1
                 )",
                 expr = completed_at_expr,
             ))
@@ -1867,10 +1870,10 @@ mod tests {
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs, status,
                     is_workflow_task, sent_at, created_at, updated_at,
-                    completed_at, retry_count, max_retries, enqueue_sha
+                    completed_at, terminal_at, retry_count, max_retries, enqueue_sha
                 ) VALUES (
                     $1, 'ret_override_task', $2, 100, '[]', '{{}}', 'COMPLETED',
-                    $3, {ts}, {ts}, {ts}, {ts}, 0, 0, $1
+                    $3, {ts}, {ts}, {ts}, {ts}, {ts}, 0, 0, $1
                 )",
             ))
             .bind(&id)
@@ -1988,12 +1991,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, completed_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             )
             SELECT
                 'ret-qidx-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g
             FROM generate_series(1, 500) g",
         )
         .execute(&pool)
@@ -2002,12 +2007,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, completed_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             )
             SELECT
                 'ret-qidx-other-' || g, 'ret_qidx_task', 'ret-q-other', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)
@@ -2016,11 +2023,12 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+                sent_at, created_at, updated_at, completed_at, terminal_at,
+                retry_count, max_retries, enqueue_sha
             )
             SELECT
                 'ret-qidx-recent-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g
+                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)

@@ -3767,12 +3767,15 @@ mod fused_finalize_tests {
                 id, task_name, queue_name, priority, args, kwargs,
                 status, sent_at, enqueued_at, started_at, max_retries, retry_count,
                 enqueue_sha, claimed_by_worker_id, worker_hostname, worker_pid,
-                worker_process_name, is_workflow_task, created_at, updated_at
+                worker_process_name, is_workflow_task, created_at, updated_at,
+                terminal_at
             ) VALUES (
                 $1, 'fused_task', 'default', 0, '[]', '{}',
                 $2, NOW(), NOW(), NOW(), 3, $4,
                 $1, $3, 'host1', 123,
-                'worker-123', FALSE, NOW(), NOW()
+                'worker-123', FALSE, NOW(), NOW(),
+                CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+                     THEN NOW() END
             )",
         )
         .bind(id)
