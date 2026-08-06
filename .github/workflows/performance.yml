@@ -976,9 +976,12 @@ jobs:
               ).declared_peak_bytes
           )
           ")
-          free=$(df --output=avail -B1 /var/lib/docker | tail -1)
+          # The root filesystem, not the docker data root: the overlay2 storage
+          # lives on it, and /var/lib/docker is root-owned so statting it as
+          # the runner user can fail on permissions rather than on space.
+          free=$(df --output=avail -B1 / | tail -1)
           echo "declared peak bytes: ${declared_peak}"
-          echo "free bytes on the server's storage: ${free}"
+          echo "free bytes on the runner root filesystem: ${free}"
           if (( free < declared_peak )); then
             echo "::error::runner has ${free} bytes free; one cell declares a" \
                  "peak of ${declared_peak} bytes"
@@ -1010,7 +1013,7 @@ jobs:
             --bootstrap-resamples 1000 \
             --rerun-input-bytes 65536 \
             --result-bytes 200 \
-            --data-path /var/lib/docker \
+            --data-path / \
             --partial-evidence-path "$partial" \
             --progress-fd 3 \
             --demo-quiesced > "$candidate_output" 2> "$error_log"
