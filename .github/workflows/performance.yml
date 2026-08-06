@@ -43,3 +43,101 @@ jobs:
       - name: Stop measurement servers
         if: always()
         run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  replacement-archive-transcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 16442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 16446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+        run: >-
+          docker compose -f tests/fixtures/history/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      # Run every domain even after one misses a budget so the preserved
+      # evidence gives the operator a complete failure shape. The final exit
+      # status is nonzero if execution, verification, retirement, or any
+      # declared budget fails.
+      - name: Replacement archive transcode qualification
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-replacement-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          failures=0
+          for component in HISTORY_ROW RESULT ATTEMPTS RERUN_INPUT; do
+            attempts=4
+            if [[ "$component" == "ATTEMPTS" ]]; then
+              attempts=21
+            fi
+            output="$output_dir/${component,,}.json"
+            if ! uv run python -m tests.task_history_prototypes \
+              --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+              --commit '${{ github.sha }}' \
+              --run-kind gate \
+              --server-image '${{ matrix.image }}' \
+              --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+              --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+              --scenario replacement-archive-transcode \
+              --archive-component "$component" \
+              --rows 1000000 \
+              --batch-size 100000 \
+              --result-bytes 200 \
+              --attempts-per-task "$attempts" \
+              --demo-quiesced > "$output"
+            then
+              failures=1
+              continue
+            fi
+            if ! jq -e '
+              .verification.verified
+              and .decoder_retirement_ready
+              and .throughput_passed
+              and .duration_passed
+              and .wal_passed
+              and .peak_disk_passed
+            ' "$output"
+            then
+              failures=1
+            fi
+          done
+          exit "$failures"
+
+      - name: Preserve replacement qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: replacement-archive-transcode-pg${{ matrix.postgres }}
+          path: /tmp/task-history-replacement-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+        if: always()
+        run: docker compose -f tests/fixtures/history/compose.yaml down -v
