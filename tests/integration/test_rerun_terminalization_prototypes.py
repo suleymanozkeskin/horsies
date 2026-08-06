@@ -49,6 +49,7 @@ from tests.task_history_prototypes.rerun_terminalization_evidence import (
     install_rerun_terminalization_prototype,
     install_statement_counters,
     measure_cell,
+    read_statement_counter_prerequisite,
     stored_history_form,
 )
 from tests.task_history_prototypes.schema import (
@@ -212,6 +213,21 @@ async def _terminalize(
         },
     )
     await connection.commit()
+
+
+
+async def _require_counters(connection: AsyncConnection) -> None:
+    """Skip with the named prerequisite rather than failing four times over.
+
+    A bench without pg_stat_statements preloaded cannot count statements at
+    all. Letting the driver tests fail there reports four unexplained errors
+    about a measurement; naming the missing prerequisite reports the one fact
+    that is actually true about the environment.
+    """
+    prerequisite = await read_statement_counter_prerequisite(connection)
+    if not prerequisite.usable:
+        pytest.skip(f'{prerequisite.availability.value}: {prerequisite.reason}')
+    await install_statement_counters(connection)
 
 
 class TestPairedRelationsAreComparable:
@@ -456,7 +472,7 @@ class TestMeasurementDriver:
         installed: tuple[AsyncConnection, InstalledComparison],
     ) -> None:
         connection, comparison = installed
-        await install_statement_counters(connection)
+        await _require_counters(connection)
 
         cell = await measure_cell(
             connection,
@@ -482,7 +498,7 @@ class TestMeasurementDriver:
         installed: tuple[AsyncConnection, InstalledComparison],
     ) -> None:
         connection, comparison = installed
-        await install_statement_counters(connection)
+        await _require_counters(connection)
 
         cell = await measure_cell(
             connection,
@@ -508,7 +524,7 @@ class TestMeasurementDriver:
         # history and deletes a live row, so a measurement reporting no extra
         # WAL at all would mean the probe never attributed the candidate's work.
         connection, comparison = installed
-        await install_statement_counters(connection)
+        await _require_counters(connection)
 
         cell = await measure_cell(
             connection,
@@ -542,7 +558,7 @@ class TestWalDetectionControl:
         installed: tuple[AsyncConnection, InstalledComparison],
     ) -> None:
         connection, comparison = installed
-        await install_statement_counters(connection)
+        await _require_counters(connection)
 
         cell = await measure_cell(
             connection,

@@ -1115,12 +1115,134 @@ class AsyncCounterProbe:
         )
 
 
-async def install_statement_counters(connection: AsyncConnection) -> None:
-    """Make the statement view available before anything is counted."""
-    await connection.execute(
-        text('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+class CounterAvailability(StrEnum):
+    """Whether this server can count statements, and if not, why not."""
+
+    AVAILABLE = 'available'
+    NOT_PRELOADED = 'environment_lacks_pg_stat_statements_preload'
+    EXTENSION_ABSENT = 'environment_lacks_pg_stat_statements_extension'
+
+
+class StatementCountersUnavailableError(RerunTerminalizationError):
+    """This server cannot count statements, with the reason named."""
+
+
+@dataclass(frozen=True, slots=True)
+class StatementCounterPrerequisite:
+    """What the server reports about its statement-counting prerequisites."""
+
+    availability: CounterAvailability
+    shared_preload_libraries: str
+    extension_present: bool
+    track: str
+    reason: str
+
+    @property
+    def usable(self) -> bool:
+        return self.availability is CounterAvailability.AVAILABLE
+
+
+def classify_statement_counters(
+    *,
+    shared_preload_libraries: str,
+    extension_present: bool,
+) -> CounterAvailability:
+    """Decide whether statement counting can work here.
+
+    Preload is checked first and independently of the extension, because
+    `CREATE EXTENSION` succeeds on a server that never loaded the library and
+    the failure then surfaces later as an error from the view itself. A bench
+    without the preload has to read as a missing prerequisite, not as a set of
+    unexplained failures in whatever happened to query it first.
+    """
+    loaded = {
+        library.strip()
+        for library in shared_preload_libraries.split(',')
+        if library.strip()
+    }
+    if 'pg_stat_statements' not in loaded:
+        return CounterAvailability.NOT_PRELOADED
+    if not extension_present:
+        return CounterAvailability.EXTENSION_ABSENT
+    return CounterAvailability.AVAILABLE
+
+
+async def read_statement_counter_prerequisite(
+    connection: AsyncConnection,
+) -> StatementCounterPrerequisite:
+    """Report whether this server can count statements, and why not if it cannot."""
+    row = (
+        await connection.execute(
+            text(
+                """
+                SELECT
+                    current_setting('shared_preload_libraries')
+                        AS shared_preload_libraries,
+                    COALESCE(
+                        current_setting('pg_stat_statements.track', true),
+                        'unavailable'
+                    ) AS track,
+                    EXISTS (
+                        SELECT 1 FROM pg_extension
+                        WHERE extname = 'pg_stat_statements'
+                    ) AS extension_present
+                """
+            )
+        )
+    ).one()
+    preload = str(row.shared_preload_libraries)
+    extension_present = bool(row.extension_present)
+    availability = classify_statement_counters(
+        shared_preload_libraries=preload,
+        extension_present=extension_present,
     )
-    await connection.commit()
+    match availability:
+        case CounterAvailability.AVAILABLE:
+            reason = 'statement counters available'
+        case CounterAvailability.NOT_PRELOADED:
+            reason = (
+                'pg_stat_statements is not in shared_preload_libraries on this '
+                f'server (reports {preload!r}); statement, transaction and WAL '
+                'counts cannot be collected here'
+            )
+        case CounterAvailability.EXTENSION_ABSENT:
+            reason = (
+                'pg_stat_statements is preloaded but the extension is not '
+                'created in this database'
+            )
+    return StatementCounterPrerequisite(
+        availability=availability,
+        shared_preload_libraries=preload,
+        extension_present=extension_present,
+        track=str(row.track),
+        reason=reason,
+    )
+
+
+async def install_statement_counters(
+    connection: AsyncConnection,
+) -> StatementCounterPrerequisite:
+    """Make the statement view usable, or refuse with the reason it cannot be.
+
+    Creating the extension is attempted only when the library is loaded: doing
+    it the other way round produces a database that looks equipped and fails at
+    the first read.
+    """
+    prerequisite = await read_statement_counter_prerequisite(connection)
+    match prerequisite.availability:
+        case CounterAvailability.AVAILABLE:
+            return prerequisite
+        case CounterAvailability.NOT_PRELOADED:
+            raise StatementCountersUnavailableError(prerequisite.reason)
+        case CounterAvailability.EXTENSION_ABSENT:
+            await connection.execute(
+                text('CREATE EXTENSION IF NOT EXISTS pg_stat_statements')
+            )
+            await connection.commit()
+            confirmed = await read_statement_counter_prerequisite(connection)
+            if not confirmed.usable:
+                raise StatementCountersUnavailableError(confirmed.reason)
+            return confirmed
 
 
 # --------------------------------------------------------------------------
@@ -1898,7 +2020,7 @@ async def collect_rerun_terminalization_evidence(
                 'reused across the block'
             ),
         )
-        await install_statement_counters(connection)
+        counters_prerequisite = await install_statement_counters(connection)
 
     workload: dict[str, int | str] = {
         'observations_per_side': observations,
@@ -1913,6 +2035,10 @@ async def collect_rerun_terminalization_evidence(
         'terminalization_kind': TerminalizationKind.FAIL_RUNNING.value,
         'rerun_input_disposition': RerunInputDisposition.INLINE.value,
         'declared_peak_bytes': capacity.declared_peak_bytes,
+        'shared_preload_libraries': (
+            counters_prerequisite.shared_preload_libraries
+        ),
+        'pg_stat_statements_track': counters_prerequisite.track,
         'lock_envelope_definition': (
             'statement-start-through-commit-return; an upper bound on the '
             'interval the transition holds its locks'
