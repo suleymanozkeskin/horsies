@@ -233,6 +233,14 @@ class TestPublicationAtomicity:
                 f'horsies_task_history_{CLASS_B}',
                 day_bounds(datetime.now(UTC) - timedelta(days=1))[0],
             )
+            # Presence half first: the derived name must appear in the
+            # full-manifest body, or the absence assert below is vacuous
+            # and guards nothing.
+            full_manifest = manifest_from_catalog(
+                await read_attached_leaf_rows(connection, CLASS_A)
+                + await read_attached_leaf_rows(connection, CLASS_B)
+            )
+            assert leaf_b in render_staged_provenance_function(full_manifest)
             assert leaf_b not in stale_body
             await connection.execute(text(stale_body))
 
