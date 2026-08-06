@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import text
@@ -22,6 +24,27 @@ _STAGED_LOOKUP_PREFIXES = frozenset({'no_directory', 'key_registry'})
 _CANDIDATE_WINDOW_MAX_SECONDS = int(
     CANDIDATE_IDEMPOTENCY_WINDOW_MAX.total_seconds()
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FiniteLookupLeaf:
+    """One generated finite-history probe and its terminal-time bounds."""
+
+    relation_name: str
+    lower_bound: datetime
+    upper_bound: datetime
+
+    def __post_init__(self) -> None:
+        if _IDENTIFIER.fullmatch(self.relation_name) is None:
+            raise ValueError(
+                f'invalid staged lookup leaf name: {self.relation_name!r}'
+            )
+        if self.lower_bound.tzinfo is None or self.upper_bound.tzinfo is None:
+            raise ValueError('finite lookup leaf bounds must be timezone-aware')
+        if self.lower_bound >= self.upper_bound:
+            raise ValueError(
+                'finite lookup leaf lower bound must precede its upper bound'
+            )
 
 
 async def install_identity_candidates(
@@ -90,6 +113,27 @@ async def install_staged_lookup_prototype(
                 schema.sql,
                 prefix,
                 newest_first_leaf_names,
+            )
+        )
+    )
+
+
+async def install_uuid7_staged_lookup_prototype(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    prefix: Literal['no_directory', 'key_registry'],
+    oldest_first_leaves: Sequence[FiniteLookupLeaf],
+    maximum_request_lifetime: timedelta | None,
+) -> None:
+    """Install a staged lookup with UUIDv7 time pruning and v4 fallback."""
+    await connection.execute(
+        text(
+            render_uuid7_staged_lookup_prototype(
+                schema.sql,
+                prefix,
+                oldest_first_leaves,
+                maximum_request_lifetime=maximum_request_lifetime,
             )
         )
     )
@@ -820,6 +864,172 @@ def render_staged_lookup_prototype(
     END
     $function$
     """
+
+
+def render_uuid7_staged_lookup_prototype(
+    namespace: str,
+    prefix: str,
+    oldest_first_leaves: Sequence[FiniteLookupLeaf],
+    *,
+    maximum_request_lifetime: timedelta | None,
+) -> str:
+    """Render birth-time-pruned finite probes with a complete legacy walk."""
+    leaves = _validate_uuid7_leaf_manifest(prefix, oldest_first_leaves)
+    if (
+        maximum_request_lifetime is not None
+        and maximum_request_lifetime <= timedelta(0)
+    ):
+        raise ValueError('maximum request lifetime must be positive')
+
+    latest_assignment = 'v_latest_terminal_at := NULL;'
+    bounded_purge = ''
+    latest_guard = ''
+    if maximum_request_lifetime is not None:
+        lifetime_seconds = maximum_request_lifetime.total_seconds()
+        latest_assignment = (
+            'v_latest_terminal_at := v_birth_at '
+            f'+ make_interval(secs => {lifetime_seconds!r});'
+        )
+        oldest_lower = _timestamp_literal(leaves[0].lower_bound)
+        bounded_purge = f"""
+            IF v_latest_terminal_at < {oldest_lower} THEN
+                RETURN ROW(FALSE, NULL, NULL, NULL, NULL)
+                    ::{namespace}.task_lookup;
+            END IF;
+        """
+        latest_guard = (
+            ' AND v_latest_terminal_at >= '
+            '{lower_bound}'
+        )
+
+    uuid7_probes = '\n'.join(
+        _uuid7_guarded_probe(
+            namespace,
+            leaf,
+            latest_guard=latest_guard,
+        )
+        for leaf in leaves
+    )
+    legacy_probes = '\n'.join(
+        _staged_relation_probe(
+            namespace,
+            leaf.relation_name,
+            location='HISTORY',
+        )
+        for leaf in reversed(leaves)
+    )
+    return f"""
+    CREATE OR REPLACE FUNCTION {namespace}.lookup_{prefix}_uuid7_staged(
+        p_task_id varchar(36)
+    )
+    RETURNS {namespace}.task_lookup
+    LANGUAGE plpgsql
+    STABLE
+    AS $function$
+    DECLARE
+        v_task_uuid uuid;
+        v_uuid_bytes bytea;
+        v_birth_milliseconds bigint;
+        v_birth_at timestamptz;
+        v_latest_terminal_at timestamptz;
+        v_task_id varchar(36);
+        v_fingerprint_version smallint;
+        v_fingerprint bytea;
+    BEGIN
+        {_staged_relation_probe(namespace, f'{prefix}_live', location='LIVE')}
+        {_staged_relation_probe(
+            namespace,
+            f'{prefix}_history_forever',
+            location='HISTORY',
+        )}
+
+        BEGIN
+            v_task_uuid := p_task_id::uuid;
+        EXCEPTION WHEN invalid_text_representation THEN
+            RETURN ROW(FALSE, NULL, NULL, NULL, NULL)
+                ::{namespace}.task_lookup;
+        END;
+        v_uuid_bytes := uuid_send(v_task_uuid);
+        IF (get_byte(v_uuid_bytes, 6) >> 4) = 7
+           AND (get_byte(v_uuid_bytes, 8) & 192) = 128
+        THEN
+            v_birth_milliseconds :=
+                (get_byte(v_uuid_bytes, 0)::bigint << 40)
+                | (get_byte(v_uuid_bytes, 1)::bigint << 32)
+                | (get_byte(v_uuid_bytes, 2)::bigint << 24)
+                | (get_byte(v_uuid_bytes, 3)::bigint << 16)
+                | (get_byte(v_uuid_bytes, 4)::bigint << 8)
+                | get_byte(v_uuid_bytes, 5)::bigint;
+            v_birth_at := to_timestamp(
+                v_birth_milliseconds::double precision / 1000.0
+            );
+            {latest_assignment}
+            {bounded_purge}
+            {uuid7_probes}
+        ELSE
+            {legacy_probes}
+        END IF;
+        RETURN ROW(FALSE, NULL, NULL, NULL, NULL)
+            ::{namespace}.task_lookup;
+    END
+    $function$
+    """
+
+
+def _validate_uuid7_leaf_manifest(
+    prefix: str,
+    oldest_first_leaves: Sequence[FiniteLookupLeaf],
+) -> tuple[FiniteLookupLeaf, ...]:
+    if prefix not in _STAGED_LOOKUP_PREFIXES:
+        raise ValueError(
+            'UUIDv7 staged lookup requires a non-directory candidate'
+        )
+    leaves = tuple(oldest_first_leaves)
+    if not leaves:
+        raise ValueError(
+            'UUIDv7 staged lookup requires at least one finite leaf'
+        )
+    if len({leaf.relation_name for leaf in leaves}) != len(leaves):
+        raise ValueError('UUIDv7 staged lookup finite leaves must be distinct')
+    expected_prefix = f'{prefix}_history_finite_'
+    for index, leaf in enumerate(leaves):
+        if not leaf.relation_name.startswith(expected_prefix):
+            raise ValueError(
+                f'invalid UUIDv7 staged lookup leaf name: '
+                f'{leaf.relation_name!r}'
+            )
+        if index > 0 and leaves[index - 1].upper_bound != leaf.lower_bound:
+            raise ValueError(
+                'UUIDv7 staged lookup leaf bounds must be contiguous and '
+                'oldest-first'
+            )
+    return leaves
+
+
+def _uuid7_guarded_probe(
+    namespace: str,
+    leaf: FiniteLookupLeaf,
+    *,
+    latest_guard: str,
+) -> str:
+    lower_bound = _timestamp_literal(leaf.lower_bound)
+    upper_bound = _timestamp_literal(leaf.upper_bound)
+    formatted_latest_guard = latest_guard.format(lower_bound=lower_bound)
+    return f"""
+        IF v_birth_at < {upper_bound}{formatted_latest_guard} THEN
+            {_staged_relation_probe(
+                namespace,
+                leaf.relation_name,
+                location='HISTORY',
+            )}
+        END IF;
+    """
+
+
+def _timestamp_literal(value: datetime) -> str:
+    utc_value = value.astimezone(timezone.utc)
+    rendered = utc_value.isoformat().replace('+00:00', 'Z')
+    return f"TIMESTAMPTZ '{rendered}'"
 
 
 def _staged_relation_probe(

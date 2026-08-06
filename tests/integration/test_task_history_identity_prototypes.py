@@ -22,15 +22,18 @@ from tests.task_history_prototypes.identity import (
     ScopedIdempotencyKey,
 )
 from tests.task_history_prototypes.identity_schema import (
+    FiniteLookupLeaf,
     extend_identity_history_leaves,
     install_identity_candidates,
     install_staged_lookup_prototype,
+    install_uuid7_staged_lookup_prototype,
 )
 from tests.task_history_prototypes.schema import (
     PrototypeSchema,
     install_archive_candidates,
     remove_archive_candidates,
 )
+from tests.task_history_prototypes.uuid7 import uuid7_for_row
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -173,6 +176,96 @@ async def _lookup(
         row.task_id,
         row.fingerprint_version,
         bytes(row.command_fingerprint) if row.command_fingerprint is not None else None,
+    )
+
+
+async def test_uuid7_staged_lookup_prunes_and_keeps_legacy_fallback(
+    identity_schema: AsyncConnection,
+) -> None:
+    schema = _schema(identity_schema)
+    leaves = (
+        FiniteLookupLeaf(
+            'key_registry_history_finite_2026',
+            datetime(2026, 1, 1, tzinfo=timezone.utc),
+            datetime(2027, 1, 1, tzinfo=timezone.utc),
+        ),
+        FiniteLookupLeaf(
+            'key_registry_history_finite_2027',
+            datetime(2027, 1, 1, tzinfo=timezone.utc),
+            datetime(2028, 1, 1, tzinfo=timezone.utc),
+        ),
+    )
+    await install_uuid7_staged_lookup_prototype(
+        identity_schema,
+        schema,
+        prefix='key_registry',
+        oldest_first_leaves=leaves,
+        maximum_request_lifetime=timedelta(days=730),
+    )
+    command = _command()
+    v7_task_id = uuid7_for_row(
+        datetime(2026, 12, 31, 23, tzinfo=timezone.utc),
+        domain='finite-history',
+        row_number=1,
+    )
+    await _enqueue(
+        identity_schema,
+        'key_registry',
+        task_id=v7_task_id,
+        command=command,
+        key=None,
+    )
+    await identity_schema.execute(
+        text(
+            f"""
+            SELECT {schema.sql}.terminalize_key_registry(
+                :task_id, '2027-01-02T00:00:00Z'::timestamptz
+            )
+            """
+        ),
+        {'task_id': v7_task_id},
+    )
+    assert (await _lookup(identity_schema, 'key_registry', v7_task_id))[:3] == (
+        True,
+        'HISTORY',
+        v7_task_id,
+    )
+
+    legacy_task_id = str(uuid4())
+    await _enqueue(
+        identity_schema,
+        'key_registry',
+        task_id=legacy_task_id,
+        command=command,
+        key=None,
+    )
+    await identity_schema.execute(
+        text(
+            f"""
+            SELECT {schema.sql}.terminalize_key_registry(
+                :task_id, '2026-06-01T00:00:00Z'::timestamptz
+            )
+            """
+        ),
+        {'task_id': legacy_task_id},
+    )
+    assert (await _lookup(identity_schema, 'key_registry', legacy_task_id))[:3] == (
+        True,
+        'HISTORY',
+        legacy_task_id,
+    )
+
+    purged_v7 = uuid7_for_row(
+        datetime(2020, 1, 1, tzinfo=timezone.utc),
+        domain='purged',
+        row_number=1,
+    )
+    assert await _lookup(identity_schema, 'key_registry', purged_v7) == (
+        False,
+        None,
+        None,
+        None,
+        None,
     )
 
 

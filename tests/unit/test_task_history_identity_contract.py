@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -15,6 +16,7 @@ from tests.task_history_prototypes.identity import (
     EnqueueCommandV1,
     ScopedIdempotencyKey,
 )
+from tests.task_history_prototypes.uuid7 import uuid7_birth_at, uuid7_for_row
 
 
 def test_candidate_idempotency_window_bounds_are_explicit() -> None:
@@ -132,4 +134,139 @@ def test_staged_lookup_rejects_ambiguous_or_unsafe_manifests(
             'prototype_schema',
             prefix,
             leaves,
+        )
+
+
+def _uuid7_leaves() -> tuple[identity_schema.FiniteLookupLeaf, ...]:
+    boundaries = tuple(
+        datetime(year, 1, 1, tzinfo=timezone.utc)
+        for year in range(2026, 2030)
+    )
+    return tuple(
+        identity_schema.FiniteLookupLeaf(
+            relation_name=f'key_registry_history_finite_{lower.year}',
+            lower_bound=lower,
+            upper_bound=upper,
+        )
+        for lower, upper in zip(
+            boundaries[:-1],
+            boundaries[1:],
+            strict=True,
+        )
+    )
+
+
+def test_uuid7_helper_is_deterministic_and_millisecond_exact() -> None:
+    birth_at = datetime(
+        2026,
+        8,
+        6,
+        12,
+        34,
+        56,
+        789123,
+        tzinfo=timezone.utc,
+    )
+    first = uuid7_for_row(birth_at, domain='live', row_number=1)
+    replay = uuid7_for_row(birth_at, domain='live', row_number=1)
+    other = uuid7_for_row(birth_at, domain='live', row_number=2)
+    assert first == replay
+    assert first != other
+    assert UUID(first).version == 7
+    assert uuid7_birth_at(first) == birth_at.replace(microsecond=789000)
+    assert uuid7_birth_at(uuid4()) is None
+
+
+def test_uuid7_helper_is_monotonic_within_one_millisecond() -> None:
+    birth_at = datetime(2026, 8, 6, 12, 30, 45, 123000, tzinfo=timezone.utc)
+    values = tuple(
+        UUID(
+            uuid7_for_row(
+                birth_at,
+                domain='same-millisecond',
+                row_number=sequence + 1,
+                sequence_within_millisecond=sequence,
+            )
+        )
+        for sequence in range(1_000)
+    )
+    assert tuple(sorted(values)) == values
+    assert {uuid7_birth_at(value) for value in values} == {birth_at}
+
+
+def test_uuid7_staged_lookup_prunes_pre_birth_leaves_and_keeps_v4_fallback() -> None:
+    leaves = _uuid7_leaves()
+    rendered = identity_schema.render_uuid7_staged_lookup_prototype(
+        'prototype_schema',
+        'key_registry',
+        leaves,
+        maximum_request_lifetime=None,
+    )
+    uuid7_branch, legacy_branch = rendered.split('        ELSE\n', maxsplit=1)
+    assert 'uuid_send(v_task_uuid)' in uuid7_branch
+    assert '(get_byte(v_uuid_bytes, 6) >> 4) = 7' in uuid7_branch
+    assert 'v_latest_terminal_at := NULL' in uuid7_branch
+    assert uuid7_branch.index(leaves[0].relation_name) < uuid7_branch.index(
+        leaves[-1].relation_name
+    )
+    assert legacy_branch.index(leaves[-1].relation_name) < legacy_branch.index(
+        leaves[0].relation_name
+    )
+    for leaf in leaves:
+        assert rendered.count(leaf.relation_name) == 2
+    assert 'EXECUTE' not in rendered
+
+
+def test_uuid7_bounded_lookup_has_constant_time_pre_retention_miss() -> None:
+    leaves = _uuid7_leaves()
+    rendered = identity_schema.render_uuid7_staged_lookup_prototype(
+        'prototype_schema',
+        'key_registry',
+        leaves,
+        maximum_request_lifetime=timedelta(days=30),
+    )
+    first_probe = rendered.index(leaves[0].relation_name)
+    early_return = rendered.index(
+        'IF v_latest_terminal_at < '
+        "TIMESTAMPTZ '2026-01-01T00:00:00Z'"
+    )
+    assert early_return < first_probe
+    assert 'make_interval(secs => 2592000.0)' in rendered
+    assert (
+        'v_latest_terminal_at >= '
+        "TIMESTAMPTZ '2026-01-01T00:00:00Z'"
+    ) in rendered
+
+
+@pytest.mark.parametrize(
+    ('leaves', 'message'),
+    [
+        ((), 'at least one'),
+        (
+            (
+                identity_schema.FiniteLookupLeaf(
+                    'key_registry_history_finite_2026',
+                    datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    datetime(2027, 1, 1, tzinfo=timezone.utc),
+                ),
+                identity_schema.FiniteLookupLeaf(
+                    'key_registry_history_finite_2028',
+                    datetime(2028, 1, 1, tzinfo=timezone.utc),
+                    datetime(2029, 1, 1, tzinfo=timezone.utc),
+                ),
+            ),
+            'contiguous',
+        ),
+    ],
+)
+def test_uuid7_staged_lookup_rejects_incomplete_manifests(
+    leaves: tuple[identity_schema.FiniteLookupLeaf, ...],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        identity_schema.render_uuid7_staged_lookup_prototype(
+            'prototype_schema',
+            'key_registry',
+            leaves,
+            maximum_request_lifetime=None,
         )

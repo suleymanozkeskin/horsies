@@ -22,11 +22,17 @@ from tests.task_history_prototypes.identity_evidence import (
     PRIMARY_IDENTITY_CANDIDATES,
     collect_identity_evidence,
 )
+from tests.task_history_prototypes.operational_evidence import (
+    collect_operational_maintenance_evidence,
+)
 from tests.task_history_prototypes.qualification_io import (
     QualificationProgressReporter,
 )
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
+)
+from tests.task_history_prototypes.registry_evidence import (
+    collect_key_registry_evidence,
 )
 from tests.task_history_prototypes.replacement_transcode_evidence import (
     collect_replacement_archive_transcode_evidence,
@@ -34,6 +40,9 @@ from tests.task_history_prototypes.replacement_transcode_evidence import (
 from tests.task_history_prototypes.transcode import ArchiveComponent
 from tests.task_history_prototypes.transcode_evidence import (
     collect_archive_transcode_evidence,
+)
+from tests.task_history_prototypes.uuid_index_evidence import (
+    collect_task_id_index_evidence,
 )
 
 
@@ -61,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
             'pending-locator',
             'archive-transcode',
             'replacement-archive-transcode',
+            'uuid-index-economics',
+            'key-registry',
+            'operational-maintenance',
         ),
     )
     parser.add_argument('--rows', type=int, default=100)
@@ -68,6 +80,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--rerun-input-bytes', type=int, default=64 * 1024)
     parser.add_argument('--attempts-per-task', type=int, default=4)
     parser.add_argument('--batch-size', type=int, default=10_000)
+    parser.add_argument('--base-rows', type=int, default=100_000)
+    parser.add_argument('--measured-rows', type=int, default=100_000)
+    parser.add_argument('--repetitions', type=int, default=1)
+    parser.add_argument('--producers', type=int, default=64)
+    parser.add_argument('--observation-seconds', type=int, default=120)
     parser.add_argument(
         '--archive-component',
         type=ArchiveComponent,
@@ -112,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     if arguments.scenario not in {
         'identity-lookup',
         'replacement-archive-transcode',
+        'operational-maintenance',
     } and (
         arguments.partial_evidence_path is not None
         or arguments.progress_fd is not None
@@ -233,6 +251,51 @@ async def _run(
                         host_description=arguments.host_description,
                         storage_description=arguments.storage_description,
                         demo_quiesced=arguments.demo_quiesced,
+                    )
+                case 'uuid-index-economics':
+                    return await collect_task_id_index_evidence(
+                        connection,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
+                        base_rows=arguments.base_rows,
+                        measured_rows=arguments.measured_rows,
+                        batch_size=arguments.batch_size,
+                        repetitions=arguments.repetitions,
+                    )
+                case 'key-registry':
+                    return await collect_key_registry_evidence(
+                        engine,
+                        dsn=arguments.dsn,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
+                        operations=arguments.rows,
+                        producers=arguments.producers,
+                        seed=arguments.seed,
+                    )
+                case 'operational-maintenance':
+                    return await collect_operational_maintenance_evidence(
+                        engine,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
+                        registry_rows=arguments.rows,
+                        registry_batch_size=arguments.batch_size,
+                        history_rows=arguments.finite_history_rows,
+                        forever_rows=arguments.forever_history_rows,
+                        attached_leaves=arguments.attached_finite_leaves,
+                        observation_seconds=arguments.observation_seconds,
+                        progress=progress,
                     )
                 case 'archive-transcode':
                     return await collect_archive_transcode_evidence(
