@@ -6,6 +6,21 @@ checks establish the two things a latency number cannot: that the transition
 satisfies its exact structural obligations, and that the harness detects a
 candidate which violates them. A collector that cannot fail has not proven a
 pass.
+
+Reproduction, from the worktree root. The database is named explicitly rather
+than left to the ambient environment: without `HORSIES_TEST_DATABASE_URL` the
+integration conftest falls back to `localhost:5432`, which is a shared bench,
+and a run that lands there is measuring someone else's server in someone
+else's timezone.
+
+    docker compose -f tests/fixtures/perf/compose.yaml up -d --wait pg16
+    uv run python -m tests.perf --apply-schema \
+      --dsn postgresql+psycopg://postgres:testpassword@localhost:15446/horsies
+    HORSIES_TEST_DATABASE_URL=postgresql+psycopg://postgres:testpassword@localhost:15446/horsies \
+      uv run pytest tests/integration/test_rerun_terminalization_prototypes.py -q
+
+The suite asserts its own timezone independence, so a bench in any session
+timezone reproduces the same result.
 """
 
 from __future__ import annotations
@@ -579,3 +594,88 @@ class TestWalDetectionControl:
 
         assert declared.verdict is Verdict.PASS
         assert tightened.verdict is Verdict.FAIL
+
+
+class TestLeafBoundsAreTimezoneIndependent:
+    """A leaf must tile against the shared fixture's leaves in any session zone.
+
+    The shared fixture states its daily bounds as explicit UTC instants. A bare
+    date literal is resolved in the session timezone instead, so on a server
+    east of UTC this collector's leaf began before the previous day's leaf
+    ended and PostgreSQL refused it as an overlap. The installer worked on a
+    UTC bench and failed everywhere else, which is the shape of bug that makes
+    a green run unreproducible rather than wrong.
+    """
+
+    @pytest.mark.parametrize(
+        'session_timezone',
+        ('UTC', 'Europe/Berlin', 'Pacific/Kiritimati', 'Etc/GMT+12'),
+    )
+    async def test_installer_succeeds_under_any_session_timezone(
+        self,
+        engine: AsyncEngine,
+        broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+        session_timezone: str,
+    ) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(f"SET TIME ZONE '{session_timezone}'")
+            )
+            schema = PrototypeSchema(f'rerun_tz_{uuid4().hex[:10]}')
+            await install_archive_candidates(connection, schema)
+            await install_archive_transcode_prototype(connection, schema)
+            try:
+                comparison = await install_rerun_terminalization_prototype(
+                    connection,
+                    schema,
+                )
+                await connection.commit()
+
+                assert comparison.finite_leaf.startswith(
+                    'history_aggregate_finite_'
+                )
+            finally:
+                await connection.rollback()
+                await remove_archive_candidates(connection, schema)
+                await connection.commit()
+
+    @pytest.mark.parametrize(
+        'session_timezone',
+        ('UTC', 'Europe/Berlin', 'Etc/GMT+12'),
+    )
+    async def test_leaf_is_named_for_the_utc_date_it_covers(
+        self,
+        engine: AsyncEngine,
+        broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+        session_timezone: str,
+    ) -> None:
+        # The name and the bounds have to agree, or the same-date collision
+        # check against the shared fixture's leaf stops being sound.
+        async with engine.connect() as connection:
+            await connection.execute(
+                text(f"SET TIME ZONE '{session_timezone}'")
+            )
+            utc_date = (
+                await connection.execute(
+                    text("SELECT (now() AT TIME ZONE 'UTC')::date")
+                )
+            ).scalar_one()
+            schema = PrototypeSchema(f'rerun_tz_{uuid4().hex[:10]}')
+            await install_archive_candidates(connection, schema)
+            await install_archive_transcode_prototype(connection, schema)
+            try:
+                comparison = await install_rerun_terminalization_prototype(
+                    connection,
+                    schema,
+                )
+                await connection.commit()
+
+                expected = (
+                    'history_aggregate_finite_'
+                    f'{utc_date.strftime("%Y_%m_%d")}'
+                )
+                assert comparison.finite_leaf == expected
+            finally:
+                await connection.rollback()
+                await remove_archive_candidates(connection, schema)
+                await connection.commit()

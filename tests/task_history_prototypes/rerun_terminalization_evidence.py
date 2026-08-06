@@ -17,13 +17,15 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
+from pathlib import Path
 from random import Random
+from shutil import disk_usage
 from time import perf_counter
 from uuid import uuid4
 from enum import StrEnum
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
@@ -36,7 +38,24 @@ from tests.perf.statistics import (
     percentile_ms,
     worst,
 )
-from tests.task_history_prototypes.schema import PrototypeSchema
+from tests.task_history_prototypes.evidence import (
+    EvidenceConditions,
+    EvidenceRunKind,
+    collect_conditions,
+)
+from tests.task_history_prototypes.qualification_io import (
+    AtomicEvidenceWriter,
+    QualificationProgress,
+    QualificationProgressReporter,
+)
+from tests.task_history_prototypes.schema import (
+    PrototypeSchema,
+    install_archive_candidates,
+    remove_archive_candidates,
+)
+from tests.task_history_prototypes.transcode import (
+    install_archive_transcode_prototype,
+)
 
 
 class RerunTerminalizationError(Exception):
@@ -795,23 +814,31 @@ async def ensure_run_date_finite_leaf(
     The date comes from the database clock rather than the host clock: the
     partition bound and the value being routed must be decided by the same
     clock, or a run near midnight can create a leaf that its own rows miss.
+
+    Both the date and the bounds are pinned to UTC. A bare date literal is
+    resolved in the session's timezone, so on a server west or east of UTC the
+    leaf would start at a different instant than its name claims and would
+    overlap the neighbouring day's leaf — the shared fixture states its bounds
+    as explicit UTC instants, and these have to tile against those exactly.
     """
     run_date = (
         await connection.execute(
-            text("SELECT (date_trunc('day', now()))::date AS run_date")
+            text("SELECT (now() AT TIME ZONE 'UTC')::date AS run_date")
         )
     ).scalar_one()
     suffix = run_date.strftime('%Y_%m_%d')
     leaf_name = f'history_aggregate_finite_{suffix}'
     if await _covering_finite_leaf(connection, schema, leaf_name=leaf_name):
         return leaf_name
+    lower_bound = f'{run_date.isoformat()}T00:00:00Z'
+    upper_bound = f'{(run_date + timedelta(days=1)).isoformat()}T00:00:00Z'
     await connection.execute(
         text(
             f"""
             CREATE TABLE {schema.sql}."{leaf_name}"
                 PARTITION OF {schema.sql}.history_aggregate_finite
-                FOR VALUES FROM ('{run_date.isoformat()}')
-                TO ('{(run_date + timedelta(days=1)).isoformat()}')
+                FOR VALUES FROM ('{lower_bound}')
+                TO ('{upper_bound}')
             """
         )
     )
@@ -1667,4 +1694,297 @@ async def measure_cell(
         exact_counts=exact_counts,
         structural=structural,
         verdict=Verdict.FAIL if exact_failed else sampled_verdict,
+    )
+
+
+# --------------------------------------------------------------------------
+# Capacity preflight.
+#
+# Incompressible envelopes at the inline bound do not compress, so a cell's
+# footprint is predictable and large. Stating the declared peak before the run
+# and refusing to start without room turns an out-of-space death partway
+# through a multi-hour cell into a sentence the operator can act on.
+# --------------------------------------------------------------------------
+
+# Row overhead beyond the envelope: the live tuple and its replayed indexes,
+# the attempt rows, and the history tuple. Deliberately generous; the point is
+# a refusal that is never surprised, not a tight estimate.
+_PER_ROW_OVERHEAD_BYTES = 4_096
+
+
+class InsufficientDiskError(RerunTerminalizationError):
+    """The declared peak footprint does not fit in the free space available."""
+
+
+@dataclass(frozen=True, slots=True)
+class CapacityDeclaration:
+    """What one cell will occupy, stated before it runs."""
+
+    rows_per_side: int
+    envelope_bytes: int
+    live_bytes: int
+    history_bytes: int
+    declared_peak_bytes: int
+    free_bytes: int
+    sufficient: bool
+
+
+def declare_cell_capacity(
+    *,
+    observations: int,
+    block_size: int,
+    envelope_bytes: int,
+    free_bytes: int,
+) -> CapacityDeclaration:
+    """State one cell's peak footprint and whether it fits.
+
+    Both sides are seeded before measurement and the candidate's rows are then
+    copied into history, so the peak holds two seeded sides plus one history
+    copy at once.
+    """
+    blocks = -(-observations // block_size)
+    rows_per_side = (blocks + 1) * block_size
+    per_row = envelope_bytes + _PER_ROW_OVERHEAD_BYTES
+    live_bytes = 2 * rows_per_side * per_row
+    history_bytes = rows_per_side * per_row
+    declared_peak = live_bytes + history_bytes
+    return CapacityDeclaration(
+        rows_per_side=rows_per_side,
+        envelope_bytes=envelope_bytes,
+        live_bytes=live_bytes,
+        history_bytes=history_bytes,
+        declared_peak_bytes=declared_peak,
+        free_bytes=free_bytes,
+        sufficient=free_bytes >= declared_peak,
+    )
+
+
+def preflight_capacity(
+    *,
+    observations: int,
+    block_size: int,
+    envelope_bytes: int,
+    data_path: Path,
+) -> CapacityDeclaration:
+    """Refuse to start a cell the filesystem cannot hold.
+
+    PostgreSQL exposes file sizes but not filesystem free space, so the check
+    is made where the bytes actually land and the caller names that path. On a
+    containerised bench the server writes through the host's storage driver, so
+    the runner's own filesystem is the right one to measure; a bench on separate
+    storage must be given that path instead.
+    """
+    free_bytes = disk_usage(data_path).free
+    declaration = declare_cell_capacity(
+        observations=observations,
+        block_size=block_size,
+        envelope_bytes=envelope_bytes,
+        free_bytes=free_bytes,
+    )
+    if not declaration.sufficient:
+        raise InsufficientDiskError(
+            'declared peak footprint '
+            f'{declaration.declared_peak_bytes} bytes for {observations} '
+            f'observations per side at {envelope_bytes}-byte envelopes '
+            f'exceeds {free_bytes} bytes free on {data_path}'
+        )
+    return declaration
+
+
+GATE_OBSERVATIONS_PER_SIDE = 10_000
+GATE_BLOCK_SIZE = 100
+GATE_BOOTSTRAP_RESAMPLES = 1_000
+
+ATTEMPT_DEPTHS: tuple[int, ...] = (1, 4)
+
+
+@dataclass(frozen=True, slots=True)
+class RerunTerminalizationEvidence:
+    """Every cell's verdict and the conditions all of them ran under."""
+
+    conditions: EvidenceConditions
+    workload: dict[str, int | str]
+    capacity: CapacityDeclaration
+    cells: tuple[CellResult, ...]
+    verdict: Verdict
+
+
+def _validate_gate_authority(
+    run_kind: EvidenceRunKind,
+    *,
+    observations: int,
+    block_size: int,
+    resamples: int,
+) -> None:
+    """A gate run declares its sampling before it starts, or it is not a gate."""
+    if run_kind is not EvidenceRunKind.GATE:
+        return
+    if observations < GATE_OBSERVATIONS_PER_SIDE:
+        raise RerunTerminalizationError(
+            'gate evidence requires at least '
+            f'{GATE_OBSERVATIONS_PER_SIDE} observations per side'
+        )
+    if block_size != GATE_BLOCK_SIZE:
+        raise RerunTerminalizationError(
+            f'gate evidence alternates in blocks of {GATE_BLOCK_SIZE}'
+        )
+    if resamples < GATE_BOOTSTRAP_RESAMPLES:
+        raise RerunTerminalizationError(
+            'gate evidence requires at least '
+            f'{GATE_BOOTSTRAP_RESAMPLES} bootstrap resamples'
+        )
+
+
+async def collect_rerun_terminalization_evidence(
+    engine: AsyncEngine,
+    *,
+    commit: str,
+    run_kind: EvidenceRunKind,
+    server_image: str,
+    host_description: str,
+    storage_description: str,
+    demo_quiesced: bool,
+    observations: int = GATE_OBSERVATIONS_PER_SIDE,
+    block_size: int = GATE_BLOCK_SIZE,
+    resamples: int = GATE_BOOTSTRAP_RESAMPLES,
+    seed: int,
+    envelope_bytes: int = INLINE_BOUND_BYTES,
+    result_bytes: int = 200,
+    data_path: Path,
+    checkpoint_path: Path | None = None,
+    progress: QualificationProgressReporter | None = None,
+) -> RerunTerminalizationEvidence:
+    """Measure every payload shape and attempt depth as an independent cell.
+
+    Cells run strictly one at a time, each in its own disposable schema which is
+    dropped before the next begins. Two cells sharing a bench would compete for
+    cache and disk, and the second would be measuring the first.
+    """
+    _validate_gate_authority(
+        run_kind,
+        observations=observations,
+        block_size=block_size,
+        resamples=resamples,
+    )
+    capacity = preflight_capacity(
+        observations=observations,
+        block_size=block_size,
+        envelope_bytes=envelope_bytes,
+        data_path=data_path,
+    )
+
+    cells: list[CellResult] = []
+    writer = AtomicEvidenceWriter(checkpoint_path)
+    reporter = progress or QualificationProgressReporter()
+    planned = [
+        (shape, depth) for shape in PayloadShape for depth in ATTEMPT_DEPTHS
+    ]
+
+    async with engine.connect() as connection:
+        conditions = await collect_conditions(
+            connection,
+            commit=commit,
+            run_kind=run_kind,
+            server_image=server_image,
+            host_description=host_description,
+            storage_description=storage_description,
+            demo_quiesced=demo_quiesced,
+            cache_posture=(
+                'one warm-up block per side discarded before counting; '
+                'each cell in a fresh disposable schema'
+            ),
+            prepared_posture=(
+                'one client statement per observation, parameterized, '
+                'reused across the block'
+            ),
+        )
+        await install_statement_counters(connection)
+
+    workload: dict[str, int | str] = {
+        'observations_per_side': observations,
+        'block_size': block_size,
+        'bootstrap_resamples': resamples,
+        'seed': seed,
+        'envelope_bytes': envelope_bytes,
+        'result_bytes': result_bytes,
+        'attempt_depths': ','.join(str(depth) for depth in ATTEMPT_DEPTHS),
+        'cells_planned': len(planned),
+        'retention_class': FINITE_RETENTION_CLASS,
+        'terminalization_kind': TerminalizationKind.FAIL_RUNNING.value,
+        'rerun_input_disposition': RerunInputDisposition.INLINE.value,
+        'declared_peak_bytes': capacity.declared_peak_bytes,
+        'lock_envelope_definition': (
+            'statement-start-through-commit-return; an upper bound on the '
+            'interval the transition holds its locks'
+        ),
+    }
+
+    for index, (shape, depth) in enumerate(planned, start=1):
+        reporter.emit(
+            QualificationProgress(
+                scenario='rerun-input-terminalization',
+                phase='cell',
+                status='started',
+                category=shape.value,
+                cell_index=index,
+                cell_total=len(planned),
+                observation_target=observations,
+            )
+        )
+        schema = PrototypeSchema(f'rerun_gate_{uuid4().hex[:10]}')
+        async with engine.connect() as connection:
+            await install_archive_candidates(connection, schema)
+            await install_archive_transcode_prototype(connection, schema)
+            comparison = await install_rerun_terminalization_prototype(
+                connection,
+                schema,
+            )
+            await connection.commit()
+            try:
+                cell = await measure_cell(
+                    connection,
+                    comparison,
+                    payload_shape=shape,
+                    attempts_per_task=depth,
+                    observations=observations,
+                    block_size=block_size,
+                    resamples=resamples,
+                    seed=seed + index,
+                    envelope_bytes=envelope_bytes,
+                    result_bytes=result_bytes,
+                )
+            finally:
+                await connection.rollback()
+                await remove_archive_candidates(connection, schema)
+                await connection.commit()
+        cells.append(cell)
+        # Flushed before the next cell starts, so an interruption keeps every
+        # finalized cell rather than losing the whole run.
+        writer.write(
+            RerunTerminalizationEvidence(
+                conditions=conditions,
+                workload=workload,
+                capacity=capacity,
+                cells=tuple(cells),
+                verdict=worst([result.verdict for result in cells]),
+            )
+        )
+        reporter.emit(
+            QualificationProgress(
+                scenario='rerun-input-terminalization',
+                phase='cell',
+                status=cell.verdict.value.lower(),
+                category=shape.value,
+                cell_index=index,
+                cell_total=len(planned),
+                observations=cell.observations_per_side,
+            )
+        )
+
+    return RerunTerminalizationEvidence(
+        conditions=conditions,
+        workload=workload,
+        capacity=capacity,
+        cells=tuple(cells),
+        verdict=worst([result.verdict for result in cells]),
     )
