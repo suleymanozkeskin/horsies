@@ -209,11 +209,11 @@ jobs:
         include:
           - postgres: '14'
             service: pg14
-            port: 16442
+            port: 15442
             image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
           - postgres: '16'
             service: pg16
-            port: 16446
+            port: 15446
             image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -226,9 +226,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --dev
 
-      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
         run: >-
-          docker compose -f tests/fixtures/history/compose.yaml
+          docker compose -f tests/fixtures/perf/compose.yaml
           up -d --wait ${{ matrix.service }}
 
       - name: Apply schema
@@ -284,18 +284,18 @@ jobs:
                   host_description: $host_description,
                   storage_description: $storage_description,
                   demo_quiesced: true,
-                  fsync: "on",
-                  synchronous_commit: "on",
-                  full_page_writes: "on",
-                  autovacuum: "on",
+                  fsync: "off",
+                  synchronous_commit: "off",
+                  full_page_writes: "off",
+                  autovacuum: "off",
                   autovacuum_vacuum_threshold: "50",
                   autovacuum_vacuum_scale_factor: "0.2",
                   autovacuum_analyze_threshold: "50",
                   autovacuum_analyze_scale_factor: "0.1",
                   autovacuum_naptime: "1min",
                   autovacuum_max_workers: "3",
-                  checkpoint_timeout: "5min",
-                  max_wal_size: "2GB"
+                  checkpoint_timeout: "30min",
+                  max_wal_size: "4GB"
                 },
                 workload: {
                   live_rows: 100000,
@@ -325,6 +325,6 @@ jobs:
           path: /tmp/task-history-identity-pg${{ matrix.postgres }}/*.json
           if-no-files-found: error
 
-      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
         if: always()
-        run: docker compose -f tests/fixtures/history/compose.yaml down -v
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
