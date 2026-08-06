@@ -875,6 +875,14 @@ async def _active_maintenance_id(
     ).scalar_one_or_none()
 
 
+async def active_archive_maintenance_id(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+) -> str | None:
+    """Return the active archive-maintenance identity, if one exists."""
+    return await _active_maintenance_id(connection, schema)
+
+
 async def _lock_transcode_program(
     connection: AsyncConnection,
     schema: PrototypeSchema,
@@ -894,6 +902,14 @@ async def _lock_transcode_program(
     )
 
 
+async def lock_archive_transcode_program(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+) -> None:
+    """Serialize archive-transcode command mutations for this schema."""
+    await _lock_transcode_program(connection, schema)
+
+
 async def _lock_archive_access_gate(
     connection: AsyncConnection,
     schema: PrototypeSchema,
@@ -910,6 +926,14 @@ async def _lock_archive_access_gate(
     )
 
 
+async def lock_archive_access_gate(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+) -> None:
+    """Lock the archive-access gate for an offline maintenance mutation."""
+    await _lock_archive_access_gate(connection, schema)
+
+
 def _direction(source_version: int, target_version: int) -> str | None:
     match source_version, target_version:
         case 1, 2:
@@ -920,8 +944,21 @@ def _direction(source_version: int, target_version: int) -> str | None:
             return None
 
 
+def archive_transcode_direction(
+    source_version: int,
+    target_version: int,
+) -> str | None:
+    """Return the supported prototype direction for a version pair."""
+    return _direction(source_version, target_version)
+
+
 def _ratio_ceiling(value: int, *, numerator: int, denominator: int) -> int:
     return (value * numerator + denominator - 1) // denominator
+
+
+def ratio_ceiling(value: int, *, numerator: int, denominator: int) -> int:
+    """Return an integer ratio rounded toward positive infinity."""
+    return _ratio_ceiling(value, numerator=numerator, denominator=denominator)
 
 
 def _codec_for_version(component: ArchiveComponent, version: int) -> str:
@@ -938,6 +975,11 @@ def _codec_for_version(component: ArchiveComponent, version: int) -> str:
             raise ValueError(
                 f'{component.value} version {version} has no prototype codec'
             )
+
+
+def archive_codec_for_version(component: ArchiveComponent, version: int) -> str:
+    """Return the codec fixed to a prototype archive-domain version."""
+    return _codec_for_version(component, version)
 
 
 def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
@@ -1012,6 +1054,11 @@ def _component_columns(component: ArchiveComponent) -> _ComponentColumns:
                 payload_set='rerun_input_inline = encoded.target_payload',
                 updated_payload='history.rerun_input_inline',
             )
+
+
+def archive_component_columns(component: ArchiveComponent) -> _ComponentColumns:
+    """Return the physical columns that implement one archive domain."""
+    return _component_columns(component)
 
 
 def _transcode_manifest(schema: PrototypeSchema) -> tuple[str, ...]:

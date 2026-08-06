@@ -84,7 +84,7 @@ async def collect_archive_transcode_evidence(
     payload_bytes: int,
     attempts_per_task: int,
 ) -> ArchiveTranscodeEvidence:
-    _validate_workload(
+    validate_archive_transcode_workload(
         run_kind=run_kind,
         rows=rows,
         batch_size=batch_size,
@@ -110,7 +110,7 @@ async def collect_archive_transcode_evidence(
     await install_archive_transcode_prototype(connection, schema)
     await connection.commit()
     try:
-        await _seed_history(
+        await seed_archive_transcode_workload(
             connection,
             schema,
             rows=rows,
@@ -266,7 +266,7 @@ def _verify_planned_workload(
         )
 
 
-def _validate_workload(
+def validate_archive_transcode_workload(
     *,
     run_kind: EvidenceRunKind,
     rows: int,
@@ -286,7 +286,7 @@ def _validate_workload(
         raise ValueError('transcode gate evidence requires at least 1,000,000 rows')
 
 
-async def _seed_history(
+async def seed_archive_transcode_workload(
     connection: AsyncConnection,
     schema: PrototypeSchema,
     *,

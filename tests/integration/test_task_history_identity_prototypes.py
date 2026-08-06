@@ -261,14 +261,11 @@ async def test_replay_survives_terminal_move_for_declared_window(
             text(
                 f"""
                 SELECT {schema.sql}.terminalize_{terminal_prefix}(
-                    :task_id, :terminal_at
+                    :task_id, statement_timestamp()
                 )
                 """
             ),
-            {
-                'task_id': task_id,
-                'terminal_at': datetime(2026, 8, 5, tzinfo=timezone.utc),
-            },
+            {'task_id': task_id},
         )
     ).scalar_one()
     assert moved is True

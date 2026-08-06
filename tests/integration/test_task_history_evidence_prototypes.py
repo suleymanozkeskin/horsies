@@ -12,6 +12,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from tests.task_history_prototypes import (
     identity_evidence,
     recovery_evidence,
+    replacement_transcode_evidence,
     transcode_evidence,
 )
 from tests.task_history_prototypes.evidence import (
@@ -30,6 +31,9 @@ from tests.task_history_prototypes.identity_evidence import (
 from tests.task_history_prototypes.measurements import relation_footprint
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
+)
+from tests.task_history_prototypes.replacement_transcode_evidence import (
+    collect_replacement_archive_transcode_evidence,
 )
 from tests.task_history_prototypes.schema import PrototypeSchema
 from tests.task_history_prototypes.transcode import ArchiveComponent
@@ -69,6 +73,30 @@ async def test_transcode_gate_rejects_subqualification_workload(
             match='requires at least 1,000,000 rows',
         ):
             await collect_archive_transcode_evidence(
+                connection,
+                commit='test-head',
+                run_kind=EvidenceRunKind.GATE,
+                server_image='test-image',
+                host_description='test host',
+                storage_description='test storage',
+                demo_quiesced=True,
+                component=ArchiveComponent.RESULT,
+                rows=999_999,
+                batch_size=10_000,
+                payload_bytes=200,
+                attempts_per_task=4,
+            )
+
+
+async def test_replacement_transcode_gate_rejects_subqualification_workload(
+    engine: AsyncEngine,
+) -> None:
+    async with engine.connect() as connection:
+        with pytest.raises(
+            ValueError,
+            match='requires at least 1,000,000 rows',
+        ):
+            await collect_replacement_archive_transcode_evidence(
                 connection,
                 commit='test-head',
                 run_kind=EvidenceRunKind.GATE,
@@ -320,3 +348,48 @@ async def test_transcode_evidence_measures_finite_and_forever_rewrite(
     assert evidence.verification.invalid_target_rows == 0
     assert evidence.decoder_retirement_ready is True
     assert evidence.peak_additional_bytes >= 0
+
+
+@pytest.mark.parametrize('component', tuple(ArchiveComponent))
+async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+    component: ArchiveComponent,
+) -> None:
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'collect_operational_conditions',
+        _test_operational_conditions,
+    )
+    async with engine.connect() as connection:
+        evidence = await collect_replacement_archive_transcode_evidence(
+            connection,
+            commit='test-head',
+            run_kind=EvidenceRunKind.SMOKE,
+            server_image='test-image',
+            host_description='test host',
+            storage_description='test storage',
+            demo_quiesced=True,
+            component=component,
+            rows=100,
+            batch_size=17,
+            payload_bytes=200,
+            attempts_per_task=4,
+        )
+
+    assert evidence.plan.transformed_rows == 100
+    assert evidence.plan.copied_rows == 100
+    assert evidence.plan.relation_count == 2
+    assert evidence.workload == {
+        'rows': 100,
+        'batch_size': 17,
+        'payload_bytes': 200,
+        'attempts_per_task': 4,
+    }
+    assert evidence.batches == 6
+    assert evidence.verification.verified is True
+    assert evidence.verification.source_rows_remaining_after_swap == 0
+    assert evidence.decoder_retirement_ready is True
+    assert evidence.peak_additional_bytes >= 0
+    assert evidence.swap_lock_seconds >= 0

@@ -20,6 +20,9 @@ from tests.task_history_prototypes.identity_evidence import collect_identity_evi
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
 )
+from tests.task_history_prototypes.replacement_transcode_evidence import (
+    collect_replacement_archive_transcode_evidence,
+)
 from tests.task_history_prototypes.transcode import ArchiveComponent
 from tests.task_history_prototypes.transcode_evidence import (
     collect_archive_transcode_evidence,
@@ -49,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             'identity-lookup',
             'pending-locator',
             'archive-transcode',
+            'replacement-archive-transcode',
         ),
     )
     parser.add_argument('--rows', type=int, default=100)
@@ -183,6 +187,21 @@ async def _run(arguments: argparse.Namespace) -> object:
                     )
                 case 'archive-transcode':
                     return await collect_archive_transcode_evidence(
+                        connection,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
+                        component=arguments.archive_component,
+                        rows=arguments.rows,
+                        batch_size=arguments.batch_size,
+                        payload_bytes=arguments.result_bytes,
+                        attempts_per_task=arguments.attempts_per_task,
+                    )
+                case 'replacement-archive-transcode':
+                    return await collect_replacement_archive_transcode_evidence(
                         connection,
                         commit=arguments.commit,
                         run_kind=arguments.run_kind,
