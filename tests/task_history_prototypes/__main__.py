@@ -17,7 +17,11 @@ from tests.task_history_prototypes.evidence import (
     collect_rerun_storage_evidence,
     evidence_json,
 )
-from tests.task_history_prototypes.identity_evidence import collect_identity_evidence
+from tests.task_history_prototypes.identity_evidence import (
+    IdentityCandidate,
+    PRIMARY_IDENTITY_CANDIDATES,
+    collect_identity_evidence,
+)
 from tests.task_history_prototypes.qualification_io import (
     QualificationProgressReporter,
 )
@@ -84,6 +88,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--warm-observations', type=int, default=100)
     parser.add_argument('--cold-observations', type=int, default=10)
     parser.add_argument('--bootstrap-resamples', type=int, default=200)
+    parser.add_argument(
+        '--identity-candidate',
+        type=IdentityCandidate,
+        choices=list(IdentityCandidate),
+        action='append',
+    )
     parser.add_argument('--partial-evidence-path', type=Path)
     parser.add_argument('--progress-fd', type=int)
     parser.add_argument(
@@ -206,6 +216,11 @@ async def _run(
                         ),
                         bootstrap_resamples=arguments.bootstrap_resamples,
                         seed=arguments.seed,
+                        candidates=(
+                            tuple(arguments.identity_candidate)
+                            if arguments.identity_candidate is not None
+                            else PRIMARY_IDENTITY_CANDIDATES
+                        ),
                         checkpoint_path=arguments.partial_evidence_path,
                         progress=progress,
                     )

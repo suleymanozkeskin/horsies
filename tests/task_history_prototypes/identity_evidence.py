@@ -22,6 +22,7 @@ from tests.task_history_prototypes.evidence import (
 from tests.task_history_prototypes.identity_schema import (
     extend_identity_history_leaves,
     install_identity_candidates,
+    install_staged_lookup_prototype,
 )
 from tests.task_history_prototypes.measurements import (
     RelationFootprint,
@@ -45,6 +46,14 @@ class IdentityCandidate(StrEnum):
     NO_DIRECTORY = 'no_directory'
     KEY_REGISTRY = 'key_registry'
     COMBINED_REGISTRY = 'combined_registry'
+    STAGED_KEY_REGISTRY = 'staged_key_registry'
+
+
+PRIMARY_IDENTITY_CANDIDATES = (
+    IdentityCandidate.NO_DIRECTORY,
+    IdentityCandidate.KEY_REGISTRY,
+    IdentityCandidate.COMBINED_REGISTRY,
+)
 
 
 class LookupCategory(StrEnum):
@@ -158,6 +167,7 @@ class _IdentityRunObserver:
     workload: dict[str, int | tuple[int, ...]]
     writer: AtomicEvidenceWriter
     progress: QualificationProgressReporter
+    candidate_total: int = len(PRIMARY_IDENTITY_CANDIDATES)
     ballast_bytes: int | None = None
     finalized_cells: list[IdentityFinalizedCell] = field(
         default_factory=lambda: []
@@ -220,7 +230,7 @@ class _IdentityRunObserver:
         self.active_cell = IdentityActiveCell(
             candidate=candidate,
             candidate_index=candidate_index,
-            candidate_total=len(IdentityCandidate),
+            candidate_total=self.candidate_total,
             category=category,
             category_index=tuple(LookupCategory).index(category) + 1,
             category_total=len(LookupCategory),
@@ -349,9 +359,14 @@ async def collect_identity_evidence(
     cold_observations_per_category: int,
     bootstrap_resamples: int,
     seed: int,
+    candidates: tuple[IdentityCandidate, ...] = PRIMARY_IDENTITY_CANDIDATES,
     checkpoint_path: Path | None = None,
     progress: QualificationProgressReporter | None = None,
 ) -> IdentityEvidence:
+    if not candidates:
+        raise ValueError('identity evidence requires at least one candidate')
+    if len(set(candidates)) != len(candidates):
+        raise ValueError('identity evidence candidates must be distinct')
     _validate_workload(
         live_rows=live_rows,
         finite_history_rows=finite_history_rows,
@@ -400,6 +415,7 @@ async def collect_identity_evidence(
         },
         writer=AtomicEvidenceWriter(checkpoint_path),
         progress=progress or QualificationProgressReporter(),
+        candidate_total=len(candidates),
     )
     observer.checkpoint()
     observer.emit_phase('schema', 'started')
@@ -411,6 +427,20 @@ async def collect_identity_evidence(
         schema,
         target_leaf_count=attached_finite_leaves,
     )
+    if IdentityCandidate.STAGED_KEY_REGISTRY in candidates:
+        await install_staged_lookup_prototype(
+            connection,
+            schema,
+            prefix='key_registry',
+            newest_first_leaf_names=tuple(
+                f'key_registry_history_finite_{year}'
+                for year in range(
+                    2026 + attached_finite_leaves - 1,
+                    2025,
+                    -1,
+                )
+            ),
+        )
     await connection.commit()
     observer.emit_phase('schema', 'complete')
     try:
@@ -418,20 +448,21 @@ async def collect_identity_evidence(
         observer.ballast_bytes = ballast_bytes
         observer.checkpoint()
         observer.emit_phase('ballast', 'complete')
-        candidates: list[IdentityCandidateEvidence] = []
-        for candidate_index, candidate in enumerate(IdentityCandidate, start=1):
+        measured_candidates: list[IdentityCandidateEvidence] = []
+        for candidate_index, candidate in enumerate(candidates, start=1):
             observer.emit_phase(
                 'candidate',
                 'started',
                 candidate=candidate,
                 candidate_index=candidate_index,
-                candidate_total=len(IdentityCandidate),
+                candidate_total=len(candidates),
             )
             measured = await _measure_identity_candidate(
                 connection,
                 schema,
                 candidate=candidate,
                 candidate_index=candidate_index,
+                candidate_total=len(candidates),
                 live_rows=live_rows,
                 finite_history_rows=finite_history_rows,
                 forever_history_rows=forever_history_rows,
@@ -444,13 +475,13 @@ async def collect_identity_evidence(
                 seed=seed,
                 observer=observer,
             )
-            candidates.append(measured)
+            measured_candidates.append(measured)
             observer.emit_phase(
                 'candidate',
                 'complete',
                 candidate=candidate,
                 candidate_index=candidate_index,
-                candidate_total=len(IdentityCandidate),
+                candidate_total=len(candidates),
             )
             await _truncate_candidate(connection, schema, candidate)
             await connection.commit()
@@ -462,7 +493,7 @@ async def collect_identity_evidence(
             bootstrap_resamples=bootstrap_resamples,
             ballast_bytes=ballast_bytes,
             seed=seed,
-            candidates=tuple(candidates),
+            candidates=tuple(measured_candidates),
         )
     except BaseException:
         observer.checkpoint(IdentityCheckpointStatus.EXECUTION_FAILURE)
@@ -551,6 +582,7 @@ async def _measure_identity_candidate(
     *,
     candidate: IdentityCandidate,
     candidate_index: int,
+    candidate_total: int,
     live_rows: int,
     finite_history_rows: int,
     forever_history_rows: int,
@@ -613,7 +645,7 @@ async def _measure_identity_candidate(
         'complete',
         candidate=candidate,
         candidate_index=candidate_index,
-        candidate_total=len(IdentityCandidate),
+        candidate_total=candidate_total,
         live_rows=live_rows,
         finite_history_rows=finite_history_rows,
         forever_history_rows=forever_history_rows,
@@ -675,8 +707,18 @@ def _storage_prefix(candidate: IdentityCandidate) -> str:
             return 'no_directory'
         case IdentityCandidate.KEY_REGISTRY:
             return 'key_registry'
+        case IdentityCandidate.STAGED_KEY_REGISTRY:
+            return 'key_registry'
         case IdentityCandidate.COMBINED_REGISTRY:
             return 'combined'
+
+
+def _lookup_function_name(candidate: IdentityCandidate) -> str:
+    match candidate:
+        case IdentityCandidate.STAGED_KEY_REGISTRY:
+            return 'key_registry_staged'
+        case _:
+            return candidate.value
 
 
 async def _truncate_candidate(
@@ -694,7 +736,10 @@ async def _truncate_candidate(
     match candidate:
         case IdentityCandidate.NO_DIRECTORY:
             pass
-        case IdentityCandidate.KEY_REGISTRY:
+        case (
+            IdentityCandidate.KEY_REGISTRY
+            | IdentityCandidate.STAGED_KEY_REGISTRY
+        ):
             await connection.execute(
                 text(f'TRUNCATE {schema.sql}.key_reservations')
             )
@@ -874,7 +919,10 @@ async def _seed_registry(
     match candidate:
         case IdentityCandidate.NO_DIRECTORY:
             return
-        case IdentityCandidate.KEY_REGISTRY:
+        case (
+            IdentityCandidate.KEY_REGISTRY
+            | IdentityCandidate.STAGED_KEY_REGISTRY
+        ):
             if keyed_percent == 0:
                 return
             for row_kind, rows, disposition in (
@@ -1012,7 +1060,10 @@ async def _analyze_candidate(
     match candidate:
         case IdentityCandidate.NO_DIRECTORY:
             pass
-        case IdentityCandidate.KEY_REGISTRY:
+        case (
+            IdentityCandidate.KEY_REGISTRY
+            | IdentityCandidate.STAGED_KEY_REGISTRY
+        ):
             await connection.execute(
                 text(f'ANALYZE {schema.sql}.key_reservations')
             )
@@ -1030,7 +1081,10 @@ async def _registry_footprint(
     match candidate:
         case IdentityCandidate.NO_DIRECTORY:
             return RelationFootprint(0, 0, 0, 0)
-        case IdentityCandidate.KEY_REGISTRY:
+        case (
+            IdentityCandidate.KEY_REGISTRY
+            | IdentityCandidate.STAGED_KEY_REGISTRY
+        ):
             relation = f'{schema.name}.key_reservations'
         case IdentityCandidate.COMBINED_REGISTRY:
             relation = f'{schema.name}.combined_registry'
@@ -1137,6 +1191,7 @@ async def _lookup_found(
     candidate: IdentityCandidate,
     task_id: str,
 ) -> bool:
+    function_name = _lookup_function_name(candidate)
     return bool(
         (
             await connection.execute(
@@ -1144,7 +1199,7 @@ async def _lookup_found(
                     f"""
                     SELECT (located).found
                     FROM (
-                        SELECT {schema.sql}.lookup_{candidate.value}(
+                        SELECT {schema.sql}.lookup_{function_name}(
                             CAST(:task_id AS varchar(36))
                         ) AS located
                     ) AS lookup
@@ -1170,6 +1225,7 @@ async def _measure_lookups(
     bootstrap_seed: int,
     observer: _IdentityRunObserver,
 ) -> tuple[LookupLatency, ...]:
+    function_name = _lookup_function_name(candidate)
     prepared_name = f'{schema.name}_{candidate.value}_lookup'
     await connection.execute(
         text(
@@ -1177,7 +1233,7 @@ async def _measure_lookups(
             PREPARE {prepared_name}(varchar(36)) AS
             SELECT (located).found
             FROM (
-                SELECT {schema.sql}.lookup_{candidate.value}($1) AS located
+                SELECT {schema.sql}.lookup_{function_name}($1) AS located
             ) AS lookup
             """
         )
@@ -1292,6 +1348,7 @@ async def _unprepared_timings(
     *,
     observer: _IdentityRunObserver,
 ) -> list[float]:
+    function_name = _lookup_function_name(candidate)
     samples: list[float] = []
     milestones = bounded_observation_milestones(len(task_ids))
     for observation, task_id in enumerate(task_ids):
@@ -1301,7 +1358,7 @@ async def _unprepared_timings(
                 f"""
                 SELECT (located).found
                 FROM (
-                    SELECT {schema.sql}.lookup_{candidate.value}(
+                    SELECT {schema.sql}.lookup_{function_name}(
                         CAST(:task_id AS varchar(36))
                     ) AS located
                 ) AS lookup
@@ -1390,6 +1447,7 @@ async def _cold_timings(
     if ballast_bytes <= 0:
         raise RuntimeError('buffer-cold measurement requires non-empty ballast')
     samples: list[float] = []
+    function_name = _lookup_function_name(candidate)
     milestones = _bounded_range_milestones(
         observation_offset,
         observation_target,
@@ -1412,7 +1470,7 @@ async def _cold_timings(
                 f"""
                 SELECT (located).found
                 FROM (
-                    SELECT {schema.sql}.lookup_{candidate.value}(
+                    SELECT {schema.sql}.lookup_{function_name}(
                         CAST(:task_id AS varchar(36))
                     ) AS located
                 ) AS lookup

@@ -29,6 +29,7 @@ from tests.task_history_prototypes.identity_evidence import (
     IdentityCandidate,
     LookupCategory,
     LookupPosture,
+    PRIMARY_IDENTITY_CANDIDATES,
     collect_identity_evidence,
 )
 from tests.task_history_prototypes.measurements import relation_footprint
@@ -278,7 +279,7 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
         )
 
     assert tuple(candidate.candidate for candidate in evidence.candidates) == tuple(
-        IdentityCandidate
+        PRIMARY_IDENTITY_CANDIDATES
     )
     expected_pairs = {
         (category, posture)
@@ -302,6 +303,49 @@ async def test_identity_evidence_collector_exercises_every_shape_and_posture(
     progress = progress_stream.getvalue()
     assert 'phase=seed status=complete candidate=no_directory' in progress
     assert 'phase=qualification status=complete' in progress
+
+
+async def test_identity_evidence_can_measure_only_the_staged_loader(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(identity_evidence, 'collect_conditions', _test_conditions)
+    monkeypatch.setattr(identity_evidence, '_install_ballast', _small_ballast)
+    checkpoint = tmp_path / 'staged-identity.partial.json'
+    async with engine.connect() as connection:
+        evidence = await collect_identity_evidence(
+            connection,
+            commit='test-head',
+            run_kind=EvidenceRunKind.SMOKE,
+            server_image='test-image',
+            host_description='test host',
+            storage_description='test storage',
+            demo_quiesced=True,
+            live_rows=50,
+            finite_history_rows=100,
+            forever_history_rows=50,
+            attached_finite_leaves=8,
+            keyed_percent=10,
+            warm_observations_per_category=2,
+            cold_observations_per_category=1,
+            bootstrap_resamples=20,
+            seed=20260805,
+            candidates=(IdentityCandidate.STAGED_KEY_REGISTRY,),
+            checkpoint_path=checkpoint,
+        )
+
+    assert tuple(candidate.candidate for candidate in evidence.candidates) == (
+        IdentityCandidate.STAGED_KEY_REGISTRY,
+    )
+    assert len(evidence.candidates[0].lookup) == 18
+    partial = json.loads(checkpoint.read_text())
+    assert partial['status'] == 'complete'
+    assert len(partial['finalized_cells']) == 18
+    assert {
+        cell['candidate_total'] for cell in partial['finalized_cells']
+    } == {1}
 
 
 async def test_pending_locator_evidence_compares_wide_and_compact_shapes(
