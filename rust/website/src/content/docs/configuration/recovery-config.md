@@ -46,6 +46,7 @@ let config = AppConfig {
 | `heartbeat_retention_hours` | `Option<u32>` | `Some(24)` | Hours to keep heartbeat rows; `None` disables pruning |
 | `worker_state_retention_hours` | `Option<u32>` | `Some(168)` (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
 | `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
+| `queue_terminal_record_retention_hours` | `HashMap<String, u32>` | `{}` | Per-queue overrides of the terminal window for plain (non-workflow) tasks (1h–5y). Queues not listed use the global window; overrides apply even when the global window is `None`. Override keys must name declared queues |
 | `retention_sweep_interval_s` | `u64` | `300` | Seconds between retention sweep passes (30s–24h). Frequent small sweeps keep each pass short instead of accumulating an hourly spike |
 | `retention_delete_batch_size` | `u32` | `500` | Rows per retention DELETE batch (50–10,000). Bounds per-statement duration, row locks, and WAL; each batch commits independently |
 
@@ -149,6 +150,20 @@ RecoveryConfig {
     ..Default::default()
 }
 ```
+
+Per-queue overrides shorten (or lengthen) the terminal window for plain tasks on specific queues — for example an hours-scale window for a high-volume metrics queue whose terminal rows have no audit value:
+
+```rust
+RecoveryConfig {
+    terminal_record_retention_hours: Some(24 * 30),
+    queue_terminal_record_retention_hours: HashMap::from([
+        ("metrics".to_owned(), 6), // metrics-queue terminal rows kept 6 hours
+    ]),
+    ..Default::default()
+}
+```
+
+Overrides govern plain (non-workflow) tasks only: workflow-backing task rows always age under the global window, so a workflow and its task rows are retained as a unit. Override keys must name declared queues (`custom_queues` in CUSTOM mode, `"default"` in DEFAULT mode) — a typo'd key fails config validation instead of silently doing nothing.
 
 To disable all automatic cleanup:
 

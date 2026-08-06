@@ -307,6 +307,41 @@ impl AppConfig {
             }
         }
 
+        // Retention overrides must name declared queues: a typo'd key would
+        // otherwise be a silent no-op (an inert override plus a phantom
+        // exclusion that matches nothing).
+        if !self
+            .recovery
+            .queue_terminal_record_retention_hours
+            .is_empty()
+        {
+            let declared: std::collections::HashSet<&str> = match self.queue_mode {
+                QueueMode::Default => std::iter::once("default").collect(),
+                QueueMode::Custom => self
+                    .custom_queues
+                    .iter()
+                    .flatten()
+                    .map(|q| q.name.as_str())
+                    .collect(),
+            };
+            let mut unknown: Vec<&str> = self
+                .recovery
+                .queue_terminal_record_retention_hours
+                .keys()
+                .map(String::as_str)
+                .filter(|q| !declared.contains(q))
+                .collect();
+            unknown.sort_unstable();
+            if !unknown.is_empty() {
+                let mut declared_sorted: Vec<&str> = declared.into_iter().collect();
+                declared_sorted.sort_unstable();
+                errors.push(AppConfigError::QueueMode(format!(
+                    "queue_terminal_record_retention_hours references unknown queue(s): \
+                     {unknown:?} (declared queues: {declared_sorted:?})",
+                )));
+            }
+        }
+
         // Cluster-wide cap
         if let Some(cap) = self.cluster_wide_cap {
             if cap == 0 {
@@ -459,6 +494,54 @@ mod tests {
             resend_on_transient_err: false,
         };
         assert!(config.validate().is_empty());
+    }
+
+    /// Retention overrides must name declared queues ("default" in DEFAULT
+    /// mode, custom_queues names in CUSTOM); a typo'd key would otherwise be
+    /// a silent no-op. Parity with horsies PR #207.
+    #[test]
+    fn queue_retention_override_must_name_declared_queue() {
+        let overrides = |queue: &str| RecoveryConfig {
+            queue_terminal_record_retention_hours: std::collections::HashMap::from([(
+                queue.to_owned(),
+                24,
+            )]),
+            ..Default::default()
+        };
+
+        // DEFAULT mode: only "default" is declared.
+        let mut config = AppConfig {
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: valid_broker(),
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: None,
+            max_claim_renew_age_ms: 180_000,
+            recovery: overrides("default"),
+            resilience: WorkerResilienceConfig::default(),
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+        assert!(config.validate().is_empty());
+        config.recovery = overrides("metricz");
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("metricz"));
+
+        // CUSTOM mode: declared = custom queue names.
+        config.queue_mode = QueueMode::Custom;
+        config.custom_queues = Some(vec![CustomQueueConfig {
+            name: "metrics".to_owned(),
+            priority: 1,
+            max_concurrency: Some(5),
+        }]);
+        config.recovery = overrides("metrics");
+        assert!(config.validate().is_empty());
+        config.recovery = overrides("default");
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].to_string().contains("default"));
     }
 
     #[test]

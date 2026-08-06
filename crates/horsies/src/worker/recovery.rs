@@ -266,12 +266,57 @@ WHERE id IN (SELECT id FROM budgeted)";
 // per parent row but finds nothing, and remains the correctness net for
 // non-retention deletes. rows_affected reports the top-level DELETE only, so
 // the batching loop keeps counting parent rows.
+//
+// $3 carries the queues with a per-queue override window
+// (queue_terminal_record_retention_hours); an empty array excludes nothing.
+// The exclusion shields PLAIN tasks only: workflow-backing rows
+// (is_workflow_task = TRUE) age under the global window even on override
+// queues, because the per-queue statement filters them out — an unconditional
+// exclusion would leave them unreachable by both statements and retained
+// forever. The exclusion is a heap filter on the already-bounded candidate
+// scan, so the 0025 index plan is unchanged.
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
 WITH doomed AS (
     SELECT t.id
     FROM horsies_tasks t
     WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+      AND NOT (t.queue_name = ANY(CAST($3 AS text[]))
+               AND t.is_workflow_task = FALSE)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_workflows w ON w.id = wt.workflow_id
+          WHERE wt.task_id = t.id
+            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
+      )
+    LIMIT $2
+    FOR UPDATE OF t SKIP LOCKED
+),
+purged_attempts AS (
+    DELETE FROM horsies_task_attempts
+    WHERE task_id IN (SELECT id FROM doomed)
+)
+DELETE FROM horsies_tasks
+WHERE id IN (SELECT id FROM doomed)";
+
+// Per-queue override window (queue_terminal_record_retention_hours), one
+// statement per override queue. Served by idx_horsies_tasks_queue_retention
+// (migration 0029): the 0025 expression index cannot serve an override window
+// efficiently because the override cutoff is far more recent than the global
+// one, making every other queue's retained terminal rows heap-filter misses.
+// Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows age
+// under the global window so a workflow and its task rows are retained as a
+// unit. The NOT EXISTS guard is kept as defense in depth (plain tasks have no
+// workflow_task linkage). Same purged_attempts mechanism as the global delete.
+const DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL: &str = "\
+WITH doomed AS (
+    SELECT t.id
+    FROM horsies_tasks t
+    WHERE t.queue_name = $3
+      AND t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
+      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
+      AND t.is_workflow_task = FALSE
       AND NOT EXISTS (
           SELECT 1
           FROM horsies_workflow_tasks wt
@@ -795,12 +840,22 @@ enum DrainedWhen {
     EmptyBatch,
 }
 
+/// Statement-specific third bind for the tasks retention deletes.
+#[derive(Clone, Copy)]
+enum ExtraBind<'a> {
+    /// Global tasks delete: queues shielded by a per-queue override window.
+    ExcludedQueues(&'a [String]),
+    /// Per-queue override delete: the override queue's name.
+    QueueName(&'a str),
+}
+
 /// Run one retention DELETE in bounded batches (autocommit per batch).
 ///
 /// Always runs at least one batch; stops when the backlog reads as drained
 /// (per `drained_when`) or the pass deadline is reached (backlog resumes next
 /// pass). Bounded batches keep per-transaction WAL and row locks flat
-/// regardless of backlog size.
+/// regardless of backlog size. `extra` supplies the statement-specific third
+/// bind of the tasks deletes; the two-bind statements pass `None`.
 async fn delete_expired_in_batches(
     pool: &PgPool,
     sql: &str,
@@ -808,16 +863,18 @@ async fn delete_expired_in_batches(
     batch_size: i64,
     deadline: tokio::time::Instant,
     drained_when: DrainedWhen,
+    extra: Option<ExtraBind<'_>>,
 ) -> Result<u64, sqlx::Error> {
     let hours = retention_hours.to_string();
     let mut total: u64 = 0;
     loop {
-        let deleted = sqlx::query(sql)
-            .bind(&hours)
-            .bind(batch_size)
-            .execute(pool)
-            .await?
-            .rows_affected();
+        let query = sqlx::query(sql).bind(&hours).bind(batch_size);
+        let query = match extra {
+            None => query,
+            Some(ExtraBind::ExcludedQueues(queues)) => query.bind(queues),
+            Some(ExtraBind::QueueName(queue)) => query.bind(queue),
+        };
+        let deleted = query.execute(pool).await?.rows_affected();
         total += deleted;
         let drained = match drained_when {
             DrainedWhen::ShortBatch => deleted < batch_size as u64,
@@ -856,6 +913,15 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
     // outlives the budget resumes next pass.
     let deadline = tokio::time::Instant::now() + RETENTION_PASS_TIME_BUDGET;
 
+    // Queues with a per-queue override window: shielded from the global
+    // tasks delete, then swept with their own windows below.
+    let mut override_queues: Vec<String> = config
+        .queue_terminal_record_retention_hours
+        .keys()
+        .cloned()
+        .collect();
+    override_queues.sort_unstable();
+
     let result: Result<(), sqlx::Error> = async {
         if let Some(hours) = config.heartbeat_retention_hours {
             deleted_heartbeats = delete_expired_in_batches(
@@ -865,6 +931,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::ShortBatch,
+                None,
             )
             .await?;
         }
@@ -877,6 +944,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::ShortBatch,
+                None,
             )
             .await?;
         }
@@ -895,6 +963,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::EmptyBatch,
+                None,
             )
             .await?;
 
@@ -905,6 +974,24 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::ShortBatch,
+                Some(ExtraBind::ExcludedQueues(&override_queues)),
+            )
+            .await?;
+        }
+
+        // Per-queue override windows govern plain (non-workflow) tasks on
+        // their queues and apply even when the global terminal window is
+        // disabled.
+        for queue_name in &override_queues {
+            let override_hours = config.queue_terminal_record_retention_hours[queue_name];
+            deleted_tasks += delete_expired_in_batches(
+                pool,
+                DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
+                override_hours,
+                batch_size,
+                deadline,
+                DrainedWhen::ShortBatch,
+                Some(ExtraBind::QueueName(queue_name)),
             )
             .await?;
         }
@@ -1234,6 +1321,7 @@ mod tests {
             TEST_RETENTION_BATCH,
             deadline,
             DrainedWhen::EmptyBatch,
+            None,
         )
         .await
         .unwrap();
@@ -1385,6 +1473,7 @@ mod tests {
             TEST_RETENTION_BATCH,
             deadline,
             DrainedWhen::EmptyBatch,
+            None,
         )
         .await
         .unwrap();
@@ -1462,6 +1551,7 @@ mod tests {
             6,
             deadline,
             DrainedWhen::EmptyBatch,
+            None,
         )
         .await
         .unwrap();
@@ -1521,7 +1611,7 @@ mod tests {
         seed_old_heartbeats(&pool, 5).await;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch)
+        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch, None)
             .await
             .unwrap();
 
@@ -1539,7 +1629,7 @@ mod tests {
 
         // Deadline already reached before the first batch.
         let deadline = tokio::time::Instant::now();
-        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch)
+        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch, None)
             .await
             .unwrap();
 
@@ -1622,6 +1712,7 @@ mod tests {
             sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_SQL))
                 .bind("240")
                 .bind(TEST_RETENTION_BATCH)
+                .bind(Vec::<String>::new())
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap();
@@ -1665,6 +1756,7 @@ mod tests {
             TEST_RETENTION_BATCH,
             deadline,
             DrainedWhen::ShortBatch,
+            Some(ExtraBind::ExcludedQueues(&[])),
         )
         .await
         .unwrap();
@@ -1707,6 +1799,7 @@ mod tests {
         let deleted = sqlx::query(DELETE_EXPIRED_TASKS_SQL)
             .bind("1")
             .bind(TEST_RETENTION_BATCH)
+            .bind(Vec::<String>::new())
             .execute(&pool)
             .await
             .unwrap()
@@ -1735,6 +1828,254 @@ mod tests {
 
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
             .bind(&survivor_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// Per-queue override windows (parity with horsies PR #207): the override
+    /// delete removes only its queue's eligible PLAIN tasks (other queues,
+    /// in-window rows, and workflow-backing rows on the same queue survive;
+    /// the doomed row's attempts are purged); the global delete's
+    /// excluded_queues shields override queues' plain tasks but NOT their
+    /// workflow-backing rows, and an empty array excludes nothing.
+    #[tokio::test]
+    #[serial]
+    async fn per_queue_retention_override_scopes_and_shields() {
+        let pool = test_pool().await;
+
+        // Drain pre-existing eligible candidates for deterministic counts.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        delete_expired_in_batches(
+            &pool,
+            DELETE_EXPIRED_TASKS_SQL,
+            0,
+            TEST_RETENTION_BATCH,
+            deadline,
+            DrainedWhen::ShortBatch,
+            Some(ExtraBind::ExcludedQueues(&[])),
+        )
+        .await
+        .unwrap();
+
+        let seed_task = |pool: PgPool, queue: &'static str, aged: bool, wf: bool| async move {
+            let id = Uuid::new_v4().to_string();
+            let ts = if aged { "NOW() - INTERVAL '2 hours'" } else { "NOW()" };
+            sqlx::query(&format!(
+                "INSERT INTO horsies_tasks (
+                    id, task_name, queue_name, priority, args, kwargs, status,
+                    is_workflow_task, sent_at, created_at, updated_at,
+                    completed_at, retry_count, max_retries, enqueue_sha
+                ) VALUES (
+                    $1, 'ret_override_task', $2, 100, '[]', '{{}}', 'COMPLETED',
+                    $3, {ts}, {ts}, {ts}, {ts}, 0, 0, $1
+                )",
+            ))
+            .bind(&id)
+            .bind(queue)
+            .bind(wf)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO horsies_task_attempts (
+                    task_id, attempt, outcome, will_retry, started_at, finished_at
+                ) VALUES ($1, 1, 'COMPLETED', FALSE, NOW(), NOW())",
+            )
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        };
+        let exists = |pool: PgPool, id: String| async move {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM horsies_tasks WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                == 1
+        };
+
+        let a_old_plain = seed_task(pool.clone(), "ret-q-a", true, false).await;
+        let a_recent_plain = seed_task(pool.clone(), "ret-q-a", false, false).await;
+        let a_old_wf = seed_task(pool.clone(), "ret-q-a", true, true).await;
+        let b_old_plain = seed_task(pool.clone(), "ret-q-b", true, false).await;
+
+        // Override delete (1h window) on queue a: only a_old_plain leaves.
+        let deleted = sqlx::query(DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL)
+            .bind("1")
+            .bind(TEST_RETENTION_BATCH)
+            .bind("ret-q-a")
+            .execute(&pool)
+            .await
+            .unwrap()
+            .rows_affected();
+        assert_eq!(deleted, 1, "override deletes only its queue's eligible plain tasks");
+        assert!(!exists(pool.clone(), a_old_plain.clone()).await);
+        assert!(exists(pool.clone(), a_recent_plain.clone()).await, "in-window survives");
+        assert!(exists(pool.clone(), a_old_wf.clone()).await, "workflow-backing survives");
+        assert!(exists(pool.clone(), b_old_plain.clone()).await, "other queue survives");
+        let orphan_attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1",
+        )
+        .bind(&a_old_plain)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(orphan_attempts, 0, "doomed row's attempts purged");
+
+        // Global delete (0h window) with queue a excluded: shields queue a's
+        // remaining PLAIN task but not its workflow-backing row; queue b's
+        // plain task leaves.
+        let excluded = vec!["ret-q-a".to_owned()];
+        sqlx::query(DELETE_EXPIRED_TASKS_SQL)
+            .bind("0")
+            .bind(TEST_RETENTION_BATCH)
+            .bind(&excluded)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            exists(pool.clone(), a_recent_plain.clone()).await,
+            "exclusion shields the override queue's plain tasks from the global window",
+        );
+        assert!(
+            !exists(pool.clone(), a_old_wf.clone()).await,
+            "workflow-backing rows are NOT shielded (they age under the global window)",
+        );
+        assert!(!exists(pool.clone(), b_old_plain.clone()).await);
+
+        // Empty exclusion excludes nothing.
+        sqlx::query(DELETE_EXPIRED_TASKS_SQL)
+            .bind("0")
+            .bind(TEST_RETENTION_BATCH)
+            .bind(Vec::<String>::new())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!exists(pool.clone(), a_recent_plain.clone()).await);
+    }
+
+    /// The per-queue override delete must plan onto a retention partial index
+    /// — the 0029 queue-leading composite or the 0025 expression index. At
+    /// seeded scale the planner's pick between them is arbitrary (the LIMIT
+    /// lets either terminate early under a correlation-blind estimate), so
+    /// the EXPLAIN accepts both: a drifted COALESCE or status-literal
+    /// regression falls off both partials and still fails. The 0029
+    /// composite's own shape is pinned against the catalog, where planner
+    /// arbitrariness cannot reach.
+    #[tokio::test]
+    #[serial]
+    async fn per_queue_retention_delete_uses_queue_index() {
+        let pool = test_pool().await;
+
+        // Re-runnable after a failed run: drop any leftover seed rows.
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_qidx_task'")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // 500 old (eligible) + 2000 recent terminal rows on the override
+        // queue, plus 2000 equally-old terminal rows on another queue
+        // (retained under the longer global window). Both single-column
+        // contenders scan 2500 rows and filter to 500 — the plain queue_name
+        // index carries the recent same-queue rows, the 0025 expression index
+        // carries the old other-queue rows — while the queue-leading
+        // composite lands on exactly the 500.
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+            )
+            SELECT
+                'ret-qidx-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g
+            FROM generate_series(1, 500) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+            )
+            SELECT
+                'ret-qidx-other-' || g, 'ret_qidx_task', 'ret-q-other', 100, '[]', '{}', 'COMPLETED',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
+                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g
+            FROM generate_series(1, 2000) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, created_at, updated_at, completed_at, retry_count, max_retries, enqueue_sha
+            )
+            SELECT
+                'ret-qidx-recent-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
+                NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g
+            FROM generate_series(1, 2000) g",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE horsies_tasks")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let plan_rows: Vec<(String,)> =
+            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL))
+                .bind("1")
+                .bind(TEST_RETENTION_BATCH)
+                .bind("ret-q-idx")
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+        tx.rollback().await.unwrap();
+
+        let plan = plan_rows
+            .iter()
+            .map(|(line,)| line.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_horsies_tasks_queue_retention")
+                || plan.contains("idx_horsies_tasks_retention"),
+            "per-queue delete must be served by a retention partial index; plan:\n{plan}",
+        );
+
+        // Catalog pin of the 0029 composite: queue-leading column order, the
+        // retention COALESCE, and the terminal-status partial predicate.
+        let indexdef: String = sqlx::query_scalar(
+            "SELECT pg_get_indexdef(oid) FROM pg_class \
+             WHERE relname = 'idx_horsies_tasks_queue_retention'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            indexdef.contains(
+                "(queue_name, COALESCE(completed_at, failed_at, updated_at, created_at))",
+            ),
+            "0029 composite must lead with queue_name; got: {indexdef}",
+        );
+        assert!(
+            indexdef.contains("WHERE"),
+            "0029 composite must be partial on terminal statuses; got: {indexdef}",
+        );
+
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_qidx_task'")
             .execute(&pool)
             .await
             .unwrap();

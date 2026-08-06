@@ -72,6 +72,14 @@ pub struct RecoveryConfig {
     #[serde(default = "default_terminal_record_retention")]
     pub terminal_record_retention_hours: Option<u32>,
 
+    /// Per-queue overrides of `terminal_record_retention_hours` for plain
+    /// (non-workflow) tasks; queues not listed use the global window.
+    /// Overrides apply even when the global window is `None`. Workflow-backing
+    /// task rows always age under the global window so a workflow and its task
+    /// rows are retained as a unit. Values in hours, 1h–5y.
+    #[serde(default)]
+    pub queue_terminal_record_retention_hours: std::collections::HashMap<String, u32>,
+
     /// Seconds between retention sweep passes (30s–24h). Frequent small
     /// sweeps keep each pass short instead of accumulating an hourly spike.
     #[serde(default = "default_retention_sweep_interval")]
@@ -139,6 +147,7 @@ impl Default for RecoveryConfig {
             heartbeat_retention_hours: Some(24),
             worker_state_retention_hours: Some(24 * 7),
             terminal_record_retention_hours: Some(24 * 30),
+            queue_terminal_record_retention_hours: std::collections::HashMap::new(),
             retention_sweep_interval_s: 300,
             retention_delete_batch_size: 500,
         }
@@ -174,6 +183,11 @@ pub enum RecoveryConfigError {
         heartbeat: u64,
         minimum: u64,
     },
+
+    #[error(
+        "queue_terminal_record_retention_hours['{queue}'] ({value}h) must be within 1..={max}h"
+    )]
+    QueueRetentionOutOfRange { queue: String, value: u32, max: u32 },
 
     #[error("{field} ({value}) must be >= {min}")]
     BelowMinimum {
@@ -301,6 +315,22 @@ impl RecoveryConfig {
                 value: self.claimed_stale_threshold_ms,
                 max: 3_600_000,
             });
+        }
+
+        // Per-queue retention overrides: hours bounded 1h–5y per queue.
+        const QUEUE_RETENTION_MAX_HOURS: u32 = 24 * 365 * 5;
+        let mut override_queues: Vec<&String> =
+            self.queue_terminal_record_retention_hours.keys().collect();
+        override_queues.sort();
+        for queue in override_queues {
+            let value = self.queue_terminal_record_retention_hours[queue];
+            if !(1..=QUEUE_RETENTION_MAX_HOURS).contains(&value) {
+                errors.push(RecoveryConfigError::QueueRetentionOutOfRange {
+                    queue: queue.clone(),
+                    value,
+                    max: QUEUE_RETENTION_MAX_HOURS,
+                });
+            }
         }
 
         // Retention sweep cadence (seconds) and batch size (rows).
@@ -726,6 +756,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn queue_retention_override_bounds() {
+        let mk = |value: u32| RecoveryConfig {
+            queue_terminal_record_retention_hours: std::collections::HashMap::from([(
+                "metrics".to_owned(),
+                value,
+            )]),
+            ..Default::default()
+        };
+
+        assert!(mk(1).validate().is_empty());
+        assert!(mk(24 * 365 * 5).validate().is_empty());
+        assert!(RecoveryConfig::default().validate().is_empty());
+
+        for bad in [0, 24 * 365 * 5 + 1] {
+            let errors = mk(bad).validate();
+            assert_eq!(errors.len(), 1);
+            assert!(matches!(
+                &errors[0],
+                RecoveryConfigError::QueueRetentionOutOfRange { queue, value, .. }
+                    if queue == "metrics" && *value == bad
+            ));
+        }
     }
 
     // --- Edge cases: exactly at minimum / maximum ---

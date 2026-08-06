@@ -238,7 +238,7 @@ The worker's reaper loop prunes old rows automatically every `retention_sweep_in
 |-------|-------------|---------|-----------|
 | `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
 | `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
-| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold |
+| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold; plain tasks on queues listed in `queue_terminal_record_retention_hours` use their per-queue window instead |
 | `horsies_task_attempts` | -- | -- | Purged set-wise in the same statement that deletes the parent task rows (the FK cascade remains as the net for non-retention deletes) |
 | `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold, and no live backing task |
 | `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Purged set-wise in the same statement that deletes the parent workflow rows (the FK cascade remains as the net for non-retention deletes) |

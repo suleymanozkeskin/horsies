@@ -49,6 +49,7 @@ pub fn fast_recovery_app_config() -> AppConfig {
         heartbeat_retention_hours: Some(1),
         worker_state_retention_hours: Some(1),
         terminal_record_retention_hours: Some(1),
+        queue_terminal_record_retention_hours: std::collections::HashMap::new(),
         retention_sweep_interval_s: 30,
         retention_delete_batch_size: 500,
     };
