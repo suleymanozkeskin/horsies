@@ -360,6 +360,7 @@ impl Horsies {
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
+            self.core.config().payload.clone(),
         ))
     }
 
@@ -402,6 +403,7 @@ impl Horsies {
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
+            self.core.config().payload.clone(),
         )
     }
 
@@ -454,6 +456,7 @@ impl Horsies {
             Arc::clone(&self.workflow_registry_cache),
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
+            self.core.config().payload.clone(),
         ))
     }
 

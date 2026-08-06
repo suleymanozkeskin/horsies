@@ -6,6 +6,7 @@ use uuid::Uuid;
 use std::sync::Arc;
 
 use crate::broker::PostgresBroker;
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{
     AnyNode, OnError, WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError,
@@ -136,11 +137,12 @@ pub async fn start_workflow<T>(
     spec: &WorkflowSpec,
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let wf_name = spec.name.clone();
 
-    start_workflow_inner(broker, spec, &wf_id, registry)
+    start_workflow_inner(broker, spec, &wf_id, registry, payload)
         .await
         .map_err(|e| WorkflowStartError {
             code: classify_workflow_error(&e),
@@ -159,9 +161,10 @@ pub async fn start_workflow_with_retry<T>(
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
     resend_on_transient_err: bool,
+    payload: &PayloadPolicy,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     if !resend_on_transient_err {
-        return start_workflow(broker, spec, workflow_id, registry).await;
+        return start_workflow(broker, spec, workflow_id, registry, payload).await;
     }
 
     // 1 initial attempt + START_RETRY_COUNT retries = 4 total attempts.
@@ -194,7 +197,7 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow(broker, spec, Some(wf_id.clone()), registry).await {
+        match start_workflow(broker, spec, Some(wf_id.clone()), registry, payload).await {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -214,6 +217,7 @@ async fn start_workflow_inner<T>(
     spec: &WorkflowSpec,
     wf_id: &str,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<WorkflowHandle<T>, WorkflowError> {
     let pool = broker.pool();
     // Idempotent start: if a caller-provided ID already exists, return
@@ -232,6 +236,7 @@ async fn start_workflow_inner<T>(
             wf_id.to_owned(),
             Arc::clone(broker),
             Arc::new(registry.clone()),
+            payload.clone(),
         ));
     }
 
@@ -271,6 +276,7 @@ async fn start_workflow_inner<T>(
         wf_id.to_owned(),
         Arc::clone(broker),
         Arc::new(registry.clone()),
+        payload.clone(),
     ))
 }
 
@@ -300,10 +306,11 @@ pub async fn retry_start<T>(
     spec: &WorkflowSpec,
     error: &WorkflowStartError,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     // Reuse the existing validation from horsies-core.
     let workflow_id = crate::core::workflow::start_types::validate_start_retry(error, &spec.name)?;
-    start_workflow(broker, spec, Some(workflow_id), registry).await
+    start_workflow(broker, spec, Some(workflow_id), registry, payload).await
 }
 
 // ---------------------------------------------------------------------------

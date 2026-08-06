@@ -6,6 +6,7 @@ use sqlx::{FromRow, PgPool};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::retry_utils::check_retry_eligibility;
@@ -1110,6 +1111,7 @@ pub fn spawn_workflow_recovery(
     pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
+    payload: PayloadPolicy,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1137,10 +1139,10 @@ pub fn spawn_workflow_recovery(
                             );
                         }
                         GatePass::Ungated => {
-                            run_workflow_recovery_pass(&pool, &registry, &config).await;
+                            run_workflow_recovery_pass(&pool, &registry, &config, &payload).await;
                         }
                         GatePass::Held(tx) => {
-                            run_workflow_recovery_pass(&pool, &registry, &config).await;
+                            run_workflow_recovery_pass(&pool, &registry, &config, &payload).await;
                             release_gate(tx).await;
                         }
                     }
@@ -1155,11 +1157,13 @@ async fn run_workflow_recovery_pass(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
+    payload: &PayloadPolicy,
 ) {
     match crate::workflow_engine::recover_stuck_workflows(
         pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
+        payload,
     )
     .await
     {

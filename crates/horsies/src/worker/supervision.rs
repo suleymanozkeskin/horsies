@@ -242,6 +242,7 @@ mod tests {
             pool,
             Arc::new(WorkflowSpecRegistry::new()),
             config,
+            crate::core::config::payload::PayloadPolicy::default(),
             cancel.clone(),
         );
         run_loop_death_case("workflow-recovery", cancel, handle).await;

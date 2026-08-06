@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::WorkflowSpecRegistry;
@@ -486,8 +487,9 @@ pub async fn resume_workflow(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> HandleResult<bool> {
-    resume_workflow_inner(pool, workflow_id, registry)
+    resume_workflow_inner(pool, workflow_id, registry, payload)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -496,6 +498,7 @@ async fn resume_workflow_inner(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<bool, WorkflowError> {
     let resumed: Option<IdRow> = sqlx::query_as(RESUME_WORKFLOW_SQL)
         .bind(workflow_id)
@@ -535,15 +538,15 @@ async fn resume_workflow_inner(
     }
 
     // Re-evaluate and enqueue tasks for this workflow.
-    let nodes_enqueued = reevaluate_and_enqueue(pool, workflow_id, registry).await?;
+    let nodes_enqueued = reevaluate_and_enqueue(pool, workflow_id, registry, payload).await?;
 
     // Cascade resume to paused child workflows (iterative BFS).
-    let children_resumed = cascade_resume_to_children(pool, workflow_id, registry).await?;
+    let children_resumed = cascade_resume_to_children(pool, workflow_id, registry, payload).await?;
 
     // Check if all tasks are already terminal (e.g., all pending tasks were
     // skipped during re-evaluation because upstream deps failed). Without
     // this, the workflow would remain stuck in RUNNING forever.
-    engine::check_workflow_completion(pool, workflow_id, registry).await?;
+    engine::check_workflow_completion(pool, workflow_id, registry, payload).await?;
 
     // Recovery completion pass: a child workflow may have COMPLETED while the
     // parent was paused, leaving the parent's sub-workflow node stale. Run the
@@ -554,7 +557,7 @@ async fn resume_workflow_inner(
     // finalizing_grace_ms = 0: resume recovers immediately (the grace only applies
     // to the periodic reaper smoothing the Phase 1→Phase 2 finalize window).
     if let Err(e) = crate::workflow_engine::recovery::recover_stuck_workflows_with_cap(
-        pool, registry, None, 0,
+        pool, registry, None, 0, payload,
     )
     .await
     {
@@ -672,6 +675,7 @@ async fn cascade_resume_to_children(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<usize, WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
@@ -699,10 +703,10 @@ async fn cascade_resume_to_children(
             );
 
             // Re-evaluate and enqueue tasks for the resumed child.
-            reevaluate_and_enqueue(pool, &child.id, registry).await?;
+            reevaluate_and_enqueue(pool, &child.id, registry, payload).await?;
 
             // Check if child is already complete after re-evaluation.
-            engine::check_workflow_completion(pool, &child.id, registry).await?;
+            engine::check_workflow_completion(pool, &child.id, registry, payload).await?;
 
             // Add to queue to resume its children.
             queue.push_back(child.id);
@@ -731,6 +735,7 @@ async fn reevaluate_and_enqueue(
     pool: &PgPool,
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<usize, WorkflowError> {
     let mut enqueued = 0usize;
     // 1. Re-evaluate PENDING tasks using full join evaluation.
@@ -762,7 +767,8 @@ async fn reevaluate_and_enqueue(
             if triggered_dep_indices.insert(dep.task_index) {
                 // Trigger full join evaluation via process_dependents.
                 if let Err(e) =
-                    engine::process_dependents(pool, workflow_id, dep.task_index, registry).await
+                    engine::process_dependents(pool, workflow_id, dep.task_index, registry, payload)
+                        .await
                 {
                     tracing::error!(
                         workflow_id,
@@ -1101,7 +1107,7 @@ mod resume_idempotency_tests {
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
         insert_running_task(&pool, &child).await;
 
-        let resumed = resume_workflow(&pool, &parent, &registry)
+        let resumed = resume_workflow(&pool, &parent, &registry, &PayloadPolicy::default())
             .await
             .expect("resume");
         assert!(resumed, "idempotent resume must report it recovered the child");
@@ -1127,7 +1133,9 @@ mod resume_idempotency_tests {
         insert_running_task(&pool, &id).await;
 
         // No paused children, no ready nodes → genuinely nothing to do.
-        let resumed = resume_workflow(&pool, &id, &registry).await.expect("resume");
+        let resumed = resume_workflow(&pool, &id, &registry, &PayloadPolicy::default())
+            .await
+            .expect("resume");
         assert!(!resumed, "a consistent RUNNING workflow resume must return Ok(false)");
 
         cleanup(&pool, &[&id]).await;

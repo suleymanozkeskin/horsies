@@ -108,9 +108,16 @@ pub async fn complete_task(
 
     // Call the workflow engine's completion handler.
     let is_success = result.is_ok();
-    horsies::on_workflow_task_complete(pool, &task_id, &result_str, is_success, registry)
-        .await
-        .expect("on_workflow_task_complete failed");
+    horsies::on_workflow_task_complete(
+        pool,
+        &task_id,
+        &result_str,
+        is_success,
+        registry,
+        &horsies::PayloadPolicy::default(),
+    )
+    .await
+    .expect("on_workflow_task_complete failed");
 }
 
 /// Get workflow task status by index.

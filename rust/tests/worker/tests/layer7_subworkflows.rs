@@ -316,7 +316,9 @@ async fn subworkflow_failure_pause_policy_preserves_error_after_resume() {
     // Resume; workflow finalizes FAILED, error preserved with detail.
     // The failed child is already terminal, so an empty registry suffices.
     let reg = WorkflowSpecRegistry::new();
-    resume_workflow(&pool, &wf_id, &reg).await.unwrap();
+    resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(20)).await;
     assert_eq!(status, "FAILED");
 

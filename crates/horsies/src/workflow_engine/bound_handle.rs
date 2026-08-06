@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 
 use crate::broker::PostgresBroker;
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::{TaskError, TaskResult};
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
@@ -29,6 +30,7 @@ pub struct WorkflowHandle<T> {
     workflow_id: String,
     broker: Arc<PostgresBroker>,
     registry: Arc<WorkflowSpecRegistry>,
+    payload: PayloadPolicy,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -43,11 +45,13 @@ impl<T> WorkflowHandle<T> {
         workflow_id: String,
         broker: Arc<PostgresBroker>,
         registry: Arc<WorkflowSpecRegistry>,
+        payload: PayloadPolicy,
     ) -> Self {
         Self {
             workflow_id,
             broker,
             registry,
+            payload,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -174,6 +178,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
             self.broker.pool(),
             &self.workflow_id,
             &self.registry,
+            &self.payload,
         )
         .await
     }
@@ -236,6 +241,7 @@ mod tests {
                 sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
             )),
             Arc::new(WorkflowSpecRegistry::new()),
+            PayloadPolicy::default(),
         );
 
         let result =
@@ -264,6 +270,7 @@ mod tests {
                 sqlx::PgPool::connect_lazy("postgresql://localhost/test").expect("lazy pool"),
             )),
             Arc::new(WorkflowSpecRegistry::new()),
+            PayloadPolicy::default(),
         );
 
         let result = handle.fold_task_result_error::<serde_json::Value>(
@@ -345,6 +352,7 @@ mod shared_listener_tests {
                 wf_id.clone(),
                 Arc::clone(&broker),
                 Arc::clone(&registry),
+                PayloadPolicy::default(),
             );
             futures.push(async move { handle.get(Some(Duration::from_millis(400))).await });
         }

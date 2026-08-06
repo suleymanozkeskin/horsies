@@ -350,6 +350,7 @@ impl Worker {
             self.broker.pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
+            self.app_config.payload.clone(),
             self.cancel.clone(),
         );
 
@@ -878,6 +879,7 @@ impl Worker {
                     .auto_terminate_orphaned_workflow_tasks;
                 let hostname = self.hostname.clone();
                 let payload_policy = self.app_config.payload.clone();
+                let phase2_policy = self.app_config.payload.clone();
                 self.tracker.spawn(async move {
                     let reason = format!("task '{}' not registered", task_name);
                     let task_error = TaskError::builtin(
@@ -895,7 +897,8 @@ impl Worker {
                     )
                     .await
                     {
-                        execution::run_phase2(broker.pool(), &workflow_registry, work).await;
+                        execution::run_phase2(broker.pool(), &workflow_registry, work, &phase2_policy)
+                            .await;
                     } else {
                         tracing::warn!(
                             task_id = %task_id,
@@ -915,6 +918,7 @@ impl Worker {
         let hostname = self.hostname.clone();
         let recovery = self.app_config.recovery.clone();
         let payload_policy = self.app_config.payload.clone();
+        let phase2_policy = self.app_config.payload.clone();
 
         // Mark this task in-dispatch until the spawned execution finishes, so the
         // buffered probe won't re-fetch it while it is still CLAIMED (P7).
@@ -942,7 +946,8 @@ impl Worker {
             drop(permit);
 
             if let Some(work) = phase2_work {
-                execution::run_phase2(broker.pool(), &workflow_registry, work).await;
+                execution::run_phase2(broker.pool(), &workflow_registry, work, &phase2_policy)
+                    .await;
             }
 
             in_dispatch
@@ -1609,7 +1614,8 @@ mod tests {
 
         if let Some(work) = phase2_work {
             let registry = WorkflowSpecRegistry::new();
-            run_phase2(broker.pool(), &registry, work).await;
+            let policy = crate::core::config::payload::PayloadPolicy::default();
+            run_phase2(broker.pool(), &registry, work, &policy).await;
         }
     }
 
@@ -1793,9 +1799,14 @@ mod tests {
             .unwrap();
 
         let registry = WorkflowSpecRegistry::new();
-        crate::workflow_engine::engine::check_workflow_completion(&pool, &workflow_id, &registry)
-            .await
-            .unwrap();
+        crate::workflow_engine::engine::check_workflow_completion(
+            &pool,
+            &workflow_id,
+            &registry,
+            &crate::core::config::payload::PayloadPolicy::default(),
+        )
+        .await
+        .unwrap();
 
         let (workflow_status, _) = fetch_workflow_state(&pool, &workflow_id).await;
         assert_eq!(
@@ -1876,7 +1887,8 @@ mod tests {
         assert_eq!(workflow_result, None);
 
         let registry = WorkflowSpecRegistry::new();
-        run_phase2(broker.pool(), &registry, phase2_work).await;
+        let policy = crate::core::config::payload::PayloadPolicy::default();
+        run_phase2(broker.pool(), &registry, phase2_work, &policy).await;
 
         let workflow_task_status = fetch_workflow_task_status(&pool, &workflow_id, &task_id).await;
         assert_eq!(workflow_task_status, "COMPLETED");
@@ -1918,7 +1930,8 @@ mod tests {
         failed_phase2_pool.close().await;
 
         let registry = WorkflowSpecRegistry::new();
-        run_phase2(&failed_phase2_pool, &registry, phase2_work).await;
+        let policy = crate::core::config::payload::PayloadPolicy::default();
+        run_phase2(&failed_phase2_pool, &registry, phase2_work, &policy).await;
 
         let (task_status, result_json, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");

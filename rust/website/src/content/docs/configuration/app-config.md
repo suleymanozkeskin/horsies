@@ -137,7 +137,7 @@ Per-boundary coverage:
 | `send` / `schedule` (args + kwargs) | yes | yes |
 | Scheduler slot enqueue (static schedule args/kwargs) | yes | yes (slot not enqueued, logged via the schedule's enqueue-failure path) |
 | Worker terminal result (success payload and error envelope) | yes | never |
-| Workflow-node enqueue (args_from-merged kwargs) | not checked — the upstream result that becomes these kwargs was already measured at its producer's finalize | no |
+| Workflow-node enqueue (args_from-merged kwargs, measured on the final kwargs JSON incl. injected workflow context) | yes | no — rejecting a mid-workflow node needs a designed node-failure path; a size limit must not strand a running workflow |
 
 ```rust
 use horsies::PayloadPolicy;

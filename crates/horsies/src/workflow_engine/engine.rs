@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::{
@@ -498,6 +499,7 @@ pub async fn on_workflow_task_complete(
     result_json: &str,
     is_success: bool,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     // Decide terminal status and (on failure) extract the TaskError for the
     // workflow_task error column before the statement. On success no error
@@ -609,10 +611,10 @@ pub async fn on_workflow_task_complete(
     }
 
     // Process downstream dependents.
-    process_dependents(pool, workflow_id, task_index, registry).await?;
+    process_dependents(pool, workflow_id, task_index, registry, payload).await?;
 
     // Check if all tasks are terminal.
-    check_workflow_completion(pool, workflow_id, registry).await?;
+    check_workflow_completion(pool, workflow_id, registry, payload).await?;
 
     Ok(())
 }
@@ -639,11 +641,13 @@ pub(crate) fn process_dependents<'a>(
     workflow_id: &'a str,
     completed_index: i32,
     registry: &'a WorkflowSpecRegistry,
+    payload: &'a PayloadPolicy,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
         let mut sources = vec![completed_index];
         while !sources.is_empty() {
-            sources = promote_dependents_level(pool, workflow_id, &sources, registry).await?;
+            sources =
+                promote_dependents_level(pool, workflow_id, &sources, registry, payload).await?;
         }
         Ok(())
     })
@@ -674,6 +678,7 @@ async fn promote_dependents_level(
     workflow_id: &str,
     source_indexes: &[i32],
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<Vec<i32>, WorkflowError> {
     let eval_rows: Vec<DependentEvalRow> = sqlx::query_as(GET_DEPENDENTS_EVAL_SQL)
         .bind(workflow_id)
@@ -800,7 +805,7 @@ async fn promote_dependents_level(
             if !ready_won.contains(&node.task_index) {
                 continue;
             }
-            match build_enqueued_task_params(pool, workflow_id, node, &dep_results).await {
+            match build_enqueued_task_params(pool, workflow_id, node, &dep_results, payload).await {
                 Ok(params) => {
                     built_indexes.push(node.task_index);
                     built.push(params);
@@ -884,7 +889,8 @@ async fn promote_dependents_level(
     // 6. Slow path: per-node enqueue for subworkflow / ctx_from dependents (own
     // transactions, unchanged). Errors are logged and the level continues.
     for node in &slow_nodes {
-        if let Err(e) = try_make_ready_and_enqueue(pool, workflow_id, node, registry).await {
+        if let Err(e) = try_make_ready_and_enqueue(pool, workflow_id, node, registry, payload).await
+        {
             tracing::error!(
                 workflow_id,
                 task_index = node.task_index,
@@ -907,6 +913,7 @@ async fn try_make_ready_and_enqueue(
     workflow_id: &str,
     task: &DependentRow,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     let dep_indices = &task.dependencies;
     let dep_count = dep_indices.len() as i32;
@@ -953,7 +960,7 @@ async fn try_make_ready_and_enqueue(
             // All terminal. Run if no failures, or if allow_failed_deps.
             if failed + skipped > 0 && !task.allow_failed_deps {
                 // Cannot run — skip this task.
-                skip_task(pool, workflow_id, task.task_index, registry).await?;
+                skip_task(pool, workflow_id, task.task_index, registry, payload).await?;
                 return Ok(());
             }
             true
@@ -963,7 +970,7 @@ async fn try_make_ready_and_enqueue(
                 true // At least one succeeded.
             } else if terminal == dep_count {
                 // All terminal but none completed — impossible to satisfy.
-                skip_task(pool, workflow_id, task.task_index, registry).await?;
+                skip_task(pool, workflow_id, task.task_index, registry, payload).await?;
                 return Ok(());
             } else {
                 return Ok(()); // Still waiting.
@@ -977,7 +984,7 @@ async fn try_make_ready_and_enqueue(
                 let remaining = dep_count - terminal;
                 if completed + remaining < min_success {
                     // Impossible to reach quorum — skip.
-                    skip_task(pool, workflow_id, task.task_index, registry).await?;
+                    skip_task(pool, workflow_id, task.task_index, registry, payload).await?;
                     return Ok(());
                 }
                 return Ok(()); // Still possible, keep waiting.
@@ -1023,10 +1030,10 @@ async fn try_make_ready_and_enqueue(
 
     if task.is_subworkflow {
         // Sub-workflow: launch child workflow instead of enqueuing a task.
-        enqueue_subworkflow_task(pool, workflow_id, task, registry, &dep_results).await?;
+        enqueue_subworkflow_task(pool, workflow_id, task, registry, &dep_results, payload).await?;
     } else {
         // Regular task: enqueue into horsies_tasks.
-        enqueue_workflow_task(pool, workflow_id, task, &dep_results).await?;
+        enqueue_workflow_task(pool, workflow_id, task, &dep_results, payload).await?;
     }
 
     Ok(())
@@ -1038,6 +1045,7 @@ async fn skip_task(
     workflow_id: &str,
     task_index: i32,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     sqlx::query(UPDATE_WORKFLOW_TASK_SKIPPED_SQL)
         .bind(workflow_id)
@@ -1048,7 +1056,7 @@ async fn skip_task(
     tracing::debug!(workflow_id, task_index, "workflow task skipped");
 
     // Cascade: process dependents of this skipped task.
-    process_dependents(pool, workflow_id, task_index, registry).await?;
+    process_dependents(pool, workflow_id, task_index, registry, payload).await?;
 
     Ok(())
 }
@@ -1093,6 +1101,7 @@ async fn build_enqueued_task_params(
     workflow_id: &str,
     task: &DependentRow,
     dep_results: &HashMap<i32, DepResultValue>,
+    payload: &PayloadPolicy,
 ) -> Result<EnqueueInsertParams, WorkflowError> {
     let task_id = Uuid::new_v4().to_string();
 
@@ -1112,6 +1121,21 @@ async fn build_enqueued_task_params(
         merged_kwargs,
     )
     .await?;
+
+    // Warn-only payload guardrail at the args_from injection point, where an
+    // upstream task's result envelope becomes this node's kwargs — the
+    // likeliest producer of oversized payloads. Rejecting a mid-workflow node
+    // needs a designed node-failure path (a size limit must not strand a
+    // running workflow), so reject semantics for workflow nodes are deferred —
+    // same as Python. Parity with horsies PR #208.
+    if let Some(kwargs_json) = merged_kwargs.as_deref() {
+        enforce_payload_policy(
+            payload,
+            &task.task_name,
+            PayloadKind::Kwargs,
+            kwargs_json.len(),
+        );
+    }
 
     let max_retries = parse_max_retries(task.task_options.as_deref());
     let enqueue_sha = format!("wf-{}", task_id);
@@ -1174,8 +1198,9 @@ async fn enqueue_workflow_task(
     workflow_id: &str,
     task: &DependentRow,
     dep_results: &HashMap<i32, DepResultValue>,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
-    let params = build_enqueued_task_params(pool, workflow_id, task, dep_results).await?;
+    let params = build_enqueued_task_params(pool, workflow_id, task, dep_results, payload).await?;
 
     // INSERT + LINK in a single transaction to prevent orphaned horsies_task rows
     // if the workflow is paused/cancelled between INSERT and LINK.
@@ -1251,6 +1276,7 @@ async fn fail_subworkflow_load(
     spec_name: &str,
     sub_definition_key: Option<&str>,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     let error = TaskError::builtin(
         OperationalErrorCode::SubworkflowLoadFailed,
@@ -1316,8 +1342,8 @@ async fn fail_subworkflow_load(
         }
     }
 
-    process_dependents(pool, workflow_id, task_index, registry).await?;
-    check_workflow_completion(pool, workflow_id, registry).await?;
+    process_dependents(pool, workflow_id, task_index, registry, payload).await?;
+    check_workflow_completion(pool, workflow_id, registry, payload).await?;
 
     Ok(())
 }
@@ -1330,6 +1356,7 @@ async fn enqueue_subworkflow_task(
     task: &DependentRow,
     registry: &WorkflowSpecRegistry,
     dep_results: &HashMap<i32, DepResultValue>,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     // Resolve child workflow spec: try definition_key first, then name-based lookup.
     let spec_name = task
@@ -1352,6 +1379,7 @@ async fn enqueue_subworkflow_task(
             spec_name,
             task.sub_definition_key.as_deref(),
             registry,
+            payload,
         )
         .await;
     };
@@ -1466,6 +1494,7 @@ pub async fn on_subworkflow_complete(
     child_status: &str,
     child_result_json: Option<&str>,
     registry: &WorkflowSpecRegistry,
+    payload: &PayloadPolicy,
 ) -> Result<(), WorkflowError> {
     // Fail closed on a non-terminal/unknown child status. A valid-but-non-terminal
     // status (e.g. RUNNING on a corrupt row) would otherwise be treated as a failure
@@ -1706,10 +1735,10 @@ pub async fn on_subworkflow_complete(
     }
 
     // Process dependents on the parent workflow.
-    process_dependents(pool, parent_workflow_id, parent_task_index, registry).await?;
+    process_dependents(pool, parent_workflow_id, parent_task_index, registry, payload).await?;
 
     // Check if parent workflow is complete.
-    check_workflow_completion(pool, parent_workflow_id, registry).await?;
+    check_workflow_completion(pool, parent_workflow_id, registry, payload).await?;
 
     Ok(())
 }
@@ -1838,8 +1867,9 @@ pub(crate) fn check_workflow_completion<'a>(
     pool: &'a PgPool,
     workflow_id: &'a str,
     registry: &'a WorkflowSpecRegistry,
+    payload: &'a PayloadPolicy,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
-    check_workflow_completion_inner(pool, workflow_id, registry)
+    check_workflow_completion_inner(pool, workflow_id, registry, payload)
 }
 
 #[allow(clippy::explicit_auto_deref)]
@@ -1847,6 +1877,7 @@ fn check_workflow_completion_inner<'a>(
     pool: &'a PgPool,
     workflow_id: &'a str,
     registry: &'a WorkflowSpecRegistry,
+    payload: &'a PayloadPolicy,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
         // Cheap unlocked pre-check: if any workflow task is still non-terminal,
@@ -1987,6 +2018,7 @@ fn check_workflow_completion_inner<'a>(
                 status_str,
                 if is_success { Some(&result_json) } else { None },
                 registry,
+                payload,
             )
             .await?;
         }
@@ -2448,7 +2480,16 @@ mod guard_tests {
 
         let registry = WorkflowSpecRegistry::new();
         let result =
-            on_subworkflow_complete(&pool, &parent_id, 0, &child_id, "RUNNING", None, &registry)
+            on_subworkflow_complete(
+                &pool,
+                &parent_id,
+                0,
+                &child_id,
+                "RUNNING",
+                None,
+                &registry,
+                &PayloadPolicy::default(),
+            )
                 .await;
         assert!(result.is_ok(), "guard must return Ok, got {:?}", result);
         assert_eq!(
@@ -2479,7 +2520,16 @@ mod guard_tests {
 
         let registry = WorkflowSpecRegistry::new();
         let result =
-            on_subworkflow_complete(&pool, &parent_id, 0, &child_id, "GARBAGE", None, &registry)
+            on_subworkflow_complete(
+                &pool,
+                &parent_id,
+                0,
+                &child_id,
+                "GARBAGE",
+                None,
+                &registry,
+                &PayloadPolicy::default(),
+            )
                 .await;
         assert!(result.is_ok(), "guard must return Ok, got {:?}", result);
         assert_eq!(
@@ -2520,6 +2570,7 @@ mod guard_tests {
             "COMPLETED",
             Some(child_result),
             &registry,
+            &PayloadPolicy::default(),
         )
         .await
         .expect("on_subworkflow_complete");
@@ -3047,7 +3098,14 @@ WHERE wt.workflow_id = $1
         let result_json =
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
 
-        on_workflow_task_complete(&pool, &task_id, &result_json, false, &registry)
+        on_workflow_task_complete(
+            &pool,
+            &task_id,
+            &result_json,
+            false,
+            &registry,
+            &PayloadPolicy::default(),
+        )
             .await
             .expect("complete (fail) workflow task");
 
@@ -3124,7 +3182,7 @@ WHERE wt.workflow_id = $1
         // All-terminal: finalizes to COMPLETED.
         let done = Uuid::new_v4().to_string();
         seed(&pool, &done, "COMPLETED").await;
-        check_workflow_completion(&pool, &done, &registry)
+        check_workflow_completion(&pool, &done, &registry, &PayloadPolicy::default())
             .await
             .expect("completion check");
         let done_status: String =
@@ -3138,7 +3196,7 @@ WHERE wt.workflow_id = $1
         // Non-terminal node: the pre-check defers, workflow stays RUNNING.
         let running = Uuid::new_v4().to_string();
         seed(&pool, &running, "RUNNING").await;
-        check_workflow_completion(&pool, &running, &registry)
+        check_workflow_completion(&pool, &running, &registry, &PayloadPolicy::default())
             .await
             .expect("completion check");
         let running_status: String =
@@ -3577,7 +3635,7 @@ mod promotion_batch_tests {
             insert_node(&pool, &wf_id, idx, vec![0], "PENDING", "all", false).await;
         }
 
-        process_dependents(&pool, &wf_id, 0, &registry)
+        process_dependents(&pool, &wf_id, 0, &registry, &PayloadPolicy::default())
             .await
             .expect("process dependents");
 
@@ -3617,7 +3675,7 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 2, vec![1], "PENDING", "all", false).await;
         insert_node(&pool, &wf_id, 3, vec![2], "PENDING", "all", false).await;
 
-        process_dependents(&pool, &wf_id, 0, &registry)
+        process_dependents(&pool, &wf_id, 0, &registry, &PayloadPolicy::default())
             .await
             .expect("process dependents");
 
@@ -3641,7 +3699,7 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 0, vec![], "FAILED", "all", false).await;
         insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", true).await;
 
-        process_dependents(&pool, &wf_id, 0, &registry)
+        process_dependents(&pool, &wf_id, 0, &registry, &PayloadPolicy::default())
             .await
             .expect("process dependents");
 
@@ -3670,7 +3728,7 @@ mod promotion_batch_tests {
         insert_node(&pool, &wf_id, 0, vec![], "COMPLETED", "all", false).await;
         insert_node(&pool, &wf_id, 1, vec![0], "PENDING", "all", false).await;
 
-        process_dependents(&pool, &wf_id, 0, &registry)
+        process_dependents(&pool, &wf_id, 0, &registry, &PayloadPolicy::default())
             .await
             .expect("process dependents");
 

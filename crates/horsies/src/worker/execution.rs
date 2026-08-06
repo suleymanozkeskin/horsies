@@ -1228,6 +1228,7 @@ pub(crate) async fn finalize_workflow_phase(
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
+    payload_policy: &PayloadPolicy,
 ) -> Result<(), FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
@@ -1238,6 +1239,7 @@ pub(crate) async fn finalize_workflow_phase(
             result_json,
             is_success,
             workflow_registry,
+            payload_policy,
         )
         .await
         .map_err(|e| {
@@ -1530,6 +1532,7 @@ pub(crate) async fn run_phase2(
     pool: &sqlx::PgPool,
     workflow_registry: &WorkflowSpecRegistry,
     work: Phase2Work,
+    payload_policy: &PayloadPolicy,
 ) {
     retry_phase2(
         pool,
@@ -1540,6 +1543,7 @@ pub(crate) async fn run_phase2(
         &work.queue_name,
         work.is_workflow_task,
         work.capacity_notified,
+        payload_policy,
     )
     .await;
 }
@@ -1656,6 +1660,7 @@ async fn retry_phase2(
     queue_name: &str,
     is_workflow_task: bool,
     capacity_notified: bool,
+    payload_policy: &PayloadPolicy,
 ) {
     // First attempt with the in-memory result.
     match finalize_workflow_phase(
@@ -1667,6 +1672,7 @@ async fn retry_phase2(
         queue_name,
         is_workflow_task,
         capacity_notified,
+        payload_policy,
     )
     .await
     {
@@ -1727,6 +1733,7 @@ async fn retry_phase2(
             queue_name,
             is_workflow_task,
             capacity_notified,
+            payload_policy,
         )
         .await
         {

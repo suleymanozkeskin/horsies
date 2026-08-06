@@ -1,6 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
 
@@ -308,12 +309,14 @@ pub async fn recover_stuck_workflows(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     finalizing_grace_ms: u64,
+    payload: &PayloadPolicy,
 ) -> Result<RecoveryReport, WorkflowError> {
     recover_stuck_workflows_with_cap(
         pool,
         registry,
         Some(GLOBAL_SCAN_ROW_CAP),
         finalizing_grace_ms,
+        payload,
     )
     .await
 }
@@ -332,15 +335,16 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     finalizing_grace_ms: u64,
+    payload: &PayloadPolicy,
 ) -> Result<RecoveryReport, WorkflowError> {
     let mut report = RecoveryReport::default();
 
-    recover_case0(pool, registry, max_rows, &mut report).await;
+    recover_case0(pool, registry, max_rows, &mut report, payload).await;
     recover_case1(pool, max_rows, &mut report).await;
     recover_case1_5(pool, registry, max_rows, &mut report).await;
-    recover_case1_6(pool, registry, max_rows, &mut report).await;
-    recover_case1_7(pool, registry, max_rows, finalizing_grace_ms, &mut report).await;
-    recover_case2_3(pool, registry, max_rows, &mut report).await;
+    recover_case1_6(pool, registry, max_rows, &mut report, payload).await;
+    recover_case1_7(pool, registry, max_rows, finalizing_grace_ms, &mut report, payload).await;
+    recover_case2_3(pool, registry, max_rows, &mut report, payload).await;
     recover_case4(pool, max_rows, &mut report).await;
 
     if report.total() > 0 {
@@ -370,6 +374,7 @@ async fn recover_case0(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    payload: &PayloadPolicy,
 ) {
     let rows = match sqlx::query_as::<_, StuckPendingRow>(CASE0_STUCK_PENDING_SQL)
         .bind(max_rows)
@@ -389,7 +394,7 @@ async fn recover_case0(
             continue;
         };
 
-        match engine::process_dependents(pool, &row.workflow_id, dep_index, registry).await {
+        match engine::process_dependents(pool, &row.workflow_id, dep_index, registry, payload).await {
             Ok(()) => {
                 report.case0_pending_reevaluated += 1;
                 tracing::debug!(
@@ -502,6 +507,7 @@ async fn recover_case1_6(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    payload: &PayloadPolicy,
 ) {
     let rows = match sqlx::query_as::<_, StaleSubworkflowRow>(CASE1_6_STALE_SUBWORKFLOW_SQL)
         .bind(max_rows)
@@ -525,6 +531,7 @@ async fn recover_case1_6(
             &row.child_status,
             row.child_result.as_deref(),
             registry,
+            payload,
         )
         .await
         {
@@ -557,6 +564,7 @@ async fn recover_case1_7(
     max_rows: Option<i64>,
     finalizing_grace_ms: u64,
     report: &mut RecoveryReport,
+    payload: &PayloadPolicy,
 ) {
     let rows = match sqlx::query_as::<_, StaleLinkedTaskRow>(CASE1_7_STALE_LINKED_TASK_SQL)
         .bind(max_rows)
@@ -632,6 +640,7 @@ async fn recover_case1_7(
             &result_json,
             is_success,
             registry,
+            payload,
         )
         .await
         {
@@ -662,6 +671,7 @@ async fn recover_case2_3(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    payload: &PayloadPolicy,
 ) {
     let rows = match sqlx::query_as::<_, StuckWorkflowRow>(CASE2_3_STUCK_WORKFLOW_SQL)
         .bind(max_rows)
@@ -677,7 +687,7 @@ async fn recover_case2_3(
     };
 
     for row in rows {
-        match engine::check_workflow_completion(pool, &row.workflow_id, registry).await {
+        match engine::check_workflow_completion(pool, &row.workflow_id, registry, payload).await {
             Ok(()) => {
                 report.case2_3_workflow_completed += 1;
                 tracing::debug!(
@@ -994,14 +1004,14 @@ mod cap_tests {
         let registry = WorkflowSpecRegistry::new();
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2), 0)
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2), 0, &PayloadPolicy::default())
             .await
             .unwrap();
         assert_eq!(report.case4_orphaned_failed, 2);
         assert_eq!(failed_count(&pool, &ids).await, 2);
 
         // Uncapped: the remaining orphan is failed.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 0)
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 0, &PayloadPolicy::default())
             .await
             .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
@@ -1068,7 +1078,7 @@ mod cap_tests {
         };
 
         // Within the 10s grace: Case 1.7 defers.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000)
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000, &PayloadPolicy::default())
             .await
             .unwrap();
         assert_eq!(report.case1_7_task_completed, 0, "within grace: not recovered");
@@ -1080,7 +1090,7 @@ mod cap_tests {
             .execute(&pool)
             .await
             .unwrap();
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000)
+        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000, &PayloadPolicy::default())
             .await
             .unwrap();
         assert_eq!(report.case1_7_task_completed, 1, "past grace: recovered");
@@ -1206,7 +1216,7 @@ mod cap_tests {
 
         // Case 1.7 (grace 0) repairs the workflow. The scan is global (shared
         // test DB), so assert on this workflow's rows, not the report count.
-        let report = recover_stuck_workflows(&pool, &registry, 0)
+        let report = recover_stuck_workflows(&pool, &registry, 0, &PayloadPolicy::default())
             .await
             .expect("recovery pass");
         assert!(report.case1_7_task_completed >= 1, "case 1.7 must fire");

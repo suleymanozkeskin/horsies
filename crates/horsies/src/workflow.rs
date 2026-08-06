@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock};
 use serde::de::DeserializeOwned;
 
 use crate::core::app as core_app;
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
     TypedNodeRef, WorkerResilienceConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
@@ -117,6 +118,7 @@ pub struct WorkflowFunction<T> {
     registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
+    payload: PayloadPolicy,
     _phantom: PhantomData<T>,
 }
 
@@ -127,6 +129,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
+        payload: PayloadPolicy,
     ) -> Self {
         Self {
             spec,
@@ -134,6 +137,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
             registry,
             resend_on_transient_err,
             resilience,
+            payload,
             _phantom: PhantomData,
         }
     }
@@ -216,6 +220,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
             Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
+            self.payload.clone(),
         ))
     }
 
@@ -335,6 +340,7 @@ pub(crate) struct WorkflowStarter {
     registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
+    payload: PayloadPolicy,
 }
 
 impl WorkflowStarter {
@@ -343,12 +349,14 @@ impl WorkflowStarter {
         registry: Arc<RwLock<crate::core::WorkflowSpecRegistry>>,
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
+        payload: PayloadPolicy,
     ) -> Self {
         Self {
             broker,
             registry,
             resend_on_transient_err,
             resilience,
+            payload,
         }
     }
 
@@ -390,6 +398,7 @@ impl WorkflowStarter {
             Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
+            self.payload.clone(),
         );
         bound.start().await
     }
@@ -434,6 +443,7 @@ impl WorkflowStarter {
             Arc::clone(&broker),
             Arc::new(registry),
             self.resend_on_transient_err,
+            self.payload.clone(),
         );
         bound.start_with_id(workflow_id).await
     }

@@ -357,7 +357,14 @@ async fn test_unresolvable_subworkflow_marks_parent_failed() {
         serde_json::json!("completed_A"),
     ))
     .unwrap();
-    horsies::on_workflow_task_complete(&pool, &task_id_a, &ok_result, true, &reg)
+    horsies::on_workflow_task_complete(
+        &pool,
+        &task_id_a,
+        &ok_result,
+        true,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+    )
         .await
         .unwrap();
 
@@ -440,7 +447,16 @@ async fn test_subworkflow_complete_does_not_rewrite_terminal_parent_node() {
     .unwrap();
 
     // Replay a FAILED child completion against the already-terminal parent node.
-    horsies::on_subworkflow_complete(&pool, &wf_id, 1, "replay-child-id", "FAILED", None, &reg)
+    horsies::on_subworkflow_complete(
+        &pool,
+        &wf_id,
+        1,
+        "replay-child-id",
+        "FAILED",
+        None,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+    )
         .await
         .unwrap();
 
@@ -665,7 +681,9 @@ async fn test_resume_continues_workflow() {
     pause_workflow(&pool, &wf_id).await.unwrap();
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(3)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg).await.unwrap();
+    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
     assert!(resumed, "resume should succeed");
 
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
@@ -987,7 +1005,9 @@ async fn test_on_error_pause_resume_completes() {
     let wf_id = start_wf(&pool, &spec).await;
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg).await.unwrap();
+    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
     assert!(resumed);
 
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
@@ -1056,7 +1076,14 @@ async fn test_on_error_pause_cascades_to_running_child() {
     ))
     .unwrap();
 
-    horsies::on_workflow_task_complete(&pool, &task_id, &failed_result, false, &reg)
+    horsies::on_workflow_task_complete(
+        &pool,
+        &task_id,
+        &failed_result,
+        false,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+    )
         .await
         .unwrap();
 
@@ -1146,6 +1173,7 @@ async fn test_on_error_fail_keeps_first_failed_error_by_index() {
         &err_result("SECOND_ERROR", "index 1 failed"),
         false,
         &reg,
+        &horsies::PayloadPolicy::default(),
     )
     .await
     .unwrap();
@@ -1156,6 +1184,7 @@ async fn test_on_error_fail_keeps_first_failed_error_by_index() {
         &err_result("FIRST_ERROR", "index 0 failed"),
         false,
         &reg,
+        &horsies::PayloadPolicy::default(),
     )
     .await
     .unwrap();
@@ -1227,7 +1256,9 @@ async fn test_recovery_preserves_results() {
     .unwrap();
 
     // Run recovery.
-    let _report = horsies::recover_stuck_workflows(&pool, &reg, 0).await.unwrap();
+    let _report = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
 
     // Verify recovered back to COMPLETED.
     let final_status: String =
@@ -1287,7 +1318,9 @@ async fn test_recovery_preserves_failed_state() {
     .unwrap();
 
     // Run recovery.
-    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0).await.unwrap();
+    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
 
     // Should be back to FAILED (not COMPLETED).
     let final_status: String =
@@ -1377,7 +1410,9 @@ async fn test_recovery_recomputes_first_failed_error() {
     .unwrap();
 
     // Run recovery.
-    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0).await.unwrap();
+    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
 
     // Workflow finalizes FAILED with the deterministic first failed task error,
     // replacing the stale later error.
@@ -1506,7 +1541,9 @@ async fn test_resume_on_running_noop() {
     // Wait until workflow is RUNNING.
     wait_for_wf_status(&pool, &wf_id, "RUNNING", Duration::from_secs(5)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg).await.unwrap();
+    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
+        .await
+        .unwrap();
     assert!(!resumed, "resume on RUNNING workflow should return false");
 }
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 
 use crate::broker::PostgresBroker;
+use crate::core::config::payload::PayloadPolicy;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{WorkflowSpec, WorkflowStartError, WorkflowStartResult};
 
@@ -20,6 +21,7 @@ pub struct BoundWorkflowSpec<T> {
     broker: Arc<PostgresBroker>,
     registry: Arc<WorkflowSpecRegistry>,
     resend_on_transient_err: bool,
+    payload: PayloadPolicy,
     _phantom: PhantomData<T>,
 }
 
@@ -33,12 +35,14 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         broker: Arc<PostgresBroker>,
         registry: Arc<WorkflowSpecRegistry>,
         resend_on_transient_err: bool,
+        payload: PayloadPolicy,
     ) -> Self {
         Self {
             spec,
             broker,
             registry,
             resend_on_transient_err,
+            payload,
             _phantom: PhantomData,
         }
     }
@@ -51,6 +55,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             None,
             &self.registry,
             self.resend_on_transient_err,
+            &self.payload,
         )
         .await
     }
@@ -66,6 +71,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             Some(workflow_id.into()),
             &self.registry,
             self.resend_on_transient_err,
+            &self.payload,
         )
         .await
     }
@@ -80,6 +86,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             &self.spec,
             error,
             &self.registry,
+            &self.payload,
         )
         .await
     }
@@ -90,6 +97,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             workflow_id.into(),
             Arc::clone(&self.broker),
             Arc::clone(&self.registry),
+            self.payload.clone(),
         )
     }
 }
@@ -116,7 +124,7 @@ mod tests {
             registry: Arc<WorkflowSpecRegistry>,
         ) {
             let _bound: BoundWorkflowSpec<String> =
-                BoundWorkflowSpec::from_broker(spec, broker, registry, true);
+                BoundWorkflowSpec::from_broker(spec, broker, registry, true, PayloadPolicy::default());
         }
 
         let _ = _assert_from_broker;
