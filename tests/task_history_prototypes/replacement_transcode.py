@@ -7,6 +7,7 @@ from enum import StrEnum
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.lifecycle.operations import TerminalizationKind
@@ -51,6 +52,11 @@ class ReplacementRelationState(StrEnum):
 class ReplacementCopyRejectionKind(StrEnum):
     SOURCE_CORRUPT = 'SOURCE_CORRUPT'
     SOURCE_SET_CHANGED = 'SOURCE_SET_CHANGED'
+
+
+class ReplacementSwapLockMode(StrEnum):
+    PARENT = 'ACCESS_EXCLUSIVE'
+    LEAVES = 'SHARE'
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +142,16 @@ class ReplacementVerification:
 class ReplacementSwap:
     job_id: str
     relations_swapped: int
+
+
+@dataclass(frozen=True, slots=True)
+class ReplacementSwapBusy:
+    job_id: str
+    lock_mode: ReplacementSwapLockMode
+    relation_names: tuple[str, ...]
+
+
+type ReplacementSwapOutcome = ReplacementSwap | ReplacementSwapBusy
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,13 +872,17 @@ async def verify_replacement_archive_transcode(
             target_codec=job.target_codec,
         )
         mismatches += mismatch
-        relation_invalid_targets = await _invalid_component_rows_in_relation(
-            connection,
-            schema,
-            relation_name=relation.replacement_relation_name,
-            component=ArchiveComponent(job.component),
-            version=job.target_version,
-        )
+        relation_invalid_targets = 0
+        if mismatch:
+            relation_invalid_targets = (
+                await _invalid_component_rows_in_relation(
+                    connection,
+                    schema,
+                    relation_name=relation.replacement_relation_name,
+                    component=ArchiveComponent(job.component),
+                    version=job.target_version,
+                )
+            )
         invalid_targets += relation_invalid_targets
         final_token = await _relation_verification_token(
             connection,
@@ -962,7 +982,7 @@ async def swap_verified_replacement_partitions(
     schema: PrototypeSchema,
     *,
     job_id: str,
-) -> ReplacementSwap:
+) -> ReplacementSwapOutcome:
     await lock_archive_transcode_program(connection, schema)
     await lock_archive_access_gate(connection, schema)
     job = await _lock_replacement_job(connection, schema, job_id)
@@ -973,20 +993,14 @@ async def swap_verified_replacement_partitions(
         raise ValueError('replacement relations must be verified before binding swap')
     await _require_active_job_maintenance(connection, schema, job)
     relations = await _replacement_relations(connection, schema, job_id)
-    for parent_name in sorted({row.parent_relation_name for row in relations}):
-        await connection.execute(
-            text(f'LOCK TABLE {_qualified(schema, parent_name)} '
-                 'IN ACCESS EXCLUSIVE MODE')
-        )
-    for relation in relations:
-        await connection.execute(
-            text(
-                f'LOCK TABLE '
-                f'{_qualified(schema, relation.source_relation_name)}, '
-                f'{_qualified(schema, relation.replacement_relation_name)} '
-                'IN SHARE MODE'
-            )
-        )
+    busy = await _try_replacement_swap_locks(
+        connection,
+        schema,
+        job_id=job_id,
+        relations=relations,
+    )
+    if busy is not None:
+        return busy
     changed = 0
     for relation in relations:
         if not await _verified_relation_token_matches(
@@ -1049,6 +1063,64 @@ async def swap_verified_replacement_partitions(
         {'job_id': job_id},
     )
     return ReplacementSwap(job_id, len(relations))
+
+
+async def _try_replacement_swap_locks(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    job_id: str,
+    relations: tuple[_ReplacementRelation, ...],
+) -> ReplacementSwapBusy | None:
+    parent_names = tuple(
+        sorted({row.parent_relation_name for row in relations})
+    )
+    lock_mode = ReplacementSwapLockMode.PARENT
+    relation_names = parent_names
+    try:
+        async with connection.begin_nested():
+            for parent_name in parent_names:
+                lock_mode = ReplacementSwapLockMode.PARENT
+                relation_names = (parent_name,)
+                await connection.execute(
+                    text(
+                        f'LOCK TABLE {_qualified(schema, parent_name)} '
+                        'IN ACCESS EXCLUSIVE MODE NOWAIT'
+                    )
+                )
+            for relation in relations:
+                lock_mode = ReplacementSwapLockMode.LEAVES
+                relation_names = (
+                    relation.source_relation_name,
+                    relation.replacement_relation_name,
+                )
+                await connection.execute(
+                    text(
+                        f'LOCK TABLE '
+                        f'{_qualified(schema, relation.source_relation_name)}, '
+                        f'{_qualified(schema, relation.replacement_relation_name)} '
+                        'IN SHARE MODE NOWAIT'
+                    )
+                )
+    except DBAPIError as error:
+        if _sqlstate(error) != '55P03':
+            raise
+        return ReplacementSwapBusy(
+            job_id=job_id,
+            lock_mode=lock_mode,
+            relation_names=tuple(
+                f'{schema.name}.{name}' for name in relation_names
+            ),
+        )
+    return None
+
+
+def _sqlstate(error: DBAPIError) -> str | None:
+    return getattr(error.orig, 'sqlstate', None) or getattr(
+        error.orig,
+        'pgcode',
+        None,
+    )
 
 
 async def finalize_replacement_archive_transcode(

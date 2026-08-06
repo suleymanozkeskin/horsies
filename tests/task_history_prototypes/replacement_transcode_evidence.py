@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass
 from uuid import uuid4
@@ -17,6 +18,8 @@ from tests.task_history_prototypes.evidence import (
 from tests.task_history_prototypes.replacement_transcode import (
     ReplacementCopyBatch,
     ReplacementReadyForVerification,
+    ReplacementSwap,
+    ReplacementSwapBusy,
     ReplacementTranscodePlan,
     ReplacementVerification,
     begin_replacement_archive_maintenance,
@@ -55,6 +58,8 @@ from tests.task_history_prototypes.transcode_evidence import (
 PAYLOAD_CONTROL_MINIMUM_RATIO = 0.50
 REPLACEMENT_MAINTENANCE_MAX_SECONDS = 10 * 60
 REPLACEMENT_SWAP_LOCK_MAX_SECONDS = 2.0
+REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS = 120
+REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS = 0.250
 
 
 def replacement_throughput_passed(
@@ -96,6 +101,8 @@ class ReplacementArchiveTranscodeBudgets:
     payload_control_ratio_minimum: float
     maintenance_seconds_maximum: int
     swap_lock_seconds_maximum: float
+    swap_lock_attempts_maximum: int
+    swap_retry_backoff_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +122,10 @@ class ReplacementArchiveTranscodeEvidence:
     control: PlainCopyHashControl | None
     candidate_control_ratio: float | None
     swap_lock_seconds: float
+    swap_attempts: int
+    swap_busy_attempts: int
+    swap_busy_seconds: float
+    swap_retry_sleep_seconds: float
     maintenance_seconds: float
     copied_rows_per_second: float
     verification: ReplacementVerification
@@ -124,6 +135,16 @@ class ReplacementArchiveTranscodeEvidence:
     swap_window_passed: bool
     wal_passed: bool
     peak_disk_passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplacementSwapExecution:
+    swap: ReplacementSwap
+    successful_lock_seconds: float
+    attempts: int
+    busy_attempts: int
+    busy_seconds: float
+    retry_sleep_seconds: float
 
 
 async def collect_replacement_archive_transcode_evidence(
@@ -272,14 +293,11 @@ async def collect_replacement_archive_transcode_evidence(
             )
         await connection.commit()
 
-        swap_started = time.perf_counter()
-        await swap_verified_replacement_partitions(
+        swap_execution = await execute_replacement_binding_swap(
             connection,
             schema,
             job_id=job_id,
         )
-        await connection.commit()
-        swap_lock_seconds = time.perf_counter() - swap_started
         peak_bytes = max(
             peak_bytes,
             await replacement_storage_bytes(
@@ -338,6 +356,12 @@ async def collect_replacement_archive_transcode_evidence(
                     REPLACEMENT_MAINTENANCE_MAX_SECONDS
                 ),
                 swap_lock_seconds_maximum=REPLACEMENT_SWAP_LOCK_MAX_SECONDS,
+                swap_lock_attempts_maximum=(
+                    REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS
+                ),
+                swap_retry_backoff_seconds=(
+                    REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS
+                ),
             ),
             workload={
                 'rows': rows,
@@ -355,7 +379,11 @@ async def collect_replacement_archive_transcode_evidence(
             copy_storage_probe_seconds=storage_probe_seconds,
             control=control,
             candidate_control_ratio=candidate_control_ratio,
-            swap_lock_seconds=swap_lock_seconds,
+            swap_lock_seconds=swap_execution.successful_lock_seconds,
+            swap_attempts=swap_execution.attempts,
+            swap_busy_attempts=swap_execution.busy_attempts,
+            swap_busy_seconds=swap_execution.busy_seconds,
+            swap_retry_sleep_seconds=swap_execution.retry_sleep_seconds,
             maintenance_seconds=maintenance_seconds,
             copied_rows_per_second=copied_rows_per_second,
             verification=verification,
@@ -365,7 +393,8 @@ async def collect_replacement_archive_transcode_evidence(
                 maintenance_seconds <= REPLACEMENT_MAINTENANCE_MAX_SECONDS
             ),
             swap_window_passed=(
-                swap_lock_seconds <= REPLACEMENT_SWAP_LOCK_MAX_SECONDS
+                swap_execution.successful_lock_seconds
+                <= REPLACEMENT_SWAP_LOCK_MAX_SECONDS
             ),
             wal_passed=(verification.wal_bytes <= planned.wal_budget_bytes),
             peak_disk_passed=(
@@ -376,6 +405,49 @@ async def collect_replacement_archive_transcode_evidence(
         await connection.rollback()
         await remove_archive_candidates(connection, schema)
         await connection.commit()
+
+
+async def execute_replacement_binding_swap(
+    connection: AsyncConnection,
+    schema: PrototypeSchema,
+    *,
+    job_id: str,
+) -> _ReplacementSwapExecution:
+    busy_attempts = 0
+    busy_seconds = 0.0
+    retry_sleep_seconds = 0.0
+    for attempt in range(1, REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS + 1):
+        attempt_started = time.perf_counter()
+        outcome = await swap_verified_replacement_partitions(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+        match outcome:
+            case ReplacementSwap():
+                await connection.commit()
+                return _ReplacementSwapExecution(
+                    swap=outcome,
+                    successful_lock_seconds=(
+                        time.perf_counter() - attempt_started
+                    ),
+                    attempts=attempt,
+                    busy_attempts=busy_attempts,
+                    busy_seconds=busy_seconds,
+                    retry_sleep_seconds=retry_sleep_seconds,
+                )
+            case ReplacementSwapBusy():
+                await connection.rollback()
+                busy_attempts += 1
+                busy_seconds += time.perf_counter() - attempt_started
+                if attempt == REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS:
+                    raise RuntimeError(
+                        'replacement binding swap remained busy after '
+                        f'{attempt} non-queuing attempts: {outcome!r}'
+                    )
+                await asyncio.sleep(REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS)
+                retry_sleep_seconds += REPLACEMENT_SWAP_RETRY_BACKOFF_SECONDS
+    raise AssertionError('replacement binding-swap retry loop was not exhaustive')
 
 
 async def _measure_plain_copy_hash_control(

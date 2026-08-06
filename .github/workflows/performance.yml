@@ -161,7 +161,9 @@ jobs:
                     metadata_tasks_per_second_minimum: 20000,
                     payload_control_ratio_minimum: 0.5,
                     maintenance_seconds_maximum: 600,
-                    swap_lock_seconds_maximum: 2
+                    swap_lock_seconds_maximum: 2,
+                    swap_lock_attempts_maximum: 120,
+                    swap_retry_backoff_seconds: 0.25
                   },
                   error: $error
                 }' > "$output"

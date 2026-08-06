@@ -32,6 +32,12 @@ from tests.task_history_prototypes.measurements import relation_footprint
 from tests.task_history_prototypes.recovery_evidence import (
     collect_pending_locator_evidence,
 )
+from tests.task_history_prototypes.replacement_transcode import (
+    ReplacementSwap,
+    ReplacementSwapBusy,
+    ReplacementSwapLockMode,
+    ReplacementSwapOutcome,
+)
 from tests.task_history_prototypes.replacement_transcode_evidence import (
     collect_replacement_archive_transcode_evidence,
     replacement_throughput_passed,
@@ -418,6 +424,10 @@ async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
     assert evidence.peak_additional_bytes >= 0
     assert evidence.copy_storage_probe_seconds >= 0
     assert evidence.swap_lock_seconds >= 0
+    assert evidence.swap_attempts == 1
+    assert evidence.swap_busy_attempts == 0
+    assert evidence.swap_busy_seconds == 0
+    assert evidence.swap_retry_sleep_seconds == 0
     assert evidence.maintenance_seconds >= evidence.swap_lock_seconds
     assert evidence.maintenance_duration_passed is True
     assert evidence.swap_window_passed is True
@@ -425,6 +435,8 @@ async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
     assert evidence.budgets.payload_control_ratio_minimum == 0.5
     assert evidence.budgets.maintenance_seconds_maximum == 600
     assert evidence.budgets.swap_lock_seconds_maximum == 2.0
+    assert evidence.budgets.swap_lock_attempts_maximum == 120
+    assert evidence.budgets.swap_retry_backoff_seconds == 0.250
     if component is ArchiveComponent.HISTORY_ROW:
         assert evidence.control is None
         assert evidence.candidate_control_ratio is None
@@ -438,3 +450,113 @@ async def test_replacement_transcode_evidence_measures_copy_verify_and_swap(
         assert evidence.control.payload_bytes_per_second > 0
         assert evidence.candidate_control_ratio is not None
         assert evidence.candidate_control_ratio > 0
+
+
+async def test_binding_swap_retry_policy_is_bounded_and_typed(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = PrototypeSchema('replacement_swap_retry_policy')
+    attempts = 0
+    delays: list[float] = []
+
+    async def swap_after_two_busy_outcomes(
+        _connection: AsyncConnection,
+        _schema: PrototypeSchema,
+        *,
+        job_id: str,
+    ) -> ReplacementSwapOutcome:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return ReplacementSwapBusy(
+                job_id=job_id,
+                lock_mode=ReplacementSwapLockMode.PARENT,
+                relation_names=('archive.history',),
+            )
+        return ReplacementSwap(job_id=job_id, relations_swapped=2)
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'swap_verified_replacement_partitions',
+        swap_after_two_busy_outcomes,
+    )
+    monkeypatch.setattr(
+        replacement_transcode_evidence.asyncio,
+        'sleep',
+        record_sleep,
+    )
+    async with engine.connect() as connection:
+        execution = (
+            await replacement_transcode_evidence.execute_replacement_binding_swap(
+                connection,
+                schema,
+                job_id='job-1',
+            )
+        )
+
+    assert execution.swap == ReplacementSwap('job-1', 2)
+    assert execution.attempts == 3
+    assert execution.busy_attempts == 2
+    assert execution.busy_seconds >= 0
+    assert execution.retry_sleep_seconds == 0.5
+    assert delays == [0.250, 0.250]
+
+
+async def test_binding_swap_retry_policy_exhaustion_fails_with_last_busy(
+    engine: AsyncEngine,
+    broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schema = PrototypeSchema('replacement_swap_retry_exhaustion')
+    attempts = 0
+
+    async def always_busy(
+        _connection: AsyncConnection,
+        _schema: PrototypeSchema,
+        *,
+        job_id: str,
+    ) -> ReplacementSwapOutcome:
+        nonlocal attempts
+        attempts += 1
+        return ReplacementSwapBusy(
+            job_id=job_id,
+            lock_mode=ReplacementSwapLockMode.PARENT,
+            relation_names=('archive.history',),
+        )
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'REPLACEMENT_SWAP_LOCK_MAX_ATTEMPTS',
+        3,
+    )
+    monkeypatch.setattr(
+        replacement_transcode_evidence,
+        'swap_verified_replacement_partitions',
+        always_busy,
+    )
+    monkeypatch.setattr(
+        replacement_transcode_evidence.asyncio,
+        'sleep',
+        no_sleep,
+    )
+    async with engine.connect() as connection:
+        with pytest.raises(
+            RuntimeError,
+            match='remained busy after 3 non-queuing attempts',
+        ) as raised:
+            await replacement_transcode_evidence.execute_replacement_binding_swap(
+                connection,
+                schema,
+                job_id='job-2',
+            )
+
+    assert attempts == 3
+    assert "relation_names=('archive.history',)" in str(raised.value)

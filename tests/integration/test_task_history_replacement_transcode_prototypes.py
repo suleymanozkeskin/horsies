@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -28,6 +29,9 @@ from tests.task_history_prototypes.replacement_transcode import (
     ReplacementCopyRejected,
     ReplacementCopyRejectionKind,
     ReplacementReadyForVerification,
+    ReplacementSwap,
+    ReplacementSwapBusy,
+    ReplacementSwapLockMode,
     ReplacementTranscodePlan,
     begin_replacement_archive_maintenance,
     finalize_replacement_archive_transcode,
@@ -240,6 +244,7 @@ async def _run_complete(
         schema,
         job_id=job_id,
     )
+    assert isinstance(swap, ReplacementSwap)
     assert swap.relations_swapped == planned.relation_count
     await connection.commit()
     final = await finalize_replacement_archive_transcode(
@@ -659,8 +664,56 @@ async def test_source_corruption_after_plan_is_rejected_before_copy(
     )
 
 
+async def test_zero_mismatch_verification_skips_target_validity_rescan(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection, schema, _ = replacement_schema
+    await _seed_history(connection, schema, finite_rows=1, forever_rows=0)
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.ATTEMPTS,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    await _copy_all(connection, schema, job_id=job_id, batch_size=10)
+
+    async def reject_target_validity_rescan(
+        _connection: AsyncConnection,
+        _schema: PrototypeSchema,
+        *,
+        relation_name: str,
+        component: ArchiveComponent,
+        version: int,
+    ) -> int:
+        raise AssertionError(
+            'zero-mismatch verification repeated target validity scan: '
+            f'{relation_name}, {component}, {version}'
+        )
+
+    monkeypatch.setattr(
+        replacement_transcode,
+        '_invalid_component_rows_in_relation',
+        reject_target_validity_rescan,
+    )
+    verification = await verify_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+    )
+    assert verification.verified is True
+    assert verification.replacement_row_mismatches == 0
+    assert verification.invalid_target_rows == 0
+
+
 async def test_replacement_mutation_blocks_verification_and_swap(
     replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection, schema, _ = replacement_schema
     await _seed_history(connection, schema, finite_rows=1, forever_rows=0)
@@ -696,6 +749,25 @@ async def test_replacement_mutation_blocks_verification_and_swap(
     )
     await connection.commit()
 
+    validity_scans: list[str] = []
+
+    async def track_target_validity_rescan(
+        _scan_connection: AsyncConnection,
+        _scan_schema: PrototypeSchema,
+        *,
+        relation_name: str,
+        component: ArchiveComponent,
+        version: int,
+    ) -> int:
+        validity_scans.append(relation_name)
+        return 0
+
+    monkeypatch.setattr(
+        replacement_transcode,
+        '_invalid_component_rows_in_relation',
+        track_target_validity_rescan,
+    )
+
     verification = await verify_replacement_archive_transcode(
         connection,
         schema,
@@ -703,6 +775,7 @@ async def test_replacement_mutation_blocks_verification_and_swap(
     )
     assert verification.verified is False
     assert verification.replacement_row_mismatches == 1
+    assert validity_scans == [relation_name]
     with pytest.raises(
         ValueError,
         match='must be verified before binding swap',
@@ -905,7 +978,82 @@ async def test_binding_swap_does_not_repeat_content_verification(
         schema,
         job_id=job_id,
     )
+    assert isinstance(swapped, ReplacementSwap)
     assert swapped.relations_swapped == 2
+
+
+async def test_binding_swap_lock_conflict_returns_typed_busy_without_queueing(
+    replacement_schema: tuple[AsyncConnection, PrototypeSchema, str],
+    engine: AsyncEngine,
+) -> None:
+    connection, schema, _ = replacement_schema
+    await _seed_history(connection, schema, finite_rows=1, forever_rows=0)
+    job_id = str(uuid4())
+    plan = await plan_replacement_archive_transcode(
+        connection,
+        schema,
+        job_id=job_id,
+        component=ArchiveComponent.RESULT,
+        source_version=1,
+        target_version=2,
+    )
+    assert isinstance(plan, ReplacementTranscodePlan)
+    await connection.commit()
+    await _copy_all(connection, schema, job_id=job_id, batch_size=10)
+    assert (
+        await verify_replacement_archive_transcode(
+            connection,
+            schema,
+            job_id=job_id,
+        )
+    ).verified
+    await connection.commit()
+    parent_name = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT parent_relation_name
+                FROM {schema.sql}.archive_replacement_relations
+                WHERE job_id = :job_id
+                """
+            ),
+            {'job_id': job_id},
+        )
+    ).scalar_one()
+
+    blocker = await engine.connect()
+    try:
+        await blocker.execute(
+            text(
+                f'LOCK TABLE ONLY {schema.sql}."{parent_name}" '
+                'IN SHARE MODE'
+            )
+        )
+        busy = await asyncio.wait_for(
+            swap_verified_replacement_partitions(
+                connection,
+                schema,
+                job_id=job_id,
+            ),
+            timeout=1.0,
+        )
+        assert busy == ReplacementSwapBusy(
+            job_id=job_id,
+            lock_mode=ReplacementSwapLockMode.PARENT,
+            relation_names=(f'{schema.name}.{parent_name}',),
+        )
+        await connection.rollback()
+    finally:
+        await blocker.rollback()
+        await blocker.close()
+
+    swapped = await swap_verified_replacement_partitions(
+        connection,
+        schema,
+        job_id=job_id,
+    )
+    assert isinstance(swapped, ReplacementSwap)
+    assert swapped.relations_swapped == 1
 
 
 async def test_schema_drift_after_verification_blocks_locked_swap(
