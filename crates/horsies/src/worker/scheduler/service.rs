@@ -18,6 +18,56 @@ const SCHEDULE_NAMESPACE: Uuid = Uuid::from_bytes([
     0x3c, 0x01, 0xf3, 0xf5, 0xaf, 0xd6, 0x43, 0x63, 0xb7, 0x26, 0xa5, 0xda, 0xb5, 0x1a, 0x81, 0xc7,
 ]);
 
+/// Wall-clock target between missing-row existence checks while every state
+/// row is present and initialized. The check guards rare conditions (startup
+/// init failure, external row deletion); running it every tick reads the whole
+/// schedule-state table each tick for an answer that changes only on those
+/// rare events. Denominated in seconds, not ticks, so the worst-case dormancy
+/// bound for an externally deleted row does not scale with
+/// `check_interval_seconds`. While any row is missing or a re-init failed, the
+/// check reruns every tick until a fully healthy pass.
+const EXISTENCE_CHECK_INTERVAL_S: u32 = 60;
+
+/// Cadence gate for the missing-row existence check.
+///
+/// Reproduces Python's countdown: a check runs when the countdown hits zero;
+/// a healthy pass re-arms the full interval, an unhealthy pass re-checks on
+/// the very next tick.
+struct ExistenceCheckCadence {
+    /// Ticks between checks while healthy, derived once from the tick length.
+    interval_ticks: u32,
+    /// Zero means the next tick runs the check.
+    ticks_until_check: u32,
+}
+
+impl ExistenceCheckCadence {
+    fn new(check_interval_seconds: u32) -> Self {
+        let seconds = check_interval_seconds.max(1);
+        let interval_ticks = ((f64::from(EXISTENCE_CHECK_INTERVAL_S) / f64::from(seconds)).round()
+            as u32)
+            .max(1);
+        Self {
+            interval_ticks,
+            ticks_until_check: 0,
+        }
+    }
+
+    /// True when this tick must run the existence check.
+    fn should_check(&self) -> bool {
+        self.ticks_until_check == 0
+    }
+
+    /// Record a completed check's health and start the next countdown.
+    fn record(&mut self, healthy: bool) {
+        self.ticks_until_check = if healthy { self.interval_ticks } else { 1 };
+    }
+
+    /// Advance one tick.
+    fn tick(&mut self) {
+        self.ticks_until_check = self.ticks_until_check.saturating_sub(1);
+    }
+}
+
 /// Resolve the effective priority for a queue, mirroring [`Horsies::effective_priority()`].
 ///
 /// Priority resolution:
@@ -65,6 +115,8 @@ pub fn spawn_scheduler(
 
         tracing::info!("scheduler started");
         let check_interval = Duration::from_secs(schedule_config.check_interval_seconds as u64);
+        let mut existence_cadence =
+            ExistenceCheckCadence::new(schedule_config.check_interval_seconds);
 
         // Main loop.
         loop {
@@ -82,6 +134,7 @@ pub fn spawn_scheduler(
                 &schedule_config.schedules,
                 schedule_config.check_interval_seconds,
                 &app_config,
+                &mut existence_cadence,
             )
             .await
             {
@@ -170,25 +223,40 @@ async fn initialize_schedules(
 ///
 /// Diffs enabled schedule names against existing state-row names (one PK-column
 /// SELECT, no locks) and inserts the missing ones with `next_run_at` computed
-/// from `now`. Per-schedule isolated (a failure logs and is retried next tick),
-/// idempotent, and race-safe via `insert_state_if_absent` (a concurrent winner's
-/// row is preserved). Parity with horsies PR #123.
-async fn ensure_states_exist(pool: &sqlx::PgPool, schedules: &[TaskSchedule], now: DateTime<Utc>) {
+/// from `now`. Per-schedule isolated (a failure logs and is retried on the next
+/// check), idempotent, and race-safe via `insert_state_if_absent` (a concurrent
+/// winner's row is preserved). Parity with horsies PR #123.
+///
+/// Runs on a cadence, not every tick (parity with horsies PR #206): while
+/// healthy the caller re-checks roughly every [`EXISTENCE_CHECK_INTERVAL_S`]
+/// seconds; an unhealthy pass makes the caller re-check every tick until a
+/// fully healthy one. A missing row healed without error in the same pass
+/// counts as healthy.
+///
+/// Returns `true` when every enabled schedule had a state row or was
+/// re-initialized without error in this pass.
+async fn ensure_states_exist(
+    pool: &sqlx::PgPool,
+    schedules: &[TaskSchedule],
+    now: DateTime<Utc>,
+) -> bool {
     let enabled: Vec<&TaskSchedule> = schedules.iter().filter(|s| s.enabled).collect();
     if enabled.is_empty() {
-        return;
+        return true;
     }
 
     let existing: std::collections::HashSet<String> = match state::get_existing_names(pool).await {
         Ok(names) => names.into_iter().collect(),
         Err(e) => {
             // A failed existence read this tick is not a regression: the due
-            // query would fail the same way. Skip the heal until the next tick.
+            // query would fail the same way. Skip the heal; the unhealthy
+            // verdict makes the next tick re-check.
             tracing::warn!(error = %e, "schedule self-heal: existence read failed, skipping tick");
-            return;
+            return false;
         }
     };
 
+    let mut healthy = true;
     for schedule in enabled {
         if existing.contains(&schedule.name) {
             continue;
@@ -214,13 +282,17 @@ async fn ensure_states_exist(pool: &sqlx::PgPool, schedules: &[TaskSchedule], no
                 "self-healed missing schedule state",
             ),
             Ok(false) => {} // lost the check-then-insert race; winner's row stands
-            Err(e) => tracing::error!(
-                schedule = %schedule.name,
-                error = %e,
-                "schedule self-heal insert failed, will retry next tick",
-            ),
+            Err(e) => {
+                healthy = false;
+                tracing::error!(
+                    schedule = %schedule.name,
+                    error = %e,
+                    "schedule self-heal insert failed, will retry next tick",
+                );
+            }
         }
     }
+    healthy
 }
 
 /// Check for due schedules and enqueue their tasks.
@@ -234,6 +306,7 @@ async fn check_and_enqueue(
     schedules: &[TaskSchedule],
     check_interval_seconds: u32,
     app_config: &AppConfig,
+    existence_cadence: &mut ExistenceCheckCadence,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
 
@@ -251,8 +324,14 @@ async fn check_and_enqueue(
     // Self-heal: recreate state rows for enabled schedules missing one (init
     // failure or external delete) so they are not silently dormant until the
     // next restart. Runs before the due query — recreated rows have a strictly
-    // future next_run_at and so are not due this tick.
-    ensure_states_exist(broker.pool(), schedules, now).await;
+    // future next_run_at and so are not due this tick. Gated to a ~60s cadence
+    // while healthy (parity with horsies PR #206); the due read below still
+    // runs every tick.
+    if existence_cadence.should_check() {
+        let healthy = ensure_states_exist(broker.pool(), schedules, now).await;
+        existence_cadence.record(healthy);
+    }
+    existence_cadence.tick();
 
     let due = state::get_due_schedules_filtered(broker.pool(), &enabled_names, now).await?;
 
@@ -1149,7 +1228,8 @@ mod tests {
         let schedules = vec![interval_schedule_secs(&missing, 60), disabled_schedule];
 
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 0).unwrap();
-        ensure_states_exist(&pool, &schedules, now).await;
+        let healthy = ensure_states_exist(&pool, &schedules, now).await;
+        assert!(healthy, "a pass that heals its missing row counts healthy");
 
         // Missing enabled schedule was healed with a strictly-future next_run.
         let healed = state::get_state(&pool, &missing).await.unwrap().unwrap();
@@ -1161,7 +1241,8 @@ mod tests {
 
         // A later tick leaves the existing row's next_run untouched (no overwrite).
         let later = now + chrono::Duration::seconds(30);
-        ensure_states_exist(&pool, &schedules, later).await;
+        let healthy = ensure_states_exist(&pool, &schedules, later).await;
+        assert!(healthy, "all rows present is a healthy pass");
         let after = state::get_state(&pool, &missing).await.unwrap().unwrap();
         assert_eq!(
             after.next_run_at, healed.next_run_at,
@@ -1174,5 +1255,57 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+    }
+
+    // --- Existence-check cadence (parity with horsies PR #206) ---
+
+    /// The tick count preserves the ~60s wall-clock cadence across tick
+    /// configs; a tick longer than the target floors at 1.
+    #[test]
+    fn existence_cadence_ticks_derived_from_check_interval() {
+        for (seconds, expected_ticks) in [(1, 60), (10, 6), (60, 1), (120, 1)] {
+            let cadence = ExistenceCheckCadence::new(seconds);
+            assert_eq!(
+                cadence.interval_ticks, expected_ticks,
+                "check_interval_seconds={seconds}",
+            );
+        }
+    }
+
+    /// While healthy, only the first tick checks; subsequent ticks inside the
+    /// interval skip, and the check runs again once the interval elapses.
+    #[test]
+    fn existence_cadence_healthy_skips_until_interval_elapses() {
+        let mut cadence = ExistenceCheckCadence::new(10); // 6 ticks
+        let mut checks = 0;
+        for _ in 0..7 {
+            if cadence.should_check() {
+                checks += 1;
+                cadence.record(true);
+            }
+            cadence.tick();
+        }
+        assert_eq!(checks, 2, "tick 0 and tick 6 check; ticks 1-5 skip");
+    }
+
+    /// An unhealthy pass re-checks every tick until a healthy one, then the
+    /// cadence resumes.
+    #[test]
+    fn existence_cadence_unhealthy_rechecks_every_tick_until_healthy() {
+        let mut cadence = ExistenceCheckCadence::new(10); // 6 ticks
+        let health = [false, false, true]; // two failed passes, then healthy
+        let mut checks = 0;
+        for tick in 0..6 {
+            if cadence.should_check() {
+                cadence.record(health[checks.min(2)]);
+                checks += 1;
+                assert!(tick <= 2, "checks must be consecutive while unhealthy");
+            }
+            cadence.tick();
+        }
+        assert_eq!(
+            checks, 3,
+            "ticks 0/1/2 check (unhealthy, unhealthy, healthy); 3-5 skip",
+        );
     }
 }
