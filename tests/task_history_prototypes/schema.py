@@ -19,10 +19,14 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # installers restore the qualified v26 clone shape explicitly. v28 adds
 # the reservation registry table and functions — new relations the
 # prototype program never touches (its own registry candidates live in
-# disposable namespaces). The base moves; the qualified behavior does
+# disposable namespaces). v29 creates the task-history foundation at
+# its final shape and v30 adds the registry maintenance indexes — both
+# additive on surfaces the prototypes either clone-restore or never
+# touch, and neither touches horsies_tasks, so the LIKE-clone restore
+# lists are UNAFFECTED. The base moves; the qualified behavior does
 # not. Any future base move re-litigates this guard the same way —
 # explicitly, never by widening it to a range.
-_EXPECTED_BASE_SCHEMA_VERSION = 28
+_EXPECTED_BASE_SCHEMA_VERSION = 30
 
 
 @dataclass(frozen=True, slots=True)
