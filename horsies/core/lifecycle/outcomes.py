@@ -18,6 +18,7 @@ outcome, and it raises.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -262,7 +263,7 @@ def decode_outcome_row(row: Mapping[str, Any]) -> TerminalizationOutcome:
         OutcomeDecodeError: the row does not satisfy the wire contract.
     """
     _require_exact_columns(row)
-    task_id = _require_str(row, 'task_id')
+    task_id = _require_identity_text(row, 'task_id')
     ordinality = _optional_int(row, 'ordinality')
     observed = ObservedTaskState(
         status=_optional_status(row, 'observed_status'),
@@ -414,6 +415,21 @@ def _require_str(source: Mapping[str, Any], key: str) -> str:
     if not isinstance(value, str):
         raise OutcomeDecodeError(f'{key} must be a string, got {type(value).__name__}')
     return value
+
+
+def _require_identity_text(source: Mapping[str, Any], key: str) -> str:
+    """An identity column as text; the driver hands uuid columns back
+    as ``uuid.UUID`` and Python presents identities as strings."""
+    value = source.get(key)
+    match value:
+        case str():
+            return value
+        case uuid.UUID():
+            return str(value)
+        case _:
+            raise OutcomeDecodeError(
+                f'{key} must be an identity, got {type(value).__name__}'
+            )
 
 
 def _optional_str(source: Mapping[str, Any], key: str) -> str | None:

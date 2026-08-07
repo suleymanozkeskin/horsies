@@ -176,12 +176,12 @@ def _decode_recovered_task_result(
 
 
 # Each candidate query carries a uniform scope filter:
-#   AND (CAST(:scope_ids AS varchar[]) IS NULL OR <wf_col> = ANY(CAST(:scope_ids AS varchar[])))
+#   AND (CAST(:scope_ids AS uuid[]) IS NULL OR <wf_col> = ANY(CAST(:scope_ids AS uuid[])))
 # When ``:scope_ids`` is NULL (global reaper), the OR short-circuits and the
 # query behaves exactly as before. When a list of workflow ids is bound
 # (resume-time race closure), candidates are restricted to that tree. The
-# explicit ``::varchar[]`` cast avoids "could not determine data type" on the
-# NULL bind (workflow ids are VARCHAR(36) columns).
+# explicit ``::uuid[]`` cast avoids "could not determine data type" on the
+# NULL bind (workflow ids are uuid columns).
 #
 # Each query also carries ``LIMIT CAST(:max_rows AS bigint)``: the global
 # reaper pass binds GLOBAL_SCAN_ROW_CAP so one pass cannot hold its session
@@ -201,7 +201,7 @@ GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
     JOIN horsies_workflows w ON w.id = wt.workflow_id
     WHERE wt.status = 'PENDING'
       AND w.status = 'RUNNING'
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS uuid[])))
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks dep
           WHERE dep.workflow_id = wt.workflow_id
@@ -220,7 +220,7 @@ GET_READY_NOT_ENQUEUED_SQL = text("""
       AND wt.task_id IS NULL
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS uuid[])))
     LIMIT CAST(:max_rows AS bigint)
 """)
 
@@ -232,7 +232,7 @@ GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL = text("""
       AND wt.is_subworkflow = TRUE
       AND wt.sub_workflow_id IS NULL
       AND w.status = 'RUNNING'
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS uuid[])))
     LIMIT CAST(:max_rows AS bigint)
 """)
 
@@ -244,7 +244,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     WHERE child.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
       AND wt.status = 'RUNNING'
       AND parent.status = 'RUNNING'
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR child.id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR child.id = ANY(CAST(:scope_ids AS uuid[])))
     LIMIT CAST(:max_rows AS bigint)
 """)
 
@@ -259,7 +259,7 @@ GET_CRASHED_WORKER_TASKS_SQL = text("""
       AND wt.is_subworkflow = FALSE
       AND w.status = 'RUNNING'
       AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS uuid[])))
       -- Grace window: skip tasks that went terminal recently — their parent
       -- finalizer's Phase 2 (workflow progression) is likely still in flight.
       -- COALESCE picks the precise terminal stamp (completed_at/failed_at) and
@@ -279,7 +279,7 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
     FROM horsies_workflows w
     LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.status = 'RUNNING'
-      AND (CAST(:scope_ids AS varchar[]) IS NULL OR w.id = ANY(CAST(:scope_ids AS varchar[])))
+      AND (CAST(:scope_ids AS uuid[]) IS NULL OR w.id = ANY(CAST(:scope_ids AS uuid[])))
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks wt2
           WHERE wt2.workflow_id = w.id
