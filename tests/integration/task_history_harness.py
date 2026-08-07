@@ -456,6 +456,55 @@ async def insert_live_task(
     return task_id
 
 
+async def create_workflow(
+    connection: AsyncConnection,
+    *,
+    status: str,
+) -> str:
+    """Insert one workflow stand-in row and return its id."""
+    from uuid import uuid4
+
+    workflow_id = str(uuid4())
+    await connection.execute(
+        text(
+            'INSERT INTO horsies_workflows (id, status) VALUES '
+            '(CAST(:workflow_id AS uuid), :status)'
+        ),
+        {'workflow_id': workflow_id, 'status': status},
+    )
+    return workflow_id
+
+
+async def link_workflow_node(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    workflow_id: str,
+    node_status: str,
+    task_index: int = 0,
+) -> str:
+    """Link one task into a workflow through a node row; returns node id."""
+    from uuid import uuid4
+
+    node_id = str(uuid4())
+    await connection.execute(
+        text(
+            'INSERT INTO horsies_workflow_tasks '
+            '(id, workflow_id, task_id, task_index, status) VALUES '
+            '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
+            'CAST(:task_id AS uuid), :task_index, :node_status)'
+        ),
+        {
+            'node_id': node_id,
+            'workflow_id': workflow_id,
+            'task_id': task_id,
+            'task_index': task_index,
+            'node_status': node_status,
+        },
+    )
+    return node_id
+
+
 def day_bounds(day: datetime) -> tuple[datetime, datetime]:
     lower = day.astimezone(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
