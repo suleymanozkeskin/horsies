@@ -938,7 +938,7 @@ $function$
 """
 
 
-def _rerun_carriage(column: str) -> str:
+def rerun_carriage_expression(column: str) -> str:
     """One envelope-carriage column, gated on the shared ladder's verdict."""
     return (
         "CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')\n"
@@ -1009,12 +1009,12 @@ def _batch_history_insert(
                 f'sha256({ATTEMPT_ENCODER_FUNCTION}(t.id))'
             ),
             'rerun_input_disposition': 'd.disposition',
-            'rerun_input_version': _rerun_carriage('version'),
-            'rerun_input_codec': _rerun_carriage('codec'),
-            'rerun_input_content_type': _rerun_carriage('content_type'),
-            'rerun_input_digest': _rerun_carriage('digest'),
-            'rerun_input_inline': _rerun_carriage('inline'),
-            'rerun_input_reference': _rerun_carriage('reference'),
+            'rerun_input_version': rerun_carriage_expression('version'),
+            'rerun_input_codec': rerun_carriage_expression('codec'),
+            'rerun_input_content_type': rerun_carriage_expression('content_type'),
+            'rerun_input_digest': rerun_carriage_expression('digest'),
+            'rerun_input_inline': rerun_carriage_expression('inline'),
+            'rerun_input_reference': rerun_carriage_expression('reference'),
         },
         select_tail=(
             f'FROM {LIVE_TASKS} t\n'
