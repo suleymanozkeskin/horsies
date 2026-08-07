@@ -72,7 +72,9 @@ from horsies.core.workflows.sql import (
     GET_READY_WORKFLOW_TASKS_SQL,
     GET_PAUSED_CHILD_WORKFLOWS_SQL,
     RESUME_CHILD_WORKFLOW_SQL,
+    workflow_task_enqueue_stamp,
 )
+from horsies.core.history.identity.uuid7 import mint_task_id
 
 logger = get_logger('workflow.engine')
 
@@ -539,7 +541,7 @@ async def start_workflow_async(
                     )
                     task_id: str | None = None
                     if is_fast_root:
-                        task_id = str(uuid.uuid4())
+                        task_id = mint_task_id()
                         max_retries, good_until_str, good_until_dt = (
                             root_retry_and_deadline(task_options_json, task.name)
                         )
@@ -581,6 +583,15 @@ async def start_workflow_async(
                             'task_options': task_options_json,
                             'good_until': good_until_str,
                             'enqueue_sha': sha,
+                            **workflow_task_enqueue_stamp(
+                                task_name=task.name,
+                                queue_name=resolved_queue,
+                                priority=resolved_priority,
+                                args_json=args_json,
+                                kwargs_json=task_kwargs_json,
+                                good_until=good_until_dt,
+                                task_options_json=task_options_json,
+                            ),
                         })
                     elif is_root:
                         slow_root_nodes.append(task)

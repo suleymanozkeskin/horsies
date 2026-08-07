@@ -180,15 +180,17 @@ SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL = text("""
     WHERE workflow_id = :wf_id AND status IN ('PENDING', 'READY')
 """)
 
+# The cancelled backing tasks were MOVED to history by the batch
+# cancellation, so a live-table join can no longer find them; the batch
+# outcomes name exactly which tasks are cancelled, and the skip targets
+# those ids.
 SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL = text("""
     UPDATE horsies_workflow_tasks wt
     SET status = 'SKIPPED',
         completed_at = NOW()
-    FROM horsies_tasks t
     WHERE wt.workflow_id = :wf_id
-      AND wt.task_id = t.id
       AND wt.status = 'ENQUEUED'
-      AND t.status = 'CANCELLED'
+      AND wt.task_id = ANY(CAST(:cancelled_task_ids AS uuid[]))
 """)
 
 SELECT_CANCELLABLE_DESCENDANT_WORKFLOWS_SQL = text("""
@@ -1214,7 +1216,12 @@ class WorkflowHandle(Generic[OutT]):
                 # Skip ENQUEUED workflow tasks whose backing task was cancelled above.
                 await session.execute(
                     SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                    {'wf_id': self.workflow_id},
+                    {
+                        'wf_id': self.workflow_id,
+                        'cancelled_task_ids': [
+                            outcome.task_id for outcome in parent_outcomes
+                        ],
+                    },
                 )
 
                 # Cascade cancellation to active child workflows. Each
@@ -1274,7 +1281,12 @@ class WorkflowHandle(Generic[OutT]):
                     )
                     await session.execute(
                         SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
-                        {'wf_id': child_workflow_id},
+                        {
+                            'wf_id': child_workflow_id,
+                            'cancelled_task_ids': [
+                                outcome.task_id for outcome in child_outcomes
+                            ],
+                        },
                     )
 
                 await session.commit()

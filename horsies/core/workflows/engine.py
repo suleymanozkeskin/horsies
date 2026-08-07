@@ -102,7 +102,9 @@ from horsies.core.workflows.sql import (
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
+    workflow_task_enqueue_stamp,
 )
+from horsies.core.history.identity.uuid7 import mint_task_id
 
 logger = get_logger('workflow.engine')
 
@@ -804,7 +806,7 @@ async def _build_enqueued_task_params(
         )
 
     # Create actual task in tasks table
-    task_id = str(uuid.uuid4())
+    task_id = mint_task_id()
     sent_at = datetime.now(timezone.utc)
     sha = enqueue_fingerprint(
         task_name=task_name,
@@ -832,6 +834,15 @@ async def _build_enqueued_task_params(
         'task_options': task_options_str,
         'good_until': good_until_str,
         'enqueue_sha': sha,
+        **workflow_task_enqueue_stamp(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=task_args,
+            kwargs_json=kwargs_json,
+            good_until=good_until_dt,
+            task_options_json=task_options_str,
+        ),
     })
 
 
@@ -1325,7 +1336,7 @@ async def enqueue_subworkflow_task(
                     # not the parent node.
                     is_fast_root = False
             if is_fast_root and child_task.index is not None:
-                child_task_id = str(uuid.uuid4())
+                child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
                 # structurally absent on fast roots).
@@ -1370,6 +1381,15 @@ async def enqueue_subworkflow_task(
                     'task_options': child_task_options_json,
                     'good_until': good_until_str,
                     'enqueue_sha': sha,
+                    **workflow_task_enqueue_stamp(
+                        task_name=child_task.name,
+                        queue_name=child_queue,
+                        priority=child_priority,
+                        args_json=child_args_json,
+                        kwargs_json=root_kwargs_json,
+                        good_until=good_until_dt,
+                        task_options_json=child_task_options_json,
+                    ),
                 })
             elif not child_dep_indices:
                 slow_child_roots.append(child_task)

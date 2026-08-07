@@ -50,7 +50,14 @@ from horsies.core.models.health import (
     WorkerPingRequest,
     WorkerStateSnapshot,
 )
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.history.ddl.classes import (
+    DEFAULT_RETENTION_CLASS_KEY,
+    resolve_retention_class_key,
+)
+from horsies.core.utils.db import (
+    is_retryable_connection_error,
+    register_identity_text_reads,
+)
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
 
@@ -517,6 +524,7 @@ class PostgresBroker:
         self.async_engine = create_async_engine(
             self.config.database_url.get_secret_value(), **engine_cfg,
         )
+        register_identity_text_reads(self.async_engine)
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
@@ -1155,10 +1163,15 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-        retention_class_key: str = 'forever',
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
+        # The ratified retention resolution: absent → the immutable
+        # 30-day default class; forever only by EXPLICIT None.
+        resolved_retention_class_key = resolve_retention_class_key(
+            retention_class_key
+        )
         # The ratified retention posture: an app-level default with a
         # per-task override, resolved here and snapshotted at enqueue.
         # None means inherit the deployment's standing policy.
@@ -1240,7 +1253,7 @@ class PostgresBroker:
                 good_until=good_until,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 task_options=task_options,
-                retention_class_key=retention_class_key,
+                retention_class_key=resolved_retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             )
             if is_err(cutover):
