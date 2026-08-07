@@ -49,7 +49,49 @@ COMPLETE_FUSED_FUNCTION: Final = 'horsies_complete_task_fused'
 FAIL_LOCKED_FUNCTION: Final = 'horsies_fail_locked_task'
 FAIL_STALE_FUNCTION: Final = 'horsies_fail_stale_task'
 
+EXPIRE_OWNED_FUNCTION: Final = 'horsies_expire_owned_claim'
+EXPIRE_PENDING_FUNCTION: Final = 'horsies_expire_pending_tasks'
+
 _TASK_LOCK_SEED: Final = 731
+
+# The disposition ladder, once. Both the single-row IF chain and the batch
+# CASE expression render from these rungs; a second hand-written ladder is
+# the drift class this program keeps catching, closed here at generation.
+_LADDER_RUNGS: Final[tuple[tuple[str, str], ...]] = (
+    ("{row}.is_workflow_task OR {status} = 'COMPLETED'", 'NEVER_ELIGIBLE'),
+    ('NOT {row}.retain_rerun_input', 'DECLINED_BY_POLICY'),
+)
+_LADDER_FALLBACK: Final = '{row}.prepared_rerun_input_disposition'
+
+
+def disposition_if_chain(row: str, status: str) -> str:
+    """The ladder as a PL/pgSQL IF chain assigning v_rerun_disposition."""
+    lines: list[str] = []
+    keyword = 'IF'
+    for condition, result in _LADDER_RUNGS:
+        rendered = condition.format(row=row, status=status)
+        lines.append(f"    {keyword} {rendered} THEN")
+        lines.append(f"        v_rerun_disposition := '{result}';")
+        keyword = 'ELSIF'
+    fallback = _LADDER_FALLBACK.format(row=row, status=status)
+    lines.append('    ELSE')
+    lines.append(f'        v_rerun_disposition := {fallback};')
+    lines.append('    END IF;')
+    return '\n'.join(lines)
+
+
+def disposition_case_expression(row: str, status: str) -> str:
+    """The same ladder as one SQL CASE expression."""
+    arms = '\n'.join(
+        f"            WHEN {condition.format(row=row, status=status)} "
+        f"THEN '{result}'"
+        for condition, result in _LADDER_RUNGS
+    )
+    fallback = _LADDER_FALLBACK.format(row=row, status=status)
+    return f"""CASE
+{arms}
+            ELSE {fallback}
+        END"""
 
 
 ATTEMPT_ENCODER_DDL = f"""
@@ -102,6 +144,7 @@ def _move_ddl() -> str:
     complete_fused = TerminalizationKind.COMPLETE_FUSED.value
     fail_running = TerminalizationKind.FAIL_RUNNING.value
     fail_stale = TerminalizationKind.FAIL_STALE.value
+    expire_claimed = TerminalizationKind.EXPIRE_CLAIMED.value
     return f"""
 CREATE FUNCTION {MOVE_FUNCTION}(
     p_task_id uuid,
@@ -155,6 +198,11 @@ BEGIN
                 RAISE EXCEPTION 'stale-failure projection disagrees';
             END IF;
             v_requires_deferred_phase2 := TRUE;
+        WHEN '{expire_claimed}' THEN
+            IF p_terminal_status <> 'EXPIRED' THEN
+                RAISE EXCEPTION 'claimed-expiry projection disagrees';
+            END IF;
+            v_requires_deferred_phase2 := TRUE;
         ELSE
             RAISE EXCEPTION
                 'terminalization kind % has no move family yet',
@@ -201,14 +249,8 @@ BEGIN
 
     -- Rerun-input carriage: eligibility before policy, bytes copied and
     -- never re-encoded, the digest copied and never recomputed. This block
-    -- is the whole envelope decision.
-    IF v_task.is_workflow_task OR p_terminal_status = 'COMPLETED' THEN
-        v_rerun_disposition := 'NEVER_ELIGIBLE';
-    ELSIF NOT v_task.retain_rerun_input THEN
-        v_rerun_disposition := 'DECLINED_BY_POLICY';
-    ELSE
-        v_rerun_disposition := v_task.prepared_rerun_input_disposition;
-    END IF;
+    -- is the whole envelope decision, rendered from the shared ladder.
+{disposition_if_chain('v_task', 'p_terminal_status')}
     IF v_rerun_disposition IN ('INLINE', 'REFERENCE') THEN
         v_rerun_version := v_task.prepared_rerun_input_version;
         v_rerun_codec := v_task.prepared_rerun_input_codec;
@@ -589,6 +631,284 @@ BEGIN
 END
 $function$
 """
+
+
+def _expire_owned_ddl() -> str:
+    kind = TerminalizationKind.EXPIRE_CLAIMED.value
+    return f"""
+CREATE FUNCTION {EXPIRE_OWNED_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_result text,
+    p_error_code text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_good_until timestamptz;
+    v_evaluated_at timestamptz;
+    v_terminal_at timestamptz;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
+    -- One locked capture judges the deadline. Every good_until writer
+    -- mutates this row and therefore needs the lock this transaction now
+    -- holds, so the production retry-under-lock loop has no race to serve
+    -- and is deliberately not ported.
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
+           t.good_until, NOW()
+    INTO v_status, v_worker, v_claimed_at, v_good_until, v_evaluated_at
+    FROM {LIVE_TASKS} t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND
+       AND v_status = 'CLAIMED'
+       AND v_worker = CAST(p_worker_id AS VARCHAR) THEN
+        IF v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at THEN
+            v_terminal_at := NOW();
+            PERFORM {MOVE_FUNCTION}(
+                p_task_id, 'EXPIRED', '{kind}', v_terminal_at,
+                p_result, p_error_code, NULL
+            );
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at, '{kind}'::text,
+                'CLAIMED'::text, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'DEADLINE'::text,
+            jsonb_build_object(
+                'good_until', v_good_until,
+                'evaluated_at', v_evaluated_at
+            );
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
+        p_task_id, ARRAY['{kind}']::text[],
+        p_worker_id, NULL::timestamptz
+    );
+END
+$function$
+"""
+
+
+def _expire_pending_ddl() -> str:
+    kind = TerminalizationKind.EXPIRE_PENDING.value
+    disposition_case = disposition_case_expression('t', "'EXPIRED'")
+    return f"""
+CREATE FUNCTION {EXPIRE_PENDING_FUNCTION}(
+    p_batch_size integer,
+    p_result text,
+    p_error_code text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_ids uuid[];
+    v_terminal_at timestamptz;
+    v_moved bigint;
+    v_deleted bigint;
+    v_result_payload bytea;
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION
+            'p_batch_size must be a positive integer, got %', p_batch_size
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
+
+    -- Discovery under the batch locking rule: SKIP LOCKED never waits on
+    -- a row lock, so this batch cannot join any deadlock cycle; rows held
+    -- by advisory-first singles are skipped and caught next sweep.
+    -- good_until order keeps the sweep oldest-first.
+    SELECT array_agg(s.id) INTO v_ids
+    FROM (
+        SELECT id FROM {LIVE_TASKS}
+        WHERE status = 'PENDING'
+          AND good_until IS NOT NULL
+          AND good_until <= NOW()
+        ORDER BY good_until ASC
+        LIMIT p_batch_size
+        FOR UPDATE SKIP LOCKED
+    ) s;
+    IF v_ids IS NULL THEN
+        RETURN;
+    END IF;
+
+    -- Set-wise deferred-result fence: no selected workflow-backing row may
+    -- reach sha256(NULL).
+    IF p_result IS NULL AND EXISTS (
+        SELECT 1 FROM {LIVE_TASKS} t
+        WHERE t.id = ANY(v_ids) AND t.is_workflow_task
+    ) THEN
+        RAISE EXCEPTION
+            'deferred workflow terminalization requires a result payload'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+    -- One node row per workflow-backing task, set-wise.
+    IF EXISTS (
+        SELECT 1 FROM {LIVE_TASKS} t
+        WHERE t.id = ANY(v_ids)
+          AND t.is_workflow_task
+          AND (SELECT count(*) FROM horsies_workflow_tasks n
+               WHERE n.task_id = t.id) <> 1
+    ) THEN
+        RAISE EXCEPTION
+            'workflow-backing task lacks exactly one node row'
+            USING ERRCODE = 'foreign_key_violation';
+    END IF;
+    -- Per-row uniqueness guard through the staged mechanism.
+    IF EXISTS (
+        SELECT 1 FROM unnest(v_ids) AS u(tid)
+        WHERE (SELECT found FROM {TASK_PROVENANCE_FUNCTION}(u.tid, FALSE))
+    ) THEN
+        RAISE EXCEPTION 'task identity exists in multiple locations'
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+
+    v_terminal_at := NOW();
+    v_result_payload := CASE
+        WHEN p_result IS NULL THEN NULL
+        ELSE convert_to(p_result, 'UTF8')
+    END;
+
+    INSERT INTO {TASK_HISTORY_PARENT} (
+        task_id, task_name, queue_name, priority,
+        command_fingerprint_version, command_fingerprint, status,
+        terminalization_kind, terminal_at, retention_anchor_at,
+        retention_class_key, sent_at, enqueued_at, claimed_at,
+        started_at, created_at, good_until,
+        result_envelope_version, result_codec, result_content_type,
+        result_payload, prior_result_payload, result_digest,
+        error_code, final_failed_reason,
+        retry_count, max_retries,
+        last_claimed_worker_id, last_worker_hostname,
+        last_worker_pid, last_worker_process_name,
+        input_digest, rerun_of_task_id, rerun_root_task_id,
+        workflow_id, is_workflow_task, history_schema_version,
+        attempt_archive_version, attempt_snapshot_codec,
+        attempt_snapshot_content_type, attempt_snapshot,
+        attempt_snapshot_digest,
+        rerun_input_disposition, rerun_input_version, rerun_input_codec,
+        rerun_input_content_type, rerun_input_digest,
+        rerun_input_inline, rerun_input_reference
+    )
+    SELECT
+        t.id, t.task_name, t.queue_name, t.priority,
+        t.command_fingerprint_version, t.command_fingerprint,
+        'EXPIRED', '{kind}',
+        v_terminal_at, v_terminal_at, t.retention_class_key,
+        t.sent_at, t.enqueued_at, t.claimed_at,
+        t.started_at, t.created_at, t.good_until,
+        1, 'json-utf8', 'application/json',
+        v_result_payload, NULL,
+        CASE WHEN v_result_payload IS NULL THEN NULL
+             ELSE sha256(v_result_payload) END,
+        p_error_code, NULL,
+        t.retry_count, t.max_retries,
+        t.claimed_by_worker_id, t.worker_hostname,
+        t.worker_pid, t.worker_process_name,
+        t.input_digest, t.rerun_of_task_id, t.rerun_root_task_id,
+        n.workflow_id, t.is_workflow_task, 1,
+        1, 'json-utf8', 'application/json',
+        {ATTEMPT_ENCODER_FUNCTION}(t.id),
+        sha256({ATTEMPT_ENCODER_FUNCTION}(t.id)),
+        d.disposition,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_version END,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_codec END,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_content_type END,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_digest END,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_inline END,
+        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
+             THEN t.prepared_rerun_input_reference END
+    FROM {LIVE_TASKS} t
+    LEFT JOIN horsies_workflow_tasks n ON n.task_id = t.id
+    CROSS JOIN LATERAL (
+        SELECT {disposition_case} AS disposition
+    ) d
+    WHERE t.id = ANY(v_ids);
+    GET DIAGNOSTICS v_moved = ROW_COUNT;
+    IF v_moved <> cardinality(v_ids) THEN
+        RAISE EXCEPTION 'batch history insert moved % of % rows',
+            v_moved, cardinality(v_ids);
+    END IF;
+
+    INSERT INTO {WORKFLOW_PHASE2_PENDING} (
+        task_id, workflow_id, workflow_node_row_id,
+        terminal_status, terminal_at, terminalization_kind,
+        recovery_source, history_class, history_anchor,
+        history_schema_version, result_digest,
+        phase2_generation, created_at, attempt_count
+    )
+    SELECT
+        t.id, n.workflow_id, n.id,
+        'EXPIRED', v_terminal_at, '{kind}',
+        'HISTORY', t.retention_class_key, v_terminal_at,
+        1, sha256(v_result_payload),
+        gen_random_uuid(), statement_timestamp(), 0
+    FROM {LIVE_TASKS} t
+    JOIN horsies_workflow_tasks n ON n.task_id = t.id
+    WHERE t.id = ANY(v_ids) AND t.is_workflow_task;
+
+    UPDATE horsies_key_reservations r
+    SET disposition = 'TERMINAL',
+        expires_at = v_terminal_at + r.reservation_window
+    FROM {LIVE_TASKS} t
+    WHERE t.id = ANY(v_ids)
+      AND t.idempotency_key_digest IS NOT NULL
+      AND r.idempotency_key_digest = t.idempotency_key_digest
+      AND r.task_id = t.id
+      AND r.disposition = 'LIVE';
+
+    -- Outcome rows stream from the still-locked live rows BEFORE the
+    -- deletes: reading them back through the partitioned parent by
+    -- task id would be the rejected fan-out mechanism. RETURN QUERY
+    -- materializes immediately; it does not end the function.
+    RETURN QUERY SELECT
+        t.id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        'PENDING'::text, t.claimed_by_worker_id::varchar, t.claimed_at,
+        NULL::text, NULL::jsonb
+    FROM {LIVE_TASKS} t
+    WHERE t.id = ANY(v_ids);
+
+    DELETE FROM {LIVE_ATTEMPTS} WHERE task_id = ANY(v_ids);
+    DELETE FROM {LIVE_TASKS} WHERE id = ANY(v_ids);
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    IF v_deleted <> cardinality(v_ids) THEN
+        RAISE EXCEPTION 'batch live delete removed % of % rows',
+            v_deleted, cardinality(v_ids);
+    END IF;
+
+    PERFORM pg_notify('task_done', u.tid::text)
+    FROM unnest(v_ids) AS u(tid);
+END
+$function$
+"""
+
+
+def expiry_family_fragments() -> tuple[str, ...]:
+    """The expiry-family wire functions, in installation order."""
+    return (_expire_owned_ddl(), _expire_pending_ddl())
 
 
 def failure_family_fragments() -> tuple[str, ...]:

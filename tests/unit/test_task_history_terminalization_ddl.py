@@ -22,6 +22,9 @@ from horsies.core.history.terminalization.live_cutover import (
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     completion_family_fragments,
+    disposition_case_expression,
+    disposition_if_chain,
+    expiry_family_fragments,
     failure_family_fragments,
 )
 from horsies.core.history.terminalization.outcome import (
@@ -167,6 +170,7 @@ class TestLockOrderInvariant:
         [
             *completion_family_fragments()[2:],
             *failure_family_fragments(),
+            expiry_family_fragments()[0],
         ],
     )
     def test_wire_functions_take_the_advisory_lock_first(
@@ -175,6 +179,84 @@ class TestLockOrderInvariant:
         advisory = body.index('pg_advisory_xact_lock')
         guard_select = body.index('FROM horsies_tasks')
         assert advisory < guard_select
+
+    def test_batch_takes_no_advisory_lock_and_never_waits(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert 'pg_advisory_xact_lock' not in batch
+        assert 'FOR UPDATE SKIP LOCKED' in batch
+
+
+class TestLadderSingleSource:
+    """Both ladder renderings derive from one source; drift is impossible."""
+
+    def test_single_row_move_embeds_the_generated_if_chain(self) -> None:
+        assert disposition_if_chain('v_task', 'p_terminal_status') in MOVE_BODY
+
+    def test_batch_embeds_the_generated_case_expression(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert disposition_case_expression('t', "'EXPIRED'") in batch
+
+    def test_the_two_renderings_agree_rung_for_rung(self) -> None:
+        chain = disposition_if_chain('r', 's')
+        case = disposition_case_expression('r', 's')
+        for fact in (
+            "r.is_workflow_task OR s = 'COMPLETED'",
+            'NOT r.retain_rerun_input',
+            "'NEVER_ELIGIBLE'",
+            "'DECLINED_BY_POLICY'",
+            'r.prepared_rerun_input_disposition',
+        ):
+            assert fact in chain
+            assert fact in case
+
+
+class TestExpiryFamily:
+    """The expiry family's wire shape against the production contract."""
+
+    def test_move_case_covers_claimed_expiry(self) -> None:
+        assert "'claimed-expiry projection disagrees'" in MOVE_BODY
+
+    def test_owned_expiry_judges_the_deadline_from_the_capture(self) -> None:
+        owned = expiry_family_fragments()[0]
+        assert 'v_good_until IS NOT NULL AND v_good_until <= v_evaluated_at' in (
+            owned
+        )
+        assert "'DEADLINE'" in owned
+        assert "'good_until', v_good_until" in owned
+        assert 'LOOP' not in owned
+
+    def test_batch_validates_before_any_mutation(self) -> None:
+        batch = expiry_family_fragments()[1]
+        size_check = batch.index('p_batch_size must be a positive integer')
+        fence = batch.index(
+            'deferred workflow terminalization requires a result payload'
+        )
+        node_check = batch.index('lacks exactly one node row')
+        uniqueness = batch.index('exists in multiple locations')
+        insert = batch.index('INSERT INTO horsies_task_history')
+        assert size_check < fence < node_check < uniqueness < insert
+
+    def test_batch_discovery_is_oldest_first_pending_only(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert "status = 'PENDING'" in batch
+        assert 'ORDER BY good_until ASC' in batch
+        assert 'LIMIT p_batch_size' in batch
+
+    def test_batch_outcomes_stream_from_live_before_the_deletes(self) -> None:
+        batch = expiry_family_fragments()[1]
+        outcome = batch.index("'APPLIED'::text")
+        deletes = batch.index('DELETE FROM horsies_task_attempts')
+        assert outcome < deletes
+        assert 'FROM horsies_task_history h' not in batch
+
+    def test_batch_counts_are_asserted_both_ways(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert 'batch history insert moved' in batch
+        assert 'batch live delete removed' in batch
+
+    def test_batch_notifies_per_moved_row(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert "pg_notify('task_done', u.tid::text)" in batch
 
 
 class TestFailureFamily:

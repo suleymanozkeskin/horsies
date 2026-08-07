@@ -279,6 +279,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         )
         from horsies.core.history.terminalization.move import (
             completion_family_fragments,
+            expiry_family_fragments,
             failure_family_fragments,
         )
         from horsies.core.history.terminalization.outcome import (
@@ -309,6 +310,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 *outcome_fragments(),
                 *completion_family_fragments(),
                 *failure_family_fragments(),
+                *expiry_family_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))
@@ -351,6 +353,7 @@ async def insert_live_task(
     prepared_inline: bytes | None = None,
     is_workflow_task: bool = False,
     started_at_offset: timedelta = timedelta(0),
+    good_until_offset: timedelta | None = None,
 ) -> str:
     """Insert one post-cutover live row and return its minted v7 id."""
     from horsies.core.history.identity.uuid7 import mint_task_id
@@ -381,7 +384,7 @@ async def insert_live_task(
             INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, status,
                 enqueued_at, created_at, started_at, claimed_at,
-                retry_count, max_retries,
+                retry_count, max_retries, good_until,
                 claimed_by_worker_id, worker_hostname, worker_pid,
                 worker_process_name, is_workflow_task,
                 command_fingerprint_version, command_fingerprint,
@@ -394,7 +397,7 @@ async def insert_live_task(
             ) VALUES (
                 CAST(:task_id AS uuid), 'it.move', 'default', 50, :status,
                 :now, :now, :started_at, :now,
-                0, 0,
+                0, 0, :good_until,
                 :worker, 'it-host', 4242, 'it-proc', :is_workflow_task,
                 1, :fingerprint,
                 :class_key, :key_digest,
@@ -409,6 +412,11 @@ async def insert_live_task(
             'status': status,
             'now': now,
             'started_at': now + started_at_offset,
+            'good_until': (
+                now + good_until_offset
+                if good_until_offset is not None
+                else None
+            ),
             'worker': worker,
             'is_workflow_task': is_workflow_task,
             'fingerprint': sha256(task_id.encode()).digest(),
