@@ -38,6 +38,16 @@ class StagedLoaderPublisher:
             await read_all_attached_leaf_rows(connection)
         )
         await connection.execute(text(render_staged_lookup_function(manifest)))
+        # PostgreSQL overloads by signature: the provenance function's
+        # include-live parameter changed its signature, and CREATE OR
+        # REPLACE would leave a stale single-parameter overload callable
+        # forever. Dropping the superseded signature is idempotent.
+        await connection.execute(
+            text(
+                'DROP FUNCTION IF EXISTS '
+                'horsies_task_provenance_staged(uuid)'
+            )
+        )
         await connection.execute(
             text(render_staged_provenance_function(manifest))
         )

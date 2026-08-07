@@ -119,7 +119,7 @@ class TestLookupOutcomes:
             live_id = v7_with_birth(datetime.now(UTC))
             await connection.execute(
                 text(
-                    'INSERT INTO horsies_tasks (task_id, '
+                    'INSERT INTO horsies_tasks (id, '
                     'command_fingerprint_version, command_fingerprint) '
                     'VALUES (CAST(:task_id AS uuid), 1, :fingerprint)'
                 ),

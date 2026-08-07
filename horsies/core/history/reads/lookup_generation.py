@@ -147,7 +147,12 @@ def manifest_from_catalog(rows: Sequence[LeafCatalogRow]) -> LookupManifest:
 
 
 def render_staged_lookup_function(manifest: LookupManifest) -> str:
-    """Render the identity lookup: found rows carry fingerprint facts."""
+    """Render the identity lookup: found rows carry fingerprint facts.
+
+    The live table's identifier column is `id`, not `task_id`; the live
+    probe reads it as `task_id` into the composite so the wire shape is
+    uniform while the predicate matches the real column.
+    """
     return _staged_function(
         function_name=TASK_LOOKUP_FUNCTION,
         return_type=TASK_LOOKUP_TYPE,
@@ -157,7 +162,9 @@ def render_staged_lookup_function(manifest: LookupManifest) -> str:
             'v_fingerprint bytea;',
         ),
         absence_values='NULL, NULL, NULL, NULL',
-        live_probe=_identity_probe(LIVE_TASKS, location='LIVE'),
+        live_probe=_identity_probe(
+            LIVE_TASKS, location='LIVE', id_column='id'
+        ),
         history_probe=lambda relation: _identity_probe(
             relation, location='HISTORY'
         ),
@@ -174,9 +181,15 @@ def render_staged_provenance_function(manifest: LookupManifest) -> str:
     live hit carries null terminal facts: liveness is the fact, and the
     caller re-reads the live row under its own lock.
     """
+    live_probe = f'''
+        IF p_include_live THEN
+{_provenance_live_probe()}
+        END IF;
+'''
     return _staged_function(
         function_name=TASK_PROVENANCE_FUNCTION,
         return_type=TASK_PROVENANCE_TYPE,
+        extra_parameters=', p_include_live boolean DEFAULT TRUE',
         declares=(
             'v_task_id uuid;',
             'v_status text;',
@@ -184,7 +197,7 @@ def render_staged_provenance_function(manifest: LookupManifest) -> str:
             'v_kind text;',
         ),
         absence_values='NULL, NULL, NULL, NULL, NULL',
-        live_probe=_provenance_live_probe(),
+        live_probe=live_probe,
         history_probe=_provenance_history_probe,
         manifest=manifest,
     )
@@ -199,6 +212,7 @@ def _staged_function(
     live_probe: str,
     history_probe: Callable[[str], str],
     manifest: LookupManifest,
+    extra_parameters: str = '',
 ) -> str:
     """The one staged skeleton both generated functions are rendered from."""
     absence = f'RETURN ROW(FALSE, {absence_values})::{return_type};'
@@ -248,7 +262,7 @@ def _staged_function(
 
     declare_block = '\n'.join(f'        {declare}' for declare in declares)
     return f"""
-    CREATE OR REPLACE FUNCTION {function_name}(p_task_id uuid)
+    CREATE OR REPLACE FUNCTION {function_name}(p_task_id uuid{extra_parameters})
     RETURNS {return_type}
     LANGUAGE plpgsql
     STABLE
@@ -278,14 +292,19 @@ def _pruned_probe(leaf: LookupLeaf, probe: str) -> str:
 """
 
 
-def _identity_probe(relation: str, *, location: str) -> str:
+def _identity_probe(
+    relation: str,
+    *,
+    location: str,
+    id_column: str = 'task_id',
+) -> str:
     if not is_safe_identifier(relation):
         raise ValueError(f'relation name is not a safe identifier: {relation!r}')
     return f"""
-        SELECT task_id, command_fingerprint_version, command_fingerprint
+        SELECT {id_column}, command_fingerprint_version, command_fingerprint
         INTO v_task_id, v_fingerprint_version, v_fingerprint
         FROM {relation}
-        WHERE task_id = p_task_id;
+        WHERE {id_column} = p_task_id;
         IF FOUND THEN
             RETURN ROW(
                 TRUE, '{location}', v_task_id,
@@ -297,9 +316,9 @@ def _identity_probe(relation: str, *, location: str) -> str:
 
 def _provenance_live_probe() -> str:
     return f"""
-        SELECT task_id INTO v_task_id
+        SELECT id INTO v_task_id
         FROM {LIVE_TASKS}
-        WHERE task_id = p_task_id;
+        WHERE id = p_task_id;
         IF FOUND THEN
             RETURN ROW(
                 TRUE, 'LIVE', v_task_id, NULL, NULL, NULL

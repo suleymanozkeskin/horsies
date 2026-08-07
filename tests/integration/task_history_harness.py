@@ -42,12 +42,14 @@ def _database_url() -> str:
 
 LIVE_STANDIN_DDL = """
 CREATE TABLE horsies_tasks (
-    task_id uuid PRIMARY KEY,
+    id uuid PRIMARY KEY,
     command_fingerprint_version smallint NOT NULL,
     command_fingerprint bytea NOT NULL
 )
 """
-"""Pre-cutover stand-in carrying exactly the columns the lookup probes."""
+"""Stand-in carrying the real identifier column name (`id`) plus the
+fingerprint columns the lookup probes — the column name is the point:
+a `task_id` stand-in masked a generator defect once."""
 
 
 @dataclass(frozen=True, slots=True)

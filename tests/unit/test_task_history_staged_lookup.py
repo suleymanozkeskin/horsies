@@ -275,6 +275,22 @@ class TestRenderedProvenanceFunction:
             '::horsies_task_provenance;'
         ) in body
 
+    def test_live_probe_is_conditional_on_include_live(self) -> None:
+        body = self.render(make_catalog_row(0))
+        assert 'p_include_live boolean DEFAULT TRUE' in body
+        assert 'IF p_include_live THEN' in body
+        live_guard = body.index('IF p_include_live THEN')
+        live_probe = body.index('FROM horsies_tasks\n')
+        forever_probe = body.index('FROM horsies_task_history_forever\n')
+        assert live_guard < live_probe < forever_probe
+
+    def test_identity_variant_keeps_the_single_parameter(self) -> None:
+        rows = (make_catalog_row(0),)
+        identity_body = render_staged_lookup_function(
+            manifest_from_catalog(list(rows))
+        )
+        assert 'p_include_live' not in identity_body
+
 
 class TestLookupRowDecode:
     def test_absent(self) -> None:
