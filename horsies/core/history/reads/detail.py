@@ -75,6 +75,12 @@ class HistoryTaskDetail:
     workflow_id: str | None
     is_workflow_task: bool
     rerun_input_disposition: str
+    rerun_input_version: int | None
+    rerun_input_codec: str | None
+    rerun_input_content_type: str | None
+    rerun_input_digest: bytes | None
+    rerun_input_inline: bytes | None
+    rerun_input_reference: str | None
     attempts: tuple[AttemptRecord, ...]
 
 
@@ -194,6 +200,20 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
         ),
         is_workflow_task=row.is_workflow_task,
         rerun_input_disposition=row.rerun_input_disposition,
+        rerun_input_version=row.rerun_input_version,
+        rerun_input_codec=row.rerun_input_codec,
+        rerun_input_content_type=row.rerun_input_content_type,
+        rerun_input_digest=(
+            bytes(row.rerun_input_digest)
+            if row.rerun_input_digest is not None
+            else None
+        ),
+        rerun_input_inline=(
+            bytes(row.rerun_input_inline)
+            if row.rerun_input_inline is not None
+            else None
+        ),
+        rerun_input_reference=row.rerun_input_reference,
         attempts=decoded.value,
     )
 

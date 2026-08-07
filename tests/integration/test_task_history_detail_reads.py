@@ -160,6 +160,33 @@ class TestDetail:
             assert detail.attempts[0].error_code == 'BOOM'
 
     @pytest.mark.asyncio
+    async def test_inline_prepared_envelope_rides_the_detail(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        from hashlib import sha256
+
+        payload = b'{"args":[1],"kwargs":{},"options":null}'
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            task_id = await insert_live_task(
+                connection,
+                class_key=CLASS_KEY,
+                worker=WORKER,
+                retain=True,
+                prepared_disposition='INLINE',
+                prepared_inline=payload,
+            )
+            await fail_task(connection, task_id)
+            detail = await read_task_detail(connection, task_id=task_id)
+            assert isinstance(detail, HistoryTaskDetail)
+            assert detail.rerun_input_disposition == 'INLINE'
+            assert detail.rerun_input_version == 1
+            assert detail.rerun_input_codec == 'json-utf8'
+            assert detail.rerun_input_inline == payload
+            assert detail.rerun_input_digest == sha256(payload).digest()
+            assert detail.rerun_input_reference is None
+
+    @pytest.mark.asyncio
     async def test_live_task_answers_location_only(
         self, terminalization_schema: HistorySchema
     ) -> None:
