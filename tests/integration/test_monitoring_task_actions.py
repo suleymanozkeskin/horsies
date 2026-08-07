@@ -49,6 +49,7 @@ from horsies.monitoring import (
     cancel_task,
 )
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.history_seeding import route_rows
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -69,8 +70,8 @@ async def clean_task_tables(
     """Empty the task and workflow tables so claim caps and counts are exact."""
     await session.execute(
         text(
-            'TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks '
-            'CASCADE'
+            'TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks, '
+            'horsies_task_history CASCADE'
         )
     )
     await session.commit()
@@ -196,13 +197,23 @@ def make_attempt(
 
 
 async def persist(session: AsyncSession, *rows: Any) -> None:
-    """Persist rows and commit so other sessions observe them."""
-    session.add_all(list(rows))
-    await session.commit()
+    """Persist rows on their lifecycle side and commit.
+
+    Terminal-status tasks are seeded as history rows and live fixture
+    rows are stamped with the enqueue-time facts the move requires.
+    """
+    await route_rows(session, rows)
 
 
 async def read_task(session: AsyncSession, task_id: str) -> Any:
-    """Re-read a task row's action-relevant columns, bypassing identity map."""
+    """Re-read a task's action-relevant columns, bypassing identity map.
+
+    A terminal task lives in history — the move deleted its live row —
+    so the read falls through to the history row, presented with the
+    live column names the assertions use (the terminal instant lands in
+    ``completed_at`` for COMPLETED and ``failed_at`` otherwise; claim
+    and finalize columns are structurally absent on a history row).
+    """
     row = (
         await session.execute(
             text("""
@@ -213,13 +224,46 @@ async def read_task(session: AsyncSession, task_id: str) -> Any:
                        good_until, enqueued_at, next_retry_at, worker_pid,
                        worker_hostname, worker_process_name, queue_name,
                        terminalization_kind
-                FROM horsies_tasks WHERE id = :id
+                FROM horsies_tasks WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
     ).first()
-    assert row is not None
-    return row
+    if row is not None:
+        return row
+    history = (
+        await session.execute(
+            text("""
+                SELECT status,
+                       error_code,
+                       final_failed_reason AS failed_reason,
+                       CASE WHEN status <> 'COMPLETED' THEN terminal_at END
+                           AS failed_at,
+                       CASE WHEN status = 'COMPLETED' THEN terminal_at END
+                           AS completed_at,
+                       started_at,
+                       convert_from(result_payload, 'UTF8') AS result,
+                       FALSE AS claimed,
+                       claimed_at,
+                       NULL AS claimed_by_worker_id,
+                       NULL AS claim_expires_at,
+                       NULL AS finalizing_at,
+                       NULL AS finalizing_by_worker_id,
+                       retry_count, max_retries,
+                       good_until, enqueued_at,
+                       NULL AS next_retry_at,
+                       last_worker_pid AS worker_pid,
+                       last_worker_hostname AS worker_hostname,
+                       last_worker_process_name AS worker_process_name,
+                       queue_name,
+                       terminalization_kind
+                FROM horsies_task_history WHERE task_id = CAST(:id AS uuid)
+            """),
+            {'id': task_id},
+        )
+    ).first()
+    assert history is not None
+    return history
 
 
 async def attempt_rows(session: AsyncSession, task_id: str) -> list[Any]:
@@ -351,8 +395,11 @@ class TestCancelTaskSucceeds:
         assert result.ok_value.was_status is TaskStatus.CLAIMED
         row = await read_task(session, task.id)
         assert row.status == 'CANCELLED'
+        # The claim is released by the move itself: no live row remains
+        # to claim. The history row preserves the claim's timestamp as
+        # provenance while carrying no claim state.
         assert row.claimed is False
-        assert row.claimed_at is None
+        assert row.claimed_at is not None
         assert row.claimed_by_worker_id is None
         assert row.claim_expires_at is None
         assert row.finalizing_at is None
@@ -531,7 +578,9 @@ class TestCancelRunningVersusFinalize:
 
         assert isinstance(finalized, Applied)
         assert (await read_task(session, task.id)).status == 'COMPLETED'
-        assert [row.attempt for row in await attempt_rows(session, task.id)] == [1]
+        # Attempts purge with the move; the history row's snapshot is
+        # their only home once the task is terminal.
+        assert await attempt_rows(session, task.id) == []
 
     async def test_finalize_after_cancel_is_a_no_op(
         self, broker: PostgresBroker, session: AsyncSession

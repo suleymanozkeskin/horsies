@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -169,8 +170,16 @@ async def _rewind_to_published(engine: AsyncEngine) -> None:
 
     Not a downgrade path — nothing in the product offers one. It reproduces
     the state a deployment is actually in when it upgrades into this change,
-    which is the only way to assert that upgrading from there works.
+    which is the only way to assert that upgrading from there works. A
+    fresh-born database first demotes to the upgraded world (varchar
+    identities, in-place program) so the rewind's premises hold.
     """
+    from tests.integration.test_task_history_relocation import (
+        demote_to_upgraded_world,
+    )
+
+    async with engine.begin() as demote_connection:
+        await demote_to_upgraded_world(demote_connection)
     async with engine.connect() as connection:
         await connection.execute(
             text('ALTER TABLE horsies_tasks DROP COLUMN IF EXISTS terminalization_kind')
@@ -196,6 +205,50 @@ async def _rewind_to_published(engine: AsyncEngine) -> None:
             {'v': PUBLISHED_VERSION},
         )
         await connection.commit()
+
+
+async def _assert_fresh_end_state(engine: AsyncEngine) -> None:
+    """A uuid-born database is born at the cutover's end state."""
+    async with engine.connect() as connection:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        uuid_born = (
+            await connection.execute(
+                text(
+                    "SELECT atttypid = 'uuid'::regtype FROM pg_attribute "
+                    "WHERE attrelid = 'horsies_tasks'::regclass "
+                    "AND attname = 'id'"
+                )
+            )
+        ).scalar_one()
+        assert bool(uuid_born)
+        move_present = (
+            await connection.execute(
+                text(
+                    "SELECT to_regproc('horsies_move_task_to_history') "
+                    'IS NOT NULL'
+                )
+            )
+        ).scalar_one()
+        assert bool(move_present), 'the move family is the fresh program'
+        domain_present = (
+            await connection.execute(
+                text(
+                    'SELECT EXISTS (SELECT 1 FROM pg_constraint '
+                    "WHERE conrelid = 'horsies_tasks'::regclass "
+                    "AND conname = 'horsies_tasks_live_status_only')"
+                )
+            )
+        ).scalar_one()
+        assert bool(domain_present), 'live-only domain applies at birth'
+        heartbeats_partitioned = (
+            await connection.execute(
+                text(
+                    "SELECT relkind = 'p' FROM pg_class "
+                    "WHERE oid = 'horsies_heartbeats'::regclass"
+                )
+            )
+        ).scalar_one()
+        assert bool(heartbeats_partitioned)
 
 
 async def _assert_end_state(engine: AsyncEngine) -> None:
@@ -286,10 +339,13 @@ class TestUpgradePaths:
         self,
         scratch_database: str,
     ) -> None:
+        """The fresh-world characterization: a uuid-born database gets
+        the move family, the live-only domain, and the partitioned
+        heartbeat shape — never the in-place program."""
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
-            await _assert_end_state(engine)
+            await _assert_fresh_end_state(engine)
         finally:
             await engine.dispose()
 
@@ -381,7 +437,7 @@ class TestUpgradePaths:
         engine = _engine(scratch_database)
         try:
             await _migrate(scratch_database)
-            await _assert_end_state(engine)
+            await _assert_fresh_end_state(engine)
         finally:
             await engine.dispose()
 
@@ -397,11 +453,20 @@ class TestUpgradePaths:
         migrates: the canonical behaviour must come back. If it does not, then
         a merged change to a function body would reach fresh databases only,
         which is the failure the one-version-per-change rule exists to
-        prevent.
+        prevent. Characterized in the varchar world, where the in-place
+        program is self-contained; the fresh world's body restoration
+        rides the same chain arm and its program is exercised by the
+        first-terminalization characterization below.
         """
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
+            from tests.integration.test_task_history_relocation import (
+                demote_to_upgraded_world,
+            )
+
+            async with engine.begin() as demote_connection:
+                await demote_to_upgraded_world(demote_connection)
             type_identity_before = await _outcome_type_oid(engine)
             async with engine.connect() as connection:
                 await connection.execute(
@@ -452,6 +517,46 @@ class TestUpgradePaths:
             # the same shape a new identity underneath everything holding it.
             assert await _outcome_type_oid(engine) == type_identity_before
             await _assert_end_state(engine)
+        finally:
+            await engine.dispose()
+
+    async def test_fresh_first_terminalization_surfaces_the_wiring_gap(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """THE FINDING the fresh-world characterization exists to force.
+
+        A fresh install carries the move family, but the move consults
+        the staged provenance function and inserts into a covered leaf
+        — and NOTHING on a fresh install publishes the staged readers
+        or ensures leaf coverage: publication and coverage happen only
+        through the partition manager, which no production wiring
+        invokes. The first terminal task on a fresh fleet therefore
+        fails. This test pins the CURRENT truth so the gap is a named
+        fact with a ruling pending, not a surprise; the fix (startup
+        wiring that registers configured retention classes, publishes
+        the staged readers, and maintains create-ahead coverage) is
+        its own finding-scoped work.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            task_id = await _seed_running(engine)
+            # The fresh wire signature is uuid (the varchar harness
+            # helper cannot even name it — itself part of the story).
+            with pytest.raises(
+                ProgrammingError,
+                match='horsies_task_provenance_staged',
+            ):
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            'SELECT outcome FROM '
+                            'horsies_complete_locked_task('
+                            "CAST(:id AS uuid), 'w1', '{}')"
+                        ),
+                        {'id': task_id},
+                    )
         finally:
             await engine.dispose()
 

@@ -23,6 +23,14 @@ from typing import Any, AsyncGenerator
 
 import pytest
 import pytest_asyncio
+
+from horsies.core.history.reads.pages import HistoryWindow
+
+
+def _test_window() -> HistoryWindow:
+    """A window wide enough that every seeded row falls inside it."""
+    now = datetime.now(timezone.utc)
+    return HistoryWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
 from pydantic import SecretStr
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +62,7 @@ from horsies.monitoring import (
     task_stats,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import route_rows
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -86,7 +95,7 @@ async def clean_monitoring_tables(
     await session.execute(
         text(
             'TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks, '
-            'horsies_schedule_state CASCADE'
+            'horsies_schedule_state, horsies_task_history CASCADE'
         )
     )
     await session.commit()
@@ -94,9 +103,16 @@ async def clean_monitoring_tables(
 
 
 async def insert_rows(session: AsyncSession, *rows: Any) -> None:
-    """Persist the given ORM rows and commit so other sessions observe them."""
-    session.add_all(list(rows))
-    await session.commit()
+    """Persist fixture rows on their lifecycle side and commit.
+
+    Terminal-status tasks land in ``horsies_task_history`` — the live
+    table's status domain admits only live rows, exactly as production
+    writes them post-terminalization — and any attempt rows passed in
+    the same call for such a task fold into its attempt snapshot.
+    Workflow linkage comes from a same-call ``WorkflowTaskModel`` naming
+    the task. Everything else persists through the ORM unchanged.
+    """
+    await route_rows(session, rows)
 
 
 def ago(seconds: int) -> datetime:
@@ -293,6 +309,7 @@ class TestTaskStats:
     ) -> None:
         result = await task_stats(
             broker,
+            window=_test_window(),
             task_names=[],
             queues=[],
             workers=[],
@@ -317,6 +334,7 @@ class TestTaskStats:
 
         result = await task_stats(
             broker,
+            window=_test_window(),
             task_names=[],
             queues=[],
             workers=[],
@@ -367,6 +385,7 @@ class TestTaskStats:
 
         result = await task_stats(
             broker,
+            window=_test_window(),
             task_names=task_names,
             queues=queues,
             workers=workers,
@@ -397,7 +416,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -418,7 +438,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -436,7 +457,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -452,7 +474,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -469,7 +492,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -495,12 +519,14 @@ class TestTaskFacets:
 
         by_status = await task_facets(
             broker,
+            window=_test_window(),
             statuses=[TaskStatus.FAILED],
             error_categories=[],
             retried_only=False,
         )
         by_retried = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=True
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=True
         )
 
         assert is_ok(by_status)
@@ -520,7 +546,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -539,7 +566,8 @@ class TestTaskFacets:
         )
 
         result = await task_facets(
-            broker, statuses=[], error_categories=[], retried_only=False
+            broker,
+        window=_test_window(), statuses=[], error_categories=[], retried_only=False
         )
 
         assert is_ok(result)
@@ -566,6 +594,7 @@ class TestTaskBreakdown:
 
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='worker',
             statuses=[],
             task_names=[],
@@ -594,6 +623,7 @@ class TestTaskBreakdown:
     ) -> None:
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='worker',
             statuses=[],
             task_names=[],
@@ -618,6 +648,7 @@ class TestTaskBreakdown:
 
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='worker',
             statuses=[],
             task_names=[],
@@ -642,6 +673,7 @@ class TestTaskBreakdown:
 
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='queue',
             statuses=[],
             task_names=[],
@@ -670,6 +702,7 @@ class TestTaskBreakdown:
 
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='task_name',
             statuses=[],
             task_names=[],
@@ -699,6 +732,7 @@ class TestTaskBreakdown:
 
         result = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='worker',
             statuses=[],
             task_names=['alpha_task'],
@@ -733,6 +767,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -762,6 +797,7 @@ class TestListTasks:
 
         page = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -801,6 +837,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -834,6 +871,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -872,6 +910,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -903,6 +942,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=['alpha_task'],
             queues=['fast'],
@@ -932,6 +972,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[TaskStatus.FAILED, TaskStatus.CANCELLED],
             task_names=[],
             queues=[],
@@ -964,6 +1005,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -990,6 +1032,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -1022,6 +1065,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -1049,6 +1093,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[TaskStatus.PENDING],
             task_names=[],
             queues=[],
@@ -1085,6 +1130,7 @@ class TestListTasks:
 
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -1127,6 +1173,7 @@ class TestListTasks:
         try:
             result = await list_tasks(
                 broker,
+            window=_test_window(),
                 statuses=[],
                 task_names=[],
                 queues=[],
@@ -1167,6 +1214,7 @@ async def rows_by_category(
     """List the rows a category selection matches, other dimensions left open."""
     result = await list_tasks(
         broker,
+            window=_test_window(),
         statuses=[],
         task_names=[],
         queues=queues or [],
@@ -1346,6 +1394,7 @@ class TestErrorCategoryFilter:
 
         stats = await task_stats(
             broker,
+            window=_test_window(),
             task_names=[],
             queues=[],
             workers=[],
@@ -1355,6 +1404,7 @@ class TestErrorCategoryFilter:
         )
         breakdown = await task_breakdown(
             broker,
+            window=_test_window(),
             group_by='task_name',
             statuses=[],
             task_names=[],
@@ -1383,6 +1433,7 @@ class TestErrorCategoryFilter:
 
         result = await task_facets(
             broker,
+            window=_test_window(),
             statuses=[],
             error_categories=[ErrorCategory.OPERATIONAL],
             retried_only=False,
@@ -1412,9 +1463,9 @@ class TestGetTaskDetail:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED, error_code='TASK_EXCEPTION')
-        await insert_rows(session, task)
         await insert_rows(
             session,
+            task,
             make_attempt(task_id=task.id, attempt=2, error_code='TASK_EXCEPTION'),
             make_attempt(task_id=task.id, attempt=1, will_retry=True),
         )
@@ -1506,9 +1557,9 @@ class TestGetTaskDetail:
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         task = make_task(status=TaskStatus.FAILED, failed_reason='')
-        await insert_rows(session, task)
         await insert_rows(
             session,
+            task,
             make_attempt(
                 task_id=task.id,
                 attempt=1,
@@ -1539,6 +1590,7 @@ class TestTaskDurations:
     async def _only_row(self, broker: PostgresBroker) -> tuple[int | None, int | None]:
         result = await list_tasks(
             broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -1638,10 +1690,15 @@ class TestTaskDurations:
         assert queue_s == 20
         assert exec_s == 15
 
-    async def test_cancelled_before_start_does_not_count_up(
+    async def test_cancelled_before_start_reports_the_closed_queue_span(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        """A cancel path that writes no end timestamp must not accrue queue time."""
+        """The terminal instant closes the queue span; nothing counts up.
+
+        A history row always carries its terminal instant, so a task
+        cancelled before starting reports the time it actually waited —
+        a closed span, never a live count-up — and no execution span.
+        """
         await insert_rows(
             session,
             make_task(
@@ -1653,10 +1710,10 @@ class TestTaskDurations:
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s is None
+        assert queue_s == 300
         assert exec_s is None
 
-    async def test_expired_before_start_does_not_count_up(
+    async def test_expired_before_start_reports_the_closed_queue_span(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         await insert_rows(
@@ -1666,7 +1723,7 @@ class TestTaskDurations:
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s is None
+        assert queue_s == 300
         assert exec_s is None
 
     async def test_detail_leaf_uses_the_same_spans_as_the_list_row(
@@ -1679,12 +1736,13 @@ class TestTaskDurations:
         )
         await insert_rows(session, task)
 
+        queue_s, exec_s = await self._only_row(broker)
         detail = await get_task_detail(broker, task.id)
 
         assert is_ok(detail)
         assert detail.ok_value is not None
-        assert detail.ok_value.leaf.queue_s is None
-        assert detail.ok_value.leaf.exec_s is None
+        assert detail.ok_value.leaf.queue_s == queue_s
+        assert detail.ok_value.leaf.exec_s == exec_s
 
 
 # --------------------------------------------------------------------------- #
@@ -2012,9 +2070,10 @@ class TestGetWorkflowNode:
     ) -> None:
         run = make_workflow()
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
-        await insert_rows(session, run, task)
         await insert_rows(
             session,
+            run,
+            task,
             make_node(
                 workflow_id=run.id,
                 task_index=0,
@@ -2164,6 +2223,7 @@ class TestDatabaseFailure:
     ) -> None:
         result = await list_tasks(
             unreachable_broker,
+            window=_test_window(),
             statuses=[],
             task_names=[],
             queues=[],
@@ -2197,6 +2257,7 @@ class TestDatabaseFailure:
     ) -> None:
         result = await task_stats(
             unreachable_broker,
+            window=_test_window(),
             task_names=[],
             queues=[],
             workers=[],
