@@ -27,6 +27,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 
 from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
@@ -90,12 +91,16 @@ async def _schema(broker: PostgresBroker) -> None:
 _SEED_SQL = text("""
     INSERT INTO horsies_tasks (
         id, task_name, queue_name, status, args, kwargs, enqueue_sha,
-        is_workflow_task, claimed, claimed_by_worker_id, claimed_at, started_at
+        is_workflow_task, claimed, claimed_by_worker_id, claimed_at, started_at,
+        retention_class_key, command_fingerprint_version, command_fingerprint,
+        retain_rerun_input, prepared_rerun_input_disposition
     )
     VALUES (
-        :id, 'terminalization.test', 'default', :status, '[]', '{}',
+        CAST(:id AS uuid), 'terminalization.test', 'default', :status, '[]', '{}',
         repeat('0', 64), :is_workflow_task, :claimed,
-        :worker_id, :claimed_at, NOW()
+        :worker_id, :claimed_at, NOW(),
+        :retention_class_key, 1, sha256(convert_to(CAST(:id AS text), 'UTF8')),
+        FALSE, 'DECLINED_BY_POLICY'
     )
 """)
 
@@ -118,6 +123,7 @@ async def _seed(
             'claimed_at': claimed_at,
             'is_workflow_task': is_workflow_task,
             'claimed': worker_id is not None,
+            'retention_class_key': DEFAULT_RETENTION_CLASS_KEY,
         },
     )
     await session.commit()
@@ -2585,12 +2591,12 @@ class TestIdKeyedWorkflowBatches:
             ('NULL', "ARRAY['2026-08-04 09:00:00+00']", 'non-NULL'),
             ("ARRAY['one']", 'NULL', 'non-NULL'),
             (
-                "ARRAY['one', 'two']",
+                "ARRAY['one', '00000000-0000-4000-8000-000000000002']",
                 "ARRAY['2026-08-04 09:00:00+00']",
                 'lengths differ',
             ),
             (
-                'ARRAY[NULL]::varchar[]',
+                'ARRAY[NULL]::uuid[]',
                 "ARRAY['2026-08-04 09:00:00+00']",
                 'non-NULL',
             ),
@@ -2616,7 +2622,7 @@ class TestIdKeyedWorkflowBatches:
             await session.execute(
                 text(f"""
                     SELECT * FROM {function_name}(
-                        CAST({ids} AS VARCHAR[]),
+                        CAST({ids} AS uuid[]),
                         CAST({generations_sql} AS TIMESTAMPTZ[]),
                         :worker_id
                     )
