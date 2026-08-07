@@ -147,6 +147,14 @@ class TestManifestFromCatalog:
         manifest = manifest_from_catalog([make_catalog_row(0)])
         assert manifest.birth_floor is None
 
+    def test_heartbeat_leaves_are_excluded_at_assembly(self) -> None:
+        history = make_catalog_row(0)
+        heartbeat = make_catalog_row(1, class_key='heartbeats')
+        manifest = manifest_from_catalog([history, heartbeat])
+        assert [leaf.relation_name for leaf in manifest.leaves] == [
+            history.leaf_name
+        ]
+
     def test_empty_catalog_yields_empty_manifest(self) -> None:
         assert manifest_from_catalog([]) == LookupManifest(
             leaves=(), birth_floor=None

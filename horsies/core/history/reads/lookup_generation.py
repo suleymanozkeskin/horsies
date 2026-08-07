@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 
 from ..commands import is_safe_identifier
 from ..names import (
+    HEARTBEAT_CLASS_KEY,
     LIVE_TASKS,
     TASK_HISTORY_FOREVER,
     TASK_LOOKUP_FUNCTION,
@@ -124,8 +125,21 @@ def manifest_from_catalog(rows: Sequence[LeafCatalogRow]) -> LookupManifest:
     class — the caller reads them through the catalog module's
     all-classes query. Ordering is normalized here; duplicate relation
     names are a contract violation the constructor surfaces.
+
+    Non-history catalog consumers are excluded HERE, at assembly, so
+    every manifest consumer inherits the filter: heartbeat leaves share
+    the leaf catalog but carry no history columns, and a generated probe
+    against one would reference fingerprint columns that do not exist —
+    CREATE would succeed (bodies are unvalidated) and execution would
+    die at that probe, or worse resolve wrongly through the coincidental
+    task_id column.
     """
-    ordered = sorted(rows, key=lambda row: (row.lower_anchor, row.leaf_name))
+    history_rows = [
+        row for row in rows if row.class_key != HEARTBEAT_CLASS_KEY
+    ]
+    ordered = sorted(
+        history_rows, key=lambda row: (row.lower_anchor, row.leaf_name)
+    )
     names = [row.leaf_name for row in ordered]
     if len(set(names)) != len(names):
         raise ValueError('lookup manifest relation names must be distinct')

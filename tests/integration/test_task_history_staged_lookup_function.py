@@ -280,6 +280,117 @@ class TestPublicationAtomicity:
             )
 
 
+class TestHeartbeatLeafExclusion:
+    """A heartbeat leaf in the shared catalog never enters the manifest.
+
+    Presence half first (the leaf name provably appears when the filter
+    is bypassed), then the published bodies are asserted clean and the
+    real lookups still resolve — the false-absence discipline applied to
+    the cross-consumer hazard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_republish_excludes_heartbeat_leaves(
+        self, history_schema: HistorySchema
+    ) -> None:
+        from horsies.core.history.partitions.catalog import (
+            read_all_attached_leaf_rows,
+        )
+        from horsies.core.history.reads.lookup_generation import (
+            LookupLeaf,
+            LookupManifest,
+            render_staged_provenance_function,
+        )
+
+        async with history_schema.engine.begin() as connection:
+            row_a, row_b = await seed_two_classes(connection)
+
+            heartbeat_leaf = 'horsies_heartbeats_2026_08_07_00'
+            await connection.execute(
+                text(
+                    "INSERT INTO horsies_retention_classes "
+                    "(class_key, duration, partition_interval, "
+                    "finite_parent_name, created_at) VALUES "
+                    "('heartbeats', NULL, NULL, NULL, statement_timestamp())"
+                )
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_task_history_leaf_catalog ('
+                    'leaf_name, parent_name, class_key, lower_anchor, '
+                    'upper_anchor, index_schema_version, id_index_name, '
+                    'partition_bound, min_birth_at, min_birth_verified, '
+                    'created_at'
+                    ") VALUES ("
+                    ":leaf_name, 'horsies_heartbeats', 'heartbeats', "
+                    "'2026-08-07T00:00:00Z', '2026-08-07T01:00:00Z', 1, "
+                    ":index_name, 'FOR VALUES ...', NULL, TRUE, "
+                    'statement_timestamp())'
+                ),
+                {
+                    'leaf_name': heartbeat_leaf,
+                    'index_name': f'{heartbeat_leaf}_task_idx',
+                },
+            )
+
+            # Presence half: bypassing the filter provably includes the
+            # heartbeat leaf, so the exclusion assert below is non-vacuous.
+            rows = await read_all_attached_leaf_rows(connection)
+            heartbeat_row = next(
+                row for row in rows if row.leaf_name == heartbeat_leaf
+            )
+            unfiltered = LookupManifest(
+                leaves=(
+                    LookupLeaf(
+                        relation_name=heartbeat_row.leaf_name,
+                        lower_anchor=heartbeat_row.lower_anchor,
+                        upper_anchor=heartbeat_row.upper_anchor,
+                        min_birth_at=None,
+                    ),
+                ),
+                birth_floor=None,
+            )
+            assert heartbeat_leaf in render_staged_provenance_function(
+                unfiltered
+            )
+
+            await StagedLoaderPublisher().republish(connection)
+            for function_name in (
+                'horsies_task_lookup_staged',
+                'horsies_task_provenance_staged',
+            ):
+                body = (
+                    await connection.execute(
+                        text(
+                            'SELECT prosrc FROM pg_proc '
+                            'WHERE proname = :name'
+                        ),
+                        {'name': function_name},
+                    )
+                ).scalar_one()
+                assert heartbeat_leaf not in body
+            manifest_names = {
+                row.leaf_name
+                for row in (
+                    await connection.execute(
+                        text(
+                            'SELECT leaf_name FROM '
+                            'horsies_task_lookup_manifest'
+                        )
+                    )
+                ).all()
+            }
+            assert heartbeat_leaf not in manifest_names
+            assert isinstance(
+                await lookup_task_identity(connection, row_a),
+                HistoryTaskIdentity,
+            )
+            assert isinstance(
+                await lookup_task_identity(connection, row_b),
+                HistoryTaskIdentity,
+            )
+
+
 class TestFalseAbsenceSeamRegression:
     """Revert-proof: a class-scoped manifest loses other classes' rows."""
 
