@@ -13,10 +13,18 @@ from typing import Final
 
 
 class FieldProvenance(Enum):
-    """Which side of the replay principle a column derives from."""
+    """Which side of the replay principle a column derives from.
+
+    Replayed fields come from the source row or its carried envelope:
+    row-borne request fields are REPLAYED_FROM_SOURCE, and the fields
+    that travel inside the versioned input envelope — history carries
+    no generic request columns — are REPLAYED_VIA_ENVELOPE. Both sides
+    replay THE REQUEST; they differ only in where the bytes live.
+    """
 
     NEW_IDENTITY = 'NEW_IDENTITY'
     REPLAYED_FROM_SOURCE = 'REPLAYED_FROM_SOURCE'
+    REPLAYED_VIA_ENVELOPE = 'REPLAYED_VIA_ENVELOPE'
     LINEAGE = 'LINEAGE'
     CALLER_EXPLICIT = 'CALLER_EXPLICIT'
     RESOLVED_AT_ENQUEUE = 'RESOLVED_AT_ENQUEUE'
@@ -35,12 +43,15 @@ RERUN_FIELD_PROVENANCE: Final[dict[str, FieldProvenance]] = {
     'task_name': FieldProvenance.REPLAYED_FROM_SOURCE,
     'queue_name': FieldProvenance.REPLAYED_FROM_SOURCE,
     'priority': FieldProvenance.REPLAYED_FROM_SOURCE,
-    'args': FieldProvenance.REPLAYED_FROM_SOURCE,
-    'kwargs': FieldProvenance.REPLAYED_FROM_SOURCE,
-    'task_options': FieldProvenance.REPLAYED_FROM_SOURCE,
     'max_retries': FieldProvenance.REPLAYED_FROM_SOURCE,
     'is_workflow_task': FieldProvenance.REPLAYED_FROM_SOURCE,
     'input_digest': FieldProvenance.REPLAYED_FROM_SOURCE,
+    # Request-specified but not row-borne: these travel in the
+    # versioned input envelope whose content contract this package
+    # owns; options ride input availability with them.
+    'args': FieldProvenance.REPLAYED_VIA_ENVELOPE,
+    'kwargs': FieldProvenance.REPLAYED_VIA_ENVELOPE,
+    'task_options': FieldProvenance.REPLAYED_VIA_ENVELOPE,
     # The atomic pair per the frozen CHECK.
     'rerun_of_task_id': FieldProvenance.LINEAGE,
     'rerun_root_task_id': FieldProvenance.LINEAGE,
