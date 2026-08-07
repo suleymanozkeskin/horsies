@@ -133,6 +133,15 @@ def _make_result_session(row: Any) -> AsyncMock:
             'use GET_TASK_RESULT_RECORD_SQL'
         ),
     )
+    # The history fallback probes for the staged detail function on
+    # the session's connection; this mock models the unpublished
+    # database, where absent means absent (the integration suite
+    # covers the published side on real schemas).
+    published_probe = MagicMock()
+    published_probe.scalar_one = MagicMock(return_value=False)
+    connection = AsyncMock()
+    connection.execute = AsyncMock(return_value=published_probe)
+    session.connection = AsyncMock(return_value=connection)
     return session
 
 
