@@ -55,7 +55,7 @@ async def _prepare_db(url: str) -> None:
         await broker.close_async()
 
 
-async def _run_all(
+async def run_preparation_to_complete(
     connection: AsyncConnection,
     *,
     retain_default: bool,
@@ -112,7 +112,7 @@ class TestPreparation:
                     args_json='[1, unquoted]',
                 )
 
-                batches, complete = await _run_all(
+                batches, complete = await run_preparation_to_complete(
                     connection, retain_default=True
                 )
                 assert complete.rows_prepared == 3
@@ -191,7 +191,7 @@ class TestPreparation:
                     retain=None,
                     args_json='[1]',
                 )
-                batches, complete = await _run_all(
+                batches, complete = await run_preparation_to_complete(
                     connection, retain_default=False
                 )
                 assert complete.rows_prepared == 1
@@ -218,7 +218,7 @@ class TestPreparation:
                     retain=None,
                     args_json='[42]',
                 )
-                await _run_all(connection, retain_default=True)
+                await run_preparation_to_complete(connection, retain_default=True)
                 relocated = await relocate_all(connection)
                 assert isinstance(relocated, RelocationComplete)
                 row = (
