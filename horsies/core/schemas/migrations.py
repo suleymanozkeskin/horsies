@@ -215,7 +215,20 @@ from sqlalchemy import text
 #      DERIVED from the fragment programmatically so the transitional
 #      migration and the authoritative shape can never drift.
 
-SCHEMA_VERSION = 27
+# v28: the keyed-enqueue reservation registry. The table installs its
+#      FINAL FROZEN SHAPE directly, imported verbatim from the frozen
+#      DDL module — the permissive-then-tighten two-step exists for
+#      populated relations whose rows would violate final constraints
+#      before backfill, and a new empty table has no such rows; there is
+#      no tightening debt. The reservation functions install per the
+#      claim-function precedent: dropped and recreated on every apply,
+#      because a function body is program rather than state.
+#      DELIBERATELY ABSENT: the registry maintenance indexes — they are
+#      wave-gated conditional DDL emitted by the cutover program, and
+#      their absence here is sequencing, not an omission to repair. The
+#      claim path rides the table's primary key.
+
+SCHEMA_VERSION = 28
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -225,6 +238,46 @@ from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
 # the authoritative fragment (see the v27 note above).
 ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL = text(
     transitional_cutover_columns_ddl()
+)
+
+# Migration (v28): the reservation registry, verbatim from the frozen
+# module (see the v28 note above). One-owner is enforced by the import
+# graph itself; idempotence lives at the runner's existence check, not
+# in a second DDL text.
+from horsies.core.history.ddl.tables import (  # noqa: E402
+    KEY_RESERVATIONS_DDL,
+)
+from horsies.core.history.identity.reservations import (  # noqa: E402
+    KEY_RESERVATION_CLAIM_FUNCTION,
+    KEY_RESERVATION_CLEANUP_FUNCTION,
+    KEY_RESERVATION_OUTCOME_TYPE,
+    KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION,
+    KEY_RESERVATION_TERMINALIZE_FUNCTION,
+    reservation_function_fragments,
+)
+from horsies.core.history.names import KEY_RESERVATIONS  # noqa: E402
+
+KEY_RESERVATIONS_TABLE_EXISTS_SQL = text(
+    f"SELECT to_regclass('{KEY_RESERVATIONS}') IS NOT NULL"
+)
+CREATE_KEY_RESERVATIONS_TABLE_SQL = text(KEY_RESERVATIONS_DDL)
+DROP_RESERVATION_PROGRAM_SQL = tuple(
+    text(statement)
+    for statement in (
+        f'DROP FUNCTION IF EXISTS {KEY_RESERVATION_CLAIM_FUNCTION}'
+        '(bytea, smallint, interval, smallint, bytea, uuid)',
+        f'DROP FUNCTION IF EXISTS {KEY_RESERVATION_TERMINALIZE_FUNCTION}'
+        '(bytea, uuid, timestamptz)',
+        f'DROP FUNCTION IF EXISTS '
+        f'{KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION}'
+        '(bytea[], uuid[], timestamptz)',
+        f'DROP FUNCTION IF EXISTS {KEY_RESERVATION_CLEANUP_FUNCTION}'
+        '(integer)',
+        f'DROP TYPE IF EXISTS {KEY_RESERVATION_OUTCOME_TYPE}',
+    )
+)
+CREATE_RESERVATION_PROGRAM_SQL = tuple(
+    text(statement) for statement in reservation_function_fragments()
 )
 
 from .terminalization import (  # noqa: E402

@@ -32,15 +32,6 @@ from horsies.core.history.terminalization.live_cutover import (
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
-
-
-def _drop_inherited_transitional_columns(relation: str) -> str:
-    """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
-    drops = ',\n    '.join(
-        f'DROP COLUMN IF EXISTS {name}'
-        for name, _ in cutover_column_definitions()
-    )
-    return f'ALTER TABLE {relation}\n    {drops}'
 from tests.perf.counters import Counts
 from tests.perf.statistics import (
     Budget,
@@ -68,6 +59,15 @@ from tests.task_history_prototypes.schema import (
 from tests.task_history_prototypes.transcode import (
     install_archive_transcode_prototype,
 )
+
+
+def _drop_inherited_transitional_columns(relation: str) -> str:
+    """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
+    drops = ',\n    '.join(
+        f'DROP COLUMN IF EXISTS {name}'
+        for name, _ in cutover_column_definitions()
+    )
+    return f'ALTER TABLE {relation}\n    {drops}'
 
 
 class RerunTerminalizationError(Exception):

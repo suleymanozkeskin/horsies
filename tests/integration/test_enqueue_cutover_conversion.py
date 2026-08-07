@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
@@ -156,3 +157,142 @@ class TestConvertedStatement:
         conflicted = await enqueue(broker, tampered)
         assert is_err(conflicted)
         assert conflicted.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
+
+
+async def enqueue_keyed(
+    broker: PostgresBroker, send: Send, key: str
+) -> BrokerResult[str]:
+    return await broker.enqueue_async(
+        'cutover.enqueue',
+        task_id=send.task_id,
+        enqueue_sha=send.enqueue_sha,
+        kwargs_json=send.kwargs_json,
+        sent_at=send.sent_at,
+        idempotency_key=key,
+    )
+
+
+class TestKeyedEnqueue:
+    async def test_keyed_enqueue_reserves_and_inserts_in_one_commit(
+        self, broker: PostgresBroker
+    ) -> None:
+        send = make_send()
+        key = f'order-batch-{uuid4()}'
+        result = await enqueue_keyed(broker, send, key)
+        assert is_ok(result)
+        async with broker.session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        'SELECT r.disposition, r.task_id, '
+                        't.idempotency_key_digest '
+                        'FROM horsies_key_reservations r '
+                        'JOIN horsies_tasks t '
+                        'ON t.id = CAST(r.task_id AS varchar) '
+                        'WHERE r.task_id = CAST(:id AS uuid)'
+                    ),
+                    {'id': send.task_id},
+                )
+            ).one()
+        assert row.disposition == 'LIVE'
+        assert row.idempotency_key_digest is not None
+
+    async def test_keyed_resend_with_a_fresh_id_replays_the_committed(
+        self, broker: PostgresBroker
+    ) -> None:
+        """The uncertain-commit shape for keyed producers: the ack was
+        lost, the client minted a NEW id for the resend, and the same
+        key + same canonical command must resolve to the committed
+        request — same result shape as a fresh success."""
+        first = make_send()
+        key = f'order-batch-{uuid4()}'
+        committed = await enqueue_keyed(broker, first, key)
+        assert is_ok(committed)
+        resend = Send(
+            task_id=mint_task_id(),
+            enqueue_sha=first.enqueue_sha,
+            kwargs_json=first.kwargs_json,
+            sent_at=first.sent_at,
+        )
+        replayed = await enqueue_keyed(broker, resend, key)
+        assert is_ok(replayed)
+        assert replayed.ok_value == first.task_id
+        async with broker.session_factory() as session:
+            count = (
+                await session.execute(
+                    text(
+                        'SELECT count(*) FROM horsies_tasks '
+                        'WHERE id IN (:a, :b)'
+                    ),
+                    {'a': first.task_id, 'b': resend.task_id},
+                )
+            ).scalar_one()
+        assert count == 1
+
+    async def test_same_key_different_command_conflicts_with_zero_rows(
+        self, broker: PostgresBroker
+    ) -> None:
+        first = make_send()
+        key = f'order-batch-{uuid4()}'
+        committed = await enqueue_keyed(broker, first, key)
+        assert is_ok(committed)
+        different = make_send(kwargs_json='{"x":99}')
+        conflicted = await enqueue_keyed(broker, different, key)
+        assert is_err(conflicted)
+        assert (
+            conflicted.err_value.code
+            is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        )
+        async with broker.session_factory() as session:
+            orphan = (
+                await session.execute(
+                    text(
+                        'SELECT count(*) FROM horsies_tasks '
+                        'WHERE id = :id'
+                    ),
+                    {'id': different.task_id},
+                )
+            ).scalar_one()
+        assert orphan == 0
+
+    async def test_registry_indexes_are_deliberately_absent(
+        self, broker: PostgresBroker
+    ) -> None:
+        """The claim rides the primary key; the maintenance indexes are
+        wave-gated conditional DDL, and their absence at this schema
+        version is sequencing, not an omission."""
+        async with broker.session_factory() as session:
+            index_names = [
+                row.indexname
+                for row in (
+                    await session.execute(
+                        text(
+                            'SELECT indexname FROM pg_indexes '
+                            "WHERE tablename = 'horsies_key_reservations'"
+                        )
+                    )
+                ).all()
+            ]
+        assert index_names == ['horsies_key_reservations_pkey']
+
+
+class TestReservationWindowConfiguration:
+    def test_boundary_values_are_legal_and_excess_is_typed(self) -> None:
+        from datetime import timedelta
+
+        from horsies.core.history.identity.keys import (
+            validate_reservation_window,
+        )
+
+        assert validate_reservation_window(timedelta(days=30)) == (
+            timedelta(days=30)
+        )
+        assert validate_reservation_window(timedelta(seconds=1)) == (
+            timedelta(seconds=1)
+        )
+        with pytest.raises(ValueError, match='positive'):
+            validate_reservation_window(timedelta(0))
+        with pytest.raises(ValueError, match='inclusive maximum'):
+            validate_reservation_window(
+                timedelta(days=30, microseconds=1)
+            )

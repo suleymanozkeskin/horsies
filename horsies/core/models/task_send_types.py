@@ -69,6 +69,10 @@ class TaskSendPayload:
     enqueue_delay_seconds: int | None
     task_options: str | None
     enqueue_sha: str  # SHA-256 hex digest
+    # The caller's idempotency key, distinct from task identity and from
+    # enqueue_sha. Riding the payload keeps the uncertain-commit resend
+    # keyed: a replayed send claims with the same key it first sent.
+    idempotency_key: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
