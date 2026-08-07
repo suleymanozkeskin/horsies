@@ -58,9 +58,7 @@ from horsies.monitoring.task_actions import (
     TaskActionError,
     TaskActionErrorCode,
     TaskCancelled,
-    TaskRetried,
     cancel_task,
-    retry_task,
 )
 from horsies.monitoring.queries import (
     SortDirection,
@@ -92,9 +90,7 @@ __all__ = [
     'TaskActionErrorCode',
     # Actions
     'TaskCancelled',
-    'TaskRetried',
     'cancel_task',
-    'retry_task',
     # Query parameter vocabularies
     'SortDirection',
     'TaskGroupBy',

@@ -1,20 +1,12 @@
-"""Integration tests for horsies.monitoring task actions.
+"""Integration tests for the horsies.monitoring cancel action.
 
-Both actions mutate real rows through the ``broker`` fixture. Coverage:
+The action mutates real rows through the ``broker`` fixture. Coverage:
 
 1. cancel_task — every eligible status, every diagnosis code, idempotence
 2. cancel_task side effects — cleared claim fields, end timestamp, task_done
 3. cancel of a RUNNING task — a later finalize cannot overwrite it and
    writes no attempt row
-4. retry_task — every eligible status, field reset, untouched expiry/budget
-5. retry_task attempt numbering — retry_count tracks MAX(attempt), so the
-   next run neither overwrites history nor leaves a gap
-6. retry_task diagnosis — including expiry taking effect only when the
-   status itself is eligible
-7. retry_task queue NOTIFY — the UPDATE fires no INSERT trigger, so the
-   action must emit it
-8. a waiting get_result_async resolves with the retried run's result
-9. concurrent claim vs cancel — exactly one effect lands
+4. concurrent claim vs cancel — exactly one effect lands
 """
 
 from __future__ import annotations
@@ -33,7 +25,6 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.codec import JsonValue, encode_task_result
@@ -47,7 +38,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.lifecycle.persistence import apply_async
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskResult
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
@@ -56,7 +47,6 @@ from horsies.core.worker.sql import HORSIES_CLAIM_SQL
 from horsies.monitoring import (
     TaskActionErrorCode,
     cancel_task,
-    retry_task,
 )
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 
@@ -246,16 +236,6 @@ async def attempt_rows(session: AsyncSession, task_id: str) -> list[Any]:
             )
         ).all()
     )
-
-
-def register_retry_wait_task(app: Horsies) -> Any:
-    """Register the task whose ok type the result waiter decodes against."""
-
-    @app.task(task_name='retry_wait_task')
-    def retry_wait_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
-
-    return retry_wait_task
 
 
 def serialize_ok(value: object) -> str:
@@ -584,369 +564,6 @@ class TestCancelRunningVersusFinalize:
 
 
 # --------------------------------------------------------------------------- #
-# retry_task — happy paths
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestRetryTaskSucceeds:
-    """A settled task is reset in place and re-enqueued."""
-
-    @pytest.mark.parametrize(
-        'status',
-        [TaskStatus.FAILED, TaskStatus.EXPIRED, TaskStatus.CANCELLED],
-    )
-    async def test_every_settled_status_is_retryable(
-        self, broker: PostgresBroker, session: AsyncSession, status: TaskStatus
-    ) -> None:
-        task = make_task(status=status, failed_at=ago(10))
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        assert result.ok_value.was_status is status
-        assert (await read_task(session, task.id)).status == 'PENDING'
-
-    async def test_reset_clears_the_previous_run(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(
-            status=TaskStatus.FAILED,
-            worker_id=WORKER_ID,
-            claimed_at=ago(60),
-            started_at=ago(50),
-            failed_at=ago(40),
-            result=serialize_ok(1),
-            error_code='TASK_EXCEPTION',
-            failed_reason='boom',
-        )
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        row = await read_task(session, task.id)
-        assert row.status == 'PENDING'
-        assert row.started_at is None
-        assert row.completed_at is None
-        assert row.failed_at is None
-        assert row.result is None
-        assert row.error_code is None
-        assert row.failed_reason is None
-        assert row.claimed is False
-        assert row.claimed_at is None
-        assert row.claimed_by_worker_id is None
-        assert row.claim_expires_at is None
-        assert row.next_retry_at is None
-        assert row.worker_pid is None
-        assert row.worker_hostname is None
-        assert row.worker_process_name is None
-        assert row.finalizing_at is None
-        assert row.finalizing_by_worker_id is None
-
-    async def test_expiry_and_retry_budget_are_not_extended(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        """A manual retry buys neither a longer life nor extra auto-retries."""
-        expiry = ahead(3600)
-        task = make_task(
-            status=TaskStatus.FAILED, good_until=expiry, max_retries=3, retry_count=3
-        )
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        row = await read_task(session, task.id)
-        assert row.max_retries == 3
-        assert abs((row.good_until - expiry).total_seconds()) < 1
-
-    async def test_enqueued_at_is_refreshed(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED)
-        await persist(session, task)
-        before = (await read_task(session, task.id)).enqueued_at
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        assert (await read_task(session, task.id)).enqueued_at > before
-
-    async def test_first_retry_of_a_task_with_no_attempts(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.CANCELLED, retry_count=0)
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        assert result.ok_value.next_attempt_number == 1
-        assert (await read_task(session, task.id)).retry_count == 0
-
-
-# --------------------------------------------------------------------------- #
-# retry_task — attempt numbering
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestRetryAttemptNumbering:
-    """retry_count tracks MAX(attempt) so history is neither lost nor gapped."""
-
-    async def test_retry_count_becomes_the_highest_recorded_attempt(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, retry_count=0)
-        await persist(session, task)
-        await persist(
-            session,
-            make_attempt(task_id=task.id, attempt=1),
-            make_attempt(task_id=task.id, attempt=2),
-            make_attempt(task_id=task.id, attempt=3),
-        )
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        assert result.ok_value.next_attempt_number == 4
-        assert (await read_task(session, task.id)).retry_count == 3
-
-    async def test_stale_retry_count_is_corrected_upward(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        """A retry_count below MAX(attempt) would overwrite an existing row."""
-        task = make_task(status=TaskStatus.FAILED, retry_count=1)
-        await persist(session, task)
-        await persist(
-            session,
-            make_attempt(task_id=task.id, attempt=1),
-            make_attempt(task_id=task.id, attempt=2),
-        )
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-        assert (await read_task(session, task.id)).retry_count == 2
-        assert result.ok_value.next_attempt_number == 3
-
-    async def test_the_next_run_appends_instead_of_overwriting(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, retry_count=0)
-        await persist(session, task)
-        await persist(
-            session,
-            make_attempt(task_id=task.id, attempt=1, error_message='first failure'),
-            make_attempt(task_id=task.id, attempt=2, error_message='second failure'),
-        )
-        retried = await retry_task(broker, task.id)
-        assert is_ok(retried)
-
-        # Simulate the next run reaching the real finalize path.
-        claimed_at = datetime.now(UTC)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'RUNNING', claimed = TRUE, claimed_at = :claimed_at,
-                    claimed_by_worker_id = :wid, started_at = NOW()
-                WHERE id = :id
-            """),
-            {'id': task.id, 'wid': WORKER_ID, 'claimed_at': claimed_at},
-        )
-        await session.commit()
-        await complete_fused(
-            session,
-            task_id=task.id,
-            claimed_at=claimed_at,
-            result_json=serialize_ok('third time lucky'),
-        )
-        await session.commit()
-
-        attempts = await attempt_rows(session, task.id)
-        assert [row.attempt for row in attempts] == [1, 2, 3]
-        assert attempts[0].error_message == 'first failure'
-        assert attempts[1].error_message == 'second failure'
-        assert attempts[2].outcome == 'COMPLETED'
-        assert retried.ok_value.next_attempt_number == 3
-
-
-# --------------------------------------------------------------------------- #
-# retry_task — diagnosis
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestRetryTaskRefuses:
-    """Each refusal names its cause; expiry only applies to eligible statuses."""
-
-    async def test_missing_task(self, broker: PostgresBroker) -> None:
-        missing_id = str(uuid.uuid4())
-
-        result = await retry_task(broker, missing_id)
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_NOT_FOUND
-        assert result.err_value.current_status is None
-
-    async def test_workflow_bound_task(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
-        assert (await read_task(session, task.id)).status == 'FAILED'
-
-    @pytest.mark.parametrize(
-        'status',
-        [
-            TaskStatus.PENDING,
-            TaskStatus.CLAIMED,
-            TaskStatus.RUNNING,
-            TaskStatus.COMPLETED,
-        ],
-    )
-    async def test_unsettled_or_successful_task(
-        self, broker: PostgresBroker, session: AsyncSession, status: TaskStatus
-    ) -> None:
-        task = make_task(status=status)
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_NOT_RETRYABLE
-        assert result.err_value.current_status is status
-
-    async def test_expired_good_until_blocks_an_otherwise_eligible_task(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, good_until=ago(60))
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_EXPIRY_PASSED
-        assert result.err_value.current_status is TaskStatus.FAILED
-        assert (await read_task(session, task.id)).status == 'FAILED'
-
-    async def test_future_good_until_does_not_block(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, good_until=ahead(3600))
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_ok(result)
-
-    async def test_status_ineligibility_outranks_expiry(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        """A COMPLETED task is not retryable regardless of its expiry."""
-        task = make_task(status=TaskStatus.COMPLETED, good_until=ago(60))
-        await persist(session, task)
-
-        result = await retry_task(broker, task.id)
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_NOT_RETRYABLE
-        assert result.err_value.current_status is TaskStatus.COMPLETED
-
-
-# --------------------------------------------------------------------------- #
-# retry_task — waking a worker
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestRetryNotification:
-    """The reset is an UPDATE, so the INSERT trigger cannot wake anyone."""
-
-    async def test_retry_notifies_the_task_queue(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED, queue_name='reports')
-        await persist(session, task)
-
-        async def do_retry() -> None:
-            result = await retry_task(broker, task.id)
-            assert is_ok(result)
-
-        notification = await next_notification('task_queue_reports', do_retry)
-
-        assert notification is not None
-        assert notification.payload == f'retry:{task.id}'
-
-    async def test_a_plain_update_to_pending_notifies_nobody(
-        self, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        """The premise the manual notify exists for."""
-        task = make_task(status=TaskStatus.FAILED, queue_name='reports')
-        await persist(session, task)
-
-        async def flip_to_pending() -> None:
-            await session.execute(
-                text(
-                    'UPDATE horsies_tasks '
-                    "SET status='PENDING', terminal_at = NULL WHERE id = :id"
-                ),
-                {'id': task.id},
-            )
-            await session.commit()
-
-        notification = await next_notification(
-            'task_queue_reports', flip_to_pending, timeout_s=1.5
-        )
-
-        assert notification is None
-
-
-# --------------------------------------------------------------------------- #
-# retry_task — result waiters
-# --------------------------------------------------------------------------- #
-@pytest.mark.usefixtures('clean_task_tables')
-class TestRetryUnblocksResultWaiters:
-    """A handle waiting on a retried task sees the new run's result."""
-
-    async def test_waiter_resolves_with_the_new_runs_result(
-        self, app: Horsies, broker: PostgresBroker, session: AsyncSession
-    ) -> None:
-        register_retry_wait_task(app)
-
-        task = make_task(status=TaskStatus.FAILED, task_name='retry_wait_task')
-        await persist(session, task)
-        retried = await retry_task(broker, task.id)
-        assert is_ok(retried)
-
-        waiter = asyncio.create_task(app.get_result_async(task.id, timeout_ms=10_000))
-        await asyncio.sleep(0.2)
-
-        claimed_at = datetime.now(UTC)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'RUNNING', claimed = TRUE, claimed_at = :claimed_at,
-                    claimed_by_worker_id = :wid, started_at = NOW()
-                WHERE id = :id
-            """),
-            {'id': task.id, 'wid': WORKER_ID, 'claimed_at': claimed_at},
-        )
-        await session.commit()
-        await complete_fused(
-            session,
-            task_id=task.id,
-            claimed_at=claimed_at,
-            result_json=serialize_ok(4242),
-        )
-        await session.commit()
-
-        outcome = await asyncio.wait_for(waiter, timeout=15)
-
-        assert is_ok(outcome)
-        assert outcome.ok_value.unwrap() == 4242
-
-
-# --------------------------------------------------------------------------- #
 # Races
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_task_tables')
@@ -1007,9 +624,9 @@ class TestClaimCancelRace:
 # --------------------------------------------------------------------------- #
 @pytest.mark.usefixtures('clean_task_tables')
 class TestWorkflowBoundRowsAreUntouched:
-    """Neither action edits a row a workflow owns."""
+    """The cancel action never edits a row a workflow owns."""
 
-    async def test_neither_action_mutates_a_real_workflow_node_task(
+    async def test_cancel_does_not_mutate_a_real_workflow_node_task(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         workflow = WorkflowModel(
@@ -1041,12 +658,9 @@ class TestWorkflowBoundRowsAreUntouched:
         )
 
         cancelled = await cancel_task(broker, task.id, include_running=True)
-        retried = await retry_task(broker, task.id)
 
         assert is_err(cancelled)
         assert cancelled.err_value.code is TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
-        assert is_err(retried)
-        assert retried.err_value.code is TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
         row = await read_task(session, task.id)
         assert row.status == 'FAILED'
         assert row.retry_count == 0
@@ -1056,21 +670,12 @@ class TestWorkflowBoundRowsAreUntouched:
 # Database failure
 # --------------------------------------------------------------------------- #
 class TestDatabaseFailure:
-    """An unreachable database is an Err on both actions, never an exception."""
+    """An unreachable database is an Err, never an exception."""
 
     async def test_cancel_reports_a_retryable_db_failure(
         self, unreachable_broker: PostgresBroker
     ) -> None:
         result = await cancel_task(unreachable_broker, str(uuid.uuid4()))
-
-        assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.DB_OPERATION_FAILED
-        assert result.err_value.retryable is True
-
-    async def test_retry_reports_a_retryable_db_failure(
-        self, unreachable_broker: PostgresBroker
-    ) -> None:
-        result = await retry_task(unreachable_broker, str(uuid.uuid4()))
 
         assert is_err(result)
         assert result.err_value.code is TaskActionErrorCode.DB_OPERATION_FAILED

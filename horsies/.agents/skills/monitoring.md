@@ -1,6 +1,6 @@
 ---
 name: horsies-monitoring
-description: Monitoring guidance for horsies, including the horsies.monitoring query API, task cancel/retry actions, the horsies[web] dashboard, create_monitoring_app, the horsies web CLI, authorization policies, and schema-compatibility states. Use when embedding the dashboard, operating it, or building on the monitoring API.
+description: Monitoring guidance for horsies, including the horsies.monitoring query API, the task cancel action, the horsies[web] dashboard, create_monitoring_app, the horsies web CLI, authorization policies, and schema-compatibility states. Use when embedding the dashboard, operating it, or building on the monitoring API.
 ---
 
 # horsies — Monitoring
@@ -57,7 +57,7 @@ to serve). The `--database-url` form is registry-less by design:
 | Capability | app path | `--database-url` |
 |---|---|---|
 | All reads, live updates | yes | yes |
-| Task cancel / retry | yes | yes |
+| Task cancel | yes | yes |
 | Workflow pause / cancel | yes | yes |
 | Workflow **resume** when a pending node uses `args_from` | yes | **no** — encoding an upstream result into a fresh task row needs the source task's registered return type |
 
@@ -116,11 +116,10 @@ list_schedules(broker)
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`.
 
-## Task Actions — `cancel_task` / `retry_task`
+## Task Actions — `cancel_task`
 
 ```python
 cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, TaskActionError]
-retry_task(broker, task_id) -> Result[TaskRetried, TaskActionError]
 ```
 
 - Single-transaction compare-and-set. A committed CANCELLED cannot be
@@ -129,15 +128,13 @@ retry_task(broker, task_id) -> Result[TaskRetried, TaskActionError]
   `include_running=True` — the row flips durably but **the process keeps
   executing**: side effects still happen and no attempt row is recorded for
   that run. There is no cross-process kill.
-- Retry eligibility: FAILED, EXPIRED, CANCELLED. Same row reused with its
-  stored payload; attempt history preserved (`retry_count` becomes the highest
-  recorded attempt); `max_retries` and `good_until` are never modified — a
-  task past its `good_until` is refused (`TASK_EXPIRY_PASSED`), not revived.
-- Both REFUSE workflow-bound rows (`TASK_IS_WORKFLOW_TASK`) — workflow rows
+- Workflow-bound rows are REFUSED (`TASK_IS_WORKFLOW_TASK`) — workflow rows
   are managed only by the workflow primitives (`handle.pause/resume/cancel`).
+- There is no manual retry action: a terminal record is immutable, and
+  re-execution is a new request through the rerun contract.
 - `TaskActionErrorCode`: `TASK_NOT_FOUND`, `TASK_NOT_CANCELLABLE`,
-  `TASK_NOT_RETRYABLE`, `TASK_EXPIRY_PASSED`, `TASK_IS_WORKFLOW_TASK`,
-  `DB_OPERATION_FAILED`. State-conflict errors carry `current_status`.
+  `TASK_IS_WORKFLOW_TASK`, `DB_OPERATION_FAILED`. State-conflict errors
+  carry `current_status`.
 
 ## Live Updates
 
@@ -168,7 +165,7 @@ from horsies.monitoring import (
     list_workflow_names, list_workflow_runs, get_workflow_run,
     get_workflow_node, list_schedules,
     # Actions
-    cancel_task, retry_task, TaskCancelled, TaskRetried,
+    cancel_task, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,

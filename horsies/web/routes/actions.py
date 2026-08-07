@@ -42,7 +42,6 @@ from horsies.monitoring import (
     TaskActionError,
     TaskActionErrorCode,
     cancel_task,
-    retry_task,
 )
 
 logger = get_logger('web')
@@ -106,11 +105,7 @@ def _task_action_failed(error: TaskActionError) -> _Outcome:
             return _Outcome(status_code=404, content={'detail': error.message})
         case TaskActionErrorCode.TASK_IS_WORKFLOW_TASK:
             return _Outcome(status_code=400, content={'code': error.code.value})
-        case (
-            TaskActionErrorCode.TASK_NOT_CANCELLABLE
-            | TaskActionErrorCode.TASK_NOT_RETRYABLE
-            | TaskActionErrorCode.TASK_EXPIRY_PASSED
-        ):
+        case TaskActionErrorCode.TASK_NOT_CANCELLABLE:
             current = error.current_status
             return _conflict(
                 error.code.value, current.value if current is not None else None
@@ -169,25 +164,6 @@ def build_router(broker: PostgresBroker) -> APIRouter:
             'tasks.cancel',
             task_id,
             _succeeded('cancelled', was_status=result.ok_value.was_status.value),
-        )
-
-    @router.post('/tasks/{task_id}/retry')
-    async def retry_task_route(task_id: str) -> JSONResponse:
-        """Reset a settled task and re-enqueue it on its original queue."""
-        result = await retry_task(broker, task_id)
-        if is_err(result):
-            return _respond(
-                'tasks.retry', task_id, _task_action_failed(result.err_value)
-            )
-        retried = result.ok_value
-        return _respond(
-            'tasks.retry',
-            task_id,
-            _succeeded(
-                'retried',
-                was_status=retried.was_status.value,
-                next_attempt_number=retried.next_attempt_number,
-            ),
         )
 
     @router.post('/workflows/{workflow_id}/pause')

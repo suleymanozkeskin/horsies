@@ -540,21 +540,17 @@ class TestTerminalWriterInventory:
             f'SET clause as their terminal status: {sorted(missing)}'
         )
 
-    def test_terminal_to_live_transitions_clear_terminal_at(self) -> None:
-        """A row returning from terminal to live clears terminal_at.
+    def test_no_terminal_to_live_transition_exists(self) -> None:
+        """A terminal record is immutable: no runtime writer revives it.
 
-        Manual in-place retry is the only such transition today. Automatic
-        retry and requeue are live-to-live and are not matched, so they are
-        not required to clear a column that is already NULL.
+        The manual in-place retry was the only such transition;
+        re-execution is a new request through the rerun contract, so any
+        statement matched here is a regression against terminal
+        immutability. Automatic retry and requeue are live-to-live and
+        are not matched.
         """
         windows = _scan_runtime_revival_windows()
-        assert windows, 'No terminal-to-live transition found; expected retry.'
-        missing = [
-            (module, context)
-            for module, context, window in windows
-            if 'terminal_at' not in window
-        ]
-        assert not missing, (
-            'Transitions from a terminal status back to a live one that do '
-            f'not clear terminal_at: {sorted(missing)}'
+        assert not windows, (
+            'Statements that move a terminal status back to a live one: '
+            f'{sorted((module, context) for module, context, _ in windows)}'
         )

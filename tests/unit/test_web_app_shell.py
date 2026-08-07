@@ -204,7 +204,6 @@ class TestAuthorizationGate:
         'path',
         [
             '/api/tasks/some-id/cancel',
-            '/api/tasks/some-id/retry',
             '/api/workflows/run-id/cancel',
             '/api/workflows/run-id/pause',
             '/api/workflows/run-id/resume',
@@ -222,7 +221,6 @@ class TestAuthorizationGate:
         'path',
         [
             '/api/tasks/some-id/cancel',
-            '/api/tasks/some-id/retry',
             '/api/workflows/run-id/cancel',
             '/api/workflows/run-id/pause',
             '/api/workflows/run-id/resume',
@@ -572,7 +570,6 @@ class TestSchemaGate:
         'path',
         [
             '/api/tasks/some-id/cancel',
-            '/api/tasks/some-id/retry',
             '/api/workflows/run-id/cancel',
             '/api/workflows/run-id/pause',
             '/api/workflows/run-id/resume',
