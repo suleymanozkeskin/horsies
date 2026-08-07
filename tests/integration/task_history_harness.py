@@ -246,7 +246,10 @@ CREATE TABLE horsies_task_attempts (
 WORKFLOWS_STANDIN_DDL = """
 CREATE TABLE horsies_workflows (
     id uuid PRIMARY KEY,
-    status text NOT NULL
+    status text NOT NULL,
+    depth integer,
+    root_workflow_id uuid,
+    on_error text
 )
 """
 """Stand-in with the columns the workflow-scoped sweeps join on."""
@@ -267,6 +270,8 @@ CREATE TABLE horsies_workflow_tasks (
     task_id uuid,
     task_index integer NOT NULL,
     status text NOT NULL DEFAULT 'RUNNING',
+    result text,
+    completed_at timestamptz,
     UNIQUE (workflow_id, task_index)
 )
 """
@@ -289,6 +294,9 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         from horsies.core.history.ddl.conditional import (
             GatedFragment,
             gated_fragment,
+        )
+        from horsies.core.history.phase2.consumption import (
+            consumption_fragments,
         )
         from horsies.core.history.terminalization.move import (
             cancellation_family_fragments,
@@ -329,6 +337,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 *expiry_family_fragments(),
                 *cancellation_family_fragments(),
                 *workflow_node_family_fragments(),
+                *consumption_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))
