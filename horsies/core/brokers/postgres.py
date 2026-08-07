@@ -851,56 +851,20 @@ class PostgresBroker:
             await conn.execute(ADD_TERMINALIZATION_KIND_CHECK_SQL)
             await conn.execute(VALIDATE_TERMINALIZATION_KIND_CHECK_SQL)
 
-            # THE TWO-WORLDS BRANCH — the one place the chain forks, and
-            # the predicate is CATALOG-READ: the identity column's actual
-            # birth shape, never the schema version, because a database
-            # at the current version is legitimately EITHER world.
-            #
-            # A uuid-born (fresh) install is BORN AT THE CUTOVER'S END
-            # STATE: it has no old fleet, so its programs' owner is the
-            # 0.5.0 fleet being installed — the terminalization program
-            # is the MOVE family (the same install list the cutover's
-            # program-replacement stage owns), the status domain is
-            # live-only from the first row, and the heartbeat shape is
-            # partitioned from birth. A varchar-born (upgraded) install
-            # keeps the in-place program byte-for-byte and reaches the
-            # same end state only through the offline cutover.
+            # THE TWO-WORLDS FORK — one CATALOG-READ predicate, read
+            # once here: the identity column's actual birth shape,
+            # never the schema version, because a database at the
+            # current version is legitimately EITHER world. The fork's
+            # two arms are positionally split by dependency order — the
+            # varchar arm keeps the in-place program byte-for-byte at
+            # its historical position, while the fresh-world install
+            # runs AFTER the history-foundation block below, because
+            # the program it installs (transcode job state in
+            # particular) references state that block creates.
             uuid_born = bool((await conn.execute(
                 FRESH_IDENTITY_PREDICATE_SQL
             )).scalar_one())
-            if uuid_born:
-                from horsies.core.history.cutover.program import (
-                    installation_fragments,
-                    teardown_statements,
-                )
-                from horsies.core.history.heartbeats.partitioning import (
-                    HEARTBEATS_PARTITIONED_DDL,
-                )
-                from horsies.core.history.terminalization.live_cutover import (
-                    LIVE_STATUS_DOMAIN_DDL,
-                )
-
-                domain_present = (await conn.execute(text(
-                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
-                    WHERE conrelid = 'horsies_tasks'::regclass
-                    AND conname = 'horsies_tasks_live_status_only')"""
-                ))).scalar_one()
-                if not domain_present:
-                    await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
-                for statement in teardown_statements():
-                    await conn.execute(text(statement))
-                for statement in installation_fragments():
-                    await conn.execute(text(statement))
-                heartbeats_flat = (await conn.execute(text(
-                    """SELECT relkind <> 'p' FROM pg_class
-                    WHERE oid = 'horsies_heartbeats'::regclass"""
-                ))).scalar_one()
-                if heartbeats_flat:
-                    await conn.execute(
-                        text('DROP TABLE horsies_heartbeats')
-                    )
-                    await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
-            else:
+            if not uuid_born:
                 await conn.execute(CREATE_OUTCOME_TYPE_SQL)
                 for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
                     await conn.execute(drop_function)
@@ -989,6 +953,49 @@ class PostgresBroker:
             if not registry_index_exists:
                 for statement in CREATE_RESERVATION_REGISTRY_INDEXES_SQL:
                     await conn.execute(statement)
+
+            # The fresh-world arm of the two-worlds fork (predicate
+            # read above): a uuid-born install is BORN AT THE
+            # CUTOVER'S END STATE. It has no old fleet, so its
+            # programs' owner is the 0.5.0 fleet being installed —
+            # the terminalization program is the MOVE family (the
+            # same install list the cutover's program-replacement
+            # stage owns), the status domain is live-only from the
+            # first row, and the heartbeat shape is partitioned from
+            # birth. Positioned after the history foundation because
+            # the installed program references its state.
+            if uuid_born:
+                from horsies.core.history.cutover.program import (
+                    installation_fragments,
+                    teardown_statements,
+                )
+                from horsies.core.history.heartbeats.partitioning import (
+                    HEARTBEATS_PARTITIONED_DDL,
+                )
+                from horsies.core.history.terminalization.live_cutover import (
+                    LIVE_STATUS_DOMAIN_DDL,
+                )
+
+                domain_present = (await conn.execute(text(
+                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'horsies_tasks'::regclass
+                    AND conname = 'horsies_tasks_live_status_only')"""
+                ))).scalar_one()
+                if not domain_present:
+                    await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
+                for statement in teardown_statements():
+                    await conn.execute(text(statement))
+                for statement in installation_fragments():
+                    await conn.execute(text(statement))
+                heartbeats_flat = (await conn.execute(text(
+                    """SELECT relkind <> 'p' FROM pg_class
+                    WHERE oid = 'horsies_heartbeats'::regclass"""
+                ))).scalar_one()
+                if heartbeats_flat:
+                    await conn.execute(
+                        text('DROP TABLE horsies_heartbeats')
+                    )
+                    await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
