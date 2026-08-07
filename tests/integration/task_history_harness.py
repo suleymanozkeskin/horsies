@@ -184,6 +184,131 @@ INSERT INTO horsies_task_history (
 """
 
 
+FULL_LIVE_STANDIN_DDL = """
+CREATE TABLE horsies_tasks (
+    id uuid PRIMARY KEY,
+    task_name varchar(255) NOT NULL,
+    queue_name varchar(100) NOT NULL,
+    priority integer NOT NULL,
+    status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING')),
+    sent_at timestamptz,
+    enqueued_at timestamptz NOT NULL,
+    claimed_at timestamptz,
+    started_at timestamptz,
+    created_at timestamptz NOT NULL,
+    good_until timestamptz,
+    retry_count integer NOT NULL,
+    max_retries integer NOT NULL,
+    claimed_by_worker_id varchar(255),
+    worker_hostname varchar(255),
+    worker_pid integer,
+    worker_process_name varchar(255),
+    is_workflow_task boolean NOT NULL,
+    command_fingerprint_version smallint NOT NULL,
+    command_fingerprint bytea NOT NULL,
+    retention_class_key varchar(64) NOT NULL,
+    input_digest bytea,
+    rerun_of_task_id uuid,
+    rerun_root_task_id uuid,
+    idempotency_key_digest bytea,
+    retain_rerun_input boolean NOT NULL,
+    prepared_rerun_input_disposition varchar(32) NOT NULL,
+    prepared_rerun_input_version smallint,
+    prepared_rerun_input_codec varchar(64),
+    prepared_rerun_input_content_type varchar(255),
+    prepared_rerun_input_digest bytea,
+    prepared_rerun_input_inline bytea,
+    prepared_rerun_input_reference varchar(2048)
+)
+"""
+"""Post-cutover live stand-in: every column the move's snapshot reads."""
+
+ATTEMPTS_STANDIN_DDL = """
+CREATE TABLE horsies_task_attempts (
+    task_id uuid NOT NULL,
+    attempt integer NOT NULL,
+    outcome text NOT NULL,
+    will_retry boolean NOT NULL,
+    started_at timestamptz NOT NULL,
+    finished_at timestamptz NOT NULL,
+    error_code text,
+    error_message text,
+    failed_reason text,
+    worker_id text,
+    worker_hostname text,
+    worker_pid integer,
+    worker_process_name text,
+    UNIQUE (task_id, attempt)
+)
+"""
+
+WORKFLOW_TASKS_STANDIN_DDL = """
+CREATE TABLE horsies_workflow_tasks (
+    id bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+    workflow_id uuid NOT NULL,
+    task_id uuid,
+    task_index integer NOT NULL,
+    UNIQUE (workflow_id, task_index)
+)
+"""
+
+
+def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
+    """Fixture for M8 suites: frozen + gated fragments, full stand-ins,
+    outcome layer, completion family, and a published lookup pair.
+
+    Gated fragments install through `gated_fragment()` — test-schema
+    consumption per the pinned guardrail-2 boundary; production emission
+    stays wave-4-sequenced.
+    """
+
+    @pytest_asyncio.fixture()
+    async def terminalization_schema() -> AsyncGenerator[HistorySchema, None]:
+        from horsies.core.history.ddl.conditional import (
+            GatedFragment,
+            gated_fragment,
+        )
+        from horsies.core.history.terminalization.move import (
+            completion_family_fragments,
+        )
+        from horsies.core.history.terminalization.outcome import (
+            outcome_fragments,
+        )
+
+        url = _database_url()
+        admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
+        async with admin_engine.connect() as connection:
+            await connection.execute(
+                text(f'DROP SCHEMA IF EXISTS {schema_name} CASCADE')
+            )
+            await connection.execute(text(f'CREATE SCHEMA {schema_name}'))
+        engine = create_async_engine(
+            url,
+            connect_args={'options': f'-csearch_path={schema_name}'},
+        )
+        async with engine.begin() as connection:
+            statements = (
+                *frozen_fragments(),
+                *gated_fragment(GatedFragment.ATTEMPT_SNAPSHOT_COLUMNS),
+                *gated_fragment(GatedFragment.RERUN_INPUT_COLUMNS),
+                *gated_fragment(GatedFragment.RESERVATION_REGISTRY_INDEXES),
+                FULL_LIVE_STANDIN_DDL,
+                ATTEMPTS_STANDIN_DDL,
+                WORKFLOW_TASKS_STANDIN_DDL,
+                *outcome_fragments(),
+                *completion_family_fragments(),
+            )
+            for statement in statements:
+                await connection.execute(text(statement))
+        yield HistorySchema(schema_name=schema_name, engine=engine)
+        await engine.dispose()
+        async with admin_engine.connect() as connection:
+            await connection.execute(text(f'DROP SCHEMA {schema_name} CASCADE'))
+        await admin_engine.dispose()
+
+    return terminalization_schema
+
+
 def day_bounds(day: datetime) -> tuple[datetime, datetime]:
     lower = day.astimezone(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
