@@ -14,6 +14,7 @@ and a catalog detachment surfacing inside the locked window.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from uuid import uuid4
 
@@ -48,8 +49,12 @@ from horsies.core.history.transcode.outcomes import (
     TranscodeSwapExhausted,
 )
 
+from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
+
 from tests.integration.task_history_harness import (
+    INSERT_HISTORY_ROW_SQL,
     HistorySchema,
+    frozen_history_row,
     insert_live_task,
     prepare_move_storage,
     terminalization_schema_fixture,
@@ -100,6 +105,61 @@ async def seed_moved_tasks(connection: AsyncConnection, count: int) -> None:
         assert outcome.outcome == 'APPLIED'
 
 
+def v7_with_birth(birth: datetime) -> str:
+    """Mint a v7 identifier whose embedded birth is the given instant."""
+    milliseconds = int(birth.timestamp() * 1_000)
+    generator = MonotonicUuid7Generator(clock_ms=lambda: milliseconds)
+    return generator.mint()
+
+
+GATED_HISTORY_ROW_SQL = INSERT_HISTORY_ROW_SQL.replace(
+    ', history_schema_version\n',
+    """, history_schema_version,
+    attempt_archive_version, attempt_snapshot_codec,
+    attempt_snapshot_content_type, attempt_snapshot,
+    attempt_snapshot_digest, rerun_input_disposition
+""",
+    1,
+).replace(
+    ', :history_schema_version\n',
+    """, :history_schema_version,
+    :attempt_archive_version, :attempt_snapshot_codec,
+    :attempt_snapshot_content_type, :attempt_snapshot,
+    :attempt_snapshot_digest, :rerun_input_disposition
+""",
+    1,
+)
+
+
+async def seed_frozen_rows(
+    connection: AsyncConnection, *, day: datetime, count: int
+) -> None:
+    """Direct inserts carrying the gated NOT NULL component columns."""
+    snapshot = b'[]'
+    for hour in range(count):
+        terminal_at = day.replace(
+            hour=6 + hour, minute=0, second=0, microsecond=0
+        )
+        await connection.execute(
+            text(GATED_HISTORY_ROW_SQL),
+            {
+                **frozen_history_row(
+                    task_id=v7_with_birth(
+                        terminal_at - timedelta(seconds=30)
+                    ),
+                    class_key=CLASS_KEY,
+                    terminal_at=terminal_at,
+                ),
+                'attempt_archive_version': 1,
+                'attempt_snapshot_codec': 'json-utf8',
+                'attempt_snapshot_content_type': 'application/json',
+                'attempt_snapshot': snapshot,
+                'attempt_snapshot_digest': sha256(snapshot).digest(),
+                'rerun_input_disposition': 'NEVER_ELIGIBLE',
+            },
+        )
+
+
 async def run_to_ready(connection: AsyncConnection, job_id: str) -> None:
     while True:
         outcome = await run_copy_batch(
@@ -135,7 +195,20 @@ class TestFullLifecycle:
             assert isinstance(plan, TranscodePlan), plan
             assert plan.copied_rows == 5
             assert plan.reversible
-            assert plan.wal_budget_bytes > plan.affected_relation_bytes
+            # The qualified budget ratios: peak disk 5/4, WAL 3/2, both
+            # directions — ceilings over the affected relation bytes.
+            bytes_affected = plan.affected_relation_bytes
+            assert plan.peak_additional_disk_budget_bytes == -(
+                -bytes_affected * 5 // 4
+            )
+            assert plan.wal_budget_bytes == -(-bytes_affected * 3 // 2)
+            assert (
+                plan.rollback_wal_budget_bytes == plan.wal_budget_bytes
+            )
+            assert (
+                plan.rollback_peak_additional_disk_budget_bytes
+                == plan.peak_additional_disk_budget_bytes
+            )
 
             before = (
                 await connection.execute(
@@ -215,6 +288,71 @@ class TestFullLifecycle:
                     )
                 ).scalar_one(),
             )
+
+
+class TestMultiRelationSwap:
+    @pytest.mark.asyncio
+    async def test_two_leaves_swap_in_one_window(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """Rows on two days: the job spans two leaves and the swap's
+        sorted-order arm rebinds both inside one locked window."""
+        job_id = str(uuid4())
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await install_job_state(connection)
+            today = datetime.now(UTC)
+            await seed_frozen_rows(connection, day=today, count=3)
+            await seed_frozen_rows(
+                connection, day=today + timedelta(days=1), count=3
+            )
+            await begin_transcode_maintenance(
+                connection, session_id=str(uuid4())
+            )
+            plan = await plan_transcode(
+                connection,
+                job_id=job_id,
+                component=ArchiveComponent.RESULT,
+                source_version=1,
+                target_version=2,
+                source_codec='json-utf8',
+                target_codec='framed-v2',
+            )
+            assert isinstance(plan, TranscodePlan), plan
+            assert plan.relation_count == 2
+            assert plan.copied_rows == 6
+
+            await run_to_ready(connection, job_id)
+            verification = await verify_transcode(
+                connection, job_id=job_id
+            )
+            assert verification.verified, verification
+
+            swapped = await swap_transcode(connection, job_id=job_id)
+            assert isinstance(swapped, TranscodeSwap)
+            assert swapped.relations_swapped == 2
+
+            finalized = await finalize_transcode(
+                connection, job_id=job_id
+            )
+            assert isinstance(finalized, TranscodeFinalized)
+
+            rows = (
+                await connection.execute(
+                    text(
+                        'SELECT result_envelope_version, result_codec, '
+                        'result_payload, result_digest '
+                        'FROM horsies_task_history'
+                    )
+                )
+            ).all()
+            assert len(rows) == 6
+            framed = bytes.fromhex('4832') + b'{}'
+            for row in rows:
+                assert row.result_envelope_version == 2
+                assert row.result_codec == 'framed-v2'
+                assert bytes(row.result_payload) == framed
+                assert bytes(row.result_digest) == sha256(framed).digest()
 
 
 class TestTypedRefusals:
