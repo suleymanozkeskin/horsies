@@ -17,6 +17,7 @@ on:
           - operational-maintenance
           - rerun-input-terminalization
           - migration-ladder-rung1
+          - migration-ladder-rung2
 
 permissions: {}
 
@@ -1166,6 +1167,127 @@ jobs:
         with:
           name: migration-ladder-rung1-pg${{ matrix.postgres }}
           path: /tmp/migration-ladder-pg${{ matrix.postgres }}/*
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+        if: always()
+        run: docker compose -f tests/fixtures/history/compose.yaml down -v
+
+  migration-ladder-rung2:
+    if: inputs.suite == 'migration-ladder-rung2'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 16442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 16446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+        run: >-
+          docker compose -f tests/fixtures/history/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      # The step budget is set well above the predicted duration on purpose: a
+      # run that exceeds the upper bound must still finish and be judged, since
+      # a timeout would report an infrastructure failure where the ladder has
+      # an answer.
+      - name: Rung 2 — ten million rows
+        timeout-minutes: 330
+        shell: bash
+        run: |
+          output_dir=/tmp/migration-ladder-rung2-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/rung2.json"
+          candidate="$output.candidate"
+          error_log="$output.stderr"
+          set +e
+          uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario migration-ladder \
+            --rows 10000000 \
+            --attempts-per-task 1 \
+            --batch-size 10000 \
+            --next-rung-rows 100000000 \
+            --data-path / \
+            --demo-quiesced > "$candidate" 2> "$error_log"
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --argjson collector_status "$collector_status" \
+              --rawfile error "$error_log" \
+              '{
+                status: "execution_failure",
+                scenario: "migration-ladder",
+                rung: 2,
+                conditions: {
+                  commit: $commit, run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  durability_mode: "operational"
+                },
+                workload: {
+                  rung_rows: 10000000, attempts_per_task: 1,
+                  batch_size: 10000, next_rung_rows: 100000000
+                },
+                collector_exit_status: $collector_status,
+                error: $error
+              }' > "$output"
+            exit "$collector_status"
+          fi
+          mv "$candidate" "$output"
+          # Which rung ran is asserted from the artifact's own data. The
+          # collector is byte-identical to the one that produced rung 1's
+          # coefficients, so its rung_verdict and preflight_estimate strings
+          # are worded for rung 1; they describe the collector, which computes
+          # no verdict, and are not claims about this run.
+          jq -e '.workload.rung_rows == 10000000' "$output"
+          jq -e '.workload.next_rung_rows == 100000000' "$output"
+          jq -e '.workload.attempts_per_task == 1' "$output"
+          # Both validated slopes must be present: the amended model judges
+          # each independently as well as combined.
+          jq -e '.measurement.fitted.coefficients.seconds_per_million_rows' "$output"
+          jq -e '.measurement.preparation_seconds_per_million_rows' "$output"
+          jq -e '.measurement.fitted.regression_intercept_seconds != null' "$output"
+          jq -e '.footprint.fits_same_lane != null' "$output"
+
+      - name: Preserve rung-2 evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: migration-ladder-rung2-pg${{ matrix.postgres }}
+          path: /tmp/migration-ladder-rung2-pg${{ matrix.postgres }}/*
           if-no-files-found: error
 
       - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
