@@ -180,3 +180,62 @@ class TestBothBoundsStopTheLadder:
         assert passed.refit.regression_intercept_seconds == (
             pytest.approx(1.0)
         )
+
+
+class TestRatifiedValuesArePinned:
+    """A ratified value no test pins is what goes stale unnoticed."""
+
+    def test_the_bounds_are_the_ratified_ratios(self) -> None:
+        from horsies.core.history.cutover.ladder import (
+            RUNG_FLOOR_DENOMINATOR,
+            RUNG_FLOOR_NUMERATOR,
+        )
+        from horsies.core.history.cutover.preflight import (
+            PLANNING_CEILING_DENOMINATOR,
+            PLANNING_CEILING_NUMERATOR,
+        )
+
+        assert (RUNG_FLOOR_NUMERATOR, RUNG_FLOOR_DENOMINATOR) == (7, 10)
+        assert (
+            PLANNING_CEILING_NUMERATOR,
+            PLANNING_CEILING_DENOMINATOR,
+        ) == (5, 4)
+
+
+class TestBoundsAreInclusive:
+    """Exactly-at-bound PASSES on both sides, pinning the inclusive
+    reading so a comparison flip cannot silently make either bound
+    exclusive."""
+
+    COEFFICIENTS = RelocationCoefficients(
+        seconds_per_million_rows=120.0, fixed_seconds=30.0
+    )
+    RUNG = LadderRung(name='one-million', rows=1_000_000, contingent=False)
+    # Estimate 150 s exactly: ceiling 187.5 s, floor 105 s.
+
+    def _measured(self, seconds: float) -> MeasuredRun:
+        return MeasuredRun(
+            rows=1_000_000,
+            seconds=seconds,
+            fixed_seconds=30.0,
+            commits=linear_commits(
+                batches=4, batch_rows=250_000,
+                slope_per_million=120.0, intercept=0.0,
+            ),
+        )
+
+    def test_exactly_at_ceiling_passes(self) -> None:
+        outcome = evaluate_rung(
+            self.RUNG,
+            coefficients=self.COEFFICIENTS,
+            measured=self._measured(187.5),
+        )
+        assert isinstance(outcome, RungPassed)
+
+    def test_exactly_at_floor_passes(self) -> None:
+        outcome = evaluate_rung(
+            self.RUNG,
+            coefficients=self.COEFFICIENTS,
+            measured=self._measured(105.0),
+        )
+        assert isinstance(outcome, RungPassed)
