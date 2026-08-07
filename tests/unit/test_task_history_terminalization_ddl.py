@@ -153,6 +153,40 @@ class TestMoveStructure:
             assert f"'{kind.value}'" in MOVE_BODY
 
 
+class TestLockOrderInvariant:
+    """Advisory before any row lock on the task, in every wire function.
+
+    Two sessions taking the two orders on the same task deadlock; the
+    invariant is global and every future family inherits it, so each wire
+    body must acquire the advisory lock ahead of its guard select.
+    """
+
+    @pytest.mark.parametrize('index', [2, 3])
+    def test_wire_functions_take_the_advisory_lock_first(
+        self, index: int
+    ) -> None:
+        body = completion_family_fragments()[index]
+        advisory = body.index('pg_advisory_xact_lock')
+        guard_select = body.index('FROM horsies_tasks')
+        assert advisory < guard_select
+
+
+class TestCodecCrossPins:
+    """The DDL's codec literals are M3's constants, not free spellings."""
+
+    def test_move_codec_literals_match_the_archive_constants(self) -> None:
+        from horsies.core.history.archive.versions import (
+            JSON_CONTENT_TYPE,
+            JSON_UTF8_CODEC,
+        )
+
+        assert f"'{JSON_UTF8_CODEC}'" in MOVE_BODY
+        assert f"'{JSON_CONTENT_TYPE}'" in MOVE_BODY
+        assert "'json-utf8'" in MOVE_BODY
+        assert MOVE_BODY.count("'json-utf8'") == 2
+        assert MOVE_BODY.count("'application/json'") == 2
+
+
 class TestAttemptEncoder:
     def test_never_renders_a_jsonb_array_to_text(self) -> None:
         assert 'jsonb_agg' not in ATTEMPT_ENCODER_DDL

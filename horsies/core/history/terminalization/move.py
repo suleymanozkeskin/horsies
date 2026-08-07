@@ -18,6 +18,13 @@ pinned in the archive suite are the parity authority.
 
 All functions target the post-cutover shape: native uuid identifiers on
 live, attempts, and history alike.
+
+Global lock-order invariant, binding on every family: the task advisory
+lock is acquired BEFORE any row lock on that task. Both wire functions
+take the advisory lock as their first statement, ahead of their guard
+select; the move re-acquires it, which is free — advisory transaction
+locks are reentrant in-session. A family that row-locks first would
+deadlock against any advisory-first caller on the same task.
 """
 
 from __future__ import annotations
@@ -305,6 +312,9 @@ DECLARE
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
     SELECT claimed_at INTO v_claimed_at
     FROM {LIVE_TASKS}
     WHERE id = p_task_id
@@ -352,6 +362,9 @@ DECLARE
     v_ctx record;
     v_terminal_at timestamptz;
 BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
     SELECT id, retry_count, started_at, claimed_by_worker_id, claimed_at,
            worker_hostname, worker_pid, worker_process_name,
            clock_timestamp() AS db_now
