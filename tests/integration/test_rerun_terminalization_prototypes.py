@@ -25,7 +25,8 @@ timezone reproduces the same result.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from hashlib import sha256
 from uuid import uuid4
 
@@ -235,6 +236,34 @@ async def _require_counters(connection: AsyncConnection) -> None:
     if not prerequisite.usable:
         pytest.skip(f'{prerequisite.availability.value}: {prerequisite.reason}')
     await install_statement_counters(connection)
+
+
+@asynccontextmanager
+async def _session_timezone(
+    engine: AsyncEngine,
+    timezone_name: str,
+) -> AsyncGenerator[AsyncConnection]:
+    """Hold a session timezone for one test and never let it outlive it.
+
+    `SET TIME ZONE` persists for the session, and the pool hands that session
+    to whoever asks next. A later test then writes timezone-rendered state
+    under this test's zone — which is how a leaf catalog came to hold a bound
+    rendered at -12 and a healthy leaf read as a catalog conflict two files
+    later. `SET LOCAL` is not usable here because the installers commit, which
+    would end the transaction and drop the setting mid-test, so the reset is
+    explicit and unconditional.
+    """
+    connection = await engine.connect()
+    try:
+        await connection.execute(text(f"SET TIME ZONE '{timezone_name}'"))
+        yield connection
+    finally:
+        try:
+            await connection.rollback()
+            await connection.execute(text('RESET TIME ZONE'))
+            await connection.commit()
+        finally:
+            await connection.close()
 
 
 class TestPairedRelationsAreComparable:
@@ -718,10 +747,7 @@ class TestLeafBoundsAreTimezoneIndependent:
         broker: PostgresBroker,  # noqa: ARG001 - installs schema v26
         session_timezone: str,
     ) -> None:
-        async with engine.connect() as connection:
-            await connection.execute(
-                text(f"SET TIME ZONE '{session_timezone}'")
-            )
+        async with _session_timezone(engine, session_timezone) as connection:
             schema = PrototypeSchema(f'rerun_tz_{uuid4().hex[:10]}')
             await install_archive_candidates(connection, schema)
             await install_archive_transcode_prototype(connection, schema)
@@ -752,10 +778,7 @@ class TestLeafBoundsAreTimezoneIndependent:
     ) -> None:
         # The name and the bounds have to agree, or the same-date collision
         # check against the shared fixture's leaf stops being sound.
-        async with engine.connect() as connection:
-            await connection.execute(
-                text(f"SET TIME ZONE '{session_timezone}'")
-            )
+        async with _session_timezone(engine, session_timezone) as connection:
             utc_date = (
                 await connection.execute(
                     text("SELECT (now() AT TIME ZONE 'UTC')::date")

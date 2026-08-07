@@ -19,7 +19,7 @@ than flowing onward as data.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -276,6 +276,63 @@ async def _read_attached(
     return tuple(manifest)
 
 
+async def execute_with_utc_rendering(
+    connection: AsyncConnection,
+    statement: Any,
+    parameters: dict[str, Any] | None = None,
+) -> Any:
+    """Execute one statement with the session timezone pinned to UTC.
+
+    `pg_get_expr` renders timestamptz literals in the SESSION timezone,
+    so identical instants render differently across sessions and a text
+    comparison of partition bounds is session-dependent. Every bound
+    capture goes through this wrapper, making the stored convention —
+    bounds render under UTC — hold by construction. Canonical rendering
+    is chosen over parsing the rendered expression back into typed
+    instants: parsing would re-implement the server's rendering in
+    reverse, and the exact text keeps catching bound drift that has
+    nothing to do with timezones. The session-set-and-restore form works
+    on transactional and autocommit connections alike (the detach path's
+    statement_timeout handling is the in-module precedent).
+    """
+    prior = (
+        await connection.execute(text('SHOW timezone'))
+    ).scalar_one()
+    await connection.execute(
+        text("SELECT set_config('timezone', 'UTC', false)")
+    )
+    try:
+        return await connection.execute(statement, parameters)
+    finally:
+        await connection.execute(
+            text("SELECT set_config('timezone', :tz, false)"),
+            {'tz': prior},
+        )
+
+
+async def capture_partition_bound_utc(
+    connection: AsyncConnection,
+    leaf_name: str,
+) -> str | None:
+    """The leaf's rendered partition bound under the UTC convention."""
+    if not is_safe_identifier(leaf_name):
+        raise HistoryContractError(
+            f'relation name is not a safe identifier: {leaf_name!r}'
+        )
+    result = await execute_with_utc_rendering(
+        connection,
+        text(
+            'SELECT pg_get_expr(c.relpartbound, c.oid) AS bound '
+            'FROM pg_class AS c WHERE c.oid = to_regclass(:leaf)'
+        ),
+        {'leaf': leaf_name},
+    )
+    row = result.one_or_none()
+    if row is None:
+        return None
+    return _optional_str(row.bound, 'partition_bound')
+
+
 async def read_leaf_physical_state(
     connection: AsyncConnection,
     *,
@@ -289,7 +346,8 @@ async def read_leaf_physical_state(
                 f'relation name is not a safe identifier: {identifier!r}'
             )
     row = (
-        await connection.execute(
+        await execute_with_utc_rendering(
+            connection,
             text(
                 """
                 SELECT to_regclass(:leaf)::oid AS leaf_oid,
@@ -320,11 +378,21 @@ async def read_leaf_physical_state(
 
 
 async def database_now(connection: AsyncConnection) -> datetime:
-    """The database's statement timestamp; maintenance never trusts host time."""
+    """The database's statement timestamp, normalized to UTC.
+
+    Maintenance never trusts host time — and it never trusts the SESSION
+    timezone either: the driver decodes timestamptz into the session's
+    zone, and flooring such a value to a day or hour boundary would
+    anchor leaves at LOCAL boundaries with local-date names. Normalizing
+    here makes every downstream floor and name render under UTC by
+    construction; the instant is unchanged.
+    """
     value = (
         await connection.execute(text('SELECT statement_timestamp()'))
     ).scalar_one()
-    return _required_datetime(value, 'statement_timestamp')
+    return _required_datetime(value, 'statement_timestamp').astimezone(
+        timezone.utc
+    )
 
 
 # ---------------------------------------------------------------------------
