@@ -244,7 +244,7 @@ CREATE TABLE horsies_task_attempts (
 
 WORKFLOW_TASKS_STANDIN_DDL = """
 CREATE TABLE horsies_workflow_tasks (
-    id bigint GENERATED ALWAYS AS IDENTITY UNIQUE,
+    id uuid UNIQUE NOT NULL,
     workflow_id uuid NOT NULL,
     task_id uuid,
     task_index integer NOT NULL,

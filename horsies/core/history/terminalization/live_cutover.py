@@ -20,6 +20,20 @@ from __future__ import annotations
 from ..names import LIVE_TASKS
 
 
+LIVE_STATUS_DOMAIN_DDL = f"""
+ALTER TABLE {LIVE_TASKS}
+    ADD CONSTRAINT {LIVE_TASKS}_live_status_only
+    CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING'))
+"""
+"""The live-only status domain, as a declared fragment.
+
+The miss classifier reasons from this constraint — a live row cannot be
+terminal — so it must exist in production DDL, not only in fixtures. The
+migration applies it after every terminal row has moved to history; the
+superseded status constraint that admitted terminal values is dropped in
+the same migration stage.
+"""
+
 LIVE_CUTOVER_COLUMNS_DDL: tuple[str, ...] = (
     f"""
     ALTER TABLE {LIVE_TASKS}

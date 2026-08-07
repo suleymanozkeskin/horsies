@@ -207,6 +207,36 @@ class TestAttemptEncoder:
         assert "'' || ']'" not in ATTEMPT_ENCODER_DDL
 
 
+class TestLiveStatusDomain:
+    """The classifier's premise is a declared fragment, not fixture folklore."""
+
+    def test_live_only_status_domain_is_production_ddl(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            LIVE_STATUS_DOMAIN_DDL,
+        )
+
+        assert 'ADD CONSTRAINT horsies_tasks_live_status_only' in (
+            LIVE_STATUS_DOMAIN_DDL
+        )
+        assert (
+            "CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING'))"
+            in LIVE_STATUS_DOMAIN_DDL
+        )
+
+
+class TestNodeRowIdentityType:
+    """uuid end to end: frozen fragments, the move, never a stand-in guess."""
+
+    def test_frozen_fragments_declare_uuid_node_identity(self) -> None:
+        combined = '\n'.join(frozen_fragments())
+        assert combined.count('workflow_node_row_id uuid NOT NULL') == 2
+        assert 'workflow_node_row_id bigint' not in combined
+
+    def test_move_declares_uuid_node_identity(self) -> None:
+        assert 'v_workflow_node_row_id uuid;' in MOVE_BODY
+        assert 'v_workflow_node_row_id bigint' not in MOVE_BODY
+
+
 class TestLiveCutover:
     def test_prepared_disposition_is_not_null_with_the_ratified_set(
         self,

@@ -116,7 +116,7 @@ DECLARE
     v_result_payload bytea;
     v_prior_result_payload bytea;
     v_workflow_id uuid;
-    v_workflow_node_row_id bigint;
+    v_workflow_node_row_id uuid;
     v_history_rows bigint;
     v_deleted_rows bigint;
     v_requires_deferred_phase2 boolean;

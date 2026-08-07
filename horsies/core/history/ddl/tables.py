@@ -144,7 +144,7 @@ WORKFLOW_PHASE2_QUARANTINE_DDL = f"""
 CREATE TABLE {WORKFLOW_PHASE2_QUARANTINE} (
     task_id uuid PRIMARY KEY,
     workflow_id uuid NOT NULL,
-    workflow_node_row_id bigint NOT NULL,
+    workflow_node_row_id uuid NOT NULL,
     node_id text NOT NULL,
     task_name varchar(255) NOT NULL,
     terminal_status text NOT NULL CHECK (
@@ -178,7 +178,7 @@ WORKFLOW_PHASE2_PENDING_DDL = f"""
 CREATE TABLE {WORKFLOW_PHASE2_PENDING} (
     task_id uuid PRIMARY KEY,
     workflow_id uuid NOT NULL,
-    workflow_node_row_id bigint NOT NULL,
+    workflow_node_row_id uuid NOT NULL,
     terminal_status text NOT NULL CHECK (
         terminal_status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
     ),
