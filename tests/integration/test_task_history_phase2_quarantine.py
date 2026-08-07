@@ -11,7 +11,7 @@ treated as in-flight drain traffic, not stalled evidence.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -122,7 +122,13 @@ async def pending_leaf_ref(
             {'class_key': row.history_class},
         )
     ).scalar_one()
-    lower = row.history_anchor.replace(
+    # Normalize before truncating. psycopg returns a timestamptz in the
+    # SESSION's timezone, so truncating it as returned yields LOCAL midnight
+    # while leaves and anchors ride UTC — on a +02 bench the derived bounds
+    # slide two hours and a locator shifted past local midnight falls outside
+    # the leaf this helper claims to describe. `database_now` normalizes for
+    # the same reason.
+    lower = row.history_anchor.astimezone(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     return LeafRef(
@@ -395,3 +401,55 @@ class TestStatementAtATime:
         async with terminalization_schema.engine.begin() as connection:
             pending = await pending_row(connection, task_id)
             assert pending.recovery_source == 'QUARANTINE'
+
+
+class TestLeafRefDerivationIsUtcAnchored:
+    """The derived leaf bounds must describe the UTC day, in any session zone.
+
+    psycopg returns a `timestamptz` in the SESSION's timezone. Truncating it as
+    returned yields LOCAL midnight, while leaves and anchors ride UTC, so on a
+    non-UTC bench the derived bounds slide by the offset and a locator moved
+    past local midnight falls outside the leaf this helper claims to describe.
+    That is what made the broken-locator test pass on a UTC bench and fail on a
+    +02 one at the same minute.
+
+    The session timezone here is chosen from the current UTC hour so that local
+    time is always at least 18:00 — the offset at which the six-hour shift in
+    that test crosses local midnight. A fixed timezone would make this
+    regression pass or fail depending on the hour it happens to run.
+    """
+
+    @pytest.mark.asyncio
+    async def test_bounds_are_the_utc_day_under_an_adversarial_zone(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        utc_now = datetime.now(timezone.utc)
+        # Push local time to >= 18:00 whatever the hour, staying inside the
+        # offsets PostgreSQL accepts (Etc/GMT-N is UTC+N).
+        offset = (18 - utc_now.hour) % 24
+        zone = f'Etc/GMT-{offset}' if 0 < offset <= 14 else 'UTC'
+
+        async with terminalization_schema.engine.begin() as connection:
+            await connection.execute(text(f"SET TIME ZONE '{zone}'"))
+            await prepare_move_storage(connection, CLASS_KEY)
+            task_id, _, _ = await seed_pending(connection)
+            leaf = await pending_leaf_ref(connection, task_id)
+
+            anchor = (
+                await connection.execute(
+                    text(
+                        'SELECT history_anchor FROM '
+                        'horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+
+        expected_lower = anchor.astimezone(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        assert leaf.bounds.lower == expected_lower
+        assert leaf.bounds.upper == expected_lower + timedelta(days=1)
+        # The anchor must sit inside the bounds its own leaf describes.
+        assert leaf.bounds.lower <= anchor < leaf.bounds.upper
