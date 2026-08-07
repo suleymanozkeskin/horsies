@@ -54,11 +54,22 @@ from horsies.core.models.tasks import (
 from horsies.core.history.archive.attempts import (
     AttemptRecord as ArchiveAttemptRecord,
 )
+from horsies.core.history.reads.aggregates import (
+    HistoryScope,
+    history_count_statement,
+    history_scoped_status_counts_statement,
+)
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
     TaskDetailAbsent,
     read_task_detail,
     staged_detail_published,
+)
+from horsies.core.history.reads.pages import (
+    HistoryPageQuery,
+    HistoryWindow,
+    history_page_statement,
+    history_sort_expression,
 )
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
@@ -348,6 +359,46 @@ def _task_summary(task: TaskModel) -> TaskSummary:
     )
 
 
+def _history_summary(row: Any) -> TaskSummary:
+    """Map one history page row to the list-view shape."""
+    status = str(row.status)
+    completed_at = row.terminal_at if status == 'COMPLETED' else None
+    failed_at = row.terminal_at if status != 'COMPLETED' else None
+    return TaskSummary(
+        id=str(row.task_id),
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        status=status,
+        priority=row.priority,
+        retry_count=row.retry_count,
+        max_retries=row.max_retries,
+        is_workflow_task=row.is_workflow_task,
+        error_code=nz(row.error_code),
+        error_category=_category_value(row.error_code),
+        worker_hostname=row.last_worker_hostname,
+        worker_id=row.last_claimed_worker_id,
+        enqueued_at=row.enqueued_at,
+        started_at=row.started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        queue_s=span_s(
+            row.enqueued_at, row.started_at or row.terminal_at, live=False
+        ),
+        exec_s=span_s(row.started_at, row.terminal_at, live=False),
+    )
+
+
+def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
+    """The merge key for one allowlisted sort field."""
+    match field:
+        case 'queue_s':
+            return summary.queue_s
+        case 'exec_s':
+            return summary.exec_s
+        case _:
+            return getattr(summary, field)
+
+
 def _leaf_task(task: TaskModel) -> LeafTaskInfo:
     """Map a task row to the detail shape shared by tasks and workflow nodes."""
     queue_s, exec_s = _task_spans(task)
@@ -499,6 +550,42 @@ def _category_predicate(category: ErrorCategory) -> ColumnElement[bool]:
             return TaskModel.error_code.in_(_CATEGORY_TO_CODES[category])
 
 
+def _history_scope(
+    *,
+    statuses: list[TaskStatus],
+    task_names: list[str],
+    queues: list[str],
+    workers: list[str],
+    error_codes: list[str],
+    error_categories: list[ErrorCategory],
+    retried_only: bool,
+) -> HistoryScope:
+    """The live filter set expressed in history-primitive terms.
+
+    Taxonomy families resolve to their code lists here — the primitive
+    carries codes, never the taxonomy — and DOMAIN becomes the
+    complement of every built-in code, exactly the live predicate's
+    semantics.
+    """
+    families: list[tuple[str, ...]] = []
+    domain_complement: tuple[str, ...] | None = None
+    for category in error_categories:
+        if category is ErrorCategory.DOMAIN:
+            domain_complement = _BUILTIN_CODES
+        else:
+            families.append(_CATEGORY_TO_CODES[category])
+    return HistoryScope(
+        statuses=tuple(status.value for status in statuses),
+        task_names=tuple(task_names),
+        queue_names=tuple(queues),
+        workers=tuple(workers),
+        error_codes=tuple(error_codes),
+        category_families=tuple(families),
+        domain_complement=domain_complement,
+        retried_only=retried_only,
+    )
+
+
 def _scope_conditions(
     *,
     statuses: list[TaskStatus],
@@ -574,6 +661,7 @@ def _facet_values(rows: Sequence[tuple[str | None, int]]) -> list[FacetValue]:
 async def task_stats(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     task_names: list[str],
     queues: list[str],
     workers: list[str],
@@ -583,9 +671,12 @@ async def task_stats(
 ) -> MonitoringResult[list[StatusCount]]:
     """Task counts by status, for the overview cards.
 
-    Scoped by every filter except status, because the cards are the status
-    selector. Always returns all seven statuses in a fixed order, including
-    zeros, so cards never appear, disappear, or reorder between polls.
+    Cross-lifecycle: live statuses count from the live table, terminal
+    statuses from the history side over the window (terminalization
+    moves finished rows there). Scoped by every filter except status,
+    because the cards are the status selector. Always returns all
+    seven statuses in a fixed order, including zeros, so cards never
+    appear, disappear, or reorder between polls.
     """
     scope = _scope_conditions(
         statuses=[],
@@ -599,17 +690,36 @@ async def task_stats(
     stmt = (
         select(TaskModel.status, func.count()).where(*scope).group_by(TaskModel.status)
     )
+    history_sql, history_params = history_scoped_status_counts_statement(
+        window,
+        _history_scope(
+            statuses=[],
+            task_names=task_names,
+            queues=queues,
+            workers=workers,
+            error_codes=error_codes,
+            error_categories=error_categories,
+            retried_only=retried_only,
+        ),
+    )
 
     try:
         async with broker.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
+            history_rows = (
+                await session.execute(text(history_sql), history_params)
+            ).all()
     except SQLAlchemyError as exc:
         return _db_err('task stats query', exc)
 
     counts = {status: count for status, count in rows}
+    merged: dict[TaskStatus, int] = dict(counts)
+    for row in history_rows:
+        status = TaskStatus(str(row.status))
+        merged[status] = merged.get(status, 0) + int(row.terminal_count)
     return Ok(
         [
-            StatusCount(status=status.value, count=counts.get(status, 0))
+            StatusCount(status=status.value, count=merged.get(status, 0))
             for status in _STATUS_ORDER
         ]
     )
@@ -882,6 +992,7 @@ async def _estimated_task_total(session: AsyncSession) -> int:
 async def list_tasks(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     statuses: list[TaskStatus],
     task_names: list[str],
     queues: list[str],
@@ -911,29 +1022,84 @@ async def list_tasks(
         error_categories=error_categories,
         retried_only=retried_only,
     )
+    # Each side over-fetches the page's reach (offset + limit) sorted
+    # by the SAME key, and the merge re-sorts and slices — correct for
+    # any page within the capped reach, with cost bounded by the caps.
+    reach = offset + limit
     rows_stmt = list_rows_statement(
         scope=scope,
         sort_by=sort_by,
         sort_dir=sort_dir,
-        offset=offset,
-        limit=limit,
+        offset=0,
+        limit=reach,
+    )
+    history_scope = _history_scope(
+        statuses=statuses,
+        task_names=task_names,
+        queues=queues,
+        workers=workers,
+        error_codes=error_codes,
+        error_categories=error_categories,
+        retried_only=retried_only,
+    )
+    page_sql, page_params = history_page_statement(
+        HistoryPageQuery(
+            window=window,
+            limit=min(max(reach, 1), 500),
+            offset=0,
+            statuses=history_scope.statuses,
+            task_names=history_scope.task_names,
+            queue_names=history_scope.queue_names,
+            workers=history_scope.workers,
+            error_codes=history_scope.error_codes,
+            retried_only=retried_only,
+            order_by=history_sort_expression(
+                sort_by, descending=sort_dir == 'desc'
+            ),
+        )
+    )
+    count_sql, count_params = history_count_statement(
+        window, history_scope
     )
 
     try:
         async with broker.session_factory() as session:
             match scope:
                 case []:
-                    total = await _estimated_task_total(session)
+                    live_total = await _estimated_task_total(session)
                 case _:
                     count_stmt = (
                         select(func.count()).select_from(TaskModel).where(*scope)
                     )
-                    total = (await session.execute(count_stmt)).scalar_one()
+                    live_total = (
+                        await session.execute(count_stmt)
+                    ).scalar_one()
             tasks = (await session.execute(rows_stmt)).scalars().all()
+            history_rows = (
+                await session.execute(text(page_sql), page_params)
+            ).all()
+            history_total = int(
+                (
+                    await session.execute(text(count_sql), count_params)
+                ).scalar_one()
+            )
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
 
-    return Ok(TaskListPage(rows=[_task_summary(task) for task in tasks], total=total))
+    summaries = [_task_summary(task) for task in tasks]
+    summaries.extend(_history_summary(row) for row in history_rows)
+    keyed = [
+        (_summary_sort_value(summary, sort_by), summary)
+        for summary in summaries
+    ]
+    non_null = [pair for pair in keyed if pair[0] is not None]
+    nulls = [summary for value, summary in keyed if value is None]
+    non_null.sort(key=lambda pair: pair[0], reverse=sort_dir == 'desc')
+    # Nulls last in BOTH directions, matching the live SQL's
+    # nulls_last discipline.
+    ordered = [summary for _, summary in non_null] + nulls
+    page = ordered[offset : offset + limit]
+    return Ok(TaskListPage(rows=page, total=live_total + history_total))
 
 
 async def get_task_detail(

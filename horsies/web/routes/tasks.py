@@ -8,9 +8,16 @@ is never captured as a task id.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, status
+
+from horsies.core.history.reads.pages import HistoryWindow
+from horsies.monitoring.history_window import (
+    WindowRefused,
+    resolve_monitoring_window,
+)
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_err
@@ -35,12 +42,28 @@ from horsies.web.routes._common import (
 )
 
 
+def _window_or_400(
+    since: datetime | None, until: datetime | None
+) -> HistoryWindow:
+    """Resolve the terminal-history window; a refusal is a 400 that
+    names the bound, never a clamp."""
+    resolved = resolve_monitoring_window(since=since, until=until)
+    if isinstance(resolved, WindowRefused):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=resolved.reason,
+        )
+    return resolved
+
+
 def build_router(broker: PostgresBroker) -> APIRouter:
     """Build the ``/tasks`` router bound to one broker."""
     router = APIRouter(prefix='/tasks', tags=['tasks'])
 
     @router.get('/stats')
     async def read_stats(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
         task_name: list[str] = Query(default=[]),
         queue: list[str] = Query(default=[]),
         worker: list[str] = Query(default=[]),
@@ -52,6 +75,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         this feeds are the status selector."""
         result = await task_stats(
             broker,
+            window=_window_or_400(since, until),
             task_names=task_name,
             queues=queue,
             workers=worker,
@@ -111,6 +135,8 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.get('')
     async def read_tasks(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
         task_status: list[str] = Query(default=[], alias='status'),
         task_name: list[str] = Query(default=[]),
         queue: list[str] = Query(default=[]),
@@ -126,6 +152,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         """A paginated, server-sorted, server-filtered slice of tasks."""
         result = await list_tasks(
             broker,
+            window=_window_or_400(since, until),
             statuses=parse_statuses(task_status),
             task_names=task_name,
             queues=queue,
