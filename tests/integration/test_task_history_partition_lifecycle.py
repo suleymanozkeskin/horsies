@@ -106,6 +106,7 @@ async def seed_stale_locator(
     *,
     task_id: str,
     with_history_row: bool,
+    node_key: str | None = 'node-0',
 ) -> None:
     """One over-horizon pending locator on `ref`, with its node row and
     (optionally) the history row the locator names."""
@@ -124,12 +125,13 @@ async def seed_stale_locator(
             'INSERT INTO horsies_workflow_tasks '
             '(id, workflow_id, task_id, task_index, node_id) VALUES '
             '(CAST(:node_row_id AS uuid), CAST(:workflow_id AS uuid), '
-            "CAST(:task_id AS uuid), 0, 'node-0')"
+            'CAST(:task_id AS uuid), 0, :node_key)'
         ),
         {
             'node_row_id': node_row_id,
             'workflow_id': workflow_id,
             'task_id': task_id,
+            'node_key': node_key,
         },
     )
     await connection.execute(
@@ -470,6 +472,40 @@ class TestDetachAndDrop:
             UnpublishedLoader(),
         )
         assert isinstance(still_blocked, LeafPendingBlocked)
+
+    @pytest.mark.asyncio
+    async def test_refusal_reason_rides_the_detach_outcome(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """An operator diagnosing an undetachable leaf sees the named
+        per-task reason on the detach return itself, without reading
+        pending rows."""
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        task_id = str(uuid4())
+        async with history_schema.engine.begin() as connection:
+            await seed_stale_locator(
+                connection,
+                ref,
+                task_id=task_id,
+                with_history_row=True,
+                node_key=None,
+            )
+        outcome = await detach_expired_leaf(
+            history_schema.engine,
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=timedelta(days=7)
+            ),
+            UnpublishedLoader(),
+        )
+        match outcome:
+            case QuarantineRefused(refusals=(refusal,)):
+                assert refusal.task_id == task_id
+                assert refusal.verdict == 'NODE_IDENTITY_ABSENT'
+                assert refusal.detail is not None
+            case _:
+                raise AssertionError(f'unexpected outcome: {outcome!r}')
 
 
 class TestHealth:
