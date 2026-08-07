@@ -135,6 +135,38 @@ END
 $function$
 """
 
+KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION = (
+    'horsies_key_reservation_terminalize_batch'
+)
+
+KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION_DDL = f"""
+CREATE FUNCTION {KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION}(
+    p_key_digests bytea[],
+    p_task_ids uuid[],
+    p_terminal_at timestamptz
+) RETURNS integer
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_updated integer;
+BEGIN
+    IF cardinality(p_key_digests) <> cardinality(p_task_ids) THEN
+        RAISE EXCEPTION USING ERRCODE = 'invalid_parameter_value',
+            MESSAGE = 'digest and task arrays must pair element-wise';
+    END IF;
+    UPDATE {KEY_RESERVATIONS} r
+    SET disposition = 'TERMINAL',
+        expires_at = p_terminal_at + r.reservation_window
+    FROM unnest(p_key_digests, p_task_ids) AS pair(key_digest, task_id)
+    WHERE r.idempotency_key_digest = pair.key_digest
+      AND r.task_id = pair.task_id
+      AND r.disposition = 'LIVE';
+    GET DIAGNOSTICS v_updated = ROW_COUNT;
+    RETURN v_updated;
+END
+$function$
+"""
+
 KEY_RESERVATION_CLEANUP_FUNCTION_DDL = f"""
 CREATE FUNCTION {KEY_RESERVATION_CLEANUP_FUNCTION}(
     p_batch_size integer
@@ -173,6 +205,7 @@ def reservation_function_fragments() -> tuple[str, ...]:
         KEY_RESERVATION_OUTCOME_TYPE_DDL,
         KEY_RESERVATION_CLAIM_FUNCTION_DDL,
         KEY_RESERVATION_TERMINALIZE_FUNCTION_DDL,
+        KEY_RESERVATION_TERMINALIZE_BATCH_FUNCTION_DDL,
         KEY_RESERVATION_CLEANUP_FUNCTION_DDL,
     )
 

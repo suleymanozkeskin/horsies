@@ -258,6 +258,18 @@ class TestExpiryFamily:
         batch = expiry_family_fragments()[1]
         assert "pg_notify('task_done', u.tid::text)" in batch
 
+    def test_reservation_transition_has_one_owner(self) -> None:
+        batch = expiry_family_fragments()[1]
+        assert 'horsies_key_reservation_terminalize_batch' in batch
+        assert 'UPDATE horsies_key_reservations' not in batch
+        assert 'UPDATE horsies_key_reservations' not in MOVE_BODY
+
+    def test_batch_workflow_linkage_agrees_with_the_single_row_path(
+        self,
+    ) -> None:
+        batch = expiry_family_fragments()[1]
+        assert 'CASE WHEN t.is_workflow_task THEN n.workflow_id END' in batch
+
 
 class TestFailureFamily:
     """The failure family's wire shape against the production contract."""

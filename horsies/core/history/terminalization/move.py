@@ -823,7 +823,8 @@ BEGIN
         t.claimed_by_worker_id, t.worker_hostname,
         t.worker_pid, t.worker_process_name,
         t.input_digest, t.rerun_of_task_id, t.rerun_root_task_id,
-        n.workflow_id, t.is_workflow_task, 1,
+        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
+        t.is_workflow_task, 1,
         1, 'json-utf8', 'application/json',
         {ATTEMPT_ENCODER_FUNCTION}(t.id),
         sha256({ATTEMPT_ENCODER_FUNCTION}(t.id)),
@@ -869,15 +870,18 @@ BEGIN
     JOIN horsies_workflow_tasks n ON n.task_id = t.id
     WHERE t.id = ANY(v_ids) AND t.is_workflow_task;
 
-    UPDATE horsies_key_reservations r
-    SET disposition = 'TERMINAL',
-        expires_at = v_terminal_at + r.reservation_window
-    FROM {LIVE_TASKS} t
-    WHERE t.id = ANY(v_ids)
-      AND t.idempotency_key_digest IS NOT NULL
-      AND r.idempotency_key_digest = t.idempotency_key_digest
-      AND r.task_id = t.id
-      AND r.disposition = 'LIVE';
+    -- The reservation transition has ONE owner: the registry module.
+    PERFORM horsies_key_reservation_terminalize_batch(
+        (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{{}}')
+         FROM {LIVE_TASKS} t
+         WHERE t.id = ANY(v_ids)
+           AND t.idempotency_key_digest IS NOT NULL),
+        (SELECT COALESCE(array_agg(t.id), '{{}}')
+         FROM {LIVE_TASKS} t
+         WHERE t.id = ANY(v_ids)
+           AND t.idempotency_key_digest IS NOT NULL),
+        v_terminal_at
+    );
 
     -- Outcome rows stream from the still-locked live rows BEFORE the
     -- deletes: reading them back through the partitioned parent by
