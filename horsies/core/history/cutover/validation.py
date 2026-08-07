@@ -35,6 +35,8 @@ _UUID_COLUMNS: tuple[tuple[str, str], ...] = (
     (LIVE_TASKS, 'id'),
     ('horsies_task_attempts', 'task_id'),
     ('horsies_workflows', 'id'),
+    ('horsies_workflows', 'parent_workflow_id'),
+    ('horsies_workflows', 'root_workflow_id'),
     ('horsies_workflow_tasks', 'id'),
     ('horsies_workflow_tasks', 'workflow_id'),
     ('horsies_workflow_tasks', 'task_id'),

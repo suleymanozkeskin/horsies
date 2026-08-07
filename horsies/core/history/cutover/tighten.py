@@ -130,6 +130,53 @@ async def _entry_violations(
     return tuple(violations)
 
 
+_UUID_TEXT = (
+    '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}'
+    '-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+)
+
+_CONVERTED_IDENTITY_COLUMNS: tuple[tuple[str, str], ...] = (
+    (LIVE_TASKS, 'id'),
+    ('horsies_workflows', 'id'),
+    ('horsies_workflows', 'parent_workflow_id'),
+    ('horsies_workflows', 'root_workflow_id'),
+    ('horsies_workflow_tasks', 'id'),
+    ('horsies_workflow_tasks', 'workflow_id'),
+    ('horsies_workflow_tasks', 'task_id'),
+)
+
+
+async def _identity_parse_violations(
+    connection: AsyncConnection,
+) -> tuple[str, ...]:
+    """Rows whose identity text cannot parse as uuid, named BEFORE the
+    point of no return. No foreign key ever policed FORMAT on any of
+    these columns — a key polices reference, not spelling — so the
+    gate verifies every column the conversion will cast, rather than
+    discovering a bad value mid-tighten on the wrong side of the
+    boundary. Realistically zero rows; the gate must know, not
+    assume."""
+    violations: list[str] = []
+    for table, column in _CONVERTED_IDENTITY_COLUMNS:
+        bad = int(
+            (
+                await connection.execute(
+                    text(
+                        f'SELECT count(*) FROM {table} '
+                        f'WHERE {column} IS NOT NULL '
+                        f'AND {column}::text !~ :uuid_text'
+                    ),
+                    {'uuid_text': _UUID_TEXT},
+                )
+            ).scalar_one()
+        )
+        if bad:
+            violations.append(
+                f'{bad} rows in {table}.{column} do not parse as uuid'
+            )
+    return tuple(violations)
+
+
 async def _status_check_constraints(
     connection: AsyncConnection,
 ) -> tuple[str, ...]:
@@ -215,6 +262,7 @@ async def tighten_to_frozen(
             f'(expected the exact phrase for {backup_label!r})'
         )
     reasons.extend(await _entry_violations(connection))
+    reasons.extend(await _identity_parse_violations(connection))
     if reasons:
         return TightenRefused(reasons=tuple(reasons))
 
@@ -256,7 +304,12 @@ async def tighten_to_frozen(
                 f'ALTER TABLE {key.table} ALTER COLUMN {key.column} '
                 f'TYPE uuid USING {key.column}::uuid'
             )
+    # root_workflow_id converts by the domain ruling: the identity
+    # domain converts as a DOMAIN, not as a set of FK-forced columns —
+    # ::uuid preserves the value exactly; an encoding is not a fact
+    # about the past. Its parse-safety was proven at the gate.
     for table, column in (
+        ('horsies_workflows', 'root_workflow_id'),
         ('horsies_workflow_tasks', 'id'),
         ('horsies_workflow_tasks', 'task_id'),
     ):

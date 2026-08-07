@@ -175,3 +175,47 @@ async def test_the_offline_program_end_to_end(
             assert history_row.status == 'COMPLETED'
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_the_gate_names_unparseable_identities(
+    make_database: MakeDatabase,
+) -> None:
+    """No foreign key ever policed FORMAT on the identity columns; the
+    gate verifies every column the conversion will cast and names the
+    offenders BEFORE the point of no return."""
+    url = await make_database()
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    try:
+        await broker.ensure_schema_initialized()
+    finally:
+        await broker.close_async()
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await normalize_attempt_identity(connection)
+            await connection.execute(text(RELOCATION_LEDGER_DDL))
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_workflows '
+                    '(id, name, status, on_error, depth, '
+                    'root_workflow_id, created_at, updated_at, sent_at) '
+                    "VALUES ('11111111-1111-1111-1111-111111111111', "
+                    "'legacy-wf', 'COMPLETED', 'fail', 0, "
+                    "'not-a-uuid', "
+                    'statement_timestamp(), statement_timestamp(), '
+                    'statement_timestamp())'
+                )
+            )
+            refused = await tighten_to_frozen(
+                connection,
+                backup_label='backup-x',
+                operator_confirmation=confirmation_phrase('backup-x'),
+            )
+            assert isinstance(refused, TightenRefused)
+            assert any(
+                'root_workflow_id' in reason and 'parse' in reason
+                for reason in refused.reasons
+            ), refused.reasons
+    finally:
+        await engine.dispose()
