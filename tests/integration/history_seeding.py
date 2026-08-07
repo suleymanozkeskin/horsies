@@ -28,8 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
 from horsies.core.history.archive.attempts import (
     AttemptRecord,
+    decode_attempt_snapshot,
     encode_attempt_snapshot,
 )
+from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.history.commands import EnsureLeafCoverage
 from horsies.core.history.ddl.classes import (
     ClassAlreadyRegistered,
@@ -104,6 +106,47 @@ async def ensure_history_seedable(connection: AsyncConnection) -> None:
                     f'heartbeat coverage refused: {creation!r}'
                 )
     await publisher.republish(connection)
+    await connection.execute(ITEST_TASK_ROWS_VIEW_DDL)
+
+
+ITEST_TASK_ROWS_VIEW_DDL = text(
+    """
+    CREATE OR REPLACE VIEW itest_task_rows AS
+    SELECT id, task_name, queue_name, status, is_workflow_task,
+           error_code, failed_reason, failed_at, completed_at, terminal_at,
+           started_at, enqueued_at, good_until, next_retry_at,
+           result, claimed, claimed_at, claimed_by_worker_id,
+           claim_expires_at, finalizing_at, finalizing_by_worker_id,
+           retry_count, max_retries, worker_pid, worker_hostname,
+           worker_process_name, retention_class_key, terminalization_kind
+    FROM horsies_tasks
+    UNION ALL
+    SELECT task_id AS id, task_name, queue_name, status, is_workflow_task,
+           error_code,
+           final_failed_reason AS failed_reason,
+           CASE WHEN status <> 'COMPLETED' THEN terminal_at END AS failed_at,
+           CASE WHEN status = 'COMPLETED' THEN terminal_at END AS completed_at,
+           terminal_at,
+           started_at, enqueued_at, good_until,
+           NULL AS next_retry_at,
+           convert_from(result_payload, 'UTF8') AS result,
+           FALSE AS claimed, claimed_at,
+           NULL AS claimed_by_worker_id,
+           NULL::timestamptz AS claim_expires_at,
+           NULL::timestamptz AS finalizing_at,
+           NULL AS finalizing_by_worker_id,
+           retry_count, max_retries,
+           last_worker_pid AS worker_pid,
+           last_worker_hostname AS worker_hostname,
+           last_worker_process_name AS worker_process_name,
+           retention_class_key, terminalization_kind
+    FROM horsies_task_history
+    """
+)
+"""Test-only readback surface: one task per row regardless of which
+lifecycle side holds it, presented with the live column names. The
+terminal instant lands in completed_at/failed_at by status; claim and
+finalize state is structurally absent on a history row."""
 
 
 def _attempt_record(row: TaskAttemptModel) -> AttemptRecord:
@@ -216,6 +259,62 @@ def history_row_params(
         'attempt_snapshot': snapshot.payload,
         'attempt_snapshot_digest': snapshot.digest,
     }
+
+
+async def read_attempt_history(
+    session: AsyncSession, task_id: str
+) -> list[tuple[int, str, str | None]]:
+    """(attempt, outcome, failed_reason) tuples, wherever they live.
+
+    Live attempt rows while the task is live; after terminalization the
+    move purges them and the history row's snapshot is their only home.
+    """
+    live = (
+        await session.execute(
+            text(
+                """
+                SELECT attempt, outcome, failed_reason
+                FROM horsies_task_attempts
+                WHERE task_id = CAST(:id AS uuid)
+                ORDER BY attempt
+                """
+            ),
+            {'id': task_id},
+        )
+    ).all()
+    if live:
+        return [tuple(row) for row in live]
+    snapshot = (
+        await session.execute(
+            text(
+                """
+                SELECT attempt_archive_version, attempt_snapshot_codec,
+                       attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest
+                FROM horsies_task_history
+                WHERE task_id = CAST(:id AS uuid)
+                """
+            ),
+            {'id': task_id},
+        )
+    ).first()
+    if snapshot is None:
+        return []
+    decoded = decode_attempt_snapshot(
+        version=snapshot.attempt_archive_version,
+        codec=snapshot.attempt_snapshot_codec,
+        content_type=snapshot.attempt_snapshot_content_type,
+        payload=bytes(snapshot.attempt_snapshot),
+        digest=bytes(snapshot.attempt_snapshot_digest),
+    )
+    match decoded:
+        case DecodedArchiveValue(value=records):
+            return [
+                (record.attempt, record.outcome, record.failed_reason)
+                for record in records
+            ]
+        case _:
+            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
 
 
 async def route_rows(session: AsyncSession, rows: tuple[Any, ...]) -> None:

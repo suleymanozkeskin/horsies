@@ -28,6 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.history.archive.attempts import encode_attempt_snapshot
+from tests.integration.history_seeding import read_attempt_history
 
 from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
@@ -170,12 +172,8 @@ async def _requeued_after_failed_attempt(
     await session.commit()
 
 
-_ATTEMPT_HISTORY_SQL = text("""
-    SELECT attempt, outcome, failed_reason
-    FROM horsies_task_attempts
-    WHERE task_id = :id
-    ORDER BY attempt
-""")
+# Attempts purge with the move; `read_attempt_history` follows them
+# into the history row's snapshot.
 
 
 async def _force_terminal(
@@ -185,19 +183,68 @@ async def _force_terminal(
     status: str,
     kind: str | None,
 ) -> None:
-    """Put a row where another operation would have left it."""
+    """Put the task where another operation would have left it.
+
+    Post-split that is a history row carrying the operation's kind,
+    with no live row and no live attempt rows. A terminal row whose
+    family was never recorded carries LEGACY_TERMINAL — the relocated
+    presentation — which the miss classifier treats as foreign, exactly
+    the never-a-replay semantics the kindless live row used to model.
+    """
+    snapshot = encode_attempt_snapshot(())
     await session.execute(
         text("""
-            UPDATE horsies_tasks
-            SET status = :status,
-                terminal_at = NOW(),
-                terminalization_kind = :kind,
-                claimed = FALSE,
-                claimed_by_worker_id = NULL,
-                claimed_at = NULL
-            WHERE id = :id
+            INSERT INTO horsies_task_history (
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint,
+                status, terminalization_kind, terminal_at,
+                retention_anchor_at, retention_class_key,
+                enqueued_at, claimed_at, started_at, created_at,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                result_envelope_version, result_codec, result_content_type,
+                error_code, final_failed_reason,
+                is_workflow_task, history_schema_version,
+                attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot_content_type, attempt_snapshot,
+                attempt_snapshot_digest, rerun_input_disposition
+            )
+            SELECT id, task_name, queue_name, priority,
+                   command_fingerprint_version, command_fingerprint,
+                   :status, :kind, NOW(),
+                   NOW(), retention_class_key,
+                   enqueued_at, claimed_at, started_at, created_at,
+                   retry_count, max_retries,
+                   claimed_by_worker_id, worker_hostname,
+                   1, 'json-utf8', 'application/json',
+                   error_code, failed_reason,
+                   is_workflow_task, 1,
+                   :snapshot_version, :snapshot_codec,
+                   :snapshot_content_type, :snapshot_payload,
+                   :snapshot_digest, 'NEVER_ELIGIBLE'
+            FROM horsies_tasks WHERE id = CAST(:id AS uuid)
         """),
-        {'status': status, 'kind': kind, 'id': task_id},
+        {
+            'status': status,
+            'kind': kind if kind is not None else 'LEGACY_TERMINAL',
+            'id': task_id,
+            'snapshot_version': snapshot.version,
+            'snapshot_codec': snapshot.codec,
+            'snapshot_content_type': snapshot.content_type,
+            'snapshot_payload': snapshot.payload,
+            'snapshot_digest': snapshot.digest,
+        },
+    )
+    await session.execute(
+        text(
+            'DELETE FROM horsies_task_attempts '
+            'WHERE task_id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id},
+    )
+    await session.execute(
+        text('DELETE FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+        {'id': task_id},
     )
     await session.commit()
 
@@ -335,7 +382,7 @@ class TestAppliedTransitions:
             await session.execute(
                 text("""
                     SELECT status, terminal_at, terminalization_kind, result
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -392,7 +439,7 @@ class TestAppliedTransitions:
             await session.execute(
                 text("""
                     SELECT status, error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -401,10 +448,8 @@ class TestAppliedTransitions:
         assert row.error_code is None
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == expected_attempts
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == expected_attempts
 
 
 class TestAlreadyApplied:
@@ -690,7 +735,7 @@ class TestFailLocked:
             await session.execute(
                 text("""
                     SELECT status, failed_at, failed_reason, error_code, result
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -725,16 +770,14 @@ class TestFailLocked:
 
         reason = (
             await session.execute(
-                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
         assert reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -759,7 +802,7 @@ class TestFailLocked:
 
         reason = (
             await session.execute(
-                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1130,7 +1173,7 @@ class TestExpireOwnedClaim:
             await session.execute(
                 text("""
                     SELECT status, claimed, claim_expires_at, failed_at, error_code
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1166,7 +1209,7 @@ class TestExpireOwnedClaim:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1174,10 +1217,8 @@ class TestExpireOwnedClaim:
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -1369,7 +1410,7 @@ class TestExpireOwnedClaim:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1443,7 +1484,7 @@ class TestExpirePendingTasks:
             await session.execute(
                 text("""
                     SELECT status, error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1452,10 +1493,8 @@ class TestExpirePendingTasks:
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -1480,7 +1519,7 @@ class TestExpirePendingTasks:
         assert {o.task_id for o in outcomes} == {oldest, middle}
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': newest},
             )
         ).scalar_one()
@@ -1528,7 +1567,7 @@ class TestExpirePendingTasks:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1548,7 +1587,7 @@ class TestExpirePendingTasks:
 
         async with broker.async_engine.connect() as holder:
             await holder.execute(
-                text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+                text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},
             )
             outcomes = await apply_batch_async(
@@ -1654,7 +1693,7 @@ class TestCancelLockedTask:
                            terminal_at, claimed, claimed_by_worker_id,
                            claimed_at, finalizing_at,
                            finalizing_by_worker_id
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1716,7 +1755,7 @@ class TestCancelLockedTask:
         assert isinstance(outcome, SourceStateConflict)
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1795,7 +1834,7 @@ class TestCancelOwnedOrphan:
                     SELECT status, error_code, failed_reason, failed_at,
                            terminal_at, claimed, claimed_by_worker_id,
                            claimed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1978,7 +2017,7 @@ class TestCancelOrphanedTasks:
 
         rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [claimed, pending, linked, plain, running]},
             )
         ).all()
@@ -2065,7 +2104,7 @@ class TestCancelOrphanedTasks:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -2090,7 +2129,7 @@ class TestCancelOrphanedTasks:
 
         async with broker.async_engine.connect() as holder:
             await holder.execute(
-                text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+                text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},
             )
             outcomes = await apply_batch_async(
@@ -2152,7 +2191,7 @@ class TestAbandonOwnedNode:
                            finalizing_at, finalizing_by_worker_id,
                            error_code, failed_reason, failed_at,
                            terminal_at, terminalization_kind
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -2304,7 +2343,7 @@ class TestCancelOwnedNode:
         assert isinstance(outcome, LostClaim)
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -2334,7 +2373,7 @@ class TestCancelOwnedNode:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -2569,7 +2608,7 @@ class TestIdKeyedWorkflowBatches:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': applied_id},
             )
@@ -2633,7 +2672,7 @@ class TestIdKeyedWorkflowBatches:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -2762,7 +2801,7 @@ class TestWorkflowScopedBatches:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': eligible},
             )
@@ -2775,7 +2814,7 @@ class TestWorkflowScopedBatches:
                 text("""
                     SELECT status, terminalization_kind,
                            claimed_by_worker_id, claimed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': eligible},
             )
@@ -2786,7 +2825,7 @@ class TestWorkflowScopedBatches:
         assert persisted.claimed_at is None
         refused_rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [wrong_workflow, wrong_link, wrong_task_source]},
             )
         ).all()
@@ -2851,7 +2890,7 @@ class TestWorkflowScopedBatches:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_ids[0]},
             )
@@ -2899,7 +2938,7 @@ class TestWorkflowScopedBatches:
         assert outcomes == []
         rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [live_workflow_task, ready_link_task]},
             )
         ).all()
