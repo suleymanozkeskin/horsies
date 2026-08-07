@@ -174,12 +174,14 @@ class TestBuilderValidation:
             HistoryPageQuery(
                 window=make_window(),
                 limit=10,
-                status='COMPLETED',
-                task_name='acme.report',
+                statuses=('COMPLETED',),
+                task_names=('acme.report',),
             )
         )
-        assert 'status = :status' in sql
-        assert 'task_name = :task_name' in sql
+        assert 'status = ANY(CAST(:status_filter AS text[]))' in sql
+        assert (
+            'task_name = ANY(CAST(:task_name_filter AS text[]))' in sql
+        )
         assert "'COMPLETED'" not in sql
-        assert parameters['status'] == 'COMPLETED'
-        assert parameters['task_name'] == 'acme.report'
+        assert parameters['status_filter'] == ['COMPLETED']
+        assert parameters['task_name_filter'] == ['acme.report']
