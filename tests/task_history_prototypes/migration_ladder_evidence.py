@@ -43,6 +43,9 @@ from horsies.core.history.cutover.relocation import (
 )
 
 
+_CLASS_KEY = 'finite_30d_v1'
+
+
 class RungMeasurementError(Exception):
     """The rung could not be measured as declared."""
 
@@ -423,4 +426,189 @@ async def measure_rung(
         relation_bytes_before=bytes_before,
         relation_bytes_after=await _relation_bytes(connection),
         peak_relation_bytes=peak_bytes,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FootprintDeclaration:
+    """What rung 1 measured, and what it implies for the next rung.
+
+    Section 11.1.2 selects rung 2's vehicle from this: the extrapolated peak
+    must fit the runner with at least 25% headroom to ride the same lane.
+    """
+
+    rung_rows: int
+    peak_relation_bytes: int
+    bytes_per_row: float
+    next_rung_rows: int
+    extrapolated_peak_bytes: int
+    runner_free_bytes: int
+    headroom_fraction: float
+    fits_same_lane: bool
+
+
+RUNG2_HEADROOM = 0.25
+
+
+def declare_footprint(
+    measurement: RungMeasurement,
+    *,
+    next_rung_rows: int,
+    runner_free_bytes: int,
+) -> FootprintDeclaration:
+    """Extrapolate this rung's measured peak to the next rung's row count."""
+    per_row = measurement.peak_relation_bytes / measurement.rows
+    extrapolated = int(per_row * next_rung_rows)
+    headroom = (
+        (runner_free_bytes - extrapolated) / extrapolated
+        if extrapolated
+        else 0.0
+    )
+    return FootprintDeclaration(
+        rung_rows=measurement.rows,
+        peak_relation_bytes=measurement.peak_relation_bytes,
+        bytes_per_row=per_row,
+        next_rung_rows=next_rung_rows,
+        extrapolated_peak_bytes=extrapolated,
+        runner_free_bytes=runner_free_bytes,
+        headroom_fraction=headroom,
+        fits_same_lane=headroom >= RUNG2_HEADROOM,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationLadderEvidence:
+    conditions: Any
+    workload: dict[str, int | str]
+    measurement: RungMeasurement
+    footprint: FootprintDeclaration
+
+
+async def collect_migration_ladder_evidence(
+    engine: Any,
+    *,
+    commit: str,
+    run_kind: Any,
+    server_image: str,
+    host_description: str,
+    storage_description: str,
+    demo_quiesced: bool,
+    rows: int,
+    attempts_per_task: int,
+    batch_size: int,
+    next_rung_rows: int,
+    data_path: Any,
+) -> MigrationLadderEvidence:
+    """Seed, cut over, and measure one rung on a disposable database.
+
+    The database is created for this rung and dropped after it. The cutover is
+    a one-way program — it installs replacement objects and freezes the legacy
+    posture — so a rung cannot be repeated against a database that already ran
+    one, and reusing a database would measure the wrong thing rather than fail
+    loudly.
+    """
+    import uuid as _uuid
+    from shutil import disk_usage
+
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from tests.integration.task_history_harness import prepare_move_storage
+    from tests.task_history_prototypes.evidence import (
+        collect_operational_conditions,
+    )
+
+    # render_as_string, not str(): SQLAlchemy masks the password in the
+    # plain string form, and the disposable database is reached through a
+    # fresh connection that needs the real one.
+    admin_url = engine.url.render_as_string(hide_password=False)
+    base = admin_url.rsplit('/', 1)[0]
+    name = f'ladder_rung_{_uuid.uuid4().hex[:12]}'
+    admin = create_async_engine(admin_url, isolation_level='AUTOCOMMIT')
+    async with admin.connect() as connection:
+        await connection.execute(text(f'CREATE DATABASE {name}'))
+    await admin.dispose()
+
+    rung_dsn = f'{base}/{name}'
+    try:
+        # The perf helper's public entry runs its own event loop, which
+        # cannot nest inside this one. Applying the schema through the broker
+        # directly is the same work without the loop.
+        from pydantic import SecretStr
+
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+
+        rung_broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(rung_dsn))
+        )
+        try:
+            await rung_broker.ensure_schema_initialized()
+        finally:
+            await rung_broker.close_async()
+        rung_engine = create_async_engine(rung_dsn)
+        try:
+            async with rung_engine.connect() as connection:
+                conditions = await collect_operational_conditions(
+                    connection,
+                    commit=commit,
+                    run_kind=run_kind,
+                    server_image=server_image,
+                    host_description=host_description,
+                    storage_description=storage_description,
+                    demo_quiesced=demo_quiesced,
+                    cache_posture=(
+                        'disposable database per rung; seeded immediately '
+                        'before the measured cutover'
+                    ),
+                    prepared_posture=(
+                        'constant batch size across both caller-driven loops'
+                    ),
+                )
+                await prepare_move_storage(connection, _CLASS_KEY)
+                await connection.commit()
+                await seed_legacy_install(
+                    connection,
+                    rows=rows,
+                    attempts_per_task=attempts_per_task,
+                    class_key=_CLASS_KEY,
+                )
+                measurement = await measure_rung(
+                    connection,
+                    rows=rows,
+                    attempts_per_task=attempts_per_task,
+                    batch_size=batch_size,
+                    class_key=_CLASS_KEY,
+                    backup_label=f'ladder-{name}',
+                )
+        finally:
+            await rung_engine.dispose()
+    finally:
+        admin = create_async_engine(
+            admin_url, isolation_level='AUTOCOMMIT'
+        )
+        async with admin.connect() as connection:
+            await connection.execute(
+                text(f'DROP DATABASE IF EXISTS {name} WITH (FORCE)')
+            )
+        await admin.dispose()
+
+    return MigrationLadderEvidence(
+        conditions=conditions,
+        workload={
+            'rung_rows': rows,
+            'attempts_per_task': attempts_per_task,
+            'batch_size': batch_size,
+            'next_rung_rows': next_rung_rows,
+            'class_key': _CLASS_KEY,
+            'rung_verdict': measurement.rung_verdict,
+            'preflight_estimate': measurement.preflight_estimate,
+            'fixed_term_stages': 'preflight + tighten + validation',
+            'itemized_stages': 'drain + identity + program + preparation',
+        },
+        measurement=measurement,
+        footprint=declare_footprint(
+            measurement,
+            next_rung_rows=next_rung_rows,
+            runner_free_bytes=disk_usage(data_path).free,
+        ),
     )
