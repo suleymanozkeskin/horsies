@@ -437,7 +437,7 @@ CREATE OR REPLACE FUNCTION horsies_claim(
     p_lock_keys jsonb
 )
 RETURNS TABLE(
-    id varchar,
+    id text,
     task_name varchar,
     args text,
     kwargs text,
@@ -622,7 +622,7 @@ BEGIN
         updated_at = now()
     FROM pick
     WHERE t.id = pick.id
-    RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name,
+    RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
               t.is_workflow_task, t.task_options, t.claimed_at;
 END;
 $func$;
