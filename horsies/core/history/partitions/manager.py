@@ -60,6 +60,7 @@ from ..outcomes import (
 from .catalog import (
     INDEX_SCHEMA_VERSION,
     RetentionClassRow,
+    capture_partition_bound_utc,
     daily_leaf_name,
     database_now,
     leaf_id_index_name,
@@ -293,6 +294,11 @@ async def create_daily_leaf(
             """
         )
     )
+    # Captured under the UTC rendering convention; every later
+    # comparison captures the live bound the same way.
+    recorded_bound = await capture_partition_bound_utc(
+        connection, leaf.leaf_name
+    )
     await connection.execute(
         text(
             f"""
@@ -304,10 +310,7 @@ async def create_daily_leaf(
             ) VALUES (
                 :leaf_name, :parent_name, :class_key,
                 :lower, :upper,
-                :index_schema_version, :id_index_name,
-                (SELECT pg_get_expr(c.relpartbound, c.oid)
-                 FROM pg_class AS c
-                 WHERE c.oid = to_regclass(:leaf_name)),
+                :index_schema_version, :id_index_name, :partition_bound,
                 NULL, TRUE, statement_timestamp()
             )
             """
@@ -320,6 +323,7 @@ async def create_daily_leaf(
             'upper': leaf.bounds.upper,
             'index_schema_version': INDEX_SCHEMA_VERSION,
             'id_index_name': id_index_name,
+            'partition_bound': recorded_bound,
         },
     )
     await connection.execute(

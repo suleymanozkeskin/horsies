@@ -36,7 +36,12 @@ from ..outcomes import (
     PartitionHealthReport,
     RetentionClassAbsent,
 )
-from .catalog import RetentionClassRow, database_now, read_retention_class
+from .catalog import (
+    RetentionClassRow,
+    database_now,
+    execute_with_utc_rendering,
+    read_retention_class,
+)
 
 COVERAGE_FLOOR_INTERVALS = 2
 """Complete future daily intervals below which coverage health is red."""
@@ -187,10 +192,13 @@ async def _survey_attached_leaves(
 
     One statement joins the catalog against `pg_catalog` and aggregates
     pending blockers per leaf, so the pass stays flat in statement count as
-    the leaf set grows.
+    the leaf set grows. The bound capture rides the UTC rendering
+    convention, like every other capture that compares against the
+    catalog's stored text.
     """
     rows = (
-        await connection.execute(
+        await execute_with_utc_rendering(
+            connection,
             text(
                 f"""
                 SELECT
