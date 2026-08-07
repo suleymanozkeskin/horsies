@@ -19,6 +19,7 @@ deliberately spaced; each open dashboard multiplies the load.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Literal, NamedTuple
@@ -282,6 +283,20 @@ def _category_value(code: str | None) -> str | None:
     return category.value if category is not None else None
 
 
+def _is_uuid_text(value: str) -> bool:
+    """Whether ``value`` parses as a uuid.
+
+    Identity columns are uuid; text that does not parse as one names
+    nothing and must answer as an absence, not reach a CAST or a typed
+    bind that would error.
+    """
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
     """Wrap a session-boundary failure, classifying transient errors."""
     return Err(
@@ -393,12 +408,23 @@ def _history_summary(row: Any) -> TaskSummary:
 
 
 def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
-    """The merge key for one allowlisted sort field."""
+    """The merge key for one allowlisted sort field.
+
+    ``queue_s``/``exec_s`` mirror the pure-SQL sort expressions
+    (start - enqueue, terminal end - start), not the displayed spans: a
+    live row's displayed duration counts up while its sort key stays
+    NULL, exactly as the SQL side orders.
+    """
     match field:
         case 'queue_s':
-            return summary.queue_s
+            if summary.started_at is None or summary.enqueued_at is None:
+                return None
+            return summary.started_at - summary.enqueued_at
         case 'exec_s':
-            return summary.exec_s
+            end = summary.completed_at or summary.failed_at
+            if end is None or summary.started_at is None:
+                return None
+            return end - summary.started_at
         case _:
             return getattr(summary, field)
 
@@ -1154,12 +1180,7 @@ async def list_tasks(
             window=window,
             limit=min(max(reach, 1), 500),
             offset=0,
-            statuses=history_scope.statuses,
-            task_names=history_scope.task_names,
-            queue_names=history_scope.queue_names,
-            workers=history_scope.workers,
-            error_codes=history_scope.error_codes,
-            retried_only=retried_only,
+            scope=history_scope,
             order_by=history_sort_expression(
                 sort_by, descending=sort_dir == 'desc'
             ),
@@ -1218,6 +1239,8 @@ async def get_task_detail(
     The attempt history is where a task's cause lives: ``error_message``
     carries the unhandled exception per try, including retries.
     """
+    if not _is_uuid_text(task_id):
+        return Ok(None)
     task_stmt = select(TaskModel).where(TaskModel.id == task_id)
     attempts_stmt = (
         select(TaskAttemptModel)
@@ -1368,6 +1391,8 @@ async def get_workflow_run(
     drilled into by calling this again with that node's ``sub_workflow_id``.
     Edges pointing at an index the run does not have are dropped.
     """
+    if not _is_uuid_text(workflow_id):
+        return Ok(None)
     run_stmt = select(WorkflowModel).where(WorkflowModel.id == workflow_id)
     nodes_stmt = (
         select(WorkflowTaskModel)
@@ -1465,6 +1490,8 @@ async def get_workflow_node(
     None when the backing task row has been removed by retention, while its
     attempt rows are still reported if present.
     """
+    if not _is_uuid_text(workflow_id):
+        return Ok(None)
     node_stmt = select(WorkflowTaskModel).where(
         WorkflowTaskModel.workflow_id == workflow_id,
         WorkflowTaskModel.task_index == task_index,

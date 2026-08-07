@@ -114,11 +114,81 @@ class HistoryWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoryScope:
+    """The monitoring filter set, expressed in history columns.
+
+    Multi-value dimensions AND together and OR within one, mirroring
+    the live scope exactly: `error_codes` is its own AND-dimension
+    (an include-list), and the taxonomy is a second, independent
+    AND-dimension whose arms OR together — each `category_families`
+    entry is one built-in family's code list, and
+    `domain_complement`, when not None, is the domain arm (a
+    non-empty code outside the given built-in set). The primitive
+    carries code lists, never the taxonomy itself.
+
+    One scope type serves pages, counts, and aggregates — a surface
+    that took its own filter fields once dropped the taxonomy
+    dimension silently.
+    """
+
+    statuses: tuple[str, ...] = ()
+    task_names: tuple[str, ...] = ()
+    queue_names: tuple[str, ...] = ()
+    workers: tuple[str, ...] = ()
+    error_codes: tuple[str, ...] = ()
+    category_families: tuple[tuple[str, ...], ...] = ()
+    domain_complement: tuple[str, ...] | None = None
+    retried_only: bool = False
+
+
+def history_scope_conditions(
+    window: HistoryWindow,
+    scope: HistoryScope,
+) -> tuple[list[str], dict[str, object]]:
+    """Window plus filters, as bind-only conditions."""
+    conditions, parameters = window_conditions(window)
+    for column, values in (
+        ('status', scope.statuses),
+        ('task_name', scope.task_names),
+        ('queue_name', scope.queue_names),
+        ('last_claimed_worker_id', scope.workers),
+    ):
+        if values:
+            conditions.append(
+                f'{column} = ANY(CAST(:{column}_filter AS text[]))'
+            )
+            parameters[f'{column}_filter'] = list(values)
+    if scope.error_codes:
+        conditions.append(
+            'error_code = ANY(CAST(:error_code_filter AS text[]))'
+        )
+        parameters['error_code_filter'] = list(scope.error_codes)
+    category_arms: list[str] = []
+    for index, family in enumerate(scope.category_families):
+        category_arms.append(
+            f'error_code = ANY(CAST(:family_{index}_filter AS text[]))'
+        )
+        parameters[f'family_{index}_filter'] = list(family)
+    if scope.domain_complement is not None:
+        category_arms.append(
+            "(error_code IS NOT NULL AND error_code <> '' "
+            'AND error_code <> ALL('
+            'CAST(:builtin_code_filter AS text[])))'
+        )
+        parameters['builtin_code_filter'] = list(scope.domain_complement)
+    if category_arms:
+        conditions.append('(' + ' OR '.join(category_arms) + ')')
+    if scope.retried_only:
+        conditions.append('retry_count > 0')
+    return conditions, parameters
+
+
+@dataclass(frozen=True, slots=True)
 class HistoryPageQuery:
     """One filtered, sorted, bounded page over the window.
 
-    Multi-value filters AND together across dimensions and OR within
-    one; an empty tuple means the dimension is unfiltered. `order_by`
+    Filters ride the shared ``HistoryScope`` so every dimension the
+    aggregates honor is honored here identically. `order_by`
     overrides `sort` with an allowlisted field expression rendered by
     `history_sort_expression` — the monitoring list rides it so both
     lifecycle sides sort by the same key before the merge.
@@ -127,12 +197,7 @@ class HistoryPageQuery:
     window: HistoryWindow
     limit: int
     offset: int = 0
-    statuses: tuple[str, ...] = ()
-    task_names: tuple[str, ...] = ()
-    queue_names: tuple[str, ...] = ()
-    workers: tuple[str, ...] = ()
-    error_codes: tuple[str, ...] = ()
-    retried_only: bool = False
+    scope: HistoryScope = HistoryScope()
     sort: HistorySort = HistorySort.TERMINAL_AT_DESC
     order_by: str | None = None
 
@@ -163,32 +228,13 @@ class HistoryFacetQuery:
             raise ValueError('facet limit must be between 1 and 200')
 
 
-def _filter_conditions(
-    query: HistoryPageQuery,
-) -> tuple[list[str], dict[str, object]]:
-    conditions, parameters = window_conditions(query.window)
-    for column, values in (
-        ('status', query.statuses),
-        ('task_name', query.task_names),
-        ('queue_name', query.queue_names),
-        ('last_claimed_worker_id', query.workers),
-        ('error_code', query.error_codes),
-    ):
-        if values:
-            conditions.append(
-                f'{column} = ANY(CAST(:{column}_filter AS text[]))'
-            )
-            parameters[f'{column}_filter'] = list(values)
-    if query.retried_only:
-        conditions.append('retry_count > 0')
-    return conditions, parameters
-
-
 def history_page_statement(
     query: HistoryPageQuery,
 ) -> tuple[str, dict[str, object]]:
     """Render the page statement and its bind parameters."""
-    conditions, parameters = _filter_conditions(query)
+    conditions, parameters = history_scope_conditions(
+        query.window, query.scope
+    )
     parameters['limit'] = query.limit
     parameters['offset'] = query.offset
     order = (
@@ -217,6 +263,10 @@ def history_facet_statement(
     if query.retried_only:
         conditions.append('retry_count > 0')
     conditions.append(f'{query.facet.value} IS NOT NULL')
+    if query.facet is HistoryFacet.ERROR_CODE:
+        # Empty string means "no code" on relocated rows; the facet
+        # offers codes, so it is excluded exactly as the live side does.
+        conditions.append("error_code <> ''")
     parameters['limit'] = query.limit
     column = query.facet.value
     sql = (
