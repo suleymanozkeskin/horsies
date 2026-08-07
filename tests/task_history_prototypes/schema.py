@@ -48,7 +48,9 @@ async def install_archive_candidates(
 ) -> None:
     if SCHEMA_VERSION != _EXPECTED_BASE_SCHEMA_VERSION:
         raise RuntimeError(
-            'task-history prototypes require the published schema v27 program'
+            'task-history prototypes require the published schema '
+            f'v{_EXPECTED_BASE_SCHEMA_VERSION} program, '
+            f'found v{SCHEMA_VERSION}'
         )
     stored_version = (
         await connection.execute(
@@ -57,7 +59,8 @@ async def install_archive_candidates(
     ).scalar_one()
     if stored_version != _EXPECTED_BASE_SCHEMA_VERSION:
         raise RuntimeError(
-            'task-history prototypes require a disposable database at schema v26'
+            'task-history prototypes require a disposable database at schema '
+            f'v{_EXPECTED_BASE_SCHEMA_VERSION}, found v{stored_version}'
         )
 
     for statement in _archive_candidate_manifest(schema):
