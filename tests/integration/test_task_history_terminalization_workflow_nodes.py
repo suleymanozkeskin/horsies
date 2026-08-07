@@ -130,7 +130,11 @@ class TestWorkflowCancelSingle:
                     {'task_id': task_id, 'worker': WORKER},
                 )
             ).one()
-            assert refused.outcome == 'SOURCE_STATE_CONFLICT'
+            # Without the carve-out the ownership fence misses, and the
+            # one-owner classifier answers claim-first: a requeued task's
+            # claim is gone, and the observed status carries the rest.
+            assert refused.outcome == 'LOST_CLAIM'
+            assert refused.observed_status == 'PENDING'
             accepted = (
                 await connection.execute(
                     text(

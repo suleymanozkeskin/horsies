@@ -276,7 +276,7 @@ class TestDetachAndDrop:
                         history_schema_version, result_digest,
                         phase2_generation, created_at, attempt_count
                     ) VALUES (
-                        :task_id, :workflow_id, 1,
+                        :task_id, :workflow_id, :node_row_id,
                         'COMPLETED', :anchor, 'COMPLETE_FUSED',
                         'HISTORY', :class_key, :anchor,
                         1, :digest, :generation, statement_timestamp(), 0
@@ -286,6 +286,7 @@ class TestDetachAndDrop:
                 {
                     'task_id': str(uuid4()),
                     'workflow_id': str(uuid4()),
+                    'node_row_id': str(uuid4()),
                     'anchor': ref.bounds.lower + timedelta(hours=1),
                     'class_key': CLASS_KEY,
                     'digest': sha256(b'result').digest(),

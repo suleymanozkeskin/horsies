@@ -173,6 +173,14 @@ class TestDiscoveryBatch:
                     status='PENDING',
                     worker=None,
                     good_until_offset=timedelta(minutes=-(index + 1)),
+                    # The first plain task carries a prepared inline input,
+                    # so the batch proves policy-eligible carriage; the
+                    # workflow task below proves NEVER_ELIGIBLE despite the
+                    # same preparation (eligibility precedes policy).
+                    retain=(index == 0),
+                    prepared_disposition=(
+                        'INLINE' if index == 0 else 'DECLINED_BY_POLICY'
+                    ),
                 )
                 for index in range(3)
             ]

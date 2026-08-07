@@ -322,7 +322,8 @@ BEGIN
     IF p_terminal_at IS NULL THEN
         RAISE EXCEPTION 'terminal timestamp is required';
     END IF;
-    IF (SELECT found FROM {TASK_PROVENANCE_FUNCTION}(p_task_id, FALSE)) THEN
+    IF (SELECT prov.found
+        FROM {TASK_PROVENANCE_FUNCTION}(p_task_id, FALSE) AS prov) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
             USING ERRCODE = 'data_corrupted';
     END IF;
@@ -938,7 +939,8 @@ def _move_stage_core(
     -- Per-row uniqueness guard through the staged mechanism.
     IF EXISTS (
         SELECT 1 FROM unnest({ids_var}) AS u(tid)
-        WHERE (SELECT found FROM {TASK_PROVENANCE_FUNCTION}(u.tid, FALSE))
+        WHERE (SELECT prov.found
+               FROM {TASK_PROVENANCE_FUNCTION}(u.tid, FALSE) AS prov)
     ) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
             USING ERRCODE = 'data_corrupted';
