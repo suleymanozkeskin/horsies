@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+from datetime import timedelta
+
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.phase2.consumption import (
     EVIDENCE_RETAINING_DISPOSITIONS,
@@ -17,6 +19,15 @@ from horsies.core.history.phase2.consumption import (
     PHASE2_DISPOSITION_TYPE_DDL,
     consumption_fragments,
     decode_phase2_row,
+)
+from horsies.core.history.phase2.quarantine import (
+    DRAINED_VERDICTS,
+    KNOWN_QUARANTINE_VERDICTS,
+    PHASE2_QUARANTINE_FUNCTION_DDL,
+    QuarantineLeafBlockers,
+    REFUSAL_VERDICTS,
+    REPOINTED,
+    quarantine_fragments,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -90,3 +101,79 @@ class TestDecoder:
 
         with pytest.raises(HistoryContractError, match='unknown phase-2'):
             decode_phase2_row(Row())
+
+
+class TestQuarantineLockPosture:
+    def test_pending_row_lock_is_the_only_lock(self) -> None:
+        body = PHASE2_QUARANTINE_FUNCTION_DDL
+        assert body.count('FOR UPDATE') == 1
+        pending_read = body.index('FROM horsies_workflow_phase2_pending')
+        assert 'FOR UPDATE' in body[pending_read:pending_read + 200]
+        # Single-tier: neither the workflow nor the node row is locked,
+        # so no cycle with consumption's workflow -> node -> pending.
+        node_read = body.index('FROM horsies_workflow_tasks wt')
+        assert 'FOR UPDATE' not in body[node_read:node_read + 300]
+
+    def test_history_probe_carries_both_partition_keys(self) -> None:
+        body = PHASE2_QUARANTINE_FUNCTION_DDL
+        probe = body.index('h.retention_class_key = v_pending.history_class')
+        assert 'h.retention_anchor_at = v_pending.history_anchor' in body
+        assert 'h.task_id = p_task_id' in body
+        assert body.index('NOT the rejected fan-out') < probe
+
+
+class TestQuarantineEvidenceRetention:
+    def test_verification_failure_is_a_caught_subtransaction(self) -> None:
+        body = PHASE2_QUARANTINE_FUNCTION_DDL
+        insert_at = body.index('INSERT INTO horsies_workflow_phase2_quarantine')
+        raise_at = body.index("USING ERRCODE = 'HQ001'")
+        catch_at = body.index("WHEN SQLSTATE 'HQ001'")
+        assert insert_at < raise_at < catch_at
+        assert 'COPY_VERIFICATION_FAILED' in body[catch_at:]
+
+    def test_repoint_clears_the_history_locator(self) -> None:
+        body = PHASE2_QUARANTINE_FUNCTION_DDL
+        repoint = body.index("SET recovery_source = 'QUARANTINE'")
+        span = body[repoint:repoint + 300]
+        assert 'quarantine_task_id = p_task_id' in span
+        assert 'history_class = NULL' in span
+        assert 'history_anchor = NULL' in span
+
+    def test_no_branch_deletes_pending(self) -> None:
+        assert (
+            'DELETE FROM horsies_workflow_phase2_pending'
+            not in PHASE2_QUARANTINE_FUNCTION_DDL
+        )
+
+
+class TestQuarantineVocabulary:
+    def test_sql_and_decoder_vocabularies_are_closed_together(self) -> None:
+        for verdict in KNOWN_QUARANTINE_VERDICTS:
+            assert f"'{verdict}'" in PHASE2_QUARANTINE_FUNCTION_DDL
+        assert REPOINTED in KNOWN_QUARANTINE_VERDICTS
+        assert DRAINED_VERDICTS < KNOWN_QUARANTINE_VERDICTS
+        assert REFUSAL_VERDICTS < KNOWN_QUARANTINE_VERDICTS
+        assert not DRAINED_VERDICTS & REFUSAL_VERDICTS
+
+    def test_fragment_order(self) -> None:
+        first, second = quarantine_fragments()
+        assert 'CREATE TYPE' in first
+        assert 'CREATE FUNCTION' in second
+
+
+class TestQuarantineCommand:
+    def test_horizon_must_be_positive(self) -> None:
+        from horsies.core.history.commands import LeafBounds, LeafRef
+        from datetime import datetime, timezone
+
+        leaf = LeafRef(
+            leaf_name='horsies_task_history_x_20260801',
+            class_key='x',
+            bounds=LeafBounds(
+                lower=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                upper=datetime(2026, 8, 2, tzinfo=timezone.utc),
+            ),
+        )
+        with pytest.raises(ValueError, match='horizon must be positive'):
+            QuarantineLeafBlockers(leaf=leaf, horizon=timedelta(0))
+        QuarantineLeafBlockers(leaf=leaf, horizon=timedelta(days=7))

@@ -196,6 +196,7 @@ CREATE TABLE horsies_tasks (
     enqueued_at timestamptz NOT NULL,
     claimed_at timestamptz,
     started_at timestamptz,
+    finalizing_at timestamptz,
     created_at timestamptz NOT NULL,
     good_until timestamptz,
     retry_count integer NOT NULL,
@@ -269,6 +270,7 @@ CREATE TABLE horsies_workflow_tasks (
     workflow_id uuid NOT NULL,
     task_id uuid,
     task_index integer NOT NULL,
+    node_id varchar(128),
     status text NOT NULL DEFAULT 'RUNNING',
     result text,
     completed_at timestamptz,
@@ -297,6 +299,9 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         )
         from horsies.core.history.phase2.consumption import (
             consumption_fragments,
+        )
+        from horsies.core.history.phase2.quarantine import (
+            quarantine_fragments,
         )
         from horsies.core.history.terminalization.move import (
             cancellation_family_fragments,
@@ -338,6 +343,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 *cancellation_family_fragments(),
                 *workflow_node_family_fragments(),
                 *consumption_fragments(),
+                *quarantine_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))
@@ -491,6 +497,7 @@ async def link_workflow_node(
     workflow_id: str,
     node_status: str,
     task_index: int = 0,
+    node_key: str | None = 'node-0',
 ) -> str:
     """Link one task into a workflow through a node row; returns node id."""
     from uuid import uuid4
@@ -499,15 +506,16 @@ async def link_workflow_node(
     await connection.execute(
         text(
             'INSERT INTO horsies_workflow_tasks '
-            '(id, workflow_id, task_id, task_index, status) VALUES '
+            '(id, workflow_id, task_id, task_index, node_id, status) VALUES '
             '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
-            'CAST(:task_id AS uuid), :task_index, :node_status)'
+            'CAST(:task_id AS uuid), :task_index, :node_key, :node_status)'
         ),
         {
             'node_id': node_id,
             'workflow_id': workflow_id,
             'task_id': task_id,
             'task_index': task_index,
+            'node_key': node_key,
             'node_status': node_status,
         },
     )
