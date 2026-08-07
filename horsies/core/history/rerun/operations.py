@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from hashlib import sha256
 from typing import Any
@@ -45,6 +45,7 @@ from ..identity.reservations import (
 )
 from ..identity.uuid7 import mint_task_id
 from ..names import LIVE_TASKS
+from horsies.core.utils.fingerprint import enqueue_fingerprint
 from ..reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
@@ -289,13 +290,29 @@ async def rerun_task(
                 pass
 
     envelope = _prepare_envelope(decoded, retain=policy.retain_rerun_input)
+    # enqueue_sha reconciliation: the same helper the send path uses,
+    # computed over the rerun's OWN request values — it remains the
+    # exact-ID resend comparator, never the key contract.
+    rerun_sent_at = datetime.now(timezone.utc)
+    rerun_enqueue_sha = enqueue_fingerprint(
+        task_name=detail.task_name,
+        queue_name=detail.queue_name,
+        priority=detail.priority,
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        sent_at=rerun_sent_at,
+        good_until=command.deadline,
+        enqueue_delay_seconds=None,
+        task_options=options_json,
+    )
     await connection.execute(
         text(
             f"""
             INSERT INTO {LIVE_TASKS} (
                 id, task_name, queue_name, priority, args, kwargs,
-                task_options, status, enqueued_at, created_at,
+                task_options, status, sent_at, enqueued_at, created_at,
                 retry_count, max_retries, good_until, is_workflow_task,
+                enqueue_sha,
                 command_fingerprint_version, command_fingerprint,
                 retention_class_key, input_digest,
                 rerun_of_task_id, rerun_root_task_id,
@@ -308,8 +325,9 @@ async def rerun_task(
             ) VALUES (
                 CAST(:id AS uuid), :task_name, :queue_name, :priority,
                 :args, :kwargs, :task_options, 'PENDING',
-                statement_timestamp(), statement_timestamp(),
+                :sent_at, statement_timestamp(), statement_timestamp(),
                 0, :max_retries, :good_until, FALSE,
+                :enqueue_sha,
                 1, :fingerprint,
                 :retention_class_key, :input_digest,
                 CAST(:rerun_of AS uuid), CAST(:rerun_root AS uuid),
@@ -322,6 +340,8 @@ async def rerun_task(
         ),
         {
             'id': new_task_id,
+            'sent_at': rerun_sent_at,
+            'enqueue_sha': rerun_enqueue_sha,
             'task_name': detail.task_name,
             'queue_name': detail.queue_name,
             'priority': detail.priority,

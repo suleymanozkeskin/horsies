@@ -203,7 +203,29 @@ from sqlalchemy import text
 #      Earlier attempts keep their reasons in horsies_task_attempts. No table
 #      schema or function argument-type change.
 
-SCHEMA_VERSION = 26
+# v27: transitional live cutover columns. The columns of the declared
+#      live-cutover fragment (horsies.core.history.terminalization
+#      .live_cutover.LIVE_CUTOVER_COLUMNS_DDL, the authoritative final
+#      shape), added NULLABLE with no checks and no domain change — a
+#      catalog-only ALTER safe on any install, following the v17
+#      terminal_at precedent. The converted enqueue statement writes real
+#      values into them for every new row; rows written by older code
+#      carry NULLs that the cutover migration's backfill owns before it
+#      tightens the columns to the declared shape. The column list is
+#      DERIVED from the fragment programmatically so the transitional
+#      migration and the authoritative shape can never drift.
+
+SCHEMA_VERSION = 27
+
+from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
+    transitional_cutover_columns_ddl,
+)
+
+# Migration (v27): the transitional live cutover columns, derived from
+# the authoritative fragment (see the v27 note above).
+ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL = text(
+    transitional_cutover_columns_ddl()
+)
 
 from .terminalization import (  # noqa: E402
     ADD_TERMINAL_AT_CHECK_SQL,

@@ -201,6 +201,7 @@ CREATE TABLE horsies_tasks (
     args text,
     kwargs text,
     task_options text,
+    enqueue_sha varchar(64),
     status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING')),
     result text,
     sent_at timestamptz,

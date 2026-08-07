@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-import uuid
 from dataclasses import dataclass
 from typing import (
     Callable,
@@ -43,6 +42,7 @@ from horsies.core.codec.signature_check import (
     check_task_signature,
 )
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
 from horsies.core.types.result import is_err, Ok, Err
@@ -1555,7 +1555,11 @@ def create_task_wrapper(
                 exception=exc,
             ))
 
-        task_id = str(uuid.uuid4())
+        # Process-monotonic UUIDv7: the embedded birth time prunes the
+        # staged history lookup. Schedule-derived tasks keep their
+        # deterministic uuid5 slot identity — that id IS the schedule's
+        # idempotency — and resolve through the legacy walk.
+        task_id = mint_task_id()
         sent_at = datetime.now(timezone.utc)
         options_result = _serialize_options_for_send(good_until_override)
         if is_err(options_result):

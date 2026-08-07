@@ -5,9 +5,21 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from horsies.core.history.terminalization.live_cutover import (
+    cutover_column_definitions,
+)
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
 from tests.task_history_prototypes.schema import PrototypeSchema
+
+
+def _drop_inherited_transitional_columns_ddl(namespace: str) -> str:
+    """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
+    drops = ',\n    '.join(
+        f'DROP COLUMN IF EXISTS {name}'
+        for name, _ in cutover_column_definitions()
+    )
+    return f'ALTER TABLE {namespace}.live_tasks\n    {drops}'
 
 
 async def install_history_terminalization_prototype(
@@ -33,6 +45,11 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
                 INCLUDING STORAGE
         )
         """,
+        # The v27 chain adds transitional cutover columns to the cloned
+        # source; the qualified prototype base is the v26 column set, and
+        # the ALTER below re-adds its own shapes for the ones it models.
+        # Restore the qualified clone shape from the one shape authority.
+        _drop_inherited_transitional_columns_ddl(namespace),
         f'ALTER TABLE {namespace}.live_tasks ADD PRIMARY KEY (id)',
         f"""
         ALTER TABLE {namespace}.live_tasks

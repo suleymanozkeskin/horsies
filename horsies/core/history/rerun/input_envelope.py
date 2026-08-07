@@ -6,7 +6,12 @@ bytes opaque. This module owns what is inside them:
 `prepared_rerun_input_version` 1 declares one JSON object
 `{args, kwargs, options}` produced by ONE canonical serializer, because
 the digest covers bytes and two serializations of equal content must
-never diverge. `options: null` means the request ran on defaults;
+never diverge. Canonicality is load-bearing, not cosmetic: rerun
+decodes a stored envelope and re-prepares the new request's envelope
+from the decoded content, and only a deterministic serializer makes
+that re-preparation byte-identical to the source's — relaxing
+determinism here silently breaks input-identity carry-over at rerun.
+`options: null` means the request ran on defaults;
 options ABSENT means an unknown or foreign content shape and fails
 closed — absence is never guessed as defaults. Decode verifies the
 digest before parsing anything.

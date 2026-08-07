@@ -161,6 +161,7 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_FINALIZING_COLUMNS_SQL,
     ADD_TASK_TERMINAL_AT_COLUMN_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
+    ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -861,6 +862,12 @@ class PostgresBroker:
             await conn.execute(CREATE_TASKS_ENQUEUED_AT_INDEX_SQL)
             await conn.execute(CREATE_TASKS_TASK_NAME_INDEX_SQL)
 
+            # Migration (v27): transitional live cutover columns —
+            # nullable, check-free, derived from the declared cutover
+            # fragment (the authoritative final shape the cutover
+            # migration later backfills and tightens to).
+            await conn.execute(ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL)
+
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -896,6 +903,114 @@ class PostgresBroker:
 
     # ----------------- Async API -----------------
 
+    @staticmethod
+    def _cutover_enqueue_values(
+        *,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        args_json: str | None,
+        kwargs_json: str | None,
+        good_until: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        task_options: Optional[str],
+        retention_class_key: str,
+        retain_rerun_input: bool,
+    ) -> BrokerResult[dict[str, Any]]:
+        """The cutover column values for one fresh enqueue.
+
+        The command fingerprint covers the carried JSON strings as-is;
+        the prepared envelope re-serializes the parsed VALUES through the
+        canonical content-v1 serializer, because envelope identity is
+        content identity, not string identity. `enqueue_sha` is separate
+        and unchanged: it remains the exact-ID resend comparator and
+        never becomes the key contract.
+        """
+        from hashlib import sha256
+
+        from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+        from horsies.core.history.rerun.input_envelope import (
+            INPUT_ENVELOPE_CODEC,
+            INPUT_ENVELOPE_CONTENT_TYPE,
+            INPUT_ENVELOPE_INLINE_MAX_BYTES,
+            INPUT_ENVELOPE_VERSION,
+            encode_input_envelope_v1,
+        )
+
+        def parsed(label: str, value: str | None) -> Any:
+            if value is None:
+                return Ok(None)
+            loaded = loads_json(value)
+            if is_err(loaded):
+                return _broker_err(
+                    BrokerErrorCode.ENQUEUE_FAILED,
+                    f'{label} JSON corrupt for {task_name}: '
+                    f'{loaded.err_value}',
+                    loaded.err_value,
+                )
+            return loaded
+
+        args_r = parsed('args', args_json)
+        if is_err(args_r):
+            return args_r
+        kwargs_r = parsed('kwargs', kwargs_json)
+        if is_err(kwargs_r):
+            return kwargs_r
+        options_r = parsed('task_options', task_options)
+        if is_err(options_r):
+            return options_r
+
+        payload = encode_input_envelope_v1(
+            args=args_r.ok_value or [],
+            kwargs=kwargs_r.ok_value or {},
+            options=options_r.ok_value,
+        )
+        digest = sha256(payload).digest()
+        fingerprint = EnqueueCommandV1(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options_json=task_options,
+            retention_class_key=retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            rerun_of_task_id=None,
+            rerun_root_task_id=None,
+        ).fingerprint
+
+        if not retain_rerun_input:
+            disposition: dict[str, Any] = {
+                'prepared_rerun_input_disposition': 'DECLINED_BY_POLICY',
+            }
+        elif len(payload) > INPUT_ENVELOPE_INLINE_MAX_BYTES:
+            disposition = {
+                'prepared_rerun_input_disposition': 'OVER_BOUND',
+            }
+        else:
+            disposition = {
+                'prepared_rerun_input_disposition': 'INLINE',
+                'prepared_rerun_input_version': INPUT_ENVELOPE_VERSION,
+                'prepared_rerun_input_codec': INPUT_ENVELOPE_CODEC,
+                'prepared_rerun_input_content_type': (
+                    INPUT_ENVELOPE_CONTENT_TYPE
+                ),
+                'prepared_rerun_input_digest': digest,
+                'prepared_rerun_input_inline': payload,
+            }
+        return Ok(
+            {
+                'command_fingerprint_version': 1,
+                'command_fingerprint': fingerprint,
+                'retention_class_key': retention_class_key,
+                'retain_rerun_input': retain_rerun_input,
+                'input_digest': digest,
+                **disposition,
+            }
+        )
+
     async def enqueue_async(
         self,
         task_name: str,
@@ -911,6 +1026,8 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
+        retention_class_key: str = 'forever',
+        retain_rerun_input: bool = False,
     ) -> BrokerResult[str]:
         if enqueued_at is not None and enqueue_delay_seconds is not None:
             return _broker_err(
@@ -973,6 +1090,27 @@ class PostgresBroker:
             else:
                 enqueued_at_value = text('NOW()')
 
+            # The cutover payload: command fingerprint, retention
+            # snapshot, and the prepared rerun-input envelope, computed
+            # here so every producer path carries them without call-site
+            # changes. Values are real for every new row; the columns
+            # are transitionally nullable (v27) only for rows written by
+            # older code, which the cutover migration's backfill owns.
+            cutover = self._cutover_enqueue_values(
+                task_name=task_name,
+                queue_name=queue_name,
+                priority=priority,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                good_until=good_until,
+                enqueue_delay_seconds=enqueue_delay_seconds,
+                task_options=task_options,
+                retention_class_key=retention_class_key,
+                retain_rerun_input=retain_rerun_input,
+            )
+            if is_err(cutover):
+                return cutover
+
             # Single SQLAlchemy Core INSERT ... ON CONFLICT DO NOTHING ... RETURNING id.
             # Replaces both the ORM session.add() and raw SQL paths.
             stmt = (
@@ -994,6 +1132,7 @@ class PostgresBroker:
                     is_workflow_task=False,
                     created_at=text('NOW()'),
                     updated_at=text('NOW()'),
+                    **cutover.ok_value,
                 )
                 .on_conflict_do_nothing(index_elements=['id'])
                 .returning(TaskModel.id)

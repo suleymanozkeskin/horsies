@@ -17,6 +17,8 @@ it to an empty stand-in.
 
 from __future__ import annotations
 
+import re
+
 from ..names import LIVE_TASKS
 
 
@@ -76,3 +78,42 @@ LIVE_CUTOVER_COLUMNS_DDL: tuple[str, ...] = (
         )
     """,
 )
+
+
+_COLUMN_DEFINITION = re.compile(r'ADD COLUMN (\w+) ([a-z]+(?:\(\d+\))?)')
+
+
+def cutover_column_definitions() -> tuple[tuple[str, str], ...]:
+    """(name, type) for every cutover column, parsed from the fragment.
+
+    The fragment above is the single shape authority; anything else that
+    needs the column set derives it from here so the two can never
+    drift.
+    """
+    definitions = tuple(
+        (match.group(1), match.group(2))
+        for fragment in LIVE_CUTOVER_COLUMNS_DDL
+        for match in _COLUMN_DEFINITION.finditer(fragment)
+    )
+    if not definitions:
+        raise AssertionError('cutover fragment yielded no column definitions')
+    return definitions
+
+
+def transitional_cutover_columns_ddl() -> str:
+    """The permissive chain migration: same columns, no constraints.
+
+    TRANSITIONAL by design: this is the columns of
+    `LIVE_CUTOVER_COLUMNS_DDL` stripped of every NOT NULL and CHECK — a
+    catalog-only ALTER that is safe on any install, so the converted
+    enqueue statement can write real values everywhere before the
+    cutover migration runs. The fragment above remains the authoritative
+    final shape; the cutover migration backfills and tightens to it.
+    Old writers impose NULLs only on their own rows, which that backfill
+    owns.
+    """
+    columns = ',\n    '.join(
+        f'ADD COLUMN IF NOT EXISTS {name} {column_type}'
+        for name, column_type in cutover_column_definitions()
+    )
+    return f'ALTER TABLE {LIVE_TASKS}\n    {columns}'
