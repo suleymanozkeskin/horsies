@@ -494,12 +494,22 @@ class TestWorkflowNodeFamily:
         assert "t2.status IN ('PENDING', 'CLAIMED', 'RUNNING')" in cancelled
 
     def test_workflow_cancel_kinds_archive_null_summaries(self) -> None:
+        import re
+
         cancel_single = workflow_node_family_fragments()[1]
         assert 'NULL, NULL, NULL' in cancel_single
-        cancel_batch = workflow_node_family_fragments()[3]
-        assert 'NULL, NULL,' in cancel_batch
-        cancelled_sweep = workflow_node_family_fragments()[5]
-        assert 'NULL, NULL,' in cancelled_sweep
+        # Batch projection order pins error_code and final_failed_reason
+        # (the two expressions after result_digest's CASE) to NULL;
+        # whitespace-independent because the projection renders from the
+        # shared column authority, one expression per line.
+        for fragment in (
+            workflow_node_family_fragments()[3],
+            workflow_node_family_fragments()[5],
+        ):
+            assert re.search(
+                r'sha256\(v_result_payload\) END,\s*NULL,\s*NULL,',
+                fragment,
+            )
 
     def test_requeued_pending_carve_out_is_single_only(self) -> None:
         single = workflow_node_family_fragments()[1]

@@ -319,3 +319,42 @@ class TestHistoryFoundationList:
         assert 'CREATE TABLE horsies_task_history (' in combined
         assert 'horsies_archive_access_gate' in combined
         assert 'CREATE TABLE horsies_key_reservations' not in combined
+
+
+class TestHistoryProjectionAuthority:
+    """One projection authority for every history-row writer."""
+
+    def test_mismatched_projection_raises_at_render(self) -> None:
+        from horsies.core.history.terminalization.move import (
+            HISTORY_PROJECTION_COLUMNS,
+            history_insert_sql,
+        )
+
+        complete = {column: 'NULL' for column in HISTORY_PROJECTION_COLUMNS}
+        missing = dict(complete)
+        del missing['attempt_snapshot_digest']
+        with pytest.raises(ValueError, match='missing'):
+            history_insert_sql(missing)
+        extra = dict(complete)
+        extra['not_a_column'] = 'NULL'
+        with pytest.raises(ValueError, match='extra'):
+            history_insert_sql(extra)
+
+    def test_every_projection_column_exists_on_the_parent(self) -> None:
+        from horsies.core.history.ddl.conditional import (
+            GatedFragment,
+            gated_fragment,
+        )
+        from horsies.core.history.terminalization.move import (
+            HISTORY_PROJECTION_COLUMNS,
+        )
+
+        installed = '\n'.join(
+            (
+                *frozen_fragments(),
+                *gated_fragment(GatedFragment.ATTEMPT_SNAPSHOT_COLUMNS),
+                *gated_fragment(GatedFragment.RERUN_INPUT_COLUMNS),
+            )
+        )
+        for column in HISTORY_PROJECTION_COLUMNS:
+            assert column in installed, column
