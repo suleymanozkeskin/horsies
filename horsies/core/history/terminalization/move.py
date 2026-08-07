@@ -194,7 +194,7 @@ BEGIN
         FOR UPDATE;
         IF v_requires_deferred_phase2 AND p_result IS NULL THEN
             RAISE EXCEPTION
-                'deferred workflow completion requires a result payload'
+                'deferred workflow terminalization requires a result payload'
                 USING ERRCODE = 'not_null_violation';
         END IF;
     END IF;

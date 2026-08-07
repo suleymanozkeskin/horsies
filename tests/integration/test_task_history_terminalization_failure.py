@@ -43,7 +43,7 @@ async def fail_locked(
     task_id: str,
     *,
     worker: str = WORKER,
-    result: str = '{"error":{"code":"BOOM"}}',
+    result: str | None = '{"error":{"code":"BOOM"}}',
     error_code: str | None = 'BOOM',
     failed_reason: str | None = 'exploded',
 ) -> Any:
@@ -211,6 +211,43 @@ class TestDispositionLadder:
                 )
             ).scalar_one()
             assert pending.history_anchor == terminal_at
+
+
+class TestDeferredResultFence:
+    @pytest.mark.asyncio
+    async def test_workflow_failure_without_result_raises_typed(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """pending.result_digest is NOT NULL and sha256(NULL) is NULL: the
+        kind-agnostic deferred guard must fence failure kinds before the
+        insert, proven here rather than inherited from a reading."""
+        from sqlalchemy.exc import DBAPIError
+
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            task_id = await insert_live_task(
+                connection,
+                class_key=CLASS_KEY,
+                worker=WORKER,
+                is_workflow_task=True,
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_workflow_tasks '
+                    '(id, workflow_id, task_id, task_index) VALUES '
+                    '(CAST(:node_id AS uuid), CAST(:workflow_id AS uuid), '
+                    'CAST(:task_id AS uuid), 0)'
+                ),
+                {
+                    'node_id': str(uuid4()),
+                    'workflow_id': str(uuid4()),
+                    'task_id': task_id,
+                },
+            )
+            with pytest.raises(
+                DBAPIError, match='requires a result payload'
+            ):
+                await fail_locked(connection, task_id, result=None)
 
 
 class TestFailedReasonOwnership:
