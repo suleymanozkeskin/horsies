@@ -643,3 +643,72 @@ async def test_worker_and_operator_partition_privilege_modes_are_distinct(
         await partition_schema.execute(text(f'DROP ROLE {worker_role}'))
         await partition_schema.execute(text(f'DROP ROLE {operator_role}'))
         await partition_schema.commit()
+
+
+class TestBoundComparisonIsSessionIndependent:
+    """A leaf's bound must compare equal across sessions in different zones.
+
+    `pg_get_expr` renders timestamptz literals in the *session* timezone, and
+    the leaf catalog stores that rendering as text. Comparing a fresh render
+    against the stored one is therefore session-dependent: identical instants
+    render as `FROM '2026-06-01 00:00:00+00'` under UTC and
+    `FROM '2026-05-31 12:00:00-12'` twelve hours west, and the leaf reads as a
+    catalog conflict having never changed.
+
+    This is not a hazard the lifecycle can avoid by staying in one session.
+    Concurrent detach runs on a **dedicated autocommit connection** by design,
+    so capture and comparison are different sessions by construction — which
+    is why the comparison had to become session-independent rather than merely
+    careful.
+    """
+
+    @pytest.mark.parametrize(
+        'capture_zone, compare_zone',
+        (
+            ('UTC', 'Europe/Berlin'),
+            ('Europe/Berlin', 'UTC'),
+            ('Etc/GMT+12', 'Pacific/Kiritimati'),
+            ('Pacific/Kiritimati', 'Etc/GMT+12'),
+        ),
+    )
+    async def test_leaf_reads_ready_across_session_zones(
+        self,
+        engine: AsyncEngine,
+        broker: PostgresBroker,  # noqa: ARG001 - installs the base schema
+        capture_zone: str,
+        compare_zone: str,
+    ) -> None:
+        schema = PrototypeSchema(f'history_tz_{uuid4().hex[:12]}')
+        capture = await engine.connect()
+        try:
+            await capture.execute(text(f"SET TIME ZONE '{capture_zone}'"))
+            await install_archive_candidates(capture, schema)
+            await install_workflow_recovery_prototype(capture, schema)
+            await install_partition_manager_prototype(capture, schema)
+            await capture.commit()
+
+            compare = await engine.connect()
+            try:
+                await compare.execute(text(f"SET TIME ZONE '{compare_zone}'"))
+                inspection = await inspect_history_leaf(
+                    compare,
+                    schema,
+                    leaf_name=_OLD_LEAF,
+                    class_key=_CLASS_KEY,
+                    lower=_OLD_LOWER,
+                    upper=_OLD_UPPER,
+                )
+            finally:
+                await compare.rollback()
+                await compare.execute(text('RESET TIME ZONE'))
+                await compare.commit()
+                await compare.close()
+
+            assert inspection.state is LeafState.READY
+            assert inspection.attached is True
+        finally:
+            await capture.rollback()
+            await remove_archive_candidates(capture, schema)
+            await capture.execute(text('RESET TIME ZONE'))
+            await capture.commit()
+            await capture.close()

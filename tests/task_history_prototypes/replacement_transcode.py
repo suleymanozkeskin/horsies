@@ -2009,6 +2009,22 @@ async def _relation_verification_token(
     )
 
 
+# HAZARD, documented deliberately rather than fixed: the four deparse calls
+# below — pg_get_expr over column defaults, pg_get_constraintdef,
+# pg_get_indexdef, pg_get_triggerdef — all render in the CALLING SESSION's
+# settings. This signature is captured during verification and compared inside
+# the binding-swap transaction, so a session-timezone difference between those
+# two points fails the swap on a relation that never changed, for any relation
+# carrying a timestamptz default or a timestamptz CHECK or partition bound.
+#
+# Left as-is on purpose. This executor is a frozen qualified reference: it runs
+# only in single-zone qualification dispatches, where the hazard is dormant,
+# and editing its capture after qualification would drift the reference away
+# from the shape that was qualified. The production executor carries the
+# session-independent requirement instead, with its own multi-timezone pin.
+#
+# Classification, and the rest of the family's call sites, are enumerated in
+# roadmap/catalog-deparse-session-dependence-sweep-2026-08-07.md (sites 12-15).
 async def _relation_schema_signature(
     connection: AsyncConnection,
     relation_oid: int,
