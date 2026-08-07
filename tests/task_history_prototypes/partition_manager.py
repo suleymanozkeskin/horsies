@@ -10,6 +10,9 @@ from enum import StrEnum
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from horsies.core.history.partitions.catalog import (
+    execute_with_utc_rendering,
+)
 from tests.task_history_prototypes.schema import PrototypeSchema
 
 
@@ -115,8 +118,12 @@ async def install_partition_manager_prototype(
             $function$
         """,
     )
+    # Two of these statements capture partition bounds with pg_get_expr into
+    # the leaf catalog. Rendering is session-dependent, and the catalog's text
+    # is later compared against a fresh render, so every capture follows the
+    # same UTC convention production established.
     for statement in statements:
-        await connection.execute(text(statement))
+        await execute_with_utc_rendering(connection, text(statement))
 
 
 async def inspect_history_leaf(
@@ -182,7 +189,8 @@ async def inspect_history_leaf(
         else _qualified_relation(schema, f'{leaf_name}_task_idx')
     )
     relation = (
-        await connection.execute(
+        await execute_with_utc_rendering(
+            connection,
             text(
                 """
                 SELECT to_regclass(:leaf)::oid AS leaf_oid,
@@ -513,7 +521,8 @@ async def create_daily_history_leaf(
         if _IDENTIFIER.fullmatch(catalog.id_index_name) is None:
             raise RuntimeError('cataloged index name is unsafe')
         conformance = (
-            await connection.execute(
+            await execute_with_utc_rendering(
+                connection,
                 text(
                     """
                     SELECT
@@ -551,7 +560,8 @@ async def create_daily_history_leaf(
             """
         )
     )
-    await connection.execute(
+    await execute_with_utc_rendering(
+        connection,
         text(
             f"""
             INSERT INTO {schema.sql}.history_leaf_catalog (
