@@ -1410,6 +1410,90 @@ class PostgresBroker:
             raw_result=raw_value,
         ))
 
+    async def _history_result_record(
+        self,
+        session: AsyncSession,
+        task_id: str,
+    ) -> 'BrokerResult[RawResultRecord | None] | object':
+        """Resolve a result from the task-history side.
+
+        Terminalization moves the finished row out of ``horsies_tasks``,
+        so an absent (or vanished-between-statements) live row is the
+        NORMAL terminal signal, not an error. Resolution rides the
+        staged detail function — location then detail, one statement.
+        Returns ``Ok(None)`` when the staged function is not yet
+        published — a pre-coverage database has no history to consult
+        and no way to have moved the row, so absent means absent — and
+        ``_STILL_WAITING`` when the row is reported live (it appeared
+        after the live probe missed it).
+        """
+        from hashlib import sha256
+
+        from horsies.core.history.names import TASK_DETAIL_FUNCTION
+        from horsies.core.history.reads.detail import (
+            HistoryTaskDetail,
+            TaskDetailAbsent,
+            read_task_detail,
+        )
+
+        connection = await session.connection()
+        published = (
+            await connection.execute(
+                text('SELECT to_regprocedure(:name) IS NOT NULL'),
+                {'name': f'{TASK_DETAIL_FUNCTION}(uuid)'},
+            )
+        ).scalar_one()
+        if not bool(published):
+            return Ok(None)
+        detail = await read_task_detail(connection, task_id=task_id)
+        match detail:
+            case TaskDetailAbsent():
+                return Ok(None)
+            case HistoryTaskDetail():
+                pass
+            case _:
+                # Reported live: it appeared after the live probe
+                # missed it — keep polling.
+                return _STILL_WAITING
+        if detail.result_payload is None:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=detail.task_name,
+                status=TaskStatus(detail.status),
+                raw_result=None,
+            ))
+        # Digest over the exact stored bytes BEFORE parsing — the
+        # envelope discipline; a mismatch is corruption, not a payload.
+        if (
+            detail.result_digest is None
+            or sha256(detail.result_payload).digest()
+            != detail.result_digest
+        ):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'History result digest mismatch for task {task_id}'
+                ),
+                retryable=False,
+            ))
+        try:
+            result_text = detail.result_payload.decode('utf-8')
+        except UnicodeDecodeError as decode_error:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'History result payload for task {task_id} is not '
+                    f'valid UTF-8: {decode_error}'
+                ),
+                retryable=False,
+            ))
+        return self._build_raw_result_record(
+            task_id,
+            detail.task_name,
+            TaskStatus(detail.status),
+            result_text,
+        )
+
     async def _probe_result_row(
         self,
         session: AsyncSession,
@@ -1421,7 +1505,10 @@ class PostgresBroker:
 
         Polls status+name only; the full row (with potentially TOASTed
         payload columns) is fetched once, when a terminal status is
-        observed.
+        observed. A live row that is absent — or that vanishes between
+        the status probe and the record fetch — falls through to the
+        history side, because terminalization DELETES the live row as
+        it records the terminal fact.
 
         Returns the loop's final ``BrokerResult`` when the wait is over,
         or the ``_STILL_WAITING`` sentinel to keep polling. With
@@ -1433,7 +1520,7 @@ class PostgresBroker:
         )
         probe_row = probe.fetchone()
         if probe_row is None:
-            return Ok(None)
+            return await self._history_result_record(session, task_id)
         status = TaskStatus(str(probe_row.status))
         if status in (
             TaskStatus.COMPLETED,
@@ -1444,7 +1531,11 @@ class PostgresBroker:
                 GET_TASK_RESULT_RECORD_SQL, {'id': task_id},
             )).fetchone()
             if record_row is None:
-                return Ok(None)
+                # The ruled boundary: the row moved between the live
+                # poll and this fetch.
+                return await self._history_result_record(
+                    session, task_id
+                )
             return self._build_raw_result_record(
                 task_id,
                 str(record_row.task_name),
