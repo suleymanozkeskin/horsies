@@ -223,12 +223,36 @@ from sqlalchemy import text
 #      no tightening debt. The reservation functions install per the
 #      claim-function precedent: dropped and recreated on every apply,
 #      because a function body is program rather than state.
-#      DELIBERATELY ABSENT: the registry maintenance indexes — they are
-#      wave-gated conditional DDL emitted by the cutover program, and
-#      their absence here is sequencing, not an omission to repair. The
-#      claim path rides the table's primary key.
+#      DELIBERATELY ABSENT: the registry maintenance indexes — wave-gated
+#      conditional DDL whose absence here was sequencing, not an omission
+#      to repair; v30 emits them. The claim path rides the table's
+#      primary key.
 
-SCHEMA_VERSION = 28
+# v29: the task-history foundation at its final shape. One version
+#      installs the frozen history program (minus the entries v28
+#      already owns — the registry table and the reservation function
+#      program, subtracted by imported identity) and then the two gated
+#      column families (attempt-snapshot, rerun-input) on the parent.
+#      One version for all three parts because the parent is a NEW
+#      EMPTY surface: the permissive-then-tighten two-step exists for
+#      populated relations, and the gated columns are NOT NULL —
+#      addable only while the parent is empty. A version boundary
+#      between creation and the gated ALTERs would mint a deployable
+#      intermediate state whose rows could never be tightened without
+#      backfill. The parent is born final. Nothing in shipped code
+#      writes these tables until the cutover wave; the ordinary chain
+#      installs state the old fleet ignores — programs arrive with
+#      their owners, so the terminalization/move bodies are NOT here.
+
+# v30: the reservation-registry maintenance indexes, closing v28's
+#      recorded deliberate absence. Separate from v29 because they
+#      target an already-deployed surface (the v28 registry, which may
+#      hold rows) — the empty-surface argument that makes v29
+#      reviewable does not cover them. Plain CREATE INDEX: the
+#      registry is bounded pre-cutover; idempotence lives at the
+#      runner's existence check against the imported index name.
+
+SCHEMA_VERSION = 30
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -278,6 +302,51 @@ DROP_RESERVATION_PROGRAM_SQL = tuple(
 )
 CREATE_RESERVATION_PROGRAM_SQL = tuple(
     text(statement) for statement in reservation_function_fragments()
+)
+
+# Migration (v29): the history foundation and gated column families,
+# consumed by import (see the v29 note above). `gated_fragment()` is
+# the single text authority for conditional DDL; calling it here is
+# the act of production emission.
+from horsies.core.history.ddl.conditional import (  # noqa: E402
+    GatedFragment,
+    RESERVATION_REGISTRY_EXPIRY_INDEX,
+    gated_fragment,
+)
+from horsies.core.history.ddl.fragments import (  # noqa: E402
+    history_foundation_fragments,
+)
+from horsies.core.history.names import (  # noqa: E402
+    TASK_HISTORY_PARENT,
+)
+
+TASK_HISTORY_PARENT_EXISTS_SQL = text(
+    f"SELECT to_regclass('{TASK_HISTORY_PARENT}') IS NOT NULL"
+)
+CREATE_HISTORY_FOUNDATION_SQL = tuple(
+    text(statement) for statement in history_foundation_fragments()
+)
+ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL = tuple(
+    text(statement)
+    for statement in gated_fragment(GatedFragment.ATTEMPT_SNAPSHOT_COLUMNS)
+)
+ADD_RERUN_INPUT_COLUMNS_SQL = tuple(
+    text(statement)
+    for statement in gated_fragment(GatedFragment.RERUN_INPUT_COLUMNS)
+)
+
+# Migration (v30): the registry maintenance indexes (see the v30 note
+# above). The existence check probes the same imported name the DDL
+# creates.
+RESERVATION_REGISTRY_INDEX_EXISTS_SQL = text(
+    f"SELECT to_regclass('{RESERVATION_REGISTRY_EXPIRY_INDEX}') "
+    'IS NOT NULL'
+)
+CREATE_RESERVATION_REGISTRY_INDEXES_SQL = tuple(
+    text(statement)
+    for statement in gated_fragment(
+        GatedFragment.RESERVATION_REGISTRY_INDEXES
+    )
 )
 
 from .terminalization import (  # noqa: E402

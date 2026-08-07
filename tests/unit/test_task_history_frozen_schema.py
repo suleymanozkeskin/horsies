@@ -274,3 +274,48 @@ class TestClassRegistrationValidation:
     def test_rejects_overlong_derived_names(self) -> None:
         with pytest.raises(ValueError, match='safe relation name'):
             finite_class_parent_name('k' * 60)
+
+
+class TestHistoryFoundationList:
+    """The migration-facing subset: frozen minus the v28-owned entries.
+
+    The subtraction is by imported identity, so these pins prove the
+    boundary rather than re-deriving it: exactly the registry table and
+    the reservation function program drop out, everything else keeps
+    its frozen order.
+    """
+
+    def test_subtracts_exactly_the_v28_owned_entries(self) -> None:
+        from horsies.core.history.ddl.fragments import (
+            history_foundation_fragments,
+        )
+        from horsies.core.history.ddl.tables import KEY_RESERVATIONS_DDL
+        from horsies.core.history.identity.reservations import (
+            reservation_function_fragments,
+        )
+
+        foundation = history_foundation_fragments()
+        v28_owned = (KEY_RESERVATIONS_DDL, *reservation_function_fragments())
+        for owned in v28_owned:
+            assert owned in frozen_fragments()
+            assert owned not in foundation
+        assert len(foundation) == len(frozen_fragments()) - len(v28_owned)
+
+    def test_preserves_frozen_order(self) -> None:
+        from horsies.core.history.ddl.fragments import (
+            history_foundation_fragments,
+        )
+
+        frozen = frozen_fragments()
+        indices = [frozen.index(f) for f in history_foundation_fragments()]
+        assert indices == sorted(indices)
+
+    def test_carries_the_history_parent_and_the_gate(self) -> None:
+        from horsies.core.history.ddl.fragments import (
+            history_foundation_fragments,
+        )
+
+        combined = '\n'.join(history_foundation_fragments())
+        assert 'CREATE TABLE horsies_task_history (' in combined
+        assert 'horsies_archive_access_gate' in combined
+        assert 'CREATE TABLE horsies_key_reservations' not in combined

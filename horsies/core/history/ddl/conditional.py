@@ -17,7 +17,13 @@ from __future__ import annotations
 
 from enum import Enum
 
+from typing import Final
+
 from ..names import KEY_RESERVATIONS, TASK_HISTORY_PARENT
+
+RESERVATION_REGISTRY_EXPIRY_INDEX: Final = f'{KEY_RESERVATIONS}_expiry_idx'
+"""Name shared by the index DDL below and the migration's existence
+check — one owner, so the check can never probe a drifted name."""
 
 
 class GatedFragment(Enum):
@@ -119,7 +125,7 @@ _RERUN_INPUT_COLUMNS = (
 
 _RESERVATION_REGISTRY_INDEXES = (
     f"""
-    CREATE INDEX {KEY_RESERVATIONS}_expiry_idx
+    CREATE INDEX {RESERVATION_REGISTRY_EXPIRY_INDEX}
         ON {KEY_RESERVATIONS} (expires_at)
         WHERE disposition = 'TERMINAL'
     """,
