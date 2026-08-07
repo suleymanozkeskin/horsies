@@ -1097,9 +1097,14 @@ class PostgresBroker:
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         retention_class_key: str = 'forever',
-        retain_rerun_input: bool = False,
+        retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
+        # The ratified retention posture: an app-level default with a
+        # per-task override, resolved here and snapshotted at enqueue.
+        # None means inherit the deployment's standing policy.
+        if retain_rerun_input is None:
+            retain_rerun_input = self.config.retain_rerun_input_default
         if enqueued_at is not None and enqueue_delay_seconds is not None:
             return _broker_err(
                 BrokerErrorCode.ENQUEUE_FAILED,
