@@ -64,6 +64,33 @@ class TestHorizonDerivation:
                 safety_factor=0,
             )
 
+    @pytest.mark.parametrize(
+        ('stale_after', 'finalizing_stale_after', 'safety_factor'),
+        [
+            (timedelta(seconds=1), timedelta(seconds=1), 1),
+            (timedelta(minutes=10), timedelta(minutes=30), 1),
+            (timedelta(hours=2), timedelta(minutes=5), 3),
+            (timedelta(seconds=30), timedelta(seconds=45), 2),
+        ],
+    )
+    def test_horizon_never_undercuts_the_probe_recency_bound(
+        self,
+        stale_after: timedelta,
+        finalizing_stale_after: timedelta,
+        safety_factor: int,
+    ) -> None:
+        """The safety proof: horizon and recency bound derive from the
+        SAME thresholds with horizon >= bound by construction, so no
+        drop can remove a heartbeat the probe could still need —
+        including immediately after a shrink takes effect."""
+        probe_bound = max(stale_after, finalizing_stale_after)
+        horizon = heartbeat_horizon(
+            stale_after=stale_after,
+            finalizing_stale_after=finalizing_stale_after,
+            safety_factor=safety_factor,
+        )
+        assert horizon >= probe_bound
+
 
 class TestVocabulary:
     def test_hourly_leaf_name_embeds_the_hour(self) -> None:
