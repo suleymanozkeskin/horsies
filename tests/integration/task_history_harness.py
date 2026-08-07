@@ -191,6 +191,7 @@ CREATE TABLE horsies_tasks (
     queue_name varchar(100) NOT NULL,
     priority integer NOT NULL,
     status text NOT NULL CHECK (status IN ('PENDING', 'CLAIMED', 'RUNNING')),
+    result text,
     sent_at timestamptz,
     enqueued_at timestamptz NOT NULL,
     claimed_at timestamptz,
@@ -257,9 +258,13 @@ CREATE TABLE horsies_workflow_tasks (
     workflow_id uuid NOT NULL,
     task_id uuid,
     task_index integer NOT NULL,
+    status text NOT NULL DEFAULT 'RUNNING',
     UNIQUE (workflow_id, task_index)
 )
 """
+"""The default keeps earlier suites' nodes runnable — the deferred-kind
+semantics they exercise — while the orphan suites set status explicitly.
+A fixture default, not a schema recommendation."""
 
 
 def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
@@ -356,6 +361,7 @@ async def insert_live_task(
     is_workflow_task: bool = False,
     started_at_offset: timedelta = timedelta(0),
     good_until_offset: timedelta | None = None,
+    live_result: str | None = None,
 ) -> str:
     """Insert one post-cutover live row and return its minted v7 id."""
     from horsies.core.history.identity.uuid7 import mint_task_id
@@ -384,7 +390,7 @@ async def insert_live_task(
         text(
             """
             INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status,
+                id, task_name, queue_name, priority, status, result,
                 enqueued_at, created_at, started_at, claimed_at,
                 retry_count, max_retries, good_until,
                 claimed_by_worker_id, worker_hostname, worker_pid,
@@ -398,6 +404,7 @@ async def insert_live_task(
                 prepared_rerun_input_reference
             ) VALUES (
                 CAST(:task_id AS uuid), 'it.move', 'default', 50, :status,
+                :live_result,
                 :now, :now, :started_at, :now,
                 0, 0, :good_until,
                 :worker, 'it-host', 4242, 'it-proc', :is_workflow_task,
@@ -412,6 +419,7 @@ async def insert_live_task(
         {
             'task_id': task_id,
             'status': status,
+            'live_result': live_result,
             'now': now,
             'started_at': now + started_at_offset,
             'good_until': (
