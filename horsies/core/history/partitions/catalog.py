@@ -1,0 +1,378 @@
+"""The leaf catalog: the partition manager's durable memory.
+
+PostgreSQL's own catalogs say what is attached right now; they cannot say
+what the manager created, detached, or dropped, with which bounds, under
+which class, or carrying which index version. The leaf catalog records that,
+and every maintenance decision cross-checks catalog against `pg_catalog`
+before acting — a decision made from either source alone can be stale.
+
+The catalog also carries each leaf's minimum UUIDv7 birth time. The staged
+lookup loader prunes finite probes with it, and constant-time purged
+detection depends on the retained global birth floor being recomputed at
+retirement; both are catalog facts, not derivable from `pg_catalog`.
+
+Reads decode fail-closed: a column of an unexpected type means this code and
+the installed schema disagree, and that raises `HistoryContractError` rather
+than flowing onward as data.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from ..commands import is_safe_identifier
+from ..errors import HistoryContractError
+from ..names import LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES
+
+INDEX_SCHEMA_VERSION = 1
+"""Current per-leaf index layout version recorded on creation."""
+
+LEAF_CATALOG_DDL = f"""
+CREATE TABLE {LEAF_CATALOG} (
+    leaf_name text PRIMARY KEY,
+    parent_name text NOT NULL,
+    class_key text NOT NULL
+        REFERENCES {RETENTION_CLASSES}(class_key),
+    lower_anchor timestamptz NOT NULL,
+    upper_anchor timestamptz NOT NULL,
+    index_schema_version smallint NOT NULL,
+    id_index_name text NOT NULL,
+    partition_bound text NOT NULL,
+    min_birth_at timestamptz,
+    min_birth_verified boolean NOT NULL,
+    created_at timestamptz NOT NULL,
+    detached_at timestamptz,
+    dropped_at timestamptz,
+    CHECK (lower_anchor < upper_anchor),
+    CHECK (dropped_at IS NULL OR detached_at IS NOT NULL),
+    UNIQUE (class_key, lower_anchor, upper_anchor)
+)
+"""
+
+LEAF_LOCK_KEY_FUNCTION_DDL = f"""
+CREATE FUNCTION {LEAF_LOCK_KEY_FUNCTION}(
+    p_class_key text,
+    p_anchor timestamptz
+) RETURNS bigint
+LANGUAGE sql
+STABLE
+STRICT
+AS $function$
+    SELECT hashtextextended(
+        p_class_key || chr(31) ||
+        extract(epoch FROM date_trunc('day', p_anchor, 'UTC'))
+            ::bigint::text,
+        1601
+    )
+$function$
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionClassRow:
+    """One retention class as the frozen DDL module stores it.
+
+    `duration` None means forever; forever classes have no finite parent and
+    no partition interval. The column shape is owned by the frozen-DDL
+    module; this reader is part of that frozen contract.
+    """
+
+    class_key: str
+    duration: timedelta | None
+    partition_interval: timedelta | None
+    finite_parent_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LeafCatalogRow:
+    """One leaf as the catalog remembers it."""
+
+    leaf_name: str
+    parent_name: str
+    class_key: str
+    lower_anchor: datetime
+    upper_anchor: datetime
+    index_schema_version: int
+    id_index_name: str
+    partition_bound: str
+    min_birth_at: datetime | None
+    min_birth_verified: bool
+    created_at: datetime
+    detached_at: datetime | None
+    dropped_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class LeafPhysicalState:
+    """What `pg_catalog` says about one leaf right now.
+
+    `detach_pending` is three-valued: None means the leaf is not an
+    inheritance child of the parent (detached or never attached); False
+    means attached; True means a concurrent detach is awaiting FINALIZE.
+    """
+
+    relation_exists: bool
+    parent_exists: bool
+    partition_bound: str | None
+    id_index_exists: bool
+    detach_pending: bool | None
+
+
+def daily_leaf_name(parent_name: str, lower: datetime) -> str:
+    """The canonical relation name for a daily leaf of `parent_name`."""
+    name = f'{parent_name}_{lower:%Y_%m_%d}'
+    if not is_safe_identifier(name):
+        raise ValueError(f'derived leaf name is not a safe identifier: {name!r}')
+    return name
+
+
+def leaf_id_index_name(leaf_name: str) -> str:
+    """The canonical per-leaf task-ID index name."""
+    return f'{leaf_name}_task_idx'
+
+
+async def read_retention_class(
+    connection: AsyncConnection,
+    class_key: str,
+) -> RetentionClassRow | None:
+    row = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT class_key, duration, partition_interval,
+                       finite_parent_name
+                FROM {RETENTION_CLASSES}
+                WHERE class_key = :class_key
+                """
+            ),
+            {'class_key': class_key},
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    duration = _optional_timedelta(row.duration, 'duration')
+    partition_interval = _optional_timedelta(
+        row.partition_interval, 'partition_interval'
+    )
+    finite_parent_name = _optional_str(row.finite_parent_name, 'finite_parent_name')
+    if duration is not None and finite_parent_name is None:
+        raise HistoryContractError(
+            f'finite retention class {class_key!r} has no finite parent relation'
+        )
+    if finite_parent_name is not None and not is_safe_identifier(finite_parent_name):
+        raise HistoryContractError(
+            f'retention class {class_key!r} names an unsafe parent relation'
+        )
+    return RetentionClassRow(
+        class_key=_required_str(row.class_key, 'class_key'),
+        duration=duration,
+        partition_interval=partition_interval,
+        finite_parent_name=finite_parent_name,
+    )
+
+
+async def read_leaf_catalog_row(
+    connection: AsyncConnection,
+    leaf_name: str,
+) -> LeafCatalogRow | None:
+    row = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT leaf_name, parent_name, class_key,
+                       lower_anchor, upper_anchor,
+                       index_schema_version, id_index_name, partition_bound,
+                       min_birth_at, min_birth_verified,
+                       created_at, detached_at, dropped_at
+                FROM {LEAF_CATALOG}
+                WHERE leaf_name = :leaf_name
+                """
+            ),
+            {'leaf_name': leaf_name},
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    id_index_name = _required_str(row.id_index_name, 'id_index_name')
+    if not is_safe_identifier(id_index_name):
+        raise HistoryContractError(
+            f'cataloged index name is not a safe identifier: {id_index_name!r}'
+        )
+    return LeafCatalogRow(
+        leaf_name=_required_str(row.leaf_name, 'leaf_name'),
+        parent_name=_required_str(row.parent_name, 'parent_name'),
+        class_key=_required_str(row.class_key, 'class_key'),
+        lower_anchor=_required_datetime(row.lower_anchor, 'lower_anchor'),
+        upper_anchor=_required_datetime(row.upper_anchor, 'upper_anchor'),
+        index_schema_version=_required_int(
+            row.index_schema_version, 'index_schema_version'
+        ),
+        id_index_name=id_index_name,
+        partition_bound=_required_str(row.partition_bound, 'partition_bound'),
+        min_birth_at=_optional_datetime(row.min_birth_at, 'min_birth_at'),
+        min_birth_verified=_required_bool(row.min_birth_verified, 'min_birth_verified'),
+        created_at=_required_datetime(row.created_at, 'created_at'),
+        detached_at=_optional_datetime(row.detached_at, 'detached_at'),
+        dropped_at=_optional_datetime(row.dropped_at, 'dropped_at'),
+    )
+
+
+async def read_attached_leaf_rows(
+    connection: AsyncConnection,
+    class_key: str,
+) -> tuple[LeafCatalogRow, ...]:
+    """Catalog rows of one class the manager believes attached, oldest first."""
+    return await _read_attached(connection, class_key=class_key)
+
+
+async def read_all_attached_leaf_rows(
+    connection: AsyncConnection,
+) -> tuple[LeafCatalogRow, ...]:
+    """Every attached catalog row across all classes, oldest first.
+
+    The staged lookup function is regenerated from this complete set: a
+    per-class manifest would drop every other class's leaves from the
+    function and turn their retained rows into false absence.
+    """
+    return await _read_attached(connection, class_key=None)
+
+
+async def _read_attached(
+    connection: AsyncConnection,
+    *,
+    class_key: str | None,
+) -> tuple[LeafCatalogRow, ...]:
+    class_filter = 'AND class_key = :class_key' if class_key is not None else ''
+    parameters = {'class_key': class_key} if class_key is not None else {}
+    rows = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT leaf_name
+                FROM {LEAF_CATALOG}
+                WHERE detached_at IS NULL
+                  AND dropped_at IS NULL
+                  {class_filter}
+                ORDER BY lower_anchor, leaf_name
+                """
+            ),
+            parameters,
+        )
+    ).all()
+    manifest: list[LeafCatalogRow] = []
+    for row in rows:
+        leaf_name = _required_str(row.leaf_name, 'leaf_name')
+        catalog_row = await read_leaf_catalog_row(connection, leaf_name)
+        if catalog_row is None:
+            raise HistoryContractError(
+                f'attached leaf {leaf_name!r} vanished from the catalog mid-read'
+            )
+        manifest.append(catalog_row)
+    return tuple(manifest)
+
+
+async def read_leaf_physical_state(
+    connection: AsyncConnection,
+    *,
+    leaf_name: str,
+    parent_name: str,
+    id_index_name: str,
+) -> LeafPhysicalState:
+    for identifier in (leaf_name, parent_name, id_index_name):
+        if not is_safe_identifier(identifier):
+            raise HistoryContractError(
+                f'relation name is not a safe identifier: {identifier!r}'
+            )
+    row = (
+        await connection.execute(
+            text(
+                """
+                SELECT to_regclass(:leaf)::oid AS leaf_oid,
+                       to_regclass(:parent)::oid AS parent_oid,
+                       to_regclass(:id_index) IS NOT NULL AS id_index_exists,
+                       (SELECT pg_get_expr(c.relpartbound, c.oid)
+                        FROM pg_class AS c
+                        WHERE c.oid = to_regclass(:leaf)) AS partition_bound,
+                       (SELECT i.inhdetachpending
+                        FROM pg_inherits AS i
+                        WHERE i.inhparent = to_regclass(:parent)
+                          AND i.inhrelid = to_regclass(:leaf)) AS detach_pending
+                """
+            ),
+            {'leaf': leaf_name, 'parent': parent_name, 'id_index': id_index_name},
+        )
+    ).one()
+    detach_pending = row.detach_pending
+    if detach_pending is not None and not isinstance(detach_pending, bool):
+        raise HistoryContractError('inhdetachpending did not decode as boolean')
+    return LeafPhysicalState(
+        relation_exists=row.leaf_oid is not None,
+        parent_exists=row.parent_oid is not None,
+        partition_bound=_optional_str(row.partition_bound, 'partition_bound'),
+        id_index_exists=bool(row.id_index_exists),
+        detach_pending=detach_pending,
+    )
+
+
+async def database_now(connection: AsyncConnection) -> datetime:
+    """The database's statement timestamp; maintenance never trusts host time."""
+    value = (
+        await connection.execute(text('SELECT statement_timestamp()'))
+    ).scalar_one()
+    return _required_datetime(value, 'statement_timestamp')
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed column decoding
+# ---------------------------------------------------------------------------
+
+
+def _required_str(value: Any, column: str) -> str:
+    if not isinstance(value, str):
+        raise HistoryContractError(f'{column} did not decode as text')
+    return value
+
+
+def _optional_str(value: Any, column: str) -> str | None:
+    if value is None:
+        return None
+    return _required_str(value, column)
+
+
+def _required_bool(value: Any, column: str) -> bool:
+    if not isinstance(value, bool):
+        raise HistoryContractError(f'{column} did not decode as boolean')
+    return value
+
+
+def _required_int(value: Any, column: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise HistoryContractError(f'{column} did not decode as integer')
+    return value
+
+
+def _required_datetime(value: Any, column: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise HistoryContractError(
+            f'{column} did not decode as a timezone-aware timestamp'
+        )
+    return value
+
+
+def _optional_datetime(value: Any, column: str) -> datetime | None:
+    if value is None:
+        return None
+    return _required_datetime(value, column)
+
+
+def _optional_timedelta(value: Any, column: str) -> timedelta | None:
+    if value is None:
+        return None
+    if not isinstance(value, timedelta):
+        raise HistoryContractError(f'{column} did not decode as an interval')
+    return value
