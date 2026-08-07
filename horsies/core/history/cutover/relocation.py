@@ -197,7 +197,7 @@ def relocation_insert_sql() -> str:
     CROSS JOIN LATERAL (
         SELECT {disposition_case_expression('t', 't.status')} AS disposition
     ) d
-    WHERE t.id = ANY(CAST(:task_ids AS text[]))""",
+    WHERE t.id::text = ANY(CAST(:task_ids AS text[]))""",
     )
 
 
@@ -275,7 +275,7 @@ async def relocate_terminal_batch(
         await connection.execute(
             text(
                 f'DELETE FROM {LIVE_TASKS} '
-                'WHERE id = ANY(CAST(:task_ids AS text[])) '
+                'WHERE id::text = ANY(CAST(:task_ids AS text[])) '
                 'RETURNING 1'
             ),
             {'task_ids': task_ids},

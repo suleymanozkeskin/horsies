@@ -195,6 +195,16 @@ async def test_the_gate_names_unparseable_identities(
         async with engine.begin() as connection:
             await normalize_attempt_identity(connection)
             await connection.execute(text(RELOCATION_LEDGER_DDL))
+            # The gate exists for UPGRADED databases, whose identity
+            # columns are varchar until the tighten converts them; a
+            # fresh install is uuid from birth and cannot even store a
+            # malformed value. Reproduce the upgraded shape.
+            await connection.execute(
+                text(
+                    'ALTER TABLE horsies_workflows '
+                    'ALTER COLUMN root_workflow_id TYPE varchar(36)'
+                )
+            )
             await connection.execute(
                 text(
                     'INSERT INTO horsies_workflows '

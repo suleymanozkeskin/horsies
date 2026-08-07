@@ -72,7 +72,9 @@ class TaskModel(Base):
     __tablename__ = 'horsies_tasks'
 
     # Basic task information
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True
+    )
     task_name: Mapped[str] = mapped_column(String(255), nullable=False)
     queue_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     priority: Mapped[int] = mapped_column(
@@ -253,7 +255,7 @@ class TaskAttemptModel(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     task_id: Mapped[str] = mapped_column(
-        String(36),
+        Uuid(as_uuid=False),
         ForeignKey('horsies_tasks.id', ondelete='CASCADE'),
         nullable=False,
     )
@@ -296,7 +298,9 @@ class TaskHeartbeatModel(Base):
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    task_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    task_id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), nullable=False
+    )
     sender_id: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     sent_at: Mapped[datetime] = mapped_column(

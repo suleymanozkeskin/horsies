@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Text, Integer, DateTime, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Uuid, String, Text, Integer, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -29,7 +29,7 @@ class WorkflowModel(Base):
 
     # Primary key
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True
+        Uuid(as_uuid=False), primary_key=True
     )  # UUID stored as string for consistency with tasks
 
     # Workflow metadata
@@ -64,7 +64,7 @@ class WorkflowModel(Base):
 
     # Parent workflow (if this is a subworkflow)
     parent_workflow_id: Mapped[Optional[str]] = mapped_column(
-        String(36),
+        Uuid(as_uuid=False),
         ForeignKey('horsies_workflows.id', ondelete='CASCADE'),
         nullable=True,
         index=True,
@@ -78,7 +78,7 @@ class WorkflowModel(Base):
 
     # Root workflow ID for efficient queries across nesting levels
     root_workflow_id: Mapped[Optional[str]] = mapped_column(
-        String(36), nullable=True, index=True
+        Uuid(as_uuid=False), nullable=True, index=True
     )
 
     # -------------------------------------------------------------------------
@@ -123,11 +123,13 @@ class WorkflowTaskModel(Base):
     __tablename__ = 'horsies_workflow_tasks'
 
     # Primary key
-    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True
+    )
 
     # Workflow reference
     workflow_id: Mapped[str] = mapped_column(
-        String(36),
+        Uuid(as_uuid=False),
         ForeignKey('horsies_workflows.id', ondelete='CASCADE'),
         nullable=False,
         index=True,
@@ -183,7 +185,7 @@ class WorkflowTaskModel(Base):
 
     # Link to actual task once enqueued (for TaskNode only)
     task_id: Mapped[Optional[str]] = mapped_column(
-        String(36), nullable=True, index=True
+        Uuid(as_uuid=False), nullable=True, index=True
     )
 
     # -------------------------------------------------------------------------
@@ -195,7 +197,7 @@ class WorkflowTaskModel(Base):
 
     # Link to child workflow (for SubWorkflowNode)
     sub_workflow_id: Mapped[Optional[str]] = mapped_column(
-        String(36),
+        Uuid(as_uuid=False),
         ForeignKey('horsies_workflows.id', ondelete='SET NULL'),
         nullable=True,
         index=True,

@@ -51,6 +51,15 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     RetrievalCode,
 )
+from horsies.core.history.archive.attempts import (
+    AttemptRecord as ArchiveAttemptRecord,
+)
+from horsies.core.history.reads.detail import (
+    HistoryTaskDetail,
+    TaskDetailAbsent,
+    read_task_detail,
+    staged_detail_published,
+)
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
@@ -372,6 +381,58 @@ def _attempt(row: TaskAttemptModel) -> TaskAttemptInfo:
         worker_hostname=row.worker_hostname,
         started_at=row.started_at,
         finished_at=row.finished_at,
+    )
+
+
+def _history_attempt(record: 'ArchiveAttemptRecord') -> TaskAttemptInfo:
+    """Map one snapshot-preserved attempt to the same response shape."""
+    return TaskAttemptInfo(
+        attempt=record.attempt,
+        outcome=record.outcome,
+        will_retry=record.will_retry,
+        error_code=nz(record.error_code),
+        error_message=nz(record.error_message),
+        failed_reason=nz(record.failed_reason),
+        worker_hostname=record.worker_hostname,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )
+
+
+def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
+    """Map a history detail to the leaf shape the routes already serve.
+
+    The terminal instant is authoritative: it lands in ``completed_at``
+    for COMPLETED and in ``failed_at`` for every other terminal status,
+    which is strictly more end-stamp information than the pre-history
+    live rows carried for cancelled and expired tasks.
+    """
+    completed_at = (
+        detail.terminal_at if detail.status == 'COMPLETED' else None
+    )
+    failed_at = (
+        detail.terminal_at if detail.status != 'COMPLETED' else None
+    )
+    end = detail.terminal_at
+    queue_s = span_s(
+        detail.enqueued_at, detail.started_at or end, live=False
+    )
+    exec_s = span_s(detail.started_at, end, live=False)
+    return LeafTaskInfo(
+        task_id=detail.task_id,
+        status=detail.status,
+        error_code=nz(detail.error_code),
+        failed_reason=nz(detail.final_failed_reason),
+        retry_count=detail.retry_count,
+        max_retries=detail.max_retries,
+        enqueued_at=detail.enqueued_at,
+        started_at=detail.started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        queue_s=queue_s,
+        exec_s=exec_s,
+        worker_hostname=detail.last_worker_hostname,
+        good_until=detail.good_until,
     )
 
 
@@ -901,7 +962,29 @@ async def get_task_detail(
         async with broker.session_factory() as session:
             task = (await session.execute(task_stmt)).scalar_one_or_none()
             if task is None:
-                return Ok(None)
+                history = await _history_detail_or_none(session, task_id)
+                if history is None:
+                    return Ok(None)
+                node = (await session.execute(node_stmt)).tuples().first()
+                workflow_id, workflow_task_index = (
+                    node if node is not None else (None, None)
+                )
+                return Ok(
+                    TaskDetail(
+                        leaf=_history_leaf(history),
+                        task_name=history.task_name,
+                        queue_name=history.queue_name,
+                        priority=history.priority,
+                        is_workflow_task=history.is_workflow_task,
+                        error_category=_category_value(history.error_code),
+                        attempts=[
+                            _history_attempt(record)
+                            for record in history.attempts
+                        ],
+                        workflow_id=workflow_id,
+                        workflow_task_index=workflow_task_index,
+                    )
+                )
             attempt_rows = (await session.execute(attempts_stmt)).scalars().all()
             node = (await session.execute(node_stmt)).tuples().first()
     except SQLAlchemyError as exc:
@@ -921,6 +1004,29 @@ async def get_task_detail(
             workflow_task_index=workflow_task_index,
         )
     )
+
+
+async def _history_detail_or_none(
+    session: AsyncSession, task_id: str
+) -> HistoryTaskDetail | None:
+    """The history side of a detail read, or None when nothing is there.
+
+    Terminalization moves finished rows out of the live table, so an
+    absent live row is the normal terminal case, not an error. A
+    pre-coverage database (no published staged function) has no
+    history to consult; a row the staged read reports live vanished
+    mid-read and is treated as absent — the caller's next poll sees
+    whichever side it landed on.
+    """
+    connection = await session.connection()
+    if not await staged_detail_published(connection):
+        return None
+    detail = await read_task_detail(connection, task_id=task_id)
+    match detail:
+        case HistoryTaskDetail():
+            return detail
+        case TaskDetailAbsent() | _:
+            return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1098,6 +1204,7 @@ async def get_workflow_node(
                 return Ok(None)
 
             task: TaskModel | None = None
+            history: HistoryTaskDetail | None = None
             attempt_rows: list[TaskAttemptModel] = []
             if node.task_id is not None:
                 task = (
@@ -1105,6 +1212,10 @@ async def get_workflow_node(
                         select(TaskModel).where(TaskModel.id == node.task_id)
                     )
                 ).scalar_one_or_none()
+                if task is None:
+                    history = await _history_detail_or_none(
+                        session, str(node.task_id)
+                    )
                 attempt_rows = list(
                     (
                         await session.execute(
@@ -1119,6 +1230,12 @@ async def get_workflow_node(
     except SQLAlchemyError as exc:
         return _db_err('workflow node detail query', exc)
 
+    if history is not None:
+        leaf = _history_leaf(history)
+        attempts = [_history_attempt(record) for record in history.attempts]
+    else:
+        leaf = _leaf_task(task) if task is not None else None
+        attempts = [_attempt(row) for row in attempt_rows]
     return Ok(
         WorkflowTaskDetail(
             task_index=node.task_index,
@@ -1127,8 +1244,8 @@ async def get_workflow_node(
             node_status=node.status,
             is_subworkflow=node.is_subworkflow,
             node_error=nz(node.error),
-            leaf=_leaf_task(task) if task is not None else None,
-            attempts=[_attempt(row) for row in attempt_rows],
+            leaf=leaf,
+            attempts=attempts,
         )
     )
 

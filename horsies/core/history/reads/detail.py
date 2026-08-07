@@ -235,3 +235,21 @@ async def _classify_absence(
     if floor is None:
         return None
     return birth < floor
+
+
+async def staged_detail_published(connection: AsyncConnection) -> bool:
+    """Whether the staged detail function exists on this database.
+
+    Consumers that fall through to history must not error on a
+    pre-coverage database — one that has no history to consult and no
+    way to have moved a row. One owner for the probe; every fallback
+    site consults it rather than carrying its own.
+    """
+    return bool(
+        (
+            await connection.execute(
+                text('SELECT to_regprocedure(:name) IS NOT NULL'),
+                {'name': f'{TASK_DETAIL_FUNCTION}(uuid)'},
+            )
+        ).scalar_one()
+    )

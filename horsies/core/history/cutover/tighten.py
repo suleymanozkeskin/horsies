@@ -277,6 +277,14 @@ async def tighten_to_frozen(
         f'ALTER TABLE {LIVE_TASKS} '
         'ALTER COLUMN id TYPE uuid USING id::uuid'
     )
+    # On a fresh install the attempts key was never dropped (the
+    # identity was uuid from birth and normalization was a no-op);
+    # drop-then-add makes the restoration deterministic on both
+    # shapes.
+    statements.append(
+        f'ALTER TABLE {LIVE_ATTEMPTS} '
+        'DROP CONSTRAINT IF EXISTS horsies_task_attempts_task_id_fkey'
+    )
     statements.append(
         f'ALTER TABLE {LIVE_ATTEMPTS} '
         'ADD CONSTRAINT horsies_task_attempts_task_id_fkey '

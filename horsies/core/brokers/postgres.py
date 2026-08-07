@@ -1429,21 +1429,15 @@ class PostgresBroker:
         """
         from hashlib import sha256
 
-        from horsies.core.history.names import TASK_DETAIL_FUNCTION
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             TaskDetailAbsent,
             read_task_detail,
+            staged_detail_published,
         )
 
         connection = await session.connection()
-        published = (
-            await connection.execute(
-                text('SELECT to_regprocedure(:name) IS NOT NULL'),
-                {'name': f'{TASK_DETAIL_FUNCTION}(uuid)'},
-            )
-        ).scalar_one()
-        if not bool(published):
+        if not await staged_detail_published(connection):
             return Ok(None)
         detail = await read_task_detail(connection, task_id=task_id)
         match detail:
