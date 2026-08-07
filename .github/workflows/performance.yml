@@ -3,11 +3,25 @@ name: Performance Harness
 # Manual evidence only. Correctness and release workflows do not invoke it.
 on:
   workflow_dispatch:
+    inputs:
+      suite:
+        description: Qualification suite
+        required: true
+        type: choice
+        default: full
+        options:
+          - full
+          - staged-lookup
+          - storage-qualification
+          - uuid-index
+          - operational-maintenance
+          - rerun-input-terminalization
 
 permissions: {}
 
 jobs:
   harness:
+    if: inputs.suite == 'full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,3 +57,1124 @@ jobs:
       - name: Stop measurement servers
         if: always()
         run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  replacement-archive-transcode:
+    if: inputs.suite == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 16442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 16446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+        run: >-
+          docker compose -f tests/fixtures/history/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      # Run every domain even after one misses a budget so the preserved
+      # evidence gives the operator a complete failure shape. The final exit
+      # status is nonzero if execution, verification, retirement, or any
+      # declared budget fails.
+      - name: Replacement archive transcode qualification
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-replacement-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          failures=0
+          for component in HISTORY_ROW RESULT ATTEMPTS RERUN_INPUT; do
+            attempts=4
+            if [[ "$component" == "ATTEMPTS" ]]; then
+              attempts=21
+            fi
+            output="$output_dir/${component,,}.json"
+            partial_output="$output.partial.json"
+            candidate_output="$output.candidate"
+            error_log="$output.stderr"
+            if ! uv run python -m tests.task_history_prototypes \
+              --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+              --commit '${{ github.sha }}' \
+              --run-kind gate \
+              --server-image '${{ matrix.image }}' \
+              --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+              --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+              --scenario replacement-archive-transcode \
+              --archive-component "$component" \
+              --rows 1000000 \
+              --batch-size 100000 \
+              --result-bytes 200 \
+              --attempts-per-task "$attempts" \
+              --partial-evidence-path "$partial_output" \
+              --demo-quiesced > "$candidate_output" 2> "$error_log"
+            then
+              failure_evidence=null
+              if [[ -s "$partial_output" ]]; then
+                failure_evidence="$(jq -c . "$partial_output")"
+              fi
+              jq -n \
+                --arg component "$component" \
+                --arg commit '${{ github.sha }}' \
+                --arg postgres_major '${{ matrix.postgres }}' \
+                --arg server_image '${{ matrix.image }}' \
+                --arg host_description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+                --arg storage_description 'GitHub-hosted runner Docker overlay2 storage' \
+                --argjson attempts_per_task "$attempts" \
+                --argjson failure_evidence "$failure_evidence" \
+                --rawfile error "$error_log" \
+                '{
+                  status: "execution_failure",
+                  component: $component,
+                  conditions: {
+                    commit: $commit,
+                    run_kind: "gate",
+                    postgres_major: $postgres_major,
+                    server_image: $server_image,
+                    host_description: $host_description,
+                    storage_description: $storage_description,
+                    demo_quiesced: true,
+                    durability_mode: "operational",
+                    cache_posture: "explicit checkpoint; payload controls receive an untimed source validation warmup before the paired control and candidate; replacement relations use committed task-ID batches",
+                    prepared_posture: "parameterized seed and durable replacement-copy program",
+                    fsync: "on",
+                    synchronous_commit: "on",
+                    full_page_writes: "on",
+                    autovacuum: "on",
+                    autovacuum_vacuum_threshold: "50",
+                    autovacuum_vacuum_scale_factor: "0.2",
+                    autovacuum_analyze_threshold: "50",
+                    autovacuum_analyze_scale_factor: "0.1",
+                    autovacuum_naptime: "1min",
+                    autovacuum_max_workers: "3",
+                    checkpoint_timeout: "5min",
+                    max_wal_size: "2GB"
+                  },
+                  workload: {
+                    rows: 1000000,
+                    batch_size: 100000,
+                    payload_bytes: 200,
+                    attempts_per_task: $attempts_per_task
+                  },
+                  budgets: {
+                    metadata_tasks_per_second_minimum: 20000,
+                    payload_control_ratio_minimum: 0.5,
+                    maintenance_seconds_maximum: 600,
+                    swap_lock_seconds_maximum: 2,
+                    swap_lock_attempts_maximum: 120,
+                    swap_retry_backoff_seconds: 0.25
+                  },
+                  failure_evidence: $failure_evidence,
+                  error: $error
+                }' > "$output"
+              failures=1
+              continue
+            fi
+            mv "$candidate_output" "$output"
+            if ! jq -e '
+              .verification.verified
+              and .decoder_retirement_ready
+              and .throughput_passed
+              and .maintenance_duration_passed
+              and .swap_window_passed
+              and .wal_passed
+              and .peak_disk_passed
+            ' "$output"
+            then
+              failures=1
+            fi
+          done
+          exit "$failures"
+
+      - name: Preserve replacement qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: replacement-archive-transcode-pg${{ matrix.postgres }}
+          path: /tmp/task-history-replacement-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+        if: always()
+        run: docker compose -f tests/fixtures/history/compose.yaml down -v
+
+  identity-lookup-boundary:
+    if: inputs.suite == 'full'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      # The harness prints the evidence document and exits zero even when a
+      # latency budget fails; the verdicts live inside the document. The final
+      # exit status is nonzero if execution fails or any lookup cell across
+      # every candidate and posture reports a verdict other than PASS.
+      - name: Identity lookup boundary qualification
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-identity-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/identity_lookup.json"
+          partial_output="$output_dir/identity_lookup.partial.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          exec 3>&1
+          set +e
+          timeout --foreground --signal=TERM --kill-after=30s 330m \
+            uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario identity-lookup \
+            --live-rows 100000 \
+            --finite-history-rows 10000000 \
+            --forever-history-rows 1000000 \
+            --attached-finite-leaves 512 \
+            --keyed-percent 10 \
+            --warm-observations 10000 \
+            --cold-observations 10000 \
+            --bootstrap-resamples 1000 \
+            --partial-evidence-path "$partial_output" \
+            --progress-fd 3 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            partial_evidence=null
+            if [[ -s "$partial_output" ]]; then
+              partial_evidence="$(jq -c . "$partial_output")"
+            fi
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --arg server_image '${{ matrix.image }}' \
+              --arg host_description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+              --arg storage_description 'GitHub-hosted runner Docker overlay2 storage' \
+              --argjson collector_status "$collector_status" \
+              --argjson partial_evidence "$partial_evidence" \
+              --rawfile error "$error_log" \
+              '{
+                status: "execution_failure",
+                scenario: "identity-lookup",
+                conditions: {
+                  commit: $commit,
+                  run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  server_image: $server_image,
+                  host_description: $host_description,
+                  storage_description: $storage_description,
+                  demo_quiesced: true,
+                  fsync: "off",
+                  synchronous_commit: "off",
+                  full_page_writes: "off",
+                  autovacuum: "off",
+                  autovacuum_vacuum_threshold: "50",
+                  autovacuum_vacuum_scale_factor: "0.2",
+                  autovacuum_analyze_threshold: "50",
+                  autovacuum_analyze_scale_factor: "0.1",
+                  autovacuum_naptime: "1min",
+                  autovacuum_max_workers: "3",
+                  checkpoint_timeout: "30min",
+                  max_wal_size: "4GB"
+                },
+                workload: {
+                  live_rows: 100000,
+                  finite_history_rows: 10000000,
+                  forever_history_rows: 1000000,
+                  attached_finite_leaves: 512,
+                  keyed_percent: 10,
+                  warm_observations_per_category: 10000,
+                  cold_observation_ladder: [500, 2000, 10000],
+                  cold_observations_maximum: 10000,
+                  bootstrap_resamples: 1000
+                },
+                collector_exit_status: $collector_status,
+                partial_evidence: $partial_evidence,
+                error: $error
+              }' > "$output"
+            exit 1
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '
+            [.candidates[].lookup[].verdict]
+            | length > 0 and all(. == "PASS")
+          ' "$output"
+
+      - name: Preserve identity qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: identity-lookup-boundary-pg${{ matrix.postgres }}
+          path: /tmp/task-history-identity-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  staged-lookup-boundary:
+    if: inputs.suite == 'staged-lookup'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Staged lookup boundary qualification
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-staged-lookup-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/staged_lookup.json"
+          partial_output="$output_dir/staged_lookup.partial.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          exec 3>&1
+          set +e
+          timeout --foreground --signal=TERM --kill-after=30s 330m \
+            uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario identity-lookup \
+            --identity-candidate staged_key_registry \
+            --live-rows 100000 \
+            --finite-history-rows 10000000 \
+            --forever-history-rows 1000000 \
+            --attached-finite-leaves 512 \
+            --keyed-percent 10 \
+            --warm-observations 10000 \
+            --cold-observations 10000 \
+            --bootstrap-resamples 1000 \
+            --partial-evidence-path "$partial_output" \
+            --progress-fd 3 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            partial_evidence=null
+            if [[ -s "$partial_output" ]]; then
+              partial_evidence="$(jq -c . "$partial_output")"
+            fi
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --arg server_image '${{ matrix.image }}' \
+              --argjson collector_status "$collector_status" \
+              --argjson partial_evidence "$partial_evidence" \
+              --rawfile error "$error_log" \
+              '{
+                status: "execution_failure",
+                scenario: "staged-task-lookup",
+                conditions: {
+                  commit: $commit,
+                  run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  server_image: $server_image,
+                  host_description: "GitHub-hosted ephemeral x86_64 VM; repository application units absent",
+                  storage_description: "GitHub-hosted runner Docker overlay2 storage",
+                  demo_quiesced: true,
+                  fsync: "off",
+                  synchronous_commit: "off",
+                  full_page_writes: "off",
+                  autovacuum: "off",
+                  autovacuum_vacuum_threshold: "50",
+                  autovacuum_vacuum_scale_factor: "0.2",
+                  autovacuum_analyze_threshold: "50",
+                  autovacuum_analyze_scale_factor: "0.1",
+                  autovacuum_naptime: "1min",
+                  autovacuum_max_workers: "3",
+                  checkpoint_timeout: "30min",
+                  max_wal_size: "4GB"
+                },
+                workload: {
+                  candidate: "staged_key_registry",
+                  live_rows: 100000,
+                  finite_history_rows: 10000000,
+                  forever_history_rows: 1000000,
+                  attached_finite_leaves: 512,
+                  keyed_percent: 10,
+                  warm_observations_per_category: 10000,
+                  cold_observation_ladder: [500, 2000, 10000],
+                  cold_observations_maximum: 10000,
+                  bootstrap_resamples: 1000
+                },
+                collector_exit_status: $collector_status,
+                partial_evidence: $partial_evidence,
+                error: $error
+              }' > "$output"
+            exit 1
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '
+            (.candidates | length) == 1
+            and .candidates[0].candidate == "staged_key_registry"
+            and (.candidates[0].lookup | length) == 18
+            and ([.candidates[0].lookup[].verdict] | all(. == "PASS"))
+          ' "$output"
+
+      - name: Preserve staged lookup qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: staged-task-lookup-pg${{ matrix.postgres }}
+          path: /tmp/task-history-staged-lookup-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  attempt-storage-qualification:
+    if: inputs.suite == 'storage-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Aggregate attempt qualification
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-attempts-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/attempts.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          if ! uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario attempt-storage \
+            --rows 1000000 \
+            --result-bytes 200 \
+            --attempts-per-task 21 \
+            --warm-observations 10000 \
+            --bootstrap-resamples 1000 \
+            --payload-shape incompressible \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --rawfile error "$error_log" \
+              '{status: "execution_failure", scenario: "attempt-storage",
+                conditions: {commit: $commit, run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  durability_mode: "paired-micro"},
+                workload: {rows: 1000000, attempts_per_task: 21,
+                  detail_observations: 10000}, error: $error}' > "$output"
+            exit 1
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '
+            .aggregate_logical_payload_passed
+            and .aggregate.detail_latency.verdict == "PASS"
+            and .copartitioned.detail_latency.verdict == "PASS"
+          ' "$output"
+
+      - name: Preserve attempt evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: attempt-storage-pg${{ matrix.postgres }}
+          path: /tmp/task-history-attempts-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  rerun-input-qualification:
+    if: inputs.suite == 'storage-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Rerun-input qualification and capacity preview
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-rerun-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          gate_output="$output_dir/compressible-gate.json"
+          gate_candidate="$gate_output.candidate"
+          gate_error="$gate_output.stderr"
+          if ! uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario rerun-storage \
+            --rows 1000000 \
+            --result-bytes 200 \
+            --rerun-input-bytes 65536 \
+            --payload-shape compressible \
+            --demo-quiesced > "$gate_candidate" 2> "$gate_error"
+          then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --rawfile error "$gate_error" \
+              '{status: "execution_failure", scenario: "rerun-storage",
+                conditions: {commit: $commit, run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  durability_mode: "paired-micro"},
+                workload: {rows: 1000000, rerun_input_bytes: 65536,
+                  payload_shape: "compressible"}, error: $error}' > "$gate_output"
+            exit 1
+          fi
+          mv "$gate_candidate" "$gate_output"
+          jq -e '
+            .workload.rows == 1000000
+            and .workload.rerun_input_bytes == 65536
+            and (.measurements | length) == 3
+          ' "$gate_output"
+          preview_output="$output_dir/incompressible-capacity-preview.json"
+          preview_candidate="$preview_output.candidate"
+          preview_error="$preview_output.stderr"
+          if ! uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind smoke \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario rerun-storage \
+            --rows 100000 \
+            --result-bytes 200 \
+            --rerun-input-bytes 65536 \
+            --payload-shape incompressible \
+            --demo-quiesced > "$preview_candidate" 2> "$preview_error"
+          then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --rawfile error "$preview_error" \
+              '{status: "execution_failure", scenario: "rerun-storage",
+                conditions: {commit: $commit, run_kind: "smoke",
+                  postgres_major: $postgres_major,
+                  durability_mode: "paired-micro"},
+                workload: {rows: 100000, rerun_input_bytes: 65536,
+                  payload_shape: "incompressible"}, error: $error}' \
+              > "$preview_output"
+            exit 1
+          fi
+          mv "$preview_candidate" "$preview_output"
+
+      - name: Preserve rerun-input evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rerun-input-pg${{ matrix.postgres }}
+          path: /tmp/task-history-rerun-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  key-registry-qualification:
+    if: inputs.suite == 'storage-qualification'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Key-registry qualification
+        run: |
+          output_dir=/tmp/task-history-registry-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/key_registry.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          if ! uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario key-registry \
+            --rows 4096 \
+            --producers 64 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --rawfile error "$error_log" \
+              '{status: "execution_failure", scenario: "key-registry",
+                conditions: {commit: $commit, run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  durability_mode: "paired-micro"},
+                workload: {operations_per_ratio: 4096, producers: 64},
+                error: $error}' > "$output"
+            exit 1
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '
+            .different_key_throughput_passed
+            and .same_key_p99_passed
+            and .exact_outcomes_passed
+            and ([.keyed_workloads[].keyed_percent] == [0, 1, 10, 100])
+          ' "$output"
+
+      - name: Preserve key-registry evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: key-registry-pg${{ matrix.postgres }}
+          path: /tmp/task-history-registry-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  uuid-index-qualification:
+    if: >-
+      inputs.suite == 'storage-qualification'
+      || inputs.suite == 'uuid-index'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 16442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 16446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+        run: >-
+          docker compose -f tests/fixtures/history/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: UUID index qualification
+        run: |
+          output_dir=/tmp/task-history-uuid-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/uuid_index.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          if ! uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario uuid-index-economics \
+            --base-rows 1000000 \
+            --measured-rows 1000000 \
+            --batch-size 10000 \
+            --repetitions 2 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --rawfile error "$error_log" \
+              '{status: "execution_failure", scenario: "uuid-index-economics",
+                conditions: {commit: $commit, run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  durability_mode: "operational"},
+                workload: {base_rows: 1000000, measured_rows: 1000000,
+                  batch_size: 10000, repetitions: 2}, error: $error}' > "$output"
+            exit 1
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '
+            .workload.base_rows == 1000000
+            and .workload.measured_rows == 1000000
+            and .workload.repetitions == 2
+            and (.measurements | length) == 8
+          ' "$output"
+
+      - name: Preserve UUID index evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: uuid-index-pg${{ matrix.postgres }}
+          path: /tmp/task-history-uuid-pg${{ matrix.postgres }}/*.json
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+        if: always()
+        run: docker compose -f tests/fixtures/history/compose.yaml down -v
+
+  rerun-input-terminalization:
+    if: inputs.suite == 'rerun-input-terminalization'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 15442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 15446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} measurement server
+        run: >-
+          docker compose -f tests/fixtures/perf/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Declare capacity and confirm the runner can hold a cell
+        shell: bash
+        run: |
+          # Incompressible envelopes at the inline bound do not compress, so a
+          # cell's footprint is predictable and large. Stating it here means an
+          # undersized runner refuses before the first cell rather than dying
+          # partway through one as an out-of-space traceback.
+          declared_peak=$(uv run python -c "
+          from tests.task_history_prototypes.rerun_terminalization_evidence import (
+              declare_cell_capacity,
+          )
+          print(
+              declare_cell_capacity(
+                  observations=10000,
+                  block_size=100,
+                  envelope_bytes=65536,
+                  free_bytes=0,
+              ).declared_peak_bytes
+          )
+          ")
+          # The root filesystem, not the docker data root: the overlay2 storage
+          # lives on it, and /var/lib/docker is root-owned so statting it as
+          # the runner user can fail on permissions rather than on space.
+          free=$(df --output=avail -B1 / | tail -1)
+          echo "declared peak bytes: ${declared_peak}"
+          echo "free bytes on the runner root filesystem: ${free}"
+          if (( free < declared_peak )); then
+            echo "::error::runner has ${free} bytes free; one cell declares a" \
+                 "peak of ${declared_peak} bytes"
+            exit 1
+          fi
+
+      - name: Rerun-input paired terminalization qualification
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-rerun-terminalization-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/paired-terminalization.json"
+          partial="$output_dir/paired-terminalization.partial.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          exec 3>&1
+          set +e
+          uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario rerun-input-terminalization \
+            --warm-observations 10000 \
+            --batch-size 100 \
+            --bootstrap-resamples 1000 \
+            --rerun-input-bytes 65536 \
+            --result-bytes 200 \
+            --data-path / \
+            --partial-evidence-path "$partial" \
+            --progress-fd 3 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --arg server_image '${{ matrix.image }}' \
+              --argjson collector_status "$collector_status" \
+              --rawfile error "$error_log" \
+              '{
+                status: "execution_failure",
+                scenario: "rerun-input-terminalization",
+                conditions: {
+                  commit: $commit,
+                  run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  server_image: $server_image,
+                  demo_quiesced: true,
+                  durability_mode: "paired-micro"
+                },
+                workload: {
+                  observations_per_side: 10000,
+                  block_size: 100,
+                  bootstrap_resamples: 1000,
+                  envelope_bytes: 65536,
+                  result_bytes: 200
+                },
+                collector_exit_status: $collector_status,
+                error: $error
+              }' > "$output"
+            exit "$collector_status"
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '.verdict' "$output"
+          jq -e '(.cells | length) == 4' "$output"
+
+      - name: Preserve paired terminalization evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rerun-input-terminalization-pg${{ matrix.postgres }}
+          path: /tmp/task-history-rerun-terminalization-pg${{ matrix.postgres }}/*
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} measurement server
+        if: always()
+        run: docker compose -f tests/fixtures/perf/compose.yaml down -v
+
+  operational-maintenance-qualification:
+    if: inputs.suite == 'operational-maintenance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - postgres: '14'
+            service: pg14
+            port: 16442
+            image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+          - postgres: '16'
+            service: pg16
+            port: 16446
+            image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          version: 0.11.14
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Start PostgreSQL ${{ matrix.postgres }} operational server
+        run: >-
+          docker compose -f tests/fixtures/history/compose.yaml
+          up -d --wait ${{ matrix.service }}
+
+      - name: Apply schema
+        run: >-
+          uv run python -m tests.perf --apply-schema
+          --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies
+
+      - name: Registry and partition lifecycle qualification
+        timeout-minutes: 345
+        shell: bash
+        run: |
+          output_dir=/tmp/task-history-operational-pg${{ matrix.postgres }}
+          mkdir -p "$output_dir"
+          output="$output_dir/operational.json"
+          candidate_output="$output.candidate"
+          error_log="$output.stderr"
+          exec 3>&1
+          set +e
+          uv run python -m tests.task_history_prototypes \
+            --dsn postgresql+psycopg://postgres:testpassword@localhost:${{ matrix.port }}/horsies \
+            --commit '${{ github.sha }}' \
+            --run-kind gate \
+            --server-image '${{ matrix.image }}' \
+            --host-description 'GitHub-hosted ephemeral x86_64 VM; repository application units absent' \
+            --storage-description 'GitHub-hosted runner Docker overlay2 storage' \
+            --scenario operational-maintenance \
+            --rows 1000000 \
+            --batch-size 10000 \
+            --finite-history-rows 1000000 \
+            --forever-history-rows 100000 \
+            --attached-finite-leaves 512 \
+            --observation-seconds 120 \
+            --progress-fd 3 \
+            --demo-quiesced > "$candidate_output" 2> "$error_log"
+          collector_status=$?
+          set -e
+          if (( collector_status != 0 )); then
+            jq -n \
+              --arg commit '${{ github.sha }}' \
+              --arg postgres_major '${{ matrix.postgres }}' \
+              --arg server_image '${{ matrix.image }}' \
+              --argjson collector_status "$collector_status" \
+              --rawfile error "$error_log" \
+              '{
+                status: "execution_failure",
+                scenario: "operational-maintenance",
+                conditions: {
+                  commit: $commit,
+                  run_kind: "gate",
+                  postgres_major: $postgres_major,
+                  server_image: $server_image,
+                  demo_quiesced: true,
+                  durability_mode: "operational"
+                },
+                workload: {
+                  registry_rows: 1000000,
+                  registry_batch_size: 10000,
+                  history_rows: 1000000,
+                  forever_rows: 100000,
+                  attached_leaves: 512,
+                  observation_seconds: 120
+                },
+                collector_exit_status: $collector_status,
+                error: $error
+              }' > "$output"
+            exit "$collector_status"
+          fi
+          mv "$candidate_output" "$output"
+          jq -e '.verdict' "$output"
+
+      - name: Preserve operational evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: operational-maintenance-pg${{ matrix.postgres }}
+          path: /tmp/task-history-operational-pg${{ matrix.postgres }}/*
+          if-no-files-found: error
+
+      - name: Stop PostgreSQL ${{ matrix.postgres }} operational server
+        if: always()
+        run: docker compose -f tests/fixtures/history/compose.yaml down -v
