@@ -9,6 +9,7 @@ class PostgresConfig(BaseModel):
         'database_url',
         'session_database_url',
         'pgbouncer_transaction_mode',
+        'retain_rerun_input_default',
         'worker_pool_size',
         'worker_max_overflow',
         'worker_child_pool_min_size',
@@ -44,6 +45,14 @@ class PostgresConfig(BaseModel):
     )
     max_overflow: int = Field(
         default=10, description='The maximum number of connections to allow in the pool'
+    )
+    retain_rerun_input_default: bool = Field(
+        default=False,
+        description=(
+            'App-level default for enqueue-time rerun-input retention; '
+            'a per-task value overrides it, and the resolved value is '
+            'snapshotted at enqueue'
+        ),
     )
     worker_pool_size: int | None = Field(
         default=3,

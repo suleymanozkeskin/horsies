@@ -17,9 +17,78 @@ it to an empty stand-in.
 
 from __future__ import annotations
 
-import re
+from dataclasses import dataclass
 
 from ..names import LIVE_TASKS
+
+
+@dataclass(frozen=True, slots=True)
+class CutoverColumn:
+    """One declared cutover column: the structured shape authority.
+
+    Three renderings derive from this table — the final ADD form, the
+    transitional chain migration, and the offline tighten — so the
+    column set has one owner and no rendering ever parses another
+    rendering's text.
+    """
+
+    name: str
+    column_type: str
+    not_null: bool
+    check: str | None
+
+
+CUTOVER_COLUMNS: tuple[CutoverColumn, ...] = (
+    CutoverColumn(
+        'command_fingerprint_version', 'smallint', True,
+        'command_fingerprint_version > 0',
+    ),
+    CutoverColumn(
+        'command_fingerprint', 'bytea', True,
+        'octet_length(command_fingerprint) = 32',
+    ),
+    CutoverColumn('retention_class_key', 'varchar(64)', True, None),
+    CutoverColumn(
+        'input_digest', 'bytea', False,
+        'input_digest IS NULL OR octet_length(input_digest) = 32',
+    ),
+    CutoverColumn('rerun_of_task_id', 'uuid', False, None),
+    CutoverColumn('rerun_root_task_id', 'uuid', False, None),
+    CutoverColumn(
+        'idempotency_key_digest', 'bytea', False,
+        'idempotency_key_digest IS NULL\n'
+        '                OR octet_length(idempotency_key_digest) = 32',
+    ),
+    CutoverColumn('retain_rerun_input', 'boolean', True, None),
+    CutoverColumn(
+        'prepared_rerun_input_disposition', 'varchar(32)', True,
+        "prepared_rerun_input_disposition IN (\n"
+        "                    'INLINE', 'REFERENCE', 'DECLINED_BY_POLICY',\n"
+        "                    'OVER_BOUND', 'NEVER_ELIGIBLE'\n"
+        '                )',
+    ),
+    CutoverColumn('prepared_rerun_input_version', 'smallint', False, None),
+    CutoverColumn('prepared_rerun_input_codec', 'varchar(64)', False, None),
+    CutoverColumn(
+        'prepared_rerun_input_content_type', 'varchar(255)', False, None
+    ),
+    CutoverColumn('prepared_rerun_input_digest', 'bytea', False, None),
+    CutoverColumn(
+        'prepared_rerun_input_inline', 'bytea', False,
+        'prepared_rerun_input_inline IS NULL\n'
+        '                OR octet_length(prepared_rerun_input_inline) '
+        '<= 65536',
+    ),
+    CutoverColumn(
+        'prepared_rerun_input_reference', 'varchar(2048)', False, None
+    ),
+)
+
+RERUN_LINEAGE_PAIR_CHECK = (
+    '(rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL)\n'
+    '            OR (rerun_of_task_id IS NOT NULL\n'
+    '                AND rerun_root_task_id IS NOT NULL)'
+)
 
 
 LIVE_STATUS_DOMAIN_DDL = f"""
@@ -36,68 +105,68 @@ superseded status constraint that admitted terminal values is dropped in
 the same migration stage.
 """
 
+def _final_add_column(column: CutoverColumn) -> str:
+    rendered = f'ADD COLUMN {column.name} {column.column_type}'
+    if column.not_null:
+        rendered += ' NOT NULL'
+    if column.check is not None:
+        rendered += (
+            f'\n            CHECK ({column.check})'
+            if '\n' in column.check
+            else f'\n            CHECK ({column.check})'
+        )
+    return rendered
+
+
 LIVE_CUTOVER_COLUMNS_DDL: tuple[str, ...] = (
     f"""
     ALTER TABLE {LIVE_TASKS}
-        ADD COLUMN command_fingerprint_version smallint NOT NULL
-            CHECK (command_fingerprint_version > 0),
-        ADD COLUMN command_fingerprint bytea NOT NULL
-            CHECK (octet_length(command_fingerprint) = 32),
-        ADD COLUMN retention_class_key varchar(64) NOT NULL,
-        ADD COLUMN input_digest bytea
-            CHECK (input_digest IS NULL OR octet_length(input_digest) = 32),
-        ADD COLUMN rerun_of_task_id uuid,
-        ADD COLUMN rerun_root_task_id uuid,
-        ADD COLUMN idempotency_key_digest bytea
-            CHECK (
-                idempotency_key_digest IS NULL
-                OR octet_length(idempotency_key_digest) = 32
-            ),
-        ADD COLUMN retain_rerun_input boolean NOT NULL,
-        ADD COLUMN prepared_rerun_input_disposition varchar(32) NOT NULL
-            CHECK (
-                prepared_rerun_input_disposition IN (
-                    'INLINE', 'REFERENCE', 'DECLINED_BY_POLICY',
-                    'OVER_BOUND', 'NEVER_ELIGIBLE'
-                )
-            ),
-        ADD COLUMN prepared_rerun_input_version smallint,
-        ADD COLUMN prepared_rerun_input_codec varchar(64),
-        ADD COLUMN prepared_rerun_input_content_type varchar(255),
-        ADD COLUMN prepared_rerun_input_digest bytea,
-        ADD COLUMN prepared_rerun_input_inline bytea
-            CHECK (
-                prepared_rerun_input_inline IS NULL
-                OR octet_length(prepared_rerun_input_inline) <= 65536
-            ),
-        ADD COLUMN prepared_rerun_input_reference varchar(2048),
+        """
+    + ',\n        '.join(
+        _final_add_column(column) for column in CUTOVER_COLUMNS
+    )
+    + f""",
         ADD CONSTRAINT {LIVE_TASKS}_rerun_lineage_pair CHECK (
-            (rerun_of_task_id IS NULL AND rerun_root_task_id IS NULL)
-            OR (rerun_of_task_id IS NOT NULL
-                AND rerun_root_task_id IS NOT NULL)
+            {RERUN_LINEAGE_PAIR_CHECK}
         )
     """,
 )
 
 
-_COLUMN_DEFINITION = re.compile(r'ADD COLUMN (\w+) ([a-z]+(?:\(\d+\))?)')
-
-
 def cutover_column_definitions() -> tuple[tuple[str, str], ...]:
-    """(name, type) for every cutover column, parsed from the fragment.
-
-    The fragment above is the single shape authority; anything else that
-    needs the column set derives it from here so the two can never
-    drift.
-    """
-    definitions = tuple(
-        (match.group(1), match.group(2))
-        for fragment in LIVE_CUTOVER_COLUMNS_DDL
-        for match in _COLUMN_DEFINITION.finditer(fragment)
+    """(name, type) for every cutover column, from the structured
+    authority."""
+    return tuple(
+        (column.name, column.column_type) for column in CUTOVER_COLUMNS
     )
-    if not definitions:
-        raise AssertionError('cutover fragment yielded no column definitions')
-    return definitions
+
+
+def tightening_cutover_ddl() -> tuple[str, ...]:
+    """The offline tighten: the transitional columns reach the declared
+    final shape. Rendered from the same structured table as the final
+    and transitional forms — no rendering parses another's text. Valid
+    only after the backfill: every terminal row has moved and every
+    remaining row carries real values."""
+    statements: list[str] = []
+    set_not_null = ',\n    '.join(
+        f'ALTER COLUMN {column.name} SET NOT NULL'
+        for column in CUTOVER_COLUMNS
+        if column.not_null
+    )
+    statements.append(f'ALTER TABLE {LIVE_TASKS}\n    {set_not_null}')
+    for column in CUTOVER_COLUMNS:
+        if column.check is not None:
+            statements.append(
+                f'ALTER TABLE {LIVE_TASKS}\n'
+                f'    ADD CONSTRAINT {LIVE_TASKS}_{column.name}_cutover'
+                f'\n    CHECK ({column.check})'
+            )
+    statements.append(
+        f'ALTER TABLE {LIVE_TASKS}\n'
+        f'    ADD CONSTRAINT {LIVE_TASKS}_rerun_lineage_pair\n'
+        f'    CHECK ({RERUN_LINEAGE_PAIR_CHECK})'
+    )
+    return tuple(statements)
 
 
 def transitional_cutover_columns_ddl() -> str:

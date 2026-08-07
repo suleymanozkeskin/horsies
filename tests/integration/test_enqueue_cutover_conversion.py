@@ -255,14 +255,19 @@ class TestKeyedEnqueue:
             ).scalar_one()
         assert orphan == 0
 
-    async def test_registry_indexes_are_deliberately_absent(
+    async def test_registry_indexes_are_present_since_emission(
         self, broker: PostgresBroker
     ) -> None:
-        """The claim rides the primary key; the maintenance indexes are
-        wave-gated conditional DDL, and their absence at this schema
-        version is sequencing, not an omission."""
+        """The v28 deliberate absence ended when the emission migration
+        landed the maintenance indexes: the recorded sequencing debt is
+        discharged, and this pin flips from absence to presence — the
+        inventory flip becoming a permanent structural invariant."""
+        from horsies.core.history.ddl.conditional import (
+            RESERVATION_REGISTRY_EXPIRY_INDEX,
+        )
+
         async with broker.session_factory() as session:
-            index_names = [
+            index_names = {
                 row.indexname
                 for row in (
                     await session.execute(
@@ -272,8 +277,11 @@ class TestKeyedEnqueue:
                         )
                     )
                 ).all()
-            ]
-        assert index_names == ['horsies_key_reservations_pkey']
+            }
+        assert index_names == {
+            'horsies_key_reservations_pkey',
+            RESERVATION_REGISTRY_EXPIRY_INDEX,
+        }
 
 
 class TestReservationWindowConfiguration:

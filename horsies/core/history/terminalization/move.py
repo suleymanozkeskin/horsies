@@ -161,6 +161,74 @@ _WORKFLOW_REJECTING_KINDS: Final[tuple[TerminalizationKind, ...]] = (
 )
 
 
+HISTORY_PROJECTION_COLUMNS: Final[tuple[str, ...]] = (
+    'task_id', 'task_name', 'queue_name', 'priority',
+    'command_fingerprint_version', 'command_fingerprint', 'status',
+    'terminalization_kind', 'terminal_at', 'retention_anchor_at',
+    'retention_class_key', 'sent_at', 'enqueued_at', 'claimed_at',
+    'started_at', 'created_at', 'good_until',
+    'result_envelope_version', 'result_codec', 'result_content_type',
+    'result_payload', 'prior_result_payload', 'result_digest',
+    'error_code', 'final_failed_reason',
+    'retry_count', 'max_retries',
+    'last_claimed_worker_id', 'last_worker_hostname',
+    'last_worker_pid', 'last_worker_process_name',
+    'input_digest', 'rerun_of_task_id', 'rerun_root_task_id',
+    'workflow_id', 'is_workflow_task', 'history_schema_version',
+    'attempt_archive_version', 'attempt_snapshot_codec',
+    'attempt_snapshot_content_type', 'attempt_snapshot',
+    'attempt_snapshot_digest',
+    'rerun_input_disposition', 'rerun_input_version', 'rerun_input_codec',
+    'rerun_input_content_type', 'rerun_input_digest',
+    'rerun_input_inline', 'rerun_input_reference',
+)
+"""The history-insert projection, once. Every writer of a history row —
+the single-row move, the batch families, and the cutover relocation —
+renders its INSERT from this list, so a column can never be added to
+one writer and silently dropped from another."""
+
+
+def history_insert_sql(
+    values: dict[str, str],
+    *,
+    select_tail: str | None = None,
+) -> str:
+    """Render the history INSERT from the single projection authority.
+
+    `values` must supply exactly one SQL expression per projection
+    column — a missing or extra key raises at render (import) time,
+    which is where a drifted writer should fail. With `select_tail`
+    the statement is the set-based INSERT ... SELECT ... {tail};
+    without it, the single-row INSERT ... VALUES form.
+    """
+    missing = [c for c in HISTORY_PROJECTION_COLUMNS if c not in values]
+    extra = [c for c in values if c not in HISTORY_PROJECTION_COLUMNS]
+    if missing or extra:
+        raise ValueError(
+            f'history projection mismatch: missing={missing} extra={extra}'
+        )
+    columns = ',\n        '.join(HISTORY_PROJECTION_COLUMNS)
+    expressions = ',\n        '.join(
+        values[column] for column in HISTORY_PROJECTION_COLUMNS
+    )
+    if select_tail is None:
+        return (
+            f'INSERT INTO {TASK_HISTORY_PARENT} (\n'
+            f'        {columns}\n'
+            f'    ) VALUES (\n'
+            f'        {expressions}\n'
+            f'    )'
+        )
+    return (
+        f'INSERT INTO {TASK_HISTORY_PARENT} (\n'
+        f'        {columns}\n'
+        f'    )\n'
+        f'    SELECT\n'
+        f'        {expressions}\n'
+        f'    {select_tail}'
+    )
+
+
 def _projection_case() -> str:
     arms: list[str] = []
     for kind, status, message, deferred in KIND_PROJECTIONS:
@@ -258,6 +326,67 @@ AS $function$
     WHERE a.task_id = p_task_id
 $function$
 """
+
+
+def _single_row_history_insert() -> str:
+    """The single-row move's projection, over its declared variables."""
+    return history_insert_sql({
+        'task_id': 'v_task.id',
+        'task_name': 'v_task.task_name',
+        'queue_name': 'v_task.queue_name',
+        'priority': 'v_task.priority',
+        'command_fingerprint_version': 'v_task.command_fingerprint_version',
+        'command_fingerprint': 'v_task.command_fingerprint',
+        'status': 'p_terminal_status',
+        'terminalization_kind': 'p_terminalization_kind',
+        'terminal_at': 'p_terminal_at',
+        'retention_anchor_at': 'p_terminal_at',
+        'retention_class_key': 'v_task.retention_class_key',
+        'sent_at': 'v_task.sent_at',
+        'enqueued_at': 'v_task.enqueued_at',
+        'claimed_at': 'v_task.claimed_at',
+        'started_at': 'v_task.started_at',
+        'created_at': 'v_task.created_at',
+        'good_until': 'v_task.good_until',
+        'result_envelope_version': '1',
+        'result_codec': "'json-utf8'",
+        'result_content_type': "'application/json'",
+        'result_payload': 'v_result_payload',
+        'prior_result_payload': 'v_prior_result_payload',
+        'result_digest': (
+            'CASE WHEN v_result_payload IS NOT NULL\n'
+            '                 THEN sha256(v_result_payload)\n'
+            '             WHEN v_prior_result_payload IS NOT NULL\n'
+            '                 THEN sha256(v_prior_result_payload)\n'
+            '             ELSE NULL END'
+        ),
+        'error_code': 'p_error_code',
+        'final_failed_reason': 'p_failed_reason',
+        'retry_count': 'v_task.retry_count',
+        'max_retries': 'v_task.max_retries',
+        'last_claimed_worker_id': 'v_task.claimed_by_worker_id',
+        'last_worker_hostname': 'v_task.worker_hostname',
+        'last_worker_pid': 'v_task.worker_pid',
+        'last_worker_process_name': 'v_task.worker_process_name',
+        'input_digest': 'v_task.input_digest',
+        'rerun_of_task_id': 'v_task.rerun_of_task_id',
+        'rerun_root_task_id': 'v_task.rerun_root_task_id',
+        'workflow_id': 'v_workflow_id',
+        'is_workflow_task': 'v_task.is_workflow_task',
+        'history_schema_version': '1',
+        'attempt_archive_version': '1',
+        'attempt_snapshot_codec': "'json-utf8'",
+        'attempt_snapshot_content_type': "'application/json'",
+        'attempt_snapshot': 'v_attempt_snapshot',
+        'attempt_snapshot_digest': 'sha256(v_attempt_snapshot)',
+        'rerun_input_disposition': 'v_rerun_disposition',
+        'rerun_input_version': 'v_rerun_version',
+        'rerun_input_codec': 'v_rerun_codec',
+        'rerun_input_content_type': 'v_rerun_content_type',
+        'rerun_input_digest': 'v_rerun_digest',
+        'rerun_input_inline': 'v_rerun_inline',
+        'rerun_input_reference': 'v_rerun_reference',
+    })
 
 
 def _move_ddl() -> str:
@@ -406,53 +535,7 @@ BEGIN
         v_prior_result_payload := NULL;
     END IF;
 
-    INSERT INTO {TASK_HISTORY_PARENT} (
-        task_id, task_name, queue_name, priority,
-        command_fingerprint_version, command_fingerprint, status,
-        terminalization_kind, terminal_at, retention_anchor_at,
-        retention_class_key, sent_at, enqueued_at, claimed_at,
-        started_at, created_at, good_until,
-        result_envelope_version, result_codec, result_content_type,
-        result_payload, prior_result_payload, result_digest,
-        error_code, final_failed_reason,
-        retry_count, max_retries,
-        last_claimed_worker_id, last_worker_hostname,
-        last_worker_pid, last_worker_process_name,
-        input_digest, rerun_of_task_id, rerun_root_task_id,
-        workflow_id, is_workflow_task, history_schema_version,
-        attempt_archive_version, attempt_snapshot_codec,
-        attempt_snapshot_content_type, attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition, rerun_input_version, rerun_input_codec,
-        rerun_input_content_type, rerun_input_digest,
-        rerun_input_inline, rerun_input_reference
-    ) VALUES (
-        v_task.id, v_task.task_name, v_task.queue_name, v_task.priority,
-        v_task.command_fingerprint_version, v_task.command_fingerprint,
-        p_terminal_status, p_terminalization_kind,
-        p_terminal_at, p_terminal_at, v_task.retention_class_key,
-        v_task.sent_at, v_task.enqueued_at, v_task.claimed_at,
-        v_task.started_at, v_task.created_at, v_task.good_until,
-        1, 'json-utf8', 'application/json',
-        v_result_payload, v_prior_result_payload,
-        CASE WHEN v_result_payload IS NOT NULL
-                 THEN sha256(v_result_payload)
-             WHEN v_prior_result_payload IS NOT NULL
-                 THEN sha256(v_prior_result_payload)
-             ELSE NULL END,
-        p_error_code, p_failed_reason,
-        v_task.retry_count, v_task.max_retries,
-        v_task.claimed_by_worker_id, v_task.worker_hostname,
-        v_task.worker_pid, v_task.worker_process_name,
-        v_task.input_digest, v_task.rerun_of_task_id,
-        v_task.rerun_root_task_id,
-        v_workflow_id, v_task.is_workflow_task, 1,
-        1, 'json-utf8', 'application/json', v_attempt_snapshot,
-        sha256(v_attempt_snapshot),
-        v_rerun_disposition, v_rerun_version, v_rerun_codec,
-        v_rerun_content_type, v_rerun_digest,
-        v_rerun_inline, v_rerun_reference
-    );
+    {_single_row_history_insert()};
     GET DIAGNOSTICS v_history_rows = ROW_COUNT;
     IF v_history_rows <> 1 THEN
         RAISE EXCEPTION 'terminal history insert did not affect one row';
@@ -855,6 +938,95 @@ $function$
 """
 
 
+def rerun_carriage_expression(column: str) -> str:
+    """One envelope-carriage column, gated on the shared ladder's verdict."""
+    return (
+        "CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')\n"
+        f'             THEN t.prepared_rerun_input_{column} END'
+    )
+
+
+def _batch_history_insert(
+    *,
+    status: str,
+    kind: TerminalizationKind,
+    error_expression: str,
+    reason_expression: str,
+    linkage_join: str,
+    disposition_case: str,
+    ids_var: str,
+) -> str:
+    """The batch families' projection, over the shared column authority."""
+    return history_insert_sql(
+        {
+            'task_id': 't.id',
+            'task_name': 't.task_name',
+            'queue_name': 't.queue_name',
+            'priority': 't.priority',
+            'command_fingerprint_version': 't.command_fingerprint_version',
+            'command_fingerprint': 't.command_fingerprint',
+            'status': f"'{status}'",
+            'terminalization_kind': f"'{kind.value}'",
+            'terminal_at': 'v_terminal_at',
+            'retention_anchor_at': 'v_terminal_at',
+            'retention_class_key': 't.retention_class_key',
+            'sent_at': 't.sent_at',
+            'enqueued_at': 't.enqueued_at',
+            'claimed_at': 't.claimed_at',
+            'started_at': 't.started_at',
+            'created_at': 't.created_at',
+            'good_until': 't.good_until',
+            'result_envelope_version': '1',
+            'result_codec': "'json-utf8'",
+            'result_content_type': "'application/json'",
+            'result_payload': 'v_result_payload',
+            'prior_result_payload': 'NULL',
+            'result_digest': (
+                'CASE WHEN v_result_payload IS NULL THEN NULL\n'
+                '             ELSE sha256(v_result_payload) END'
+            ),
+            'error_code': error_expression,
+            'final_failed_reason': reason_expression,
+            'retry_count': 't.retry_count',
+            'max_retries': 't.max_retries',
+            'last_claimed_worker_id': 't.claimed_by_worker_id',
+            'last_worker_hostname': 't.worker_hostname',
+            'last_worker_pid': 't.worker_pid',
+            'last_worker_process_name': 't.worker_process_name',
+            'input_digest': 't.input_digest',
+            'rerun_of_task_id': 't.rerun_of_task_id',
+            'rerun_root_task_id': 't.rerun_root_task_id',
+            'workflow_id': (
+                'CASE WHEN t.is_workflow_task THEN n.workflow_id END'
+            ),
+            'is_workflow_task': 't.is_workflow_task',
+            'history_schema_version': '1',
+            'attempt_archive_version': '1',
+            'attempt_snapshot_codec': "'json-utf8'",
+            'attempt_snapshot_content_type': "'application/json'",
+            'attempt_snapshot': f'{ATTEMPT_ENCODER_FUNCTION}(t.id)',
+            'attempt_snapshot_digest': (
+                f'sha256({ATTEMPT_ENCODER_FUNCTION}(t.id))'
+            ),
+            'rerun_input_disposition': 'd.disposition',
+            'rerun_input_version': rerun_carriage_expression('version'),
+            'rerun_input_codec': rerun_carriage_expression('codec'),
+            'rerun_input_content_type': rerun_carriage_expression('content_type'),
+            'rerun_input_digest': rerun_carriage_expression('digest'),
+            'rerun_input_inline': rerun_carriage_expression('inline'),
+            'rerun_input_reference': rerun_carriage_expression('reference'),
+        },
+        select_tail=(
+            f'FROM {LIVE_TASKS} t\n'
+            f'    {linkage_join}\n'
+            f'    CROSS JOIN LATERAL (\n'
+            f'        SELECT {disposition_case} AS disposition\n'
+            f'    ) d\n'
+            f'    WHERE t.id = ANY({ids_var})'
+        ),
+    )
+
+
 def _move_stage_core(
     *,
     kind: TerminalizationKind,
@@ -963,67 +1135,15 @@ def _move_stage_core(
         ELSE convert_to(({result_expression}), 'UTF8')
     END;
 
-    INSERT INTO {TASK_HISTORY_PARENT} (
-        task_id, task_name, queue_name, priority,
-        command_fingerprint_version, command_fingerprint, status,
-        terminalization_kind, terminal_at, retention_anchor_at,
-        retention_class_key, sent_at, enqueued_at, claimed_at,
-        started_at, created_at, good_until,
-        result_envelope_version, result_codec, result_content_type,
-        result_payload, prior_result_payload, result_digest,
-        error_code, final_failed_reason,
-        retry_count, max_retries,
-        last_claimed_worker_id, last_worker_hostname,
-        last_worker_pid, last_worker_process_name,
-        input_digest, rerun_of_task_id, rerun_root_task_id,
-        workflow_id, is_workflow_task, history_schema_version,
-        attempt_archive_version, attempt_snapshot_codec,
-        attempt_snapshot_content_type, attempt_snapshot,
-        attempt_snapshot_digest,
-        rerun_input_disposition, rerun_input_version, rerun_input_codec,
-        rerun_input_content_type, rerun_input_digest,
-        rerun_input_inline, rerun_input_reference
-    )
-    SELECT
-        t.id, t.task_name, t.queue_name, t.priority,
-        t.command_fingerprint_version, t.command_fingerprint,
-        '{status}', '{kind.value}',
-        v_terminal_at, v_terminal_at, t.retention_class_key,
-        t.sent_at, t.enqueued_at, t.claimed_at,
-        t.started_at, t.created_at, t.good_until,
-        1, 'json-utf8', 'application/json',
-        v_result_payload, NULL,
-        CASE WHEN v_result_payload IS NULL THEN NULL
-             ELSE sha256(v_result_payload) END,
-        {error_expression}, {reason_expression},
-        t.retry_count, t.max_retries,
-        t.claimed_by_worker_id, t.worker_hostname,
-        t.worker_pid, t.worker_process_name,
-        t.input_digest, t.rerun_of_task_id, t.rerun_root_task_id,
-        CASE WHEN t.is_workflow_task THEN n.workflow_id END,
-        t.is_workflow_task, 1,
-        1, 'json-utf8', 'application/json',
-        {ATTEMPT_ENCODER_FUNCTION}(t.id),
-        sha256({ATTEMPT_ENCODER_FUNCTION}(t.id)),
-        d.disposition,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_version END,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_codec END,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_content_type END,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_digest END,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_inline END,
-        CASE WHEN d.disposition IN ('INLINE', 'REFERENCE')
-             THEN t.prepared_rerun_input_reference END
-    FROM {LIVE_TASKS} t
-    {linkage_join}
-    CROSS JOIN LATERAL (
-        SELECT {disposition_case} AS disposition
-    ) d
-    WHERE t.id = ANY({ids_var});
+    {_batch_history_insert(
+        status=status,
+        kind=kind,
+        error_expression=error_expression,
+        reason_expression=reason_expression,
+        linkage_join=linkage_join,
+        disposition_case=disposition_case,
+        ids_var=ids_var,
+    )};
     GET DIAGNOSTICS v_moved = ROW_COUNT;
     IF v_moved <> cardinality({ids_var}) THEN
         RAISE EXCEPTION 'batch history insert moved % of % rows',

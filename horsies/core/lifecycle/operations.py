@@ -65,6 +65,15 @@ class TerminalizationKind(Enum):
     WORKFLOW_CANCEL_CLAIM = 'WORKFLOW_CANCEL_CLAIM'
     WORKFLOW_CANCEL_CLAIM_BATCH = 'WORKFLOW_CANCEL_CLAIM_BATCH'
     WORKFLOW_CANCEL_WORKFLOW = 'WORKFLOW_CANCEL_WORKFLOW'
+    LEGACY_TERMINAL = 'LEGACY_TERMINAL'
+    """Relocated at cutover; terminalized by pre-history code, family
+    unrecorded. A true statement where any wire kind would be a guess:
+    an immutable archive must never contain inferred provenance. Not a
+    wire family — no move operation accepts it, and the miss classifier
+    treats it as foreign by design (unreachable post-cutover: every
+    pre-cutover claim died at the drain, so no worker replays against a
+    legacy row; conservative if somehow reached). Admits all four
+    legacy terminal statuses."""
 
 
 # Kinds whose committed effect is interchangeable. A replay that finds one of
@@ -101,6 +110,12 @@ EQUIVALENCE_CLASSES: tuple[frozenset[TerminalizationKind], ...] = (
         TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
         TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW,
     }),
+    # Its own class: no wire operation shares a family with a relocated
+    # legacy row, so any replay that finds it committed has been
+    # overtaken by a foreign event — the conservative verdict, and the
+    # path is unreachable post-cutover anyway (every pre-cutover claim
+    # died at the drain).
+    frozenset({TerminalizationKind.LEGACY_TERMINAL}),
 )
 
 

@@ -162,10 +162,16 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_TERMINAL_AT_COLUMN_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
     ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
+    ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL,
+    ADD_RERUN_INPUT_COLUMNS_SQL,
+    CREATE_HISTORY_FOUNDATION_SQL,
     CREATE_KEY_RESERVATIONS_TABLE_SQL,
     CREATE_RESERVATION_PROGRAM_SQL,
+    CREATE_RESERVATION_REGISTRY_INDEXES_SQL,
     DROP_RESERVATION_PROGRAM_SQL,
     KEY_RESERVATIONS_TABLE_EXISTS_SQL,
+    RESERVATION_REGISTRY_INDEX_EXISTS_SQL,
+    TASK_HISTORY_PARENT_EXISTS_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -902,6 +908,36 @@ class PostgresBroker:
             for create_statement in CREATE_RESERVATION_PROGRAM_SQL:
                 await conn.execute(create_statement)
 
+            # Migration (v29): the task-history foundation at its final
+            # shape — the frozen program minus the v28-owned entries,
+            # then the two gated column families while the parent is
+            # empty (born final; the NOT NULL columns are addable only
+            # now). The parent carries NO leaves at emission: leaf
+            # creation is partition-manager runtime owned by the
+            # cutover, so an empty partitioned parent here is designed,
+            # not defective. Parent existence implies the whole block
+            # applied — it runs in this one transaction.
+            history_parent_exists = (
+                await conn.execute(TASK_HISTORY_PARENT_EXISTS_SQL)
+            ).scalar_one()
+            if not history_parent_exists:
+                for statement in CREATE_HISTORY_FOUNDATION_SQL:
+                    await conn.execute(statement)
+                for statement in ADD_ATTEMPT_SNAPSHOT_COLUMNS_SQL:
+                    await conn.execute(statement)
+                for statement in ADD_RERUN_INPUT_COLUMNS_SQL:
+                    await conn.execute(statement)
+
+            # Migration (v30): the registry maintenance indexes, closing
+            # v28's recorded deliberate absence on the already-deployed
+            # registry.
+            registry_index_exists = (
+                await conn.execute(RESERVATION_REGISTRY_INDEX_EXISTS_SQL)
+            ).scalar_one()
+            if not registry_index_exists:
+                for statement in CREATE_RESERVATION_REGISTRY_INDEXES_SQL:
+                    await conn.execute(statement)
+
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -1061,9 +1097,14 @@ class PostgresBroker:
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         retention_class_key: str = 'forever',
-        retain_rerun_input: bool = False,
+        retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
+        # The ratified retention posture: an app-level default with a
+        # per-task override, resolved here and snapshotted at enqueue.
+        # None means inherit the deployment's standing policy.
+        if retain_rerun_input is None:
+            retain_rerun_input = self.config.retain_rerun_input_default
         if enqueued_at is not None and enqueue_delay_seconds is not None:
             return _broker_err(
                 BrokerErrorCode.ENQUEUE_FAILED,

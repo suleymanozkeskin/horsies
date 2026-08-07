@@ -63,6 +63,26 @@ def frozen_fragments() -> tuple[str, ...]:
     )
 
 
+def history_foundation_fragments() -> tuple[str, ...]:
+    """The frozen program minus the entries the v28 migration owns.
+
+    The v28 migration emitted the reservation registry table and
+    re-applies the reservation function program on every pass;
+    re-emitting either here would create a second owner. The
+    subtraction is computed by imported identity — membership against
+    the same objects the frozen list itself composes — so this list
+    and the frozen list cannot drift.
+    """
+    v28_owned = frozenset(
+        (KEY_RESERVATIONS_DDL, *reservation_function_fragments())
+    )
+    return tuple(
+        fragment
+        for fragment in frozen_fragments()
+        if fragment not in v28_owned
+    )
+
+
 def cutover_fragments() -> tuple[str, ...]:
     """Statements deferred to the hard cutover's identifier conversion.
 

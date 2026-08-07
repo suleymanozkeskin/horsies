@@ -430,8 +430,14 @@ class TestWorkflowNodeFamily:
             TerminalizationKind.EXPIRE_PENDING,
             TerminalizationKind.CANCEL_ORPHAN_SWEEP,
         }
-        assert classified | batch_only == set(TerminalizationKind)
-        assert not classified & batch_only
+        # Written only by the cutover relocation; no wire family, and
+        # the single-row move's ELSE arm rejects it.
+        relocation_only = {TerminalizationKind.LEGACY_TERMINAL}
+        assert (
+            classified | batch_only | relocation_only
+            == set(TerminalizationKind)
+        )
+        assert not classified & (batch_only | relocation_only)
 
     @pytest.mark.parametrize(
         'batch', [*workflow_node_family_fragments()[2:4]]
@@ -494,12 +500,22 @@ class TestWorkflowNodeFamily:
         assert "t2.status IN ('PENDING', 'CLAIMED', 'RUNNING')" in cancelled
 
     def test_workflow_cancel_kinds_archive_null_summaries(self) -> None:
+        import re
+
         cancel_single = workflow_node_family_fragments()[1]
         assert 'NULL, NULL, NULL' in cancel_single
-        cancel_batch = workflow_node_family_fragments()[3]
-        assert 'NULL, NULL,' in cancel_batch
-        cancelled_sweep = workflow_node_family_fragments()[5]
-        assert 'NULL, NULL,' in cancelled_sweep
+        # Batch projection order pins error_code and final_failed_reason
+        # (the two expressions after result_digest's CASE) to NULL;
+        # whitespace-independent because the projection renders from the
+        # shared column authority, one expression per line.
+        for fragment in (
+            workflow_node_family_fragments()[3],
+            workflow_node_family_fragments()[5],
+        ):
+            assert re.search(
+                r'sha256\(v_result_payload\) END,\s*NULL,\s*NULL,',
+                fragment,
+            )
 
     def test_requeued_pending_carve_out_is_single_only(self) -> None:
         single = workflow_node_family_fragments()[1]
@@ -572,3 +588,48 @@ class TestLiveCutover:
     def test_no_defaults_on_classification_columns(self) -> None:
         combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
         assert 'DEFAULT' not in combined
+
+
+class TestTighteningRendering:
+    """Three renderings, one structured authority, no text parsing."""
+
+    def test_set_not_null_covers_exactly_the_declared_columns(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+            tightening_cutover_ddl,
+        )
+
+        rendered = '\n'.join(tightening_cutover_ddl())
+        for column in CUTOVER_COLUMNS:
+            clause = f'ALTER COLUMN {column.name} SET NOT NULL'
+            assert (clause in rendered) is column.not_null, column.name
+
+    def test_every_declared_check_lands_once(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+            tightening_cutover_ddl,
+        )
+
+        rendered = tightening_cutover_ddl()
+        checked = [c for c in CUTOVER_COLUMNS if c.check is not None]
+        constraint_statements = [
+            s for s in rendered if 'ADD CONSTRAINT' in s
+        ]
+        # One per declared column check, plus the lineage pair.
+        assert len(constraint_statements) == len(checked) + 1
+        assert any(
+            'rerun_lineage_pair' in s for s in constraint_statements
+        )
+
+    def test_final_and_transitional_share_the_column_set(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            LIVE_CUTOVER_COLUMNS_DDL,
+            cutover_column_definitions,
+            transitional_cutover_columns_ddl,
+        )
+
+        final = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
+        transitional = transitional_cutover_columns_ddl()
+        for name, _ in cutover_column_definitions():
+            assert f'ADD COLUMN {name} ' in final
+            assert f'ADD COLUMN IF NOT EXISTS {name} ' in transitional
