@@ -134,7 +134,7 @@ def _archive_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         *_history_partitions(namespace, 'history_copartitioned'),
         f"""
         CREATE TABLE {namespace}.attempts_copartitioned (
-            task_id varchar(36) NOT NULL,
+            task_id uuid NOT NULL,
             retention_class_key text NOT NULL,
             retention_anchor_at timestamptz NOT NULL,
             attempt_archive_version smallint NOT NULL,
@@ -164,7 +164,7 @@ def _common_history_columns(
     terminalization_kinds: str,
 ) -> str:
     return f"""
-        task_id varchar(36) NOT NULL,
+        task_id uuid NOT NULL,
         task_name varchar(255) NOT NULL,
         queue_name varchar(100) NOT NULL,
         priority integer NOT NULL CHECK (priority BETWEEN 1 AND 100),
@@ -203,8 +203,8 @@ def _common_history_columns(
         error_code text,
         final_failed_reason text,
         prior_result_payload bytea,
-        rerun_of_task_id varchar(36),
-        rerun_root_task_id varchar(36),
+        rerun_of_task_id uuid,
+        rerun_root_task_id uuid,
         input_digest bytea,
         rerun_input_version smallint,
         rerun_input_codec varchar(64),
@@ -213,7 +213,7 @@ def _common_history_columns(
         rerun_input_digest bytea,
         rerun_input_inline bytea,
         rerun_input_reference varchar(2048),
-        workflow_id varchar(36),
+        workflow_id uuid,
         is_workflow_task boolean NOT NULL,
         history_schema_version smallint NOT NULL
             CHECK (history_schema_version > 0),

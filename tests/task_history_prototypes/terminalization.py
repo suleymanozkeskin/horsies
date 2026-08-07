@@ -32,8 +32,12 @@ async def install_history_terminalization_prototype(
 
 def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
     namespace = schema.sql
+    # The chain vocabulary declares task_id varchar (its era); the move
+    # program's outcome carries uuid identity. Track the source and flip
+    # only the identity column, mirroring the production uuid-era type.
     outcome_columns = ',\n            '.join(
-        f'{name} {kind}' for name, kind in OUTCOME_COLUMNS
+        f'{name} {"uuid" if name == "task_id" else kind}'
+        for name, kind in OUTCOME_COLUMNS
     )
     return (
         f"""
@@ -56,8 +60,8 @@ def _terminalization_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             ADD COLUMN retention_class_key text NOT NULL
                 DEFAULT 'finite_30d_v1'
                 REFERENCES {namespace}.retention_classes(class_key),
-            ADD COLUMN rerun_of_task_id varchar(36),
-            ADD COLUMN rerun_root_task_id varchar(36),
+            ADD COLUMN rerun_of_task_id uuid,
+            ADD COLUMN rerun_root_task_id uuid,
             ADD COLUMN input_digest bytea,
             ADD CHECK (
                 input_digest IS NULL OR octet_length(input_digest) = 32
@@ -140,19 +144,19 @@ def _archive_availability_function(namespace: str) -> str:
 
 def _task_notification_function(namespace: str) -> str:
     return f"""
-    CREATE FUNCTION {namespace}.emit_task_done(p_task_id varchar)
+    CREATE FUNCTION {namespace}.emit_task_done(p_task_id uuid)
     RETURNS void
     LANGUAGE sql
     STRICT
     AS $function$
-        SELECT pg_notify('task_done', p_task_id)
+        SELECT pg_notify('task_done', p_task_id::text)
     $function$
     """
 
 
 def _attempt_snapshot_function(namespace: str) -> str:
     return f"""
-    CREATE FUNCTION {namespace}.encode_live_attempts(p_task_id varchar)
+    CREATE FUNCTION {namespace}.encode_live_attempts(p_task_id uuid)
     RETURNS bytea
     LANGUAGE sql
     STABLE
@@ -199,7 +203,7 @@ def _attempt_snapshot_function(namespace: str) -> str:
 def _move_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.move_locked_task_to_history(
-        p_task_id varchar,
+        p_task_id uuid,
         p_terminal_status text,
         p_terminalization_kind text,
         p_terminal_at timestamptz,
@@ -214,7 +218,7 @@ def _move_function(namespace: str) -> str:
         v_attempt_snapshot bytea;
         v_result_payload bytea;
         v_prior_result_payload bytea;
-        v_workflow_id varchar(36);
+        v_workflow_id uuid;
         v_workflow_node_row_id bigint;
         v_history_rows bigint;
         v_deleted_rows bigint;
@@ -397,7 +401,7 @@ def _move_function(namespace: str) -> str:
                 p_terminal_status, p_terminal_at, p_terminalization_kind,
                 'HISTORY', v_task.retention_class_key, p_terminal_at,
                 1, sha256(v_result_payload),
-                gen_random_uuid()::text, statement_timestamp()
+                gen_random_uuid(), statement_timestamp()
             );
         END IF;
 
@@ -416,7 +420,7 @@ def _move_function(namespace: str) -> str:
 def _miss_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.terminalization_miss(
-        p_task_id varchar,
+        p_task_id uuid,
         p_equivalent_kinds text[],
         p_worker_id text,
         p_claimed_at timestamptz
@@ -430,7 +434,7 @@ def _miss_function(namespace: str) -> str:
         v_live_found boolean;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT * INTO v_live
         FROM {namespace}.live_tasks
         WHERE id = p_task_id
@@ -497,7 +501,7 @@ def _miss_function(namespace: str) -> str:
 def _complete_locked_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_complete_locked_task(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_result text
     ) RETURNS SETOF {namespace}.terminalization_outcome
@@ -508,7 +512,7 @@ def _complete_locked_function(namespace: str) -> str:
         v_terminal_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT claimed_at INTO v_claimed_at
         FROM {namespace}.live_tasks
         WHERE id = p_task_id
@@ -546,7 +550,7 @@ def _complete_locked_function(namespace: str) -> str:
 def _complete_fused_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_complete_task_fused(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_claimed_at timestamptz,
         p_result text,
@@ -561,7 +565,7 @@ def _complete_fused_function(namespace: str) -> str:
         v_finished_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT * INTO v_task
         FROM {namespace}.live_tasks
         WHERE id = p_task_id
@@ -628,7 +632,7 @@ def _complete_fused_function(namespace: str) -> str:
 def _fail_locked_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_fail_locked_task(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_result text,
         p_error_code text,
@@ -641,7 +645,7 @@ def _fail_locked_function(namespace: str) -> str:
         v_terminal_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT claimed_at INTO v_claimed_at
         FROM {namespace}.live_tasks
         WHERE id = p_task_id
@@ -676,7 +680,7 @@ def _fail_locked_function(namespace: str) -> str:
 def _fail_stale_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_fail_stale_task(
-        p_task_id varchar,
+        p_task_id uuid,
         p_stale_after_ms integer,
         p_finalizing_stale_after_ms integer,
         p_result text,
@@ -696,7 +700,7 @@ def _fail_stale_function(namespace: str) -> str:
         v_evaluated_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT t.status::text, t.claimed_by_worker_id, t.claimed_at,
                t.started_at, t.finalizing_at,
                (
@@ -772,7 +776,7 @@ def _fail_stale_function(namespace: str) -> str:
 def _expire_owned_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_expire_owned_claim(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_result text,
         p_error_code text
@@ -787,7 +791,7 @@ def _expire_owned_function(namespace: str) -> str:
         v_evaluated_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT status::text, claimed_by_worker_id, claimed_at,
                good_until, NOW()
         INTO v_status, v_worker, v_claimed_at,
@@ -965,7 +969,7 @@ def _expire_pending_function(namespace: str) -> str:
                    history.terminalization_kind, 'HISTORY',
                    target.retention_class_key, history.terminal_at,
                    1, sha256(target.encoded_result),
-                   gen_random_uuid()::text, statement_timestamp()
+                   gen_random_uuid(), statement_timestamp()
             FROM targets AS target
             JOIN history_rows AS history ON history.task_id = target.id
             WHERE target.is_workflow_task
@@ -1016,7 +1020,7 @@ def _expire_pending_function(namespace: str) -> str:
 def _cancel_admin_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_cancel_locked_task(
-        p_task_id varchar,
+        p_task_id uuid,
         p_permitted_source_statuses text[]
     ) RETURNS SETOF {namespace}.terminalization_outcome
     LANGUAGE plpgsql
@@ -1028,7 +1032,7 @@ def _cancel_admin_function(namespace: str) -> str:
         v_terminal_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT status::text, claimed_by_worker_id, claimed_at
         INTO v_status, v_worker, v_claimed_at
         FROM {namespace}.live_tasks
@@ -1066,7 +1070,7 @@ def _cancel_admin_function(namespace: str) -> str:
 def _cancel_owned_orphan_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_cancel_owned_orphan(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_claimed_at timestamptz
     ) RETURNS SETOF {namespace}.terminalization_outcome
@@ -1082,7 +1086,7 @@ def _cancel_owned_orphan_function(namespace: str) -> str:
         v_terminal_at timestamptz;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT task.status::text, task.claimed_by_worker_id,
                task.claimed_at, task.is_workflow_task, task.result,
                (
@@ -1294,7 +1298,7 @@ def _cancel_orphaned_batch_function(namespace: str) -> str:
 def _abandon_owned_node_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_abandon_owned_node(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_claimed_at timestamptz
     ) RETURNS SETOF {namespace}.terminalization_outcome
@@ -1309,7 +1313,7 @@ def _abandon_owned_node_function(namespace: str) -> str:
         v_node_rows bigint;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT status::text, claimed_by_worker_id, claimed_at, result
         INTO v_status, v_worker, v_claimed_at, v_result
         FROM {namespace}.live_tasks
@@ -1360,7 +1364,7 @@ def _abandon_owned_node_function(namespace: str) -> str:
 def _cancel_owned_node_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.horsies_cancel_owned_node(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_claimed_at timestamptz,
         p_accepts_requeued_pending boolean
@@ -1378,7 +1382,7 @@ def _cancel_owned_node_function(namespace: str) -> str:
         v_node_rows bigint;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
         SELECT status::text, claimed_by_worker_id, claimed_at,
                result, error_code, failed_reason
         INTO v_status, v_worker, v_claimed_at,
@@ -1459,7 +1463,7 @@ def _owned_node_batch_function(namespace: str, *, pause: bool) -> str:
     equivalent_array = ', '.join(f"'{item}'" for item in equivalent_kinds)
     return f"""
     CREATE FUNCTION {namespace}.{function_name}(
-        p_ids varchar[],
+        p_ids uuid[],
         p_claimed_ats timestamptz[],
         p_worker_id text
     ) RETURNS SETOF {namespace}.terminalization_outcome
@@ -1692,7 +1696,7 @@ def _workflow_scoped_batch_function(namespace: str, *, pause: bool) -> str:
         reason_projection = 'target.failed_reason'
     return f"""
     CREATE FUNCTION {namespace}.{function_name}(
-        p_workflow_ids varchar[]
+        p_workflow_ids uuid[]
     ) RETURNS SETOF {namespace}.terminalization_outcome
     LANGUAGE plpgsql
     AS $function$

@@ -192,9 +192,9 @@ async def _complete_fused(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_complete_task_fused(
-                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:task_id AS uuid), :worker_id,
                     CAST(:claimed_at AS timestamptz), :result,
-                    'task_queue_default', :task_id
+                    'task_queue_default', CAST(:task_id AS text)
                 )
                 """
                 ),
@@ -225,7 +225,7 @@ async def _complete_locked(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_complete_locked_task(
-                    CAST(:task_id AS varchar), :worker_id, :result
+                    CAST(:task_id AS uuid), :worker_id, :result
                 )
                 """
                 ),
@@ -251,7 +251,7 @@ async def _fail_locked(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_fail_locked_task(
-                    CAST(:task_id AS varchar), :worker_id, :result,
+                    CAST(:task_id AS uuid), :worker_id, :result,
                     'TASK_EXCEPTION', 'final attempt failed'
                 )
                 """
@@ -279,7 +279,7 @@ async def _fail_stale(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_fail_stale_task(
-                    CAST(:task_id AS varchar), :stale_after_ms,
+                    CAST(:task_id AS uuid), :stale_after_ms,
                     :finalizing_stale_after_ms, :result,
                     'WORKER_LOST', 'stale runner'
                 )
@@ -312,7 +312,7 @@ async def _expire_owned(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_expire_owned_claim(
-                    CAST(:task_id AS varchar), :worker_id, :result,
+                    CAST(:task_id AS uuid), :worker_id, :result,
                     'TASK_EXPIRED'
                 )
                 """
@@ -364,7 +364,7 @@ async def _cancel_admin(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_cancel_locked_task(
-                    CAST(:task_id AS varchar),
+                    CAST(:task_id AS uuid),
                     CAST(:statuses AS text[])
                 )
                 """
@@ -392,7 +392,7 @@ async def _cancel_owned_orphan(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_cancel_owned_orphan(
-                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:task_id AS uuid), :worker_id,
                     CAST(:claimed_at AS timestamptz)
                 )
                 """
@@ -449,7 +449,7 @@ async def _abandon_owned_node(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_abandon_owned_node(
-                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:task_id AS uuid), :worker_id,
                     CAST(:claimed_at AS timestamptz)
                 )
                 """
@@ -482,7 +482,7 @@ async def _cancel_owned_node(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.horsies_cancel_owned_node(
-                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:task_id AS uuid), :worker_id,
                     CAST(:claimed_at AS timestamptz),
                     :accepts_requeued_pending
                 )
@@ -519,7 +519,7 @@ async def _owned_node_batch(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.{function_name}(
-                    CAST(:ids AS varchar[]),
+                    CAST(:ids AS uuid[]),
                     CAST(:claimed_ats AS timestamptz[]),
                     :worker_id
                 )
@@ -556,7 +556,7 @@ async def _workflow_scoped_batch(
                 text(
                     f"""
                 SELECT * FROM {schema.sql}.{function_name}(
-                    CAST(:workflow_ids AS varchar[])
+                    CAST(:workflow_ids AS uuid[])
                 )
                 """
                 ),
@@ -859,8 +859,8 @@ async def test_workflow_completion_creates_precise_pending_and_phase2_applies(
             text(
                 f"""
                 SELECT {schema.sql}.apply_phase2(
-                    CAST(:task_id AS varchar(36)),
-                    CAST(:generation AS varchar(36))
+                    CAST(:task_id AS uuid),
+                    CAST(:generation AS uuid)
                 )::text
                 """
             ),
@@ -943,8 +943,8 @@ async def test_workflow_failure_archives_attempt_and_defers_phase2(
             text(
                 f"""
                 SELECT {schema.sql}.apply_phase2(
-                    CAST(:task_id AS varchar(36)),
-                    CAST(:generation AS varchar(36))
+                    CAST(:task_id AS uuid),
+                    CAST(:generation AS uuid)
                 )::text
                 """
             ),
@@ -1736,14 +1736,25 @@ async def test_pairwise_cancel_batch_preserves_summary_and_skips_node(
     )
 
 
+# Identity inputs are uuid-shaped: a non-uuid string dies at the CAST
+# before any function precondition can speak, so the precondition
+# evidence uses well-formed ids throughout.
+_BATCH_ID_ONE = '00000000-0000-4000-8000-000000000001'
+_BATCH_ID_DUP = '00000000-0000-4000-8000-00000000000d'
+
+
 @pytest.mark.parametrize(
     ('ids', 'claimed_ats', 'message'),
     [
         (None, None, 'non-NULL'),
-        (['one'], [], 'lengths differ'),
-        (['one', None], [_GENERATION, _GENERATION], 'ids must be non-NULL'),
+        ([_BATCH_ID_ONE], [], 'lengths differ'),
         (
-            ['duplicate', 'duplicate'],
+            [_BATCH_ID_ONE, None],
+            [_GENERATION, _GENERATION],
+            'ids must be non-NULL',
+        ),
+        (
+            [_BATCH_ID_DUP, _BATCH_ID_DUP],
             [_GENERATION, _GENERATION],
             'ids must be distinct',
         ),
@@ -1939,8 +1950,11 @@ async def test_prototype_catalog_contains_exact_terminalization_function_set(
         'varchar': 'character varying',
         'timestamptz': 'timestamp with time zone',
     }
+    # The chain vocabulary spells task_id varchar; the prototype renders
+    # the move program's uuid-era outcome, flipping only the identity.
     expected_attributes = [
-        (name, postgres_spelling.get(kind, kind)) for name, kind in OUTCOME_COLUMNS
+        (name, 'uuid' if name == 'task_id' else postgres_spelling.get(kind, kind))
+        for name, kind in OUTCOME_COLUMNS
     ]
     assert [tuple(row) for row in outcome_attributes] == expected_attributes
 
@@ -1975,7 +1989,7 @@ async def test_terminalization_boundary_failure_rolls_back_every_relation(
                 text(
                     f"""
                     CREATE OR REPLACE FUNCTION
-                        {schema.sql}.encode_live_attempts(p_task_id varchar)
+                        {schema.sql}.encode_live_attempts(p_task_id uuid)
                     RETURNS bytea
                     LANGUAGE plpgsql
                     AS $function$
@@ -2022,7 +2036,7 @@ async def test_terminalization_boundary_failure_rolls_back_every_relation(
                 text(
                     f"""
                     CREATE OR REPLACE FUNCTION
-                        {schema.sql}.emit_task_done(p_task_id varchar)
+                        {schema.sql}.emit_task_done(p_task_id uuid)
                     RETURNS void
                     LANGUAGE plpgsql
                     AS $function$
@@ -2070,9 +2084,9 @@ async def test_capacity_notification_failure_rolls_back_fused_completion(
             text(
                 f"""
                 SELECT * FROM {schema.sql}.horsies_complete_task_fused(
-                    CAST(:task_id AS varchar), :worker_id,
+                    CAST(:task_id AS uuid), :worker_id,
                     CAST(:claimed_at AS timestamptz), :result,
-                    :channel, :task_id
+                    :channel, CAST(:task_id AS text)
                 )
                 """
             ),
