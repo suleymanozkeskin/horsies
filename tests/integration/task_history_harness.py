@@ -243,6 +243,14 @@ CREATE TABLE horsies_task_attempts (
 )
 """
 
+WORKFLOWS_STANDIN_DDL = """
+CREATE TABLE horsies_workflows (
+    id uuid PRIMARY KEY,
+    status text NOT NULL
+)
+"""
+"""Stand-in with the columns the workflow-scoped sweeps join on."""
+
 HEARTBEATS_STANDIN_DDL = """
 CREATE TABLE horsies_heartbeats (
     task_id uuid NOT NULL,
@@ -287,6 +295,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
             completion_family_fragments,
             expiry_family_fragments,
             failure_family_fragments,
+            workflow_node_family_fragments,
         )
         from horsies.core.history.terminalization.outcome import (
             outcome_fragments,
@@ -312,12 +321,14 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 FULL_LIVE_STANDIN_DDL,
                 ATTEMPTS_STANDIN_DDL,
                 WORKFLOW_TASKS_STANDIN_DDL,
+                WORKFLOWS_STANDIN_DDL,
                 HEARTBEATS_STANDIN_DDL,
                 *outcome_fragments(),
                 *completion_family_fragments(),
                 *failure_family_fragments(),
                 *expiry_family_fragments(),
                 *cancellation_family_fragments(),
+                *workflow_node_family_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))

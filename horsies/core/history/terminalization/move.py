@@ -46,6 +46,16 @@ ATTEMPT_ENCODER_FUNCTION: Final = 'horsies_encode_task_attempts'
 MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
 CANCEL_LOCKED_FUNCTION: Final = 'horsies_cancel_locked_task'
 CANCEL_ORPHAN_SWEEP_FUNCTION: Final = 'horsies_cancel_orphaned_tasks'
+ABANDON_OWNED_NODE_FUNCTION: Final = 'horsies_abandon_owned_node'
+ABANDON_OWNED_NODES_FUNCTION: Final = 'horsies_abandon_owned_nodes'
+ABANDON_PAUSED_SWEEP_FUNCTION: Final = (
+    'horsies_abandon_nodes_of_paused_workflows'
+)
+CANCEL_OWNED_NODE_FUNCTION: Final = 'horsies_cancel_owned_node'
+CANCEL_OWNED_NODES_FUNCTION: Final = 'horsies_cancel_owned_nodes'
+CANCEL_CANCELLED_SWEEP_FUNCTION: Final = (
+    'horsies_cancel_nodes_of_cancelled_workflow'
+)
 CANCEL_ORPHAN_FUNCTION: Final = 'horsies_cancel_owned_orphan'
 COMPLETE_LOCKED_FUNCTION: Final = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION: Final = 'horsies_complete_task_fused'
@@ -62,7 +72,7 @@ _TASK_LOCK_SEED: Final = 731
 # node-linkage lookup shape. The move's CASE renders from this table, so a
 # future family chooses its classification explicitly here rather than
 # inheriting a lookup shape by copy-paste.
-_KIND_PROJECTIONS: Final[
+KIND_PROJECTIONS: Final[
     tuple[tuple[TerminalizationKind, str, str, bool], ...]
 ] = (
     (
@@ -107,6 +117,42 @@ _KIND_PROJECTIONS: Final[
         'orphan-cancel projection disagrees',
         False,
     ),
+    (
+        TerminalizationKind.PAUSE_ABANDON_CLAIM,
+        'CANCELLED',
+        'pause-abandon projection disagrees',
+        False,
+    ),
+    (
+        TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH,
+        'CANCELLED',
+        'pause-abandon-batch projection disagrees',
+        False,
+    ),
+    (
+        TerminalizationKind.PAUSE_ABANDON_WORKFLOW,
+        'CANCELLED',
+        'paused-workflow-sweep projection disagrees',
+        False,
+    ),
+    (
+        TerminalizationKind.WORKFLOW_CANCEL_CLAIM,
+        'CANCELLED',
+        'workflow-cancel projection disagrees',
+        False,
+    ),
+    (
+        TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
+        'CANCELLED',
+        'workflow-cancel-batch projection disagrees',
+        False,
+    ),
+    (
+        TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW,
+        'CANCELLED',
+        'cancelled-workflow-sweep projection disagrees',
+        False,
+    ),
 )
 # Kinds whose wire contract forbids workflow-backing tasks entirely.
 _WORKFLOW_REJECTING_KINDS: Final[tuple[TerminalizationKind, ...]] = (
@@ -117,7 +163,7 @@ _WORKFLOW_REJECTING_KINDS: Final[tuple[TerminalizationKind, ...]] = (
 
 def _projection_case() -> str:
     arms: list[str] = []
-    for kind, status, message, deferred in _KIND_PROJECTIONS:
+    for kind, status, message, deferred in KIND_PROJECTIONS:
         arms.append(f"        WHEN '{kind.value}' THEN")
         arms.append(f"            IF p_terminal_status <> '{status}' THEN")
         arms.append(f"                RAISE EXCEPTION '{message}';")
@@ -797,27 +843,23 @@ $function$
 """
 
 
-def _batch_move_ddl(
+def _move_stage_core(
     *,
-    function_name: str,
-    parameters_sql: str,
     kind: TerminalizationKind,
     status: str,
-    discovery_sql: str,
     result_expression: str,
     error_expression: str,
     reason_expression: str,
     deferred: bool,
+    ids_var: str,
+    outcome_sql: str,
 ) -> str:
-    """The set-wise move skeleton, once.
+    """The move stages every batch shares, rendered once.
 
-    Load-bearing infrastructure: every discovery batch renders from this
-    builder, and the stage order — batch-size raise, availability,
-    locked discovery, deferred fence, linkage guard, per-row uniqueness,
-    history INSERT-SELECT with ladder and encoder, optional pending
-    stage, the registry module's set-wise reservation call, pre-image
-    outcome streaming, asserted deletes, per-row notify — is pinned once
-    at the builder level rather than per family.
+    From the deferred fence through the per-row notify: both the
+    discovery builder and the id-keyed builder compose this rendering
+    around their own selection semantics, so the set-wise move has one
+    implementation regardless of how a batch chooses its rows.
     """
     disposition_case = disposition_case_expression('t', f"'{status}'")
     fence_stage = ''
@@ -825,7 +867,7 @@ def _batch_move_ddl(
         fence_stage = f"""
     IF p_result IS NULL AND EXISTS (
         SELECT 1 FROM {LIVE_TASKS} t
-        WHERE t.id = ANY(v_ids) AND t.is_workflow_task
+        WHERE t.id = ANY({ids_var}) AND t.is_workflow_task
     ) THEN
         RAISE EXCEPTION
             'deferred workflow terminalization requires a result payload'
@@ -836,7 +878,7 @@ def _batch_move_ddl(
         linkage_guard = f"""
     IF EXISTS (
         SELECT 1 FROM {LIVE_TASKS} t
-        WHERE t.id = ANY(v_ids)
+        WHERE t.id = ANY({ids_var})
           AND t.is_workflow_task
           AND (SELECT count(*) FROM horsies_workflow_tasks n
                WHERE n.task_id = t.id) <> 1
@@ -853,7 +895,7 @@ def _batch_move_ddl(
         linkage_guard = f"""
     IF EXISTS (
         SELECT 1 FROM {LIVE_TASKS} t
-        WHERE t.id = ANY(v_ids)
+        WHERE t.id = ANY({ids_var})
           AND t.is_workflow_task
           AND (SELECT count(DISTINCT wt.workflow_id)
                FROM horsies_workflow_tasks wt
@@ -890,43 +932,12 @@ def _batch_move_ddl(
         gen_random_uuid(), statement_timestamp(), 0
     FROM {LIVE_TASKS} t
     JOIN horsies_workflow_tasks n ON n.task_id = t.id
-    WHERE t.id = ANY(v_ids) AND t.is_workflow_task;
+    WHERE t.id = ANY({ids_var}) AND t.is_workflow_task;
 """
-    return f"""
-CREATE FUNCTION {function_name}(
-{parameters_sql}
-)
-RETURNS SETOF {OUTCOME_TYPE}
-LANGUAGE plpgsql
-AS $function$
-DECLARE
-    v_ids uuid[];
-    v_terminal_at timestamptz;
-    v_moved bigint;
-    v_deleted bigint;
-    v_result_payload bytea;
-BEGIN
-    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
-        RAISE EXCEPTION
-            'p_batch_size must be a positive integer, got %', p_batch_size
-            USING ERRCODE = 'invalid_parameter_value';
-    END IF;
-    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
-
-    -- Discovery under the batch locking rule: SKIP LOCKED never waits on
-    -- a row lock, so this batch cannot join any deadlock cycle; rows held
-    -- by advisory-first singles are skipped and caught next sweep.
-    SELECT array_agg(s.id) INTO v_ids
-    FROM (
-{discovery_sql}
-    ) s;
-    IF v_ids IS NULL THEN
-        RETURN;
-    END IF;
-{fence_stage}{linkage_guard}
+    return f"""{fence_stage}{linkage_guard}
     -- Per-row uniqueness guard through the staged mechanism.
     IF EXISTS (
-        SELECT 1 FROM unnest(v_ids) AS u(tid)
+        SELECT 1 FROM unnest({ids_var}) AS u(tid)
         WHERE (SELECT found FROM {TASK_PROVENANCE_FUNCTION}(u.tid, FALSE))
     ) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
@@ -999,27 +1010,42 @@ BEGIN
     CROSS JOIN LATERAL (
         SELECT {disposition_case} AS disposition
     ) d
-    WHERE t.id = ANY(v_ids);
+    WHERE t.id = ANY({ids_var});
     GET DIAGNOSTICS v_moved = ROW_COUNT;
-    IF v_moved <> cardinality(v_ids) THEN
+    IF v_moved <> cardinality({ids_var}) THEN
         RAISE EXCEPTION 'batch history insert moved % of % rows',
-            v_moved, cardinality(v_ids);
+            v_moved, cardinality({ids_var});
     END IF;
 {pending_stage}
     -- The reservation transition has ONE owner: the registry module.
     PERFORM horsies_key_reservation_terminalize_batch(
         (SELECT COALESCE(array_agg(t.idempotency_key_digest), '{{}}')
          FROM {LIVE_TASKS} t
-         WHERE t.id = ANY(v_ids)
+         WHERE t.id = ANY({ids_var})
            AND t.idempotency_key_digest IS NOT NULL),
         (SELECT COALESCE(array_agg(t.id), '{{}}')
          FROM {LIVE_TASKS} t
-         WHERE t.id = ANY(v_ids)
+         WHERE t.id = ANY({ids_var})
            AND t.idempotency_key_digest IS NOT NULL),
         v_terminal_at
     );
 
-    -- Outcome rows stream from the still-locked live rows BEFORE the
+{outcome_sql}
+    DELETE FROM {LIVE_ATTEMPTS} WHERE task_id = ANY({ids_var});
+    DELETE FROM {LIVE_TASKS} WHERE id = ANY({ids_var});
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    IF v_deleted <> cardinality({ids_var}) THEN
+        RAISE EXCEPTION 'batch live delete removed % of % rows',
+            v_deleted, cardinality({ids_var});
+    END IF;
+
+    PERFORM pg_notify('task_done', u.tid::text)
+    FROM unnest({ids_var}) AS u(tid);
+"""
+
+
+def _discovery_outcome_sql(kind: TerminalizationKind, ids_var: str) -> str:
+    return f"""    -- Outcome rows stream from the still-locked live rows BEFORE the
     -- deletes: reading them back through the partitioned parent by
     -- task id would be the rejected fan-out mechanism. RETURN QUERY
     -- materializes immediately; it does not end the function.
@@ -1029,19 +1055,76 @@ BEGIN
         t.status::text, t.claimed_by_worker_id::varchar, t.claimed_at,
         NULL::text, NULL::jsonb
     FROM {LIVE_TASKS} t
-    WHERE t.id = ANY(v_ids);
+    WHERE t.id = ANY({ids_var});
+"""
 
-    DELETE FROM {LIVE_ATTEMPTS} WHERE task_id = ANY(v_ids);
-    DELETE FROM {LIVE_TASKS} WHERE id = ANY(v_ids);
-    GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    IF v_deleted <> cardinality(v_ids) THEN
-        RAISE EXCEPTION 'batch live delete removed % of % rows',
-            v_deleted, cardinality(v_ids);
+
+def _batch_move_ddl(
+    *,
+    function_name: str,
+    parameters_sql: str,
+    kind: TerminalizationKind,
+    status: str,
+    discovery_sql: str,
+    result_expression: str,
+    error_expression: str,
+    reason_expression: str,
+    deferred: bool,
+    has_batch_size: bool = True,
+) -> str:
+    """The discovery-batch wrapper around the shared move-stage core.
+
+    Never-waits posture: SKIP LOCKED discovery cannot join any deadlock
+    cycle; rows held by advisory-first singles are skipped and caught by
+    the next sweep.
+    """
+    core = _move_stage_core(
+        kind=kind,
+        status=status,
+        result_expression=result_expression,
+        error_expression=error_expression,
+        reason_expression=reason_expression,
+        deferred=deferred,
+        ids_var='v_ids',
+        outcome_sql=_discovery_outcome_sql(kind, 'v_ids'),
+    )
+    # Workflow-scoped sweeps are SCOPE-bounded by the caller's workflow
+    # array, not size-bounded; production takes no LIMIT for them.
+    size_stage = ''
+    if has_batch_size:
+        size_stage = """    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION
+            'p_batch_size must be a positive integer, got %', p_batch_size
+            USING ERRCODE = 'invalid_parameter_value';
     END IF;
+"""
+    return f"""
+CREATE FUNCTION {function_name}(
+{parameters_sql}
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_ids uuid[];
+    v_terminal_at timestamptz;
+    v_moved bigint;
+    v_deleted bigint;
+    v_result_payload bytea;
+BEGIN
+{size_stage}    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
 
-    PERFORM pg_notify('task_done', u.tid::text)
-    FROM unnest(v_ids) AS u(tid);
-END
+    -- Discovery under the batch locking rule: SKIP LOCKED never waits on
+    -- a row lock, so this batch cannot join any deadlock cycle; rows held
+    -- by advisory-first singles are skipped and caught next sweep.
+    SELECT array_agg(s.id) INTO v_ids
+    FROM (
+{discovery_sql}
+    ) s;
+    IF v_ids IS NULL THEN
+        RETURN;
+    END IF;
+{core}END
 $function$
 """
 
@@ -1229,6 +1312,320 @@ BEGIN
 END
 $function$
 """
+
+
+def _id_keyed_batch_ddl(
+    *,
+    function_name: str,
+    kind: TerminalizationKind,
+    error_expression: str,
+    reason_expression: str,
+) -> str:
+    """The id-keyed pairwise wrapper around the shared move-stage core.
+
+    Waits-in-global-order posture: an id-keyed batch cannot skip — the
+    caller demands an answer per input id — so it does wait on row
+    locks, and therefore locks every present input row in SORTED id
+    order regardless of input order. Two id-keyed batches acquire
+    identically (no batch-batch cycle); a single holding advisory+row
+    completes independently (no batch-single cycle). Outcomes are
+    emitted at input ordinality; the client decoder reconstructs by
+    ordinality value and never trusts result order. Every non-applied
+    input gets its answer through the ONE miss classifier.
+    """
+    core = _move_stage_core(
+        kind=kind,
+        status='CANCELLED',
+        result_expression='NULL::text',
+        error_expression=error_expression,
+        reason_expression=reason_expression,
+        deferred=False,
+        ids_var='v_applied_ids',
+        outcome_sql=f"""    -- Applied outcomes stream from the still-locked live rows at their
+    -- input ordinality, BEFORE the deletes.
+    RETURN QUERY SELECT
+        t.id, input.ordinality, 'APPLIED'::text,
+        v_terminal_at, '{kind.value}'::text,
+        t.status::text, t.claimed_by_worker_id::varchar, t.claimed_at,
+        NULL::text, NULL::jsonb
+    FROM {LIVE_TASKS} t
+    JOIN unnest(p_ids) WITH ORDINALITY AS input(task_id, ordinality)
+        ON input.task_id = t.id
+    WHERE t.id = ANY(v_applied_ids);
+""",
+    )
+    return f"""
+CREATE FUNCTION {function_name}(
+    p_ids uuid[],
+    p_claimed_ats timestamptz[],
+    p_worker_id text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_applied_ids uuid[];
+    v_terminal_at timestamptz;
+    v_moved bigint;
+    v_deleted bigint;
+    v_result_payload bytea;
+BEGIN
+    IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
+        RAISE EXCEPTION 'batch arrays must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> cardinality(p_claimed_ats) THEN
+        RAISE EXCEPTION
+            'batch array lengths differ: ids=%, claimed_ats=%',
+            cardinality(p_ids), cardinality(p_claimed_ats)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF array_position(p_ids, NULL) IS NOT NULL THEN
+        RAISE EXCEPTION 'batch task ids must be non-NULL'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_ids) <> (
+        SELECT COUNT(DISTINCT item.id)
+        FROM unnest(p_ids) AS item(id)
+    ) THEN
+        RAISE EXCEPTION 'batch task ids must be distinct'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
+
+    -- Waits-in-global-order: lock every present input row in sorted id
+    -- order before anything is judged.
+    PERFORM 1 FROM (
+        SELECT t.id FROM {LIVE_TASKS} t
+        WHERE t.id = ANY(p_ids)
+        ORDER BY t.id
+        FOR UPDATE
+    ) locked;
+
+    SELECT COALESCE(array_agg(t.id), '{{}}') INTO v_applied_ids
+    FROM unnest(p_ids, p_claimed_ats)
+        AS input(task_id, expected_claimed_at)
+    JOIN {LIVE_TASKS} t ON t.id = input.task_id
+    WHERE t.status = 'CLAIMED'
+      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (
+          input.expected_claimed_at IS NULL
+          OR t.claimed_at = input.expected_claimed_at
+      );
+
+    IF cardinality(v_applied_ids) > 0 THEN
+{core}    END IF;
+
+    -- Every non-applied input gets its answer through the ONE miss
+    -- classifier, at its own ordinality.
+    RETURN QUERY
+    SELECT input.task_id, input.ordinality,
+           m.outcome, m.terminal_at, m.terminalization_kind,
+           m.observed_status, m.observed_worker_id, m.observed_claimed_at,
+           m.guard_kind, m.observed_guard
+    FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
+        AS input(task_id, expected_claimed_at, ordinality)
+    CROSS JOIN LATERAL {MISS_CLASSIFIER_FUNCTION}(
+        input.task_id, ARRAY['{kind.value}']::text[],
+        p_worker_id, input.expected_claimed_at
+    ) m
+    WHERE NOT (input.task_id = ANY(v_applied_ids));
+END
+$function$
+"""
+
+
+def _abandon_owned_node_ddl() -> str:
+    kind = TerminalizationKind.PAUSE_ABANDON_CLAIM.value
+    return f"""
+CREATE FUNCTION {ABANDON_OWNED_NODE_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamptz
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_terminal_at timestamptz;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at
+    INTO v_status, v_worker, v_claimed_at
+    FROM {LIVE_TASKS} t
+    WHERE t.id = p_task_id
+      AND t.status = 'CLAIMED'
+      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
+            p_task_id, ARRAY['{kind}']::text[],
+            p_worker_id, p_claimed_at
+        );
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    PERFORM {MOVE_FUNCTION}(
+        p_task_id, 'CANCELLED', '{kind}', v_terminal_at,
+        NULL, 'TASK_CANCELLED', 'Workflow paused before task start'
+    );
+    RETURN QUERY SELECT
+        p_task_id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        v_status, v_worker, v_claimed_at,
+        NULL::text, NULL::jsonb;
+END
+$function$
+"""
+
+
+def _cancel_owned_node_ddl() -> str:
+    kind = TerminalizationKind.WORKFLOW_CANCEL_CLAIM.value
+    return f"""
+CREATE FUNCTION {CANCEL_OWNED_NODE_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_claimed_at timestamptz,
+    p_accepts_requeued_pending boolean
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_terminal_at timestamptz;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
+    -- Full ownership fence, with the explicit carve-out for a task this
+    -- same child observed as requeued to PENDING, where no claim remains
+    -- to fence; the carve-out is a property of this variant only.
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at
+    INTO v_status, v_worker, v_claimed_at
+    FROM {LIVE_TASKS} t
+    WHERE t.id = p_task_id
+      AND (
+          (
+              t.status = 'CLAIMED'
+              AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+              AND (p_claimed_at IS NULL OR t.claimed_at = p_claimed_at)
+          )
+          OR (p_accepts_requeued_pending AND t.status = 'PENDING')
+      )
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
+            p_task_id, ARRAY['{kind}']::text[],
+            p_worker_id, p_claimed_at
+        );
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    PERFORM {MOVE_FUNCTION}(
+        p_task_id, 'CANCELLED', '{kind}', v_terminal_at,
+        NULL, NULL, NULL
+    );
+    RETURN QUERY SELECT
+        p_task_id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        v_status, v_worker, v_claimed_at,
+        NULL::text, NULL::jsonb;
+END
+$function$
+"""
+
+
+def _abandon_owned_nodes_ddl() -> str:
+    return _id_keyed_batch_ddl(
+        function_name=ABANDON_OWNED_NODES_FUNCTION,
+        kind=TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH,
+        error_expression="'TASK_CANCELLED'",
+        reason_expression="'Workflow paused before task start'",
+    )
+
+
+def _cancel_owned_nodes_ddl() -> str:
+    return _id_keyed_batch_ddl(
+        function_name=CANCEL_OWNED_NODES_FUNCTION,
+        kind=TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
+        error_expression='NULL',
+        reason_expression='NULL',
+    )
+
+
+def _abandon_paused_sweep_ddl() -> str:
+    return _batch_move_ddl(
+        function_name=ABANDON_PAUSED_SWEEP_FUNCTION,
+        parameters_sql='    p_workflow_ids uuid[]',
+        kind=TerminalizationKind.PAUSE_ABANDON_WORKFLOW,
+        status='CANCELLED',
+        discovery_sql=f"""        SELECT t2.id FROM {LIVE_TASKS} t2
+        WHERE t2.status = 'CLAIMED'
+          AND EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t2.id
+                AND wt.workflow_id = ANY(p_workflow_ids)
+                AND w.status = 'PAUSED'
+                AND wt.status IN ('ENQUEUED', 'RUNNING')
+          )
+        FOR UPDATE OF t2 SKIP LOCKED""",
+        result_expression='NULL::text',
+        error_expression="'TASK_CANCELLED'",
+        reason_expression="'Workflow paused before task start'",
+        deferred=False,
+        has_batch_size=False,
+    )
+
+
+def _cancel_cancelled_sweep_ddl() -> str:
+    return _batch_move_ddl(
+        function_name=CANCEL_CANCELLED_SWEEP_FUNCTION,
+        parameters_sql='    p_workflow_ids uuid[]',
+        kind=TerminalizationKind.WORKFLOW_CANCEL_WORKFLOW,
+        status='CANCELLED',
+        discovery_sql=f"""        SELECT t2.id FROM {LIVE_TASKS} t2
+        WHERE t2.status IN ('PENDING', 'CLAIMED', 'RUNNING')
+          AND EXISTS (
+              SELECT 1
+              FROM horsies_workflow_tasks wt
+              JOIN horsies_workflows w ON w.id = wt.workflow_id
+              WHERE wt.task_id = t2.id
+                AND wt.workflow_id = ANY(p_workflow_ids)
+                AND w.status = 'CANCELLED'
+                AND wt.status = 'ENQUEUED'
+          )
+        FOR UPDATE OF t2 SKIP LOCKED""",
+        result_expression='NULL::text',
+        error_expression='NULL',
+        reason_expression='NULL',
+        deferred=False,
+        has_batch_size=False,
+    )
+
+
+def workflow_node_family_fragments() -> tuple[str, ...]:
+    """The workflow-node family wire functions, in install order."""
+    return (
+        _abandon_owned_node_ddl(),
+        _cancel_owned_node_ddl(),
+        _abandon_owned_nodes_ddl(),
+        _cancel_owned_nodes_ddl(),
+        _abandon_paused_sweep_ddl(),
+        _cancel_cancelled_sweep_ddl(),
+    )
 
 
 def cancellation_family_fragments() -> tuple[str, ...]:

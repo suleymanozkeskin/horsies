@@ -27,6 +27,7 @@ from horsies.core.history.terminalization.move import (
     disposition_if_chain,
     expiry_family_fragments,
     failure_family_fragments,
+    workflow_node_family_fragments,
 )
 from horsies.core.history.terminalization.outcome import (
     MISS_CLASSIFIER_DDL,
@@ -173,6 +174,7 @@ class TestLockOrderInvariant:
             *failure_family_fragments(),
             expiry_family_fragments()[0],
             *cancellation_family_fragments()[:2],
+            *workflow_node_family_fragments()[:2],
         ],
     )
     def test_wire_functions_take_the_advisory_lock_first(
@@ -413,6 +415,97 @@ class TestCancellationFamily:
         orphan = cancellation_family_fragments()[1]
         assert "'WORKFLOW_LINK_STATE'" in orphan
         assert "jsonb_build_object('node_status', v_node_status)" in orphan
+
+
+class TestWorkflowNodeFamily:
+    """The final six operations: postures, literals, and full coverage."""
+
+    def test_every_terminalization_kind_is_accounted_for(self) -> None:
+        from horsies.core.history.terminalization.move import (
+            KIND_PROJECTIONS,
+        )
+
+        classified = {kind for kind, _, _, _ in KIND_PROJECTIONS}
+        batch_only = {
+            TerminalizationKind.EXPIRE_PENDING,
+            TerminalizationKind.CANCEL_ORPHAN_SWEEP,
+        }
+        assert classified | batch_only == set(TerminalizationKind)
+        assert not classified & batch_only
+
+    @pytest.mark.parametrize(
+        'batch', [*workflow_node_family_fragments()[2:4]]
+    )
+    def test_id_keyed_batches_wait_in_global_order(self, batch: str) -> None:
+        assert 'pg_advisory_xact_lock' not in batch
+        assert 'ORDER BY t.id' in batch
+        lock_span_start = batch.index('ORDER BY t.id')
+        lock_span_end = batch.index(') locked;')
+        assert 'FOR UPDATE' in batch[lock_span_start:lock_span_end]
+        assert 'SKIP LOCKED' not in batch[lock_span_start:lock_span_end]
+
+    @pytest.mark.parametrize(
+        'batch', [*workflow_node_family_fragments()[2:4]]
+    )
+    def test_id_keyed_preconditions_precede_any_work(self, batch: str) -> None:
+        distinct = batch.index('batch task ids must be distinct')
+        availability = batch.index('horsies_assert_archive_available')
+        lock = batch.index('ORDER BY t.id')
+        assert distinct < availability < lock
+
+    @pytest.mark.parametrize(
+        'batch', [*workflow_node_family_fragments()[2:4]]
+    )
+    def test_id_keyed_misses_route_through_the_one_classifier(
+        self, batch: str
+    ) -> None:
+        assert 'CROSS JOIN LATERAL horsies_terminalization_miss' in batch
+        assert 'input.ordinality' in batch
+
+    def test_all_four_batches_share_the_core_verbatim(self) -> None:
+        marker = 'Per-row uniqueness guard through the staged mechanism'
+        for batch in (
+            expiry_family_fragments()[1],
+            cancellation_family_fragments()[2],
+            *workflow_node_family_fragments()[2:4],
+            *workflow_node_family_fragments()[4:6],
+        ):
+            assert marker in batch
+            assert 'horsies_key_reservation_terminalize_batch' in batch
+
+    @pytest.mark.parametrize(
+        'sweep', [*workflow_node_family_fragments()[4:6]]
+    )
+    def test_sweeps_are_scope_bounded_not_size_bounded(
+        self, sweep: str
+    ) -> None:
+        assert 'p_batch_size' not in sweep
+        assert 'p_workflow_ids uuid[]' in sweep
+        assert 'SKIP LOCKED' in sweep
+
+    def test_sweep_predicates_match_production(self) -> None:
+        paused = workflow_node_family_fragments()[4]
+        cancelled = workflow_node_family_fragments()[5]
+        assert "w.status = 'PAUSED'" in paused
+        assert "wt.status IN ('ENQUEUED', 'RUNNING')" in paused
+        assert "t2.status = 'CLAIMED'" in paused
+        assert "w.status = 'CANCELLED'" in cancelled
+        assert "wt.status = 'ENQUEUED'" in cancelled
+        assert "t2.status IN ('PENDING', 'CLAIMED', 'RUNNING')" in cancelled
+
+    def test_workflow_cancel_kinds_archive_null_summaries(self) -> None:
+        cancel_single = workflow_node_family_fragments()[1]
+        assert 'NULL, NULL, NULL' in cancel_single
+        cancel_batch = workflow_node_family_fragments()[3]
+        assert 'NULL, NULL,' in cancel_batch
+        cancelled_sweep = workflow_node_family_fragments()[5]
+        assert 'NULL, NULL,' in cancelled_sweep
+
+    def test_requeued_pending_carve_out_is_single_only(self) -> None:
+        single = workflow_node_family_fragments()[1]
+        assert 'p_accepts_requeued_pending' in single
+        for batch in workflow_node_family_fragments()[2:4]:
+            assert 'p_accepts_requeued_pending' not in batch
 
 
 class TestAttemptEncoder:
