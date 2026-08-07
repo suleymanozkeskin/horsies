@@ -430,8 +430,14 @@ class TestWorkflowNodeFamily:
             TerminalizationKind.EXPIRE_PENDING,
             TerminalizationKind.CANCEL_ORPHAN_SWEEP,
         }
-        assert classified | batch_only == set(TerminalizationKind)
-        assert not classified & batch_only
+        # Written only by the cutover relocation; no wire family, and
+        # the single-row move's ELSE arm rejects it.
+        relocation_only = {TerminalizationKind.LEGACY_TERMINAL}
+        assert (
+            classified | batch_only | relocation_only
+            == set(TerminalizationKind)
+        )
+        assert not classified & (batch_only | relocation_only)
 
     @pytest.mark.parametrize(
         'batch', [*workflow_node_family_fragments()[2:4]]
