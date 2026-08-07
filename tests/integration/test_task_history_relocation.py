@@ -61,7 +61,7 @@ async def _prepare(url: str) -> None:
         await broker.close_async()
 
 
-async def _install_program_state(connection: AsyncConnection) -> None:
+async def install_program_state(connection: AsyncConnection) -> None:
     await prepare_move_storage(connection, CLASS_KEY)
     await connection.execute(text(RELOCATION_LEDGER_DDL))
     await normalize_attempt_identity(connection)
@@ -78,7 +78,11 @@ async def insert_legacy_task(
     error_code: str | None = None,
     is_workflow_task: bool = False,
     attempts: tuple[tuple[str, str | None], ...] = (),
-    disposition: str = 'NEVER_ELIGIBLE',
+    disposition: str | None = 'NEVER_ELIGIBLE',
+    args_json: str | None = None,
+    kwargs_json: str | None = None,
+    task_options: str | None = None,
+    retain: bool | None = False,
 ) -> str:
     """One row as 0.4.x left it, with the transitional columns in their
     post-backfill state."""
@@ -90,6 +94,7 @@ async def insert_legacy_task(
             """
             INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, status, result,
+                args, kwargs, task_options,
                 enqueued_at, created_at, started_at, claimed_at,
                 terminal_at, terminalization_kind,
                 retry_count, max_retries, error_code,
@@ -101,13 +106,14 @@ async def insert_legacy_task(
             ) VALUES (
                 CAST(:task_id AS uuid), 'legacy.task', 'default', 50,
                 :status, :result,
+                :args_json, :kwargs_json, :task_options,
                 :enqueued_at, :enqueued_at, :started_at, :started_at,
                 :terminal_at, :kind,
                 0, 0, :error_code,
                 'legacy-worker', 'legacy-host', 4242, 'legacy-proc',
                 :is_workflow_task, :enqueue_sha,
                 1, :fingerprint,
-                :class_key, FALSE, :disposition
+                :class_key, :retain, :disposition
             )
             """
         ),
@@ -126,7 +132,11 @@ async def insert_legacy_task(
             'enqueue_sha': 'a' * 64,
             'fingerprint': uuid.uuid4().bytes + uuid.uuid4().bytes,
             'class_key': CLASS_KEY,
+            'retain': retain,
             'disposition': disposition,
+            'args_json': args_json,
+            'kwargs_json': kwargs_json,
+            'task_options': task_options,
         },
     )
     for attempt_number, (outcome, failed_reason) in enumerate(
@@ -182,7 +192,7 @@ class TestRelocation:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
-                await _install_program_state(connection)
+                await install_program_state(connection)
                 completed = await insert_legacy_task(
                     connection,
                     status='COMPLETED',
@@ -300,7 +310,7 @@ class TestRelocation:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
-                await _install_program_state(connection)
+                await install_program_state(connection)
                 relocated = await insert_legacy_task(
                     connection, status='COMPLETED', kind='COMPLETE_LOCKED'
                 )
@@ -345,7 +355,7 @@ class TestRelocation:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
-                await _install_program_state(connection)
+                await install_program_state(connection)
                 task_id = await insert_legacy_task(
                     connection,
                     status='COMPLETED',
