@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.commands import (
     CollectPartitionHealth,
@@ -56,9 +57,13 @@ from horsies.core.history.partitions.manager import (
 )
 from horsies.core.history.partitions.publication import UnpublishedLoader
 
+from horsies.core.history.phase2.quarantine import QuarantineRefused
+
 from tests.integration.task_history_harness import (
+    INSERT_HISTORY_ROW_SQL,
     HistorySchema,
     day_bounds,
+    frozen_history_row,
     register_class,
     task_history_schema_fixture,
 )
@@ -93,6 +98,68 @@ async def make_expired_leaf(
         )
         assert isinstance(outcome, LeafCreated)
     return ref
+
+
+async def seed_stale_locator(
+    connection: AsyncConnection,
+    ref: LeafRef,
+    *,
+    task_id: str,
+    with_history_row: bool,
+) -> None:
+    """One over-horizon pending locator on `ref`, with its node row and
+    (optionally) the history row the locator names."""
+    anchor = ref.bounds.lower + timedelta(hours=1)
+    node_row_id = str(uuid4())
+    workflow_id = str(uuid4())
+    if with_history_row:
+        await connection.execute(
+            text(INSERT_HISTORY_ROW_SQL),
+            frozen_history_row(
+                task_id=task_id, class_key=CLASS_KEY, terminal_at=anchor
+            ),
+        )
+    await connection.execute(
+        text(
+            'INSERT INTO horsies_workflow_tasks '
+            '(id, workflow_id, task_id, task_index, node_id) VALUES '
+            '(CAST(:node_row_id AS uuid), CAST(:workflow_id AS uuid), '
+            "CAST(:task_id AS uuid), 0, 'node-0')"
+        ),
+        {
+            'node_row_id': node_row_id,
+            'workflow_id': workflow_id,
+            'task_id': task_id,
+        },
+    )
+    await connection.execute(
+        text(
+            """
+            INSERT INTO horsies_workflow_phase2_pending (
+                task_id, workflow_id, workflow_node_row_id,
+                terminal_status, terminal_at, terminalization_kind,
+                recovery_source, history_class, history_anchor,
+                history_schema_version, result_digest,
+                phase2_generation, created_at, attempt_count
+            ) VALUES (
+                :task_id, :workflow_id, :node_row_id,
+                'COMPLETED', :anchor, 'COMPLETE_FUSED',
+                'HISTORY', :class_key, :anchor,
+                1, :digest, :generation,
+                statement_timestamp() - interval '8 days', 0
+            )
+            """
+        ),
+        {
+            'task_id': task_id,
+            'workflow_id': workflow_id,
+            'node_row_id': node_row_id,
+            'anchor': anchor,
+            'class_key': CLASS_KEY,
+            'digest': sha256(b'{}').digest(),
+            'generation': str(uuid4()),
+        },
+    )
 
 
 class TestClassRegistration:
@@ -244,7 +311,7 @@ class TestDetachAndDrop:
             assert isinstance(inspection, LeafDetachable)
         detached = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref),
+            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
             UnpublishedLoader(),
         )
         assert isinstance(detached, LeafDetached)
@@ -295,7 +362,7 @@ class TestDetachAndDrop:
             )
         refused = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref),
+            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
             UnpublishedLoader(),
         )
         assert isinstance(refused, LeafPendingBlocked)
@@ -306,10 +373,103 @@ class TestDetachAndDrop:
             )
         detached = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref),
+            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
             UnpublishedLoader(),
         )
         assert isinstance(detached, LeafDetached)
+
+    @pytest.mark.asyncio
+    async def test_detach_horizon_quarantines_stale_locator_then_detaches(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        task_id = str(uuid4())
+        async with history_schema.engine.begin() as connection:
+            await seed_stale_locator(
+                connection, ref, task_id=task_id, with_history_row=True
+            )
+        outcome = await detach_expired_leaf(
+            history_schema.engine,
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=timedelta(days=7)
+            ),
+            UnpublishedLoader(),
+        )
+        assert isinstance(outcome, LeafDetached)
+        async with history_schema.engine.begin() as connection:
+            pending = (
+                await connection.execute(
+                    text(
+                        'SELECT recovery_source, quarantine_task_id, '
+                        'history_class '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).one()
+            assert pending.recovery_source == 'QUARANTINE'
+            assert str(pending.quarantine_task_id) == task_id
+            assert pending.history_class is None
+            quarantined = (
+                await connection.execute(
+                    text(
+                        'SELECT count(*) '
+                        'FROM horsies_workflow_phase2_quarantine '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+            assert quarantined == 1
+
+    @pytest.mark.asyncio
+    async def test_detach_horizon_refusal_keeps_the_leaf_pinned(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent)
+        task_id = str(uuid4())
+        async with history_schema.engine.begin() as connection:
+            # Locator with no history row behind it: the copy refuses
+            # and the evidence must keep the leaf pinned.
+            await seed_stale_locator(
+                connection, ref, task_id=task_id, with_history_row=False
+            )
+        outcome = await detach_expired_leaf(
+            history_schema.engine,
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=timedelta(days=7)
+            ),
+            UnpublishedLoader(),
+        )
+        match outcome:
+            case QuarantineRefused(repointed=0, refusals=(refusal,)):
+                assert refusal.task_id == task_id
+                assert refusal.verdict == 'SOURCE_ABSENT'
+            case _:
+                raise AssertionError(f'unexpected outcome: {outcome!r}')
+        async with history_schema.engine.begin() as connection:
+            pending = (
+                await connection.execute(
+                    text(
+                        'SELECT recovery_source '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).one()
+            assert pending.recovery_source == 'HISTORY'
+        still_blocked = await detach_expired_leaf(
+            history_schema.engine,
+            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            UnpublishedLoader(),
+        )
+        assert isinstance(still_blocked, LeafPendingBlocked)
 
 
 class TestHealth:

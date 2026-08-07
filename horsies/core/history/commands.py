@@ -125,14 +125,24 @@ class DetachExpiredHistoryLeaf:
     Runs on a dedicated autocommit connection because
     `DETACH PARTITION ... CONCURRENTLY` cannot run inside a transaction
     block. The optional statement timeout bounds the wait on long readers.
+
+    `quarantine_horizon` is stated at every call site: None means a
+    pending locator on the leaf always refuses the detach; a duration
+    means locators older than it (by the pending row's `created_at`) are
+    first moved through the quarantine protocol — copy, verify,
+    repoint — and only a leaf whose blockers all resolved proceeds to
+    detach. A quarantine refusal keeps the leaf pinned.
     """
 
     leaf: LeafRef
+    quarantine_horizon: timedelta | None
     statement_timeout_ms: int | None = None
 
     def __post_init__(self) -> None:
         if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
             raise ValueError('statement timeout must be positive')
+        if self.quarantine_horizon is not None and self.quarantine_horizon <= timedelta(0):
+            raise ValueError('quarantine horizon must be positive')
 
 
 @dataclass(frozen=True, slots=True)

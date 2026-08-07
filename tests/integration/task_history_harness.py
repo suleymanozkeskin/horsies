@@ -81,10 +81,18 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
             url,
             connect_args={'options': f'-csearch_path={schema_name}'},
         )
+        from horsies.core.history.phase2.quarantine import (
+            quarantine_fragments,
+        )
+
         async with engine.begin() as connection:
-            for fragment in frozen_fragments():
+            for fragment in (
+                *frozen_fragments(),
+                LIVE_STANDIN_DDL,
+                WORKFLOW_TASKS_STANDIN_DDL,
+                *quarantine_fragments(),
+            ):
                 await connection.execute(text(fragment))
-            await connection.execute(text(LIVE_STANDIN_DDL))
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:

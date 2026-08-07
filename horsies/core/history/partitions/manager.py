@@ -73,6 +73,11 @@ from .locks import (
     unlock_leaf_for_session,
 )
 from .publication import LoaderPublication
+from ..phase2.quarantine import (
+    QuarantineLeafBlockers,
+    QuarantineRefused,
+    quarantine_over_horizon_blockers,
+)
 
 from datetime import timedelta
 
@@ -384,10 +389,20 @@ async def detach_expired_leaf(
     engine: AsyncEngine,
     command: DetachExpiredHistoryLeaf,
     publisher: LoaderPublication,
-) -> LeafInspection:
+) -> LeafInspection | QuarantineRefused:
     """Concurrently detach one leaf classified `LeafDetachable`.
 
-    Any other classification is returned unchanged and nothing is detached.
+    Any other classification is returned unchanged and nothing is detached,
+    with one exception: an expired leaf blocked only by pending locators
+    older than the command's quarantine horizon first runs the quarantine
+    protocol on the same session-lock connection — each repoint is one
+    committed statement, so every locator leaves the leaf durably before
+    the re-inspection that clears it for detach. A quarantine refusal is
+    returned as-is and the leaf stays pinned; a leaf that remains blocked
+    (under-horizon locators, or drained-but-still-present blockers) is
+    returned re-inspected. The quarantine pass inherits the
+    bounded-relations invariant per statement — inherently per-leaf.
+
     After a successful detach the staged loader is republished without the
     leaf; the relation still exists until drop, so a reader holding the old
     function sees a standalone table, never a missing one.
@@ -404,6 +419,34 @@ async def detach_expired_leaf(
             match inspection:
                 case LeafDetachable():
                     pass
+                case LeafPendingBlocked(
+                    attachment=LeafAttachment.ATTACHED
+                ) if command.quarantine_horizon is not None:
+                    now = await database_now(connection)
+                    if inspection.expires_at > now:
+                        # Blockers on an unexpired leaf are in-flight
+                        # drain traffic; quarantine exists to unpin
+                        # detach, not to empty a live leaf early.
+                        return inspection
+                    quarantined = await quarantine_over_horizon_blockers(
+                        connection,
+                        QuarantineLeafBlockers(
+                            leaf=leaf, horizon=command.quarantine_horizon
+                        ),
+                    )
+                    match quarantined:
+                        case QuarantineRefused():
+                            return quarantined
+                        case _:
+                            pass
+                    inspection = await inspect_leaf(
+                        connection, InspectHistoryLeaf(leaf=leaf)
+                    )
+                    match inspection:
+                        case LeafDetachable():
+                            pass
+                        case _:
+                            return inspection
                 case _:
                     return inspection
             if command.statement_timeout_ms is not None:
