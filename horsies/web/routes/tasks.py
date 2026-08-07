@@ -89,6 +89,8 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.get('/facets')
     async def read_facets(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
         task_status: list[str] = Query(default=[], alias='status'),
         error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
@@ -96,6 +98,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         """Distinct filter values with counts, scoped only by the coarse filters."""
         result = await task_facets(
             broker,
+            window=_window_or_400(since, until),
             statuses=parse_statuses(task_status),
             error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
@@ -106,6 +109,8 @@ def build_router(broker: PostgresBroker) -> APIRouter:
 
     @router.get('/breakdown')
     async def read_breakdown(
+        since: datetime | None = Query(default=None),
+        until: datetime | None = Query(default=None),
         group_by: str = Query(default='worker'),
         task_status: list[str] = Query(default=[], alias='status'),
         task_name: list[str] = Query(default=[]),
@@ -119,6 +124,7 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         """Per-group status pivot with a rollup TOTAL row."""
         result = await task_breakdown(
             broker,
+            window=_window_or_400(since, until),
             group_by=parse_group_by(group_by),
             statuses=parse_statuses(task_status),
             task_names=task_name,

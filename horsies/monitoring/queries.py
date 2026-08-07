@@ -56,6 +56,7 @@ from horsies.core.history.archive.attempts import (
 )
 from horsies.core.history.reads.aggregates import (
     HistoryScope,
+    history_breakdown_statement,
     history_count_statement,
     history_scoped_status_counts_statement,
 )
@@ -66,7 +67,10 @@ from horsies.core.history.reads.detail import (
     staged_detail_published,
 )
 from horsies.core.history.reads.pages import (
+    HistoryFacet,
+    HistoryFacetQuery,
     HistoryPageQuery,
+    history_facet_statement,
     HistoryWindow,
     history_page_statement,
     history_sort_expression,
@@ -728,6 +732,7 @@ async def task_stats(
 async def task_facets(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     statuses: list[TaskStatus],
     error_categories: list[ErrorCategory],
     retried_only: bool,
@@ -771,14 +776,59 @@ async def task_facets(
         .order_by(error_count.desc())
     )
 
+    coarse_statuses = tuple(status.value for status in statuses)
+
+    def _history_facet_sql(
+        facet: HistoryFacet,
+    ) -> tuple[str, dict[str, object]]:
+        return history_facet_statement(
+            HistoryFacetQuery(
+                window=window,
+                facet=facet,
+                limit=200,
+                statuses=coarse_statuses,
+                retried_only=retried_only,
+            )
+        )
+
     try:
         async with broker.session_factory() as session:
             worker_rows = (await session.execute(workers_stmt)).tuples().all()
             name_rows = (await session.execute(names_stmt)).tuples().all()
             queue_rows = (await session.execute(queues_stmt)).tuples().all()
             error_rows = (await session.execute(errors_stmt)).tuples().all()
+            history_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
+            for facet in (
+                HistoryFacet.WORKER,
+                HistoryFacet.TASK_NAME,
+                HistoryFacet.QUEUE_NAME,
+                HistoryFacet.ERROR_CODE,
+            ):
+                sql, params = _history_facet_sql(facet)
+                history_facets[facet] = [
+                    (str(row.facet_value), int(row.facet_count))
+                    for row in (
+                        await session.execute(text(sql), params)
+                    ).all()
+                ]
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
+
+    def _merged(
+        live: Sequence[tuple[str | None, int]],
+        facet: HistoryFacet,
+    ) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {
+            value: count for value, count in live if value is not None
+        }
+        for value, count in history_facets[facet]:
+            counts[value] = counts.get(value, 0) + count
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    worker_rows = _merged(worker_rows, HistoryFacet.WORKER)
+    name_rows = _merged(name_rows, HistoryFacet.TASK_NAME)
+    queue_rows = _merged(queue_rows, HistoryFacet.QUEUE_NAME)
+    error_rows = _merged(error_rows, HistoryFacet.ERROR_CODE)
 
     # error_code is non-null and non-empty here, so categorization never
     # returns None; DOMAIN is the fallback for user-defined codes.
@@ -789,7 +839,6 @@ async def task_facets(
             category=(categorize_error_code(value) or ErrorCategory.DOMAIN).value,
         )
         for value, count in error_rows
-        if value is not None
     ]
     category_totals: dict[str, int] = {}
     for facet in error_facets:
@@ -818,6 +867,7 @@ async def task_facets(
 async def task_breakdown(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     group_by: TaskGroupBy,
     statuses: list[TaskStatus],
     task_names: list[str],
@@ -871,9 +921,31 @@ async def task_breakdown(
         .order_by(rollup_flag, group_total.desc())
     )
 
+    history_group_column = {
+        'worker': 'last_claimed_worker_id',
+        'task_name': 'task_name',
+        'queue': 'queue_name',
+    }[group_by]
+    history_sql, history_params = history_breakdown_statement(
+        window,
+        _history_scope(
+            statuses=statuses,
+            task_names=task_names,
+            queues=queues,
+            workers=workers,
+            error_codes=error_codes,
+            error_categories=error_categories,
+            retried_only=retried_only,
+        ),
+        group_column=history_group_column,
+    )
+
     try:
         async with broker.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
+            history_rows = (
+                await session.execute(text(history_sql), history_params)
+            ).all()
     except SQLAlchemyError as exc:
         return _db_err('task breakdown query', exc)
 
@@ -921,12 +993,47 @@ async def task_breakdown(
         else:
             groups.append(built)
 
+    merged: dict[str, GroupRow] = {row.group: row for row in groups}
+    total_extra = {'total': 0, 'completed': 0, 'failed': 0,
+                   'cancelled': 0, 'expired': 0, 'retried': 0}
+    for row in history_rows:
+        key = str(row.group_value)
+        status = str(row.status).lower()
+        count = int(row.status_count)
+        retried = int(row.retried_count)
+        base = merged.get(key)
+        if base is None:
+            base = GroupRow(
+                group=key, total=0, pending=0, claimed=0, running=0,
+                completed=0, failed=0, cancelled=0, expired=0, retried=0,
+            )
+        update = {
+            'total': base.total + count,
+            'retried': base.retried + retried,
+        }
+        if status in ('completed', 'failed', 'cancelled', 'expired'):
+            update[status] = getattr(base, status) + count
+            total_extra[status] += count
+        total_extra['total'] += count
+        total_extra['retried'] += retried
+        merged[key] = base.model_copy(update=update)
+    total_row = total_row.model_copy(update={
+        'total': total_row.total + total_extra['total'],
+        'completed': total_row.completed + total_extra['completed'],
+        'failed': total_row.failed + total_extra['failed'],
+        'cancelled': total_row.cancelled + total_extra['cancelled'],
+        'expired': total_row.expired + total_extra['expired'],
+        'retried': total_row.retried + total_extra['retried'],
+    })
+    ordered = sorted(
+        merged.values(), key=lambda row: (-row.total, row.group)
+    )
     return Ok(
         Breakdown(
             group_by=group_by,
-            groups=groups[:limit],
+            groups=ordered[:limit],
             total=total_row,
-            group_count=len(groups),
+            group_count=len(ordered),
         )
     )
 
