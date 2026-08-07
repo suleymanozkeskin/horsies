@@ -33,7 +33,9 @@ from ..commands import is_safe_identifier
 from ..names import (
     HEARTBEAT_CLASS_KEY,
     LIVE_TASKS,
+    TASK_DETAIL_FUNCTION,
     TASK_HISTORY_FOREVER,
+    TASK_HISTORY_PARENT,
     TASK_LOOKUP_FUNCTION,
     TASK_LOOKUP_MANIFEST,
     TASK_LOOKUP_TYPE,
@@ -217,19 +219,79 @@ def render_staged_provenance_function(manifest: LookupManifest) -> str:
     )
 
 
+def render_staged_detail_function(manifest: LookupManifest) -> str:
+    """Render the detail lookup: a history hit carries the full frozen row.
+
+    A HISTORY result from the identity lookup cannot re-derive its leaf —
+    the caller lacks the LIST key — so detail returns the whole projection
+    from the probing leaf in the one statement that finds it. The row
+    travels as the parent's composite (`%ROWTYPE` resolves per session, so
+    the shape tracks installed columns); a live hit signals location only,
+    because live rows are not frozen-shaped and the live read layer owns
+    them. Absence returns no rows.
+    """
+    detail_row = f'SELECT h.* INTO v_row FROM {{relation}} h ' \
+        'WHERE h.task_id = p_task_id;'
+
+    def history_probe(relation: str) -> str:
+        if not is_safe_identifier(relation):
+            raise ValueError(
+                f'relation name is not a safe identifier: {relation!r}'
+            )
+        return f"""
+        {detail_row.format(relation=relation)}
+        IF FOUND THEN
+            RETURN QUERY SELECT 'HISTORY'::text, v_row;
+            RETURN;
+        END IF;
+"""
+
+    live_probe = f"""
+        IF EXISTS (SELECT 1 FROM {LIVE_TASKS} WHERE id = p_task_id) THEN
+            RETURN QUERY SELECT
+                'LIVE'::text, NULL::{TASK_HISTORY_PARENT};
+            RETURN;
+        END IF;
+"""
+    return _staged_function(
+        function_name=TASK_DETAIL_FUNCTION,
+        return_type=(
+            f'TABLE (location text, task_row {TASK_HISTORY_PARENT})'
+        ),
+        declares=(f'v_row {TASK_HISTORY_PARENT}%ROWTYPE;',),
+        absence_statement='RETURN;',
+        live_probe=live_probe,
+        history_probe=history_probe,
+        manifest=manifest,
+    )
+
+
 def _staged_function(
     *,
     function_name: str,
     return_type: str,
     declares: tuple[str, ...],
-    absence_values: str,
     live_probe: str,
     history_probe: Callable[[str], str],
     manifest: LookupManifest,
+    absence_values: str | None = None,
+    absence_statement: str | None = None,
     extra_parameters: str = '',
 ) -> str:
-    """The one staged skeleton both generated functions are rendered from."""
-    absence = f'RETURN ROW(FALSE, {absence_values})::{return_type};'
+    """The one staged skeleton all three generated functions render from.
+
+    Absence is either a composite `ROW(FALSE, ...)` return built from
+    `absence_values` (the scalar-returning pair) or a caller-supplied
+    statement (`RETURN;` for the set-returning detail form). Exactly one
+    must be given.
+    """
+    if (absence_values is None) == (absence_statement is None):
+        raise ValueError('exactly one absence form must be supplied')
+    absence = (
+        absence_statement
+        if absence_statement is not None
+        else f'RETURN ROW(FALSE, {absence_values})::{return_type};'
+    )
     forever_probe = history_probe(TASK_HISTORY_FOREVER)
 
     if not manifest.leaves:

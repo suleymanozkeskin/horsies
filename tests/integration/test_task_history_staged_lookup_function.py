@@ -279,6 +279,64 @@ class TestPublicationAtomicity:
                 HistoryTaskIdentity,
             )
 
+    @pytest.mark.asyncio
+    async def test_publisher_keeps_the_detail_function_in_agreement(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """The atomicity discipline extended to the generated triple: a
+        stale detail body diverges from identity, and one republish
+        restores agreement across all three functions."""
+        from horsies.core.history.reads.lookup_generation import (
+            render_staged_detail_function,
+        )
+
+        async def detail_locations(
+            connection: AsyncConnection, task_id: str
+        ) -> list[str]:
+            return list(
+                (
+                    await connection.execute(
+                        text(
+                            'SELECT location FROM horsies_task_detail_staged('
+                            'CAST(:task_id AS uuid))'
+                        ),
+                        {'task_id': task_id},
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+        async with history_schema.engine.begin() as connection:
+            _, row_b = await seed_two_classes(connection)
+            assert await detail_locations(connection, row_b) == ['HISTORY']
+
+            stale_manifest = manifest_from_catalog(
+                await read_attached_leaf_rows(connection, CLASS_A)
+            )
+            stale_body = render_staged_detail_function(stale_manifest)
+            leaf_b = daily_leaf_name(
+                f'horsies_task_history_{CLASS_B}',
+                day_bounds(datetime.now(UTC) - timedelta(days=1))[0],
+            )
+            full_manifest = manifest_from_catalog(
+                await read_attached_leaf_rows(connection, CLASS_A)
+                + await read_attached_leaf_rows(connection, CLASS_B)
+            )
+            # Presence half first, or the absence assert is vacuous.
+            assert leaf_b in render_staged_detail_function(full_manifest)
+            assert leaf_b not in stale_body
+            await connection.execute(text(stale_body))
+
+            assert await detail_locations(connection, row_b) == []
+            assert isinstance(
+                await lookup_task_identity(connection, row_b),
+                HistoryTaskIdentity,
+            )
+
+            await StagedLoaderPublisher().republish(connection)
+            assert await detail_locations(connection, row_b) == ['HISTORY']
+
 
 class TestHeartbeatLeafExclusion:
     """A heartbeat leaf in the shared catalog never enters the manifest.

@@ -24,6 +24,7 @@ from ..partitions.catalog import read_all_attached_leaf_rows
 from .lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
+    render_staged_detail_function,
     render_staged_lookup_function,
     render_staged_provenance_function,
 )
@@ -50,6 +51,9 @@ class StagedLoaderPublisher:
         )
         await connection.execute(
             text(render_staged_provenance_function(manifest))
+        )
+        await connection.execute(
+            text(render_staged_detail_function(manifest))
         )
         await _rewrite_manifest_table(connection, manifest)
 
