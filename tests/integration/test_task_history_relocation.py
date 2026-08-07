@@ -61,7 +61,89 @@ async def _prepare(url: str) -> None:
         await broker.close_async()
 
 
+async def demote_to_upgraded_world(connection: AsyncConnection) -> None:
+    """Reproduce the UPGRADED world on a fresh-born database.
+
+    The chain now installs fresh databases at the cutover's end state
+    (uuid identities, live-only domain, move program, partitioned
+    heartbeats); the cutover battery tests the OTHER world — the one a
+    real 0.4.7 deployment brings — so it demotes explicitly: in-place
+    program reinstated, domain lifted, identities back to varchar with
+    their keys re-added on the varchar shape, heartbeats flat. Not a
+    production path; the mirror of the emission suite's rewind."""
+    from horsies.core.history.cutover.program import uninstall_programs
+
+    await uninstall_programs(connection)
+    await connection.execute(
+        text(
+            'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
+            'horsies_tasks_live_status_only'
+        )
+    )
+    foreign_keys = (
+        await connection.execute(
+            text(
+                """SELECT con.conrelid::regclass::text AS table_name,
+                       con.conname,
+                       pg_get_constraintdef(con.oid) AS definition
+                FROM pg_constraint con
+                WHERE con.contype = 'f'
+                  AND con.confrelid IN (
+                      'horsies_tasks'::regclass,
+                      'horsies_workflows'::regclass
+                  )"""
+            )
+        )
+    ).all()
+    for key in foreign_keys:
+        await connection.execute(
+            text(
+                f'ALTER TABLE {key.table_name} '
+                f'DROP CONSTRAINT "{key.conname}"'
+            )
+        )
+    for table, column in (
+        ('horsies_tasks', 'id'),
+        ('horsies_task_attempts', 'task_id'),
+        ('horsies_workflows', 'id'),
+        ('horsies_workflows', 'parent_workflow_id'),
+        ('horsies_workflows', 'root_workflow_id'),
+        ('horsies_workflow_tasks', 'id'),
+        ('horsies_workflow_tasks', 'workflow_id'),
+        ('horsies_workflow_tasks', 'task_id'),
+        ('horsies_workflow_tasks', 'sub_workflow_id'),
+    ):
+        await connection.execute(
+            text(
+                f'ALTER TABLE {table} ALTER COLUMN {column} '
+                f'TYPE varchar(36) USING {column}::text'
+            )
+        )
+    for key in foreign_keys:
+        await connection.execute(
+            text(
+                f'ALTER TABLE {key.table_name} '
+                f'ADD CONSTRAINT "{key.conname}" {key.definition}'
+            )
+        )
+    await connection.execute(text('DROP TABLE horsies_heartbeats'))
+    # The flat pre-cutover heartbeat shape, test-local: the demotion
+    # reproduces what a 0.4.7 deployment brings, indexes not needed.
+    await connection.execute(
+        text(
+            'CREATE TABLE horsies_heartbeats ('
+            'id BIGSERIAL PRIMARY KEY, '
+            'task_id varchar(36) NOT NULL, '
+            'sender_id varchar(255) NOT NULL, '
+            'role varchar(20) NOT NULL, '
+            'sent_at timestamptz NOT NULL, '
+            'hostname varchar(255), pid integer)'
+        )
+    )
+
+
 async def install_program_state(connection: AsyncConnection) -> None:
+    await demote_to_upgraded_world(connection)
     await prepare_move_storage(connection, CLASS_KEY)
     await connection.execute(text(RELOCATION_LEDGER_DDL))
     await normalize_attempt_identity(connection)

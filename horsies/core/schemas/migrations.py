@@ -320,6 +320,15 @@ from horsies.core.history.names import (  # noqa: E402
     TASK_HISTORY_PARENT,
 )
 
+# The two-worlds predicate: the identity column's actual birth shape,
+# read from the catalog. A uuid-born database is the fresh world (born
+# at the cutover's end state); a varchar-born one is the upgraded world
+# that reaches that state only through the offline cutover program.
+FRESH_IDENTITY_PREDICATE_SQL = text(
+    """SELECT atttypid = 'uuid'::regtype FROM pg_attribute
+    WHERE attrelid = 'horsies_tasks'::regclass AND attname = 'id'"""
+)
+
 TASK_HISTORY_PARENT_EXISTS_SQL = text(
     f"SELECT to_regclass('{TASK_HISTORY_PARENT}') IS NOT NULL"
 )

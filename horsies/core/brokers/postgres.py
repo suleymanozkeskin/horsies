@@ -169,6 +169,7 @@ from horsies.core.schemas.migrations import (
     CREATE_RESERVATION_PROGRAM_SQL,
     CREATE_RESERVATION_REGISTRY_INDEXES_SQL,
     DROP_RESERVATION_PROGRAM_SQL,
+    FRESH_IDENTITY_PREDICATE_SQL,
     KEY_RESERVATIONS_TABLE_EXISTS_SQL,
     RESERVATION_REGISTRY_INDEX_EXISTS_SQL,
     TASK_HISTORY_PARENT_EXISTS_SQL,
@@ -849,11 +850,62 @@ class PostgresBroker:
             await conn.execute(ADD_TERMINALIZATION_KIND_COLUMN_SQL)
             await conn.execute(ADD_TERMINALIZATION_KIND_CHECK_SQL)
             await conn.execute(VALIDATE_TERMINALIZATION_KIND_CHECK_SQL)
-            await conn.execute(CREATE_OUTCOME_TYPE_SQL)
-            for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
-                await conn.execute(drop_function)
-            for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
-                await conn.execute(create_function)
+
+            # THE TWO-WORLDS BRANCH — the one place the chain forks, and
+            # the predicate is CATALOG-READ: the identity column's actual
+            # birth shape, never the schema version, because a database
+            # at the current version is legitimately EITHER world.
+            #
+            # A uuid-born (fresh) install is BORN AT THE CUTOVER'S END
+            # STATE: it has no old fleet, so its programs' owner is the
+            # 0.5.0 fleet being installed — the terminalization program
+            # is the MOVE family (the same install list the cutover's
+            # program-replacement stage owns), the status domain is
+            # live-only from the first row, and the heartbeat shape is
+            # partitioned from birth. A varchar-born (upgraded) install
+            # keeps the in-place program byte-for-byte and reaches the
+            # same end state only through the offline cutover.
+            uuid_born = bool((await conn.execute(
+                FRESH_IDENTITY_PREDICATE_SQL
+            )).scalar_one())
+            if uuid_born:
+                from horsies.core.history.cutover.program import (
+                    installation_fragments,
+                    teardown_statements,
+                )
+                from horsies.core.history.heartbeats.partitioning import (
+                    HEARTBEATS_PARTITIONED_DDL,
+                )
+                from horsies.core.history.terminalization.live_cutover import (
+                    LIVE_STATUS_DOMAIN_DDL,
+                )
+
+                domain_present = (await conn.execute(text(
+                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'horsies_tasks'::regclass
+                    AND conname = 'horsies_tasks_live_status_only')"""
+                ))).scalar_one()
+                if not domain_present:
+                    await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
+                for statement in teardown_statements():
+                    await conn.execute(text(statement))
+                for statement in installation_fragments():
+                    await conn.execute(text(statement))
+                heartbeats_flat = (await conn.execute(text(
+                    """SELECT relkind <> 'p' FROM pg_class
+                    WHERE oid = 'horsies_heartbeats'::regclass"""
+                ))).scalar_one()
+                if heartbeats_flat:
+                    await conn.execute(
+                        text('DROP TABLE horsies_heartbeats')
+                    )
+                    await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
+            else:
+                await conn.execute(CREATE_OUTCOME_TYPE_SQL)
+                for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
+                    await conn.execute(drop_function)
+                for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
+                    await conn.execute(create_function)
 
             # Migration (v11): retention eligibility indexes.
             await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)
