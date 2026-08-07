@@ -290,13 +290,21 @@ semantics they exercise — while the orphan suites set status explicitly.
 A fixture default, not a schema recommendation."""
 
 
-def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped-def]
+def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
+    schema_name: str,
+    *,
+    partitioned_heartbeats: bool = False,
+):
     """Fixture for M8 suites: frozen + gated fragments, full stand-ins,
     outcome layer, completion family, and a published lookup pair.
 
     Gated fragments install through `gated_fragment()` — test-schema
     consumption per the pinned guardrail-2 boundary; production emission
     stays wave-4-sequenced.
+
+    `partitioned_heartbeats` swaps the flat heartbeat stand-in for the
+    cutover RANGE-partitioned parent (created leafless; the suite
+    registers the class and ensures coverage before writing heartbeats).
     """
 
     @pytest_asyncio.fixture()
@@ -307,6 +315,9 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         )
         from horsies.core.history.phase2.consumption import (
             consumption_fragments,
+        )
+        from horsies.core.history.heartbeats.partitioning import (
+            HEARTBEATS_PARTITIONED_DDL,
         )
         from horsies.core.history.phase2.quarantine import (
             quarantine_fragments,
@@ -343,7 +354,11 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 ATTEMPTS_STANDIN_DDL,
                 WORKFLOW_TASKS_STANDIN_DDL,
                 WORKFLOWS_STANDIN_DDL,
-                HEARTBEATS_STANDIN_DDL,
+                (
+                    HEARTBEATS_PARTITIONED_DDL
+                    if partitioned_heartbeats
+                    else HEARTBEATS_STANDIN_DDL
+                ),
                 *outcome_fragments(),
                 *completion_family_fragments(),
                 *failure_family_fragments(),

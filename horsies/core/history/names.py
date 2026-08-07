@@ -35,6 +35,7 @@ KEY_RESERVATIONS: Final = 'horsies_key_reservations'
 # catalog machinery but never enter history, and the staged-lookup
 # manifest excludes this key at assembly.
 HEARTBEAT_CLASS_KEY: Final = 'heartbeats'
+HEARTBEATS_TABLE: Final = 'horsies_heartbeats'
 
 # Owned by the staged lookup loader.
 TASK_LOOKUP_FUNCTION: Final = 'horsies_task_lookup_staged'

@@ -702,9 +702,20 @@ BEGIN
     SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
            t.started_at, t.finalizing_at,
            (
+               -- Recency bound, derived not constant: a heartbeat older
+               -- than stale_after satisfies the staleness comparison for
+               -- every possible value, so excluding it cannot change the
+               -- verdict; the conservative floor is the larger threshold.
+               -- On partitioned heartbeat storage the bound prunes the
+               -- probe to current leaves.
                SELECT h.sent_at
                FROM horsies_heartbeats h
                WHERE h.task_id = t.id AND h.role = 'runner'
+                 AND h.sent_at >= NOW() - make_interval(
+                     secs => GREATEST(
+                         p_stale_after_ms, p_finalizing_stale_after_ms
+                     )::double precision / 1000.0
+                 )
                ORDER BY h.sent_at DESC
                LIMIT 1
            ),
