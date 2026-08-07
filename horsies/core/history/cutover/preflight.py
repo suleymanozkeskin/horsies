@@ -26,17 +26,34 @@ PLANNING_CEILING_DENOMINATOR = 4
 
 @dataclass(frozen=True, slots=True)
 class RelocationCoefficients:
-    """Fitted from measured runs; first-class, never implied."""
+    """Fitted from measured runs; first-class, never implied.
+
+    Both row-proportional slopes are first-class: the relocation
+    slope alone described a small fraction of the row-proportional
+    cost, and an estimate that hid the preparation slope inside a
+    fudge would be the one-total failure again by another route.
+    """
 
     seconds_per_million_rows: float
     fixed_seconds: float
+    preparation_seconds_per_million_rows: float
 
 
 @dataclass(frozen=True, slots=True)
 class CutoverEstimate:
+    """The adopter-facing TOTAL WINDOW, itemized.
+
+    fixed + (preparation + relocation slopes) x rows + the
+    near-constant itemized stages; the planning ceiling applies to
+    the TOTAL, never to the model term alone.
+    """
+
     coefficients: RelocationCoefficients
     rows: int
-    estimated_seconds: float
+    preparation_seconds: float
+    relocation_seconds: float
+    stage_seconds: tuple[tuple[str, float], ...]
+    total_seconds: float
     ceiling_seconds: float
 
 
@@ -61,18 +78,31 @@ class PreflightError(Exception):
 
 
 def estimate_relocation(
-    coefficients: RelocationCoefficients, *, rows: int
+    coefficients: RelocationCoefficients,
+    *,
+    rows: int,
+    stage_seconds: tuple[tuple[str, float], ...] = (),
 ) -> CutoverEstimate:
-    estimated = (
+    millions = rows / 1_000_000
+    preparation = (
+        coefficients.preparation_seconds_per_million_rows * millions
+    )
+    relocation = coefficients.seconds_per_million_rows * millions
+    total = (
         coefficients.fixed_seconds
-        + coefficients.seconds_per_million_rows * rows / 1_000_000
+        + preparation
+        + relocation
+        + sum(seconds for _, seconds in stage_seconds)
     )
     return CutoverEstimate(
         coefficients=coefficients,
         rows=rows,
-        estimated_seconds=estimated,
+        preparation_seconds=preparation,
+        relocation_seconds=relocation,
+        stage_seconds=stage_seconds,
+        total_seconds=total,
         ceiling_seconds=(
-            estimated
+            total
             * PLANNING_CEILING_NUMERATOR
             / PLANNING_CEILING_DENOMINATOR
         ),

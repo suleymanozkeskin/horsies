@@ -36,15 +36,30 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 COEFFICIENTS = RelocationCoefficients(
-    seconds_per_million_rows=120.0, fixed_seconds=30.0
+    seconds_per_million_rows=120.0,
+    fixed_seconds=30.0,
+    preparation_seconds_per_million_rows=0.0,
 )
 
 
-def test_estimate_carries_coefficients_and_ceiling() -> None:
-    estimate = estimate_relocation(COEFFICIENTS, rows=2_000_000)
-    assert estimate.coefficients == COEFFICIENTS
-    assert estimate.estimated_seconds == pytest.approx(270.0)
-    assert estimate.ceiling_seconds == pytest.approx(270.0 * 1.25)
+def test_estimate_presents_the_total_window() -> None:
+    itemized = RelocationCoefficients(
+        seconds_per_million_rows=120.0,
+        fixed_seconds=30.0,
+        preparation_seconds_per_million_rows=600.0,
+    )
+    estimate = estimate_relocation(
+        itemized,
+        rows=2_000_000,
+        stage_seconds=(('drain-verify', 5.0), ('tighten', 20.0)),
+    )
+    assert estimate.coefficients == itemized
+    assert estimate.preparation_seconds == pytest.approx(1200.0)
+    assert estimate.relocation_seconds == pytest.approx(240.0)
+    # Total = fixed + prep + relocation + itemized stages; the
+    # planning ceiling applies to the TOTAL, never the model term.
+    assert estimate.total_seconds == pytest.approx(1495.0)
+    assert estimate.ceiling_seconds == pytest.approx(1495.0 * 1.25)
 
 
 @pytest.mark.asyncio
@@ -81,7 +96,7 @@ async def test_preflight_inventories_the_work(
     assert plan.unprepared_envelope_rows == 1
     assert plan.class_day_pairs == 1
     assert plan.estimate.rows == 2
-    assert plan.estimate.ceiling_seconds > plan.estimate.estimated_seconds
+    assert plan.estimate.ceiling_seconds > plan.estimate.total_seconds
 
 
 @pytest.mark.asyncio

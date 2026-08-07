@@ -58,7 +58,9 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 COEFFICIENTS = RelocationCoefficients(
-    seconds_per_million_rows=120.0, fixed_seconds=30.0
+    seconds_per_million_rows=120.0,
+    fixed_seconds=30.0,
+    preparation_seconds_per_million_rows=0.0,
 )
 
 
