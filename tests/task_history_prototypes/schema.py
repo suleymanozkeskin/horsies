@@ -13,7 +13,16 @@ from horsies.core.schemas.migrations import SCHEMA_VERSION
 
 
 _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
-_EXPECTED_BASE_SCHEMA_VERSION = 26
+# v27 adds the transitional live cutover columns: nullable, check-free,
+# a catalog-only ALTER the prototype program neither reads nor writes
+# (every prototype statement names its columns); the LIKE-clone
+# installers restore the qualified v26 clone shape explicitly. v28 adds
+# the reservation registry table and functions — new relations the
+# prototype program never touches (its own registry candidates live in
+# disposable namespaces). The base moves; the qualified behavior does
+# not. Any future base move re-litigates this guard the same way —
+# explicitly, never by widening it to a range.
+_EXPECTED_BASE_SCHEMA_VERSION = 28
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,7 +44,7 @@ async def install_archive_candidates(
 ) -> None:
     if SCHEMA_VERSION != _EXPECTED_BASE_SCHEMA_VERSION:
         raise RuntimeError(
-            'task-history prototypes require the published schema v26 program'
+            'task-history prototypes require the published schema v27 program'
         )
     stored_version = (
         await connection.execute(

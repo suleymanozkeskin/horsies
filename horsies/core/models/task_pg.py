@@ -1,6 +1,8 @@
 from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
+import uuid
+
 from sqlalchemy import (
     String,
     Text,
@@ -13,7 +15,10 @@ from sqlalchemy import (
     Index,
     Enum as SQLAlchemyEnum,
     Float,
+    LargeBinary,
+    SmallInteger,
     ARRAY,
+    Uuid,
     false as sa_false,
     text,
 )
@@ -166,6 +171,58 @@ class TaskModel(Base):
     worker_hostname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     worker_process_name: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
+    )
+
+    # Live cutover columns (schema v27, transitional): every column is
+    # Optional because the catalog at v27 is nullable and check-free —
+    # the model must never claim a strictness the catalog does not
+    # enforce. The cutover migration backfills, tightens the DDL to the
+    # declared fragment, and flips these typings in the same change.
+    # The converted enqueue writes real values into all of them.
+    command_fingerprint_version: Mapped[Optional[int]] = mapped_column(
+        SmallInteger, nullable=True
+    )
+    command_fingerprint: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    retention_class_key: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    input_digest: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    rerun_of_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, nullable=True
+    )
+    rerun_root_task_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, nullable=True
+    )
+    idempotency_key_digest: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    retain_rerun_input: Mapped[Optional[bool]] = mapped_column(
+        Boolean, nullable=True
+    )
+    prepared_rerun_input_disposition: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True
+    )
+    prepared_rerun_input_version: Mapped[Optional[int]] = mapped_column(
+        SmallInteger, nullable=True
+    )
+    prepared_rerun_input_codec: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    prepared_rerun_input_content_type: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    prepared_rerun_input_digest: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    prepared_rerun_input_inline: Mapped[Optional[bytes]] = mapped_column(
+        LargeBinary, nullable=True
+    )
+    prepared_rerun_input_reference: Mapped[Optional[str]] = mapped_column(
+        String(2048), nullable=True
     )
 
     # Metadata

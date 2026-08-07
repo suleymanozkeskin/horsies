@@ -567,18 +567,6 @@ class TestTaskActionMapping:
         assert body['was_status'] == 'PENDING'
         assert body['warning'] is None
 
-    async def test_retry_ok_reports_the_next_attempt_number(
-        self, api: AsyncClient, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.FAILED)
-        await persist(session, task)
-
-        body = (await api.post(f'/api/tasks/{task.id}/retry', headers=ACT)).json()
-
-        assert body['outcome'] == 'retried'
-        assert body['was_status'] == 'FAILED'
-        assert body['next_attempt_number'] == 1
-
     async def test_missing_task_is_not_found(self, api: AsyncClient) -> None:
         response = await api.post(f'/api/tasks/{uuid.uuid4()}/cancel', headers=ACT)
 
@@ -599,34 +587,6 @@ class TestTaskActionMapping:
             'current_status': 'COMPLETED',
         }
 
-    async def test_unretryable_task_is_a_conflict(
-        self, api: AsyncClient, session: AsyncSession
-    ) -> None:
-        task = make_task(status=TaskStatus.PENDING)
-        await persist(session, task)
-
-        response = await api.post(f'/api/tasks/{task.id}/retry', headers=ACT)
-
-        assert response.status_code == 409
-        assert response.json() == {
-            'code': 'TASK_NOT_RETRYABLE',
-            'current_status': 'PENDING',
-        }
-
-    async def test_expired_task_is_a_conflict(
-        self, api: AsyncClient, session: AsyncSession
-    ) -> None:
-        task = make_task(
-            status=TaskStatus.FAILED,
-            good_until=datetime.now(UTC) - timedelta(minutes=5),
-        )
-        await persist(session, task)
-
-        response = await api.post(f'/api/tasks/{task.id}/retry', headers=ACT)
-
-        assert response.status_code == 409
-        assert response.json()['code'] == 'TASK_EXPIRY_PASSED'
-
     async def test_workflow_bound_task_is_a_bad_request(
         self, api: AsyncClient, session: AsyncSession
     ) -> None:
@@ -634,7 +594,7 @@ class TestTaskActionMapping:
         task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
         await persist(session, task)
 
-        response = await api.post(f'/api/tasks/{task.id}/retry', headers=ACT)
+        response = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
 
         assert response.status_code == 400
         assert response.json() == {'code': 'TASK_IS_WORKFLOW_TASK'}
@@ -1154,7 +1114,6 @@ class TestSchemaMismatch:
         'path',
         [
             '/api/tasks/{id}/cancel',
-            '/api/tasks/{id}/retry',
             '/api/workflows/{id}/cancel',
             '/api/workflows/{id}/pause',
             '/api/workflows/{id}/resume',

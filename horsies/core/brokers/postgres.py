@@ -161,6 +161,11 @@ from horsies.core.schemas.migrations import (
     ADD_TASK_FINALIZING_COLUMNS_SQL,
     ADD_TASK_TERMINAL_AT_COLUMN_SQL,
     ADD_TASK_IS_WORKFLOW_TASK_COLUMN_SQL,
+    ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL,
+    CREATE_KEY_RESERVATIONS_TABLE_SQL,
+    CREATE_RESERVATION_PROGRAM_SQL,
+    DROP_RESERVATION_PROGRAM_SQL,
+    KEY_RESERVATIONS_TABLE_EXISTS_SQL,
     ADD_IS_SUBWORKFLOW_COLUMN_SQL,
     ADD_JOIN_TYPE_COLUMN_SQL,
     ADD_MIN_SUCCESS_COLUMN_SQL,
@@ -475,8 +480,24 @@ class PostgresBroker:
         *,
         assume_initialized: bool = False,
         run_schema_migrations: bool = True,
+        idempotency_reservation_window: Optional[timedelta] = None,
     ):
         self.config = config
+        # The keyed-enqueue reservation window, snapshotted onto every
+        # keyed request at enqueue. Broker-configured by contract:
+        # default 24 hours, accepted range greater than zero through the
+        # inclusive 30-day maximum; validation is typed and happens
+        # here, at construction.
+        from horsies.core.history.identity.keys import (
+            IDEMPOTENCY_WINDOW_DEFAULT,
+            validate_reservation_window,
+        )
+
+        self.idempotency_reservation_window = validate_reservation_window(
+            idempotency_reservation_window
+            if idempotency_reservation_window is not None
+            else IDEMPOTENCY_WINDOW_DEFAULT
+        )
         # False makes this broker incapable of executing DDL. Read-only
         # tooling that constructs its own broker sets it so that pointing
         # the tool at a database can never migrate that database. Owning
@@ -861,6 +882,26 @@ class PostgresBroker:
             await conn.execute(CREATE_TASKS_ENQUEUED_AT_INDEX_SQL)
             await conn.execute(CREATE_TASKS_TASK_NAME_INDEX_SQL)
 
+            # Migration (v27): transitional live cutover columns —
+            # nullable, check-free, derived from the declared cutover
+            # fragment (the authoritative final shape the cutover
+            # migration later backfills and tightens to).
+            await conn.execute(ADD_TRANSITIONAL_CUTOVER_COLUMNS_SQL)
+
+            # Migration (v28): the keyed-enqueue reservation registry,
+            # verbatim from the frozen module. The registry maintenance
+            # indexes are deliberately absent — wave-gated conditional
+            # DDL, not an omission to repair; the claim rides the PK.
+            registry_exists = (
+                await conn.execute(KEY_RESERVATIONS_TABLE_EXISTS_SQL)
+            ).scalar_one()
+            if not registry_exists:
+                await conn.execute(CREATE_KEY_RESERVATIONS_TABLE_SQL)
+            for drop_statement in DROP_RESERVATION_PROGRAM_SQL:
+                await conn.execute(drop_statement)
+            for create_statement in CREATE_RESERVATION_PROGRAM_SQL:
+                await conn.execute(create_statement)
+
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -896,6 +937,114 @@ class PostgresBroker:
 
     # ----------------- Async API -----------------
 
+    @staticmethod
+    def _cutover_enqueue_values(
+        *,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        args_json: str | None,
+        kwargs_json: str | None,
+        good_until: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        task_options: Optional[str],
+        retention_class_key: str,
+        retain_rerun_input: bool,
+    ) -> BrokerResult[dict[str, Any]]:
+        """The cutover column values for one fresh enqueue.
+
+        The command fingerprint covers the carried JSON strings as-is;
+        the prepared envelope re-serializes the parsed VALUES through the
+        canonical content-v1 serializer, because envelope identity is
+        content identity, not string identity. `enqueue_sha` is separate
+        and unchanged: it remains the exact-ID resend comparator and
+        never becomes the key contract.
+        """
+        from hashlib import sha256
+
+        from horsies.core.history.identity.fingerprint import EnqueueCommandV1
+        from horsies.core.history.rerun.input_envelope import (
+            INPUT_ENVELOPE_CODEC,
+            INPUT_ENVELOPE_CONTENT_TYPE,
+            INPUT_ENVELOPE_INLINE_MAX_BYTES,
+            INPUT_ENVELOPE_VERSION,
+            encode_input_envelope_v1,
+        )
+
+        def parsed(label: str, value: str | None) -> Any:
+            if value is None:
+                return Ok(None)
+            loaded = loads_json(value)
+            if is_err(loaded):
+                return _broker_err(
+                    BrokerErrorCode.ENQUEUE_FAILED,
+                    f'{label} JSON corrupt for {task_name}: '
+                    f'{loaded.err_value}',
+                    loaded.err_value,
+                )
+            return loaded
+
+        args_r = parsed('args', args_json)
+        if is_err(args_r):
+            return args_r
+        kwargs_r = parsed('kwargs', kwargs_json)
+        if is_err(kwargs_r):
+            return kwargs_r
+        options_r = parsed('task_options', task_options)
+        if is_err(options_r):
+            return options_r
+
+        payload = encode_input_envelope_v1(
+            args=args_r.ok_value or [],
+            kwargs=kwargs_r.ok_value or {},
+            options=options_r.ok_value,
+        )
+        digest = sha256(payload).digest()
+        fingerprint = EnqueueCommandV1(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options_json=task_options,
+            retention_class_key=retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            rerun_of_task_id=None,
+            rerun_root_task_id=None,
+        ).fingerprint
+
+        if not retain_rerun_input:
+            disposition: dict[str, Any] = {
+                'prepared_rerun_input_disposition': 'DECLINED_BY_POLICY',
+            }
+        elif len(payload) > INPUT_ENVELOPE_INLINE_MAX_BYTES:
+            disposition = {
+                'prepared_rerun_input_disposition': 'OVER_BOUND',
+            }
+        else:
+            disposition = {
+                'prepared_rerun_input_disposition': 'INLINE',
+                'prepared_rerun_input_version': INPUT_ENVELOPE_VERSION,
+                'prepared_rerun_input_codec': INPUT_ENVELOPE_CODEC,
+                'prepared_rerun_input_content_type': (
+                    INPUT_ENVELOPE_CONTENT_TYPE
+                ),
+                'prepared_rerun_input_digest': digest,
+                'prepared_rerun_input_inline': payload,
+            }
+        return Ok(
+            {
+                'command_fingerprint_version': 1,
+                'command_fingerprint': fingerprint,
+                'retention_class_key': retention_class_key,
+                'retain_rerun_input': retain_rerun_input,
+                'input_digest': digest,
+                **disposition,
+            }
+        )
+
     async def enqueue_async(
         self,
         task_name: str,
@@ -911,6 +1060,9 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
+        retention_class_key: str = 'forever',
+        retain_rerun_input: bool = False,
+        idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
         if enqueued_at is not None and enqueue_delay_seconds is not None:
             return _broker_err(
@@ -973,11 +1125,43 @@ class PostgresBroker:
             else:
                 enqueued_at_value = text('NOW()')
 
+            # The cutover payload: command fingerprint, retention
+            # snapshot, and the prepared rerun-input envelope, computed
+            # here so every producer path carries them without call-site
+            # changes. Values are real for every new row; the columns
+            # are transitionally nullable (v27) only for rows written by
+            # older code, which the cutover migration's backfill owns.
+            cutover = self._cutover_enqueue_values(
+                task_name=task_name,
+                queue_name=queue_name,
+                priority=priority,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                good_until=good_until,
+                enqueue_delay_seconds=enqueue_delay_seconds,
+                task_options=task_options,
+                retention_class_key=retention_class_key,
+                retain_rerun_input=retain_rerun_input,
+            )
+            if is_err(cutover):
+                return cutover
+
+            scoped_key_digest: Optional[bytes] = None
+            if idempotency_key is not None:
+                from horsies.core.history.identity.keys import (
+                    ScopedIdempotencyKey,
+                )
+
+                scoped_key_digest = ScopedIdempotencyKey(
+                    task_name=task_name, key=idempotency_key
+                ).digest
+
             # Single SQLAlchemy Core INSERT ... ON CONFLICT DO NOTHING ... RETURNING id.
             # Replaces both the ORM session.add() and raw SQL paths.
             stmt = (
                 pg_insert(TaskModel)
                 .values(
+                    idempotency_key_digest=scoped_key_digest,
                     id=task_id,
                     task_name=task_name,
                     queue_name=queue_name,
@@ -994,12 +1178,64 @@ class PostgresBroker:
                     is_workflow_task=False,
                     created_at=text('NOW()'),
                     updated_at=text('NOW()'),
+                    **cutover.ok_value,
                 )
                 .on_conflict_do_nothing(index_elements=['id'])
                 .returning(TaskModel.id)
             )
 
             async with self.session_factory() as session:
+                if scoped_key_digest is not None:
+                    # Claim and insert in ONE transaction: the claim
+                    # reuses the command fingerprint computed for the
+                    # cutover columns, and a replayed key returns the
+                    # committed request's id — the same result shape as
+                    # a fresh enqueue, no distinguishability flag.
+                    from horsies.core.history.identity.keys import (
+                        IDEMPOTENCY_SCOPE_VERSION,
+                    )
+                    from horsies.core.history.identity.reservations import (
+                        ReservationApplied,
+                        ReservationConflict,
+                        ReservationReplay,
+                        claim_key_reservation,
+                    )
+
+                    claim = await claim_key_reservation(
+                        await session.connection(),
+                        key_digest=scoped_key_digest,
+                        key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
+                        reservation_window_seconds=int(
+                            self.idempotency_reservation_window
+                            .total_seconds()
+                        ),
+                        fingerprint_version=1,
+                        fingerprint=cutover.ok_value['command_fingerprint'],
+                        task_id=task_id,
+                    )
+                    match claim:
+                        case ReservationReplay(task_id=existing):
+                            await session.rollback()
+                            return Ok(existing)
+                        case ReservationConflict(task_id=owner):
+                            await session.rollback()
+                            return Err(
+                                BrokerOperationError(
+                                    code=(
+                                        BrokerErrorCode
+                                        .IDEMPOTENCY_KEY_CONFLICT
+                                    ),
+                                    message=(
+                                        f'idempotency key for {task_name} '
+                                        f'is reserved by task {owner} '
+                                        'with a different command'
+                                    ),
+                                    retryable=False,
+                                    exception=None,
+                                )
+                            )
+                        case ReservationApplied():
+                            pass
                 result = await session.execute(stmt)
                 row = result.fetchone()
                 await session.commit()
@@ -2187,6 +2423,7 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
         """Synchronous task submission (runs enqueue_async in background loop)."""
         try:
@@ -2204,6 +2441,7 @@ class PostgresBroker:
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 good_until=good_until,
                 task_options=task_options,
+                idempotency_key=idempotency_key,
             )
         except Exception as exc:
             return _broker_err(

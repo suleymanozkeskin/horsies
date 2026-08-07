@@ -1,9 +1,10 @@
-"""Cancel and retry actions for individual tasks.
+"""The cancel action for individual tasks.
 
-Each action is one transaction: lock the target row, apply a compare-and-set,
-and — when the CAS matches nothing — diagnose the reason from the row already
-locked. Holding the lock is what makes the diagnosis trustworthy; a concurrent
-claim either waits behind it or is rejected by the CAS.
+The action is one transaction: lock the target row, apply a
+compare-and-set, and — when the CAS matches nothing — diagnose the
+reason from the row already locked. Holding the lock is what makes the
+diagnosis trustworthy; a concurrent claim either waits behind it or is
+rejected by the CAS.
 
 Two boundaries are deliberate:
 
@@ -12,6 +13,10 @@ Two boundaries are deliberate:
 * Cancelling a RUNNING task flips the row durably, but the task's code keeps
   executing on its worker until it returns, and its side effects still happen.
   There is no safe cross-process kill, and this module does not attempt one.
+
+The manual retry action that reset a terminal row to PENDING in place is
+removed: a terminal record is immutable, and re-execution is a new
+request through the rerun contract, with new identity and lineage.
 """
 
 from __future__ import annotations
@@ -44,8 +49,6 @@ class TaskActionErrorCode(Enum):
 
     TASK_NOT_FOUND = 'TASK_NOT_FOUND'
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
-    TASK_NOT_RETRYABLE = 'TASK_NOT_RETRYABLE'
-    TASK_EXPIRY_PASSED = 'TASK_EXPIRY_PASSED'
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
 
@@ -79,32 +82,13 @@ class TaskCancelled:
     was_status: TaskStatus
 
 
-@dataclass(frozen=True, slots=True)
-class TaskRetried:
-    """A task reset to PENDING and re-enqueued by this call.
-
-    ``next_attempt_number`` is the attempt the next run will record.
-    """
-
-    task_id: str
-    was_status: TaskStatus
-    next_attempt_number: int
-
-
-# Statuses a manual retry accepts. A COMPLETED task is not re-runnable here,
-# and a task still in flight must be cancelled before it can be retried.
-_RETRYABLE_STATUSES: frozenset[TaskStatus] = frozenset(
-    {TaskStatus.FAILED, TaskStatus.EXPIRED, TaskStatus.CANCELLED}
-)
-
 _STATUS_BY_VALUE: dict[str, TaskStatus] = {
     status.value: status for status in TaskStatus
 }
 
-# Locks the row for the rest of the transaction and reports everything both
-# diagnoses need. ``expiry_passed`` is evaluated against NOW(), which is the
-# transaction timestamp, so it is the exact negation of the retry CAS's
-# expiry predicate rather than a second, skewed reading of the clock.
+# Locks the row for the rest of the transaction and reports everything the
+# cancel diagnosis needs; ``expiry_passed`` is evaluated against NOW(), the
+# transaction timestamp.
 _LOCK_TASK_SQL = text("""
     SELECT status,
            is_workflow_task,
@@ -113,52 +97,6 @@ _LOCK_TASK_SQL = text("""
     WHERE id = :id
     FOR UPDATE
 """)
-
-# retry_count is set to the highest attempt already recorded, because the next
-# run records attempt retry_count + 1 and the attempt table upserts on
-# (task_id, attempt): a lower value would silently overwrite history, a higher
-# one would leave a gap. max_retries and good_until are untouched — a manual
-# retry grants neither extra automatic retries nor a longer life.
-_RETRY_TASK_SQL = text("""
-    UPDATE horsies_tasks
-    SET status = 'PENDING',
-        retry_count = COALESCE(
-            (SELECT MAX(attempt) FROM horsies_task_attempts
-             WHERE task_id = horsies_tasks.id),
-            0
-        ),
-        next_retry_at = NULL,
-        enqueued_at = NOW(),
-        claimed = FALSE,
-        claimed_at = NULL,
-        claimed_by_worker_id = NULL,
-        claim_expires_at = NULL,
-        started_at = NULL,
-        completed_at = NULL,
-        failed_at = NULL,
-        terminal_at = NULL,
-        result = NULL,
-        failed_reason = NULL,
-        error_code = NULL,
-        worker_pid = NULL,
-        worker_hostname = NULL,
-        worker_process_name = NULL,
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = NOW()
-    WHERE id = :id
-      AND is_workflow_task = FALSE
-      AND status IN ('FAILED', 'EXPIRED', 'CANCELLED')
-      AND (good_until IS NULL OR good_until > NOW())
-    RETURNING id, queue_name, retry_count
-""")
-
-# The queue notification fires on INSERT only, so an UPDATE back to PENDING
-# wakes nobody. Without this the row waits for the next claim poll.
-_NOTIFY_RETRY_SQL = text("""
-    SELECT pg_notify('task_queue_' || :queue_name, 'retry:' || :id)
-""")
-
 
 def _not_found(task_id: str) -> Err[TaskActionError]:
     """The row does not exist — retention may have removed it."""
@@ -287,61 +225,3 @@ async def cancel_task(
         return _db_err('Task cancel', task_id, exc)
 
     return Ok(TaskCancelled(task_id=task_id, was_status=current_status))
-
-
-async def retry_task(
-    broker: PostgresBroker,
-    task_id: str,
-) -> Result[TaskRetried, TaskActionError]:
-    """Reset a settled non-workflow task to PENDING and re-enqueue it.
-
-    The same row is reused with its original payload, queue and priority.
-    Attempt history is preserved: ``retry_count`` becomes the highest attempt
-    already recorded, so the next run numbers itself one past the last one
-    instead of overwriting it.
-
-    A task whose ``good_until`` has passed is refused rather than revived —
-    a manual retry does not extend expiry.
-    """
-    try:
-        async with broker.session_factory() as session:
-            locked = (await session.execute(_LOCK_TASK_SQL, {'id': task_id})).first()
-            if locked is None:
-                return _not_found(task_id)
-            status_value, is_workflow_task, expiry_passed = locked
-            current_status = _STATUS_BY_VALUE.get(status_value)
-
-            retried = (await session.execute(_RETRY_TASK_SQL, {'id': task_id})).first()
-            if retried is None or current_status is None:
-                if is_workflow_task:
-                    return _workflow_bound(task_id)
-                if current_status in _RETRYABLE_STATUSES and expiry_passed:
-                    return _state_conflict(
-                        TaskActionErrorCode.TASK_EXPIRY_PASSED,
-                        f'Task {task_id} cannot be retried: its good_until '
-                        f'has passed.',
-                        task_id,
-                        current_status,
-                    )
-                return _state_conflict(
-                    TaskActionErrorCode.TASK_NOT_RETRYABLE,
-                    f'Task {task_id} cannot be retried from status ' f'{status_value}.',
-                    task_id,
-                    current_status,
-                )
-
-            _retried_id, queue_name, retry_count = retried
-            await session.execute(
-                _NOTIFY_RETRY_SQL, {'queue_name': queue_name, 'id': task_id}
-            )
-            await session.commit()
-    except SQLAlchemyError as exc:
-        return _db_err('Task retry', task_id, exc)
-
-    return Ok(
-        TaskRetried(
-            task_id=task_id,
-            was_status=current_status,
-            next_attempt_number=retry_count + 1,
-        )
-    )

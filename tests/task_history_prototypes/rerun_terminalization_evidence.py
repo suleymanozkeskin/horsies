@@ -27,6 +27,9 @@ from enum import StrEnum
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from horsies.core.history.terminalization.live_cutover import (
+    cutover_column_definitions,
+)
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.schemas.terminalization import OUTCOME_COLUMNS
 from tests.perf.counters import Counts
@@ -56,6 +59,15 @@ from tests.task_history_prototypes.schema import (
 from tests.task_history_prototypes.transcode import (
     install_archive_transcode_prototype,
 )
+
+
+def _drop_inherited_transitional_columns(relation: str) -> str:
+    """Restore the qualified v26 clone shape after LIKE horsies_tasks."""
+    drops = ',\n    '.join(
+        f'DROP COLUMN IF EXISTS {name}'
+        for name, _ in cutover_column_definitions()
+    )
+    return f'ALTER TABLE {relation}\n    {drops}'
 
 
 class RerunTerminalizationError(Exception):
@@ -422,6 +434,11 @@ def _live_table_statements(relations: SideRelations) -> tuple[str, ...]:
                 INCLUDING STORAGE
         )
         """,
+        # The v27 chain adds transitional cutover columns to the cloned
+        # source; the qualified collector base is the v26 column set,
+        # and the envelope ALTER below adds its own shapes. Restore the
+        # qualified clone shape from the one shape authority.
+        _drop_inherited_transitional_columns(relations.live_tasks),
         f'ALTER TABLE {relations.live_tasks} ADD PRIMARY KEY (id)',
         f'ALTER TABLE {relations.live_tasks} {envelope}',
         f"""

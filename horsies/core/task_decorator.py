@@ -1,9 +1,9 @@
 # app/core/task_decorator.py
 from __future__ import annotations
 import asyncio
+import dataclasses
 import inspect
 import time
-import uuid
 from dataclasses import dataclass
 from typing import (
     Callable,
@@ -43,6 +43,7 @@ from horsies.core.codec.signature_check import (
     check_task_signature,
 )
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
 from horsies.core.types.result import is_err, Ok, Err
@@ -857,6 +858,7 @@ class TaskFunction(Protocol[P, T]):
         self,
         *,
         good_until: datetime | None = None,
+        idempotency_key: str | None = None,
     ) -> 'TaskSendOptions[P, T]': ...
 
     @abstractmethod
@@ -1253,6 +1255,7 @@ def create_task_wrapper(
                     good_until=payload.good_until,
                     sent_at=payload.sent_at,
                     task_options=payload.task_options,
+                    idempotency_key=payload.idempotency_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1329,6 +1332,7 @@ def create_task_wrapper(
                     good_until=payload.good_until,
                     sent_at=payload.sent_at,
                     task_options=payload.task_options,
+                    idempotency_key=payload.idempotency_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1418,6 +1422,7 @@ def create_task_wrapper(
                     sent_at=payload.sent_at,
                     enqueue_delay_seconds=payload.enqueue_delay_seconds,
                     task_options=payload.task_options,
+                    idempotency_key=payload.idempotency_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1494,6 +1499,7 @@ def create_task_wrapper(
                     sent_at=payload.sent_at,
                     enqueue_delay_seconds=payload.enqueue_delay_seconds,
                     task_options=payload.task_options,
+                    idempotency_key=payload.idempotency_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1555,7 +1561,11 @@ def create_task_wrapper(
                 exception=exc,
             ))
 
-        task_id = str(uuid.uuid4())
+        # Process-monotonic UUIDv7: the embedded birth time prunes the
+        # staged history lookup. Schedule-derived tasks keep their
+        # deterministic uuid5 slot identity — that id IS the schedule's
+        # idempotency — and resolve through the legacy walk.
+        task_id = mint_task_id()
         sent_at = datetime.now(timezone.utc)
         options_result = _serialize_options_for_send(good_until_override)
         if is_err(options_result):
@@ -1656,6 +1666,8 @@ def create_task_wrapper(
         args: tuple[Any, ...],
         kwargs_dict: dict[str, Any],
         good_until_override: datetime | None | object,
+        *,
+        idempotency_key: str | None = None,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1672,12 +1684,18 @@ def create_task_wrapper(
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
+        if idempotency_key is not None:
+            payload = dataclasses.replace(
+                payload, idempotency_key=idempotency_key
+            )
         return _do_send(task_id, payload)
 
     async def _send_async_with_options(
         args: tuple[Any, ...],
         kwargs_dict: dict[str, Any],
         good_until_override: datetime | None | object,
+        *,
+        idempotency_key: str | None = None,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1694,6 +1712,10 @@ def create_task_wrapper(
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
+        if idempotency_key is not None:
+            payload = dataclasses.replace(
+                payload, idempotency_key=idempotency_key
+            )
         return await _do_send_async(task_id, payload)
 
     def _validate_delay(delay: int) -> TaskSendError | None:
@@ -1810,22 +1832,33 @@ def create_task_wrapper(
         return await _schedule_async_with_options(delay, args, kwargs, _UNSET)
 
     class _TaskSendOptionsImpl:
-        def __init__(self, good_until: datetime | None) -> None:
+        def __init__(
+            self,
+            good_until: datetime | None,
+            idempotency_key: str | None,
+        ) -> None:
             self.good_until = good_until
+            self.idempotency_key = idempotency_key
 
         def send(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
         ) -> TaskSendResult[TaskHandle[T]]:
-            return _send_with_options(args, kwargs, self.good_until)
+            return _send_with_options(
+                args, kwargs, self.good_until,
+                idempotency_key=self.idempotency_key,
+            )
 
         async def send_async(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
         ) -> TaskSendResult[TaskHandle[T]]:
-            return await _send_async_with_options(args, kwargs, self.good_until)
+            return await _send_async_with_options(
+                args, kwargs, self.good_until,
+                idempotency_key=self.idempotency_key,
+            )
 
         def schedule(
             self,
@@ -1848,9 +1881,10 @@ def create_task_wrapper(
     def with_options(
         *,
         good_until: datetime | None = None,
+        idempotency_key: str | None = None,
     ) -> TaskSendOptions[P, T]:
         """Set options for one ad-hoc send without changing the task definition."""
-        return _TaskSendOptionsImpl(good_until)
+        return _TaskSendOptionsImpl(good_until, idempotency_key)
 
     # ---- Retry methods ----
 
@@ -2023,8 +2057,11 @@ def create_task_wrapper(
             self,
             *,
             good_until: datetime | None = None,
+            idempotency_key: str | None = None,
         ) -> TaskSendOptions[P, T]:
-            return with_options(good_until=good_until)
+            return with_options(
+                good_until=good_until, idempotency_key=idempotency_key
+            )
 
         def retry_send(
             self,
