@@ -1,0 +1,63 @@
+name: horsies-history-operational
+
+# Operational archive, partition, migration, vacuum, and growth evidence runs
+# here. These servers deliberately retain PostgreSQL durability and background
+# maintenance. They are separate from the paired-micro stack because combining
+# the two modes would make neither measurement contract true.
+
+x-postgres-command: &postgres-command
+  - postgres
+  - -c
+  - fsync=on
+  - -c
+  - synchronous_commit=on
+  - -c
+  - full_page_writes=on
+  - -c
+  - autovacuum=on
+  - -c
+  - autovacuum_vacuum_threshold=50
+  - -c
+  - autovacuum_vacuum_scale_factor=0.2
+  - -c
+  - autovacuum_analyze_threshold=50
+  - -c
+  - autovacuum_analyze_scale_factor=0.1
+  - -c
+  - autovacuum_naptime=1min
+  - -c
+  - autovacuum_max_workers=3
+  - -c
+  - checkpoint_timeout=5min
+  - -c
+  - max_wal_size=2GB
+
+x-postgres-environment: &postgres-environment
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: testpassword
+  POSTGRES_DB: horsies
+
+x-postgres-healthcheck: &postgres-healthcheck
+  test: ["CMD-SHELL", "pg_isready -U postgres -d horsies"]
+  interval: 5s
+  timeout: 5s
+  retries: 20
+
+services:
+  pg14:
+    image: docker.io/library/postgres:14@sha256:c6f9b7243c56553c050bec9a76bb9b9befb15b260ae1e4ac4bf9b56bd99c26a5
+    platform: linux/amd64
+    command: *postgres-command
+    environment: *postgres-environment
+    ports:
+      - "16442:5432"
+    healthcheck: *postgres-healthcheck
+
+  pg16:
+    image: docker.io/library/postgres:16@sha256:da8cf245a60506e50a0a8cbb0f39c559ca622d92490605b67fcadc74ca1ea8e4
+    platform: linux/amd64
+    command: *postgres-command
+    environment: *postgres-environment
+    ports:
+      - "16446:5432"
+    healthcheck: *postgres-healthcheck

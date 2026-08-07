@@ -897,6 +897,10 @@ class TestEventStream:
                 frame = await stream.next_data(timeout_s=25)
             finally:
                 writer.cancel()
+                try:
+                    await writer
+                except asyncio.CancelledError:
+                    pass
 
         assert frame['topic'] == 'tasks'
         assert isinstance(frame['ids'], list)
