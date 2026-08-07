@@ -22,9 +22,6 @@ from horsies.core.worker.runtime import (
     _ReaperPassState,
 )
 from horsies.core.worker.sql import (
-    DELETE_EXPIRED_HEARTBEATS_SQL,
-    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
-    DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
@@ -244,27 +241,18 @@ class ReaperMixin:
         now_monotonic = time.monotonic()
         if now_monotonic >= state.next_retention_cleanup_at:
             try:
-                deleted_heartbeats = 0
                 deleted_worker_states = 0
                 deleted_workflows = 0
-                deleted_tasks = 0
 
-                # Shared wall-clock budget across the five statements. A
+                # Shared wall-clock budget across both statements. A
                 # backlog that outlives the budget resumes next pass.
+                # Terminal TASK rows move to the task-history archive at
+                # terminalization and age by retention class; heartbeat
+                # rows live in partitions that drop whole — neither is
+                # row-deleted here anymore.
                 deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
                 batch_size = recovery_cfg.retention_delete_batch_size
-
-                if recovery_cfg.heartbeat_retention_hours is not None:
-                    deleted_heartbeats = await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_HEARTBEATS_SQL,
-                        {
-                            'retention_hours': recovery_cfg.heartbeat_retention_hours,
-                        },
-                        deadline,
-                        batch_size,
-                    )
 
                 if recovery_cfg.worker_state_retention_hours is not None:
                     deleted_worker_states = await self._delete_expired_in_batches(
@@ -277,69 +265,30 @@ class ReaperMixin:
                         batch_size,
                     )
 
-                queue_overrides = (
-                    recovery_cfg.queue_terminal_record_retention_hours
-                )
-
                 if recovery_cfg.terminal_record_retention_hours is not None:
-                    terminal_params = {
-                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                    }
                     # Workflows and their node rows go together in one
                     # workflow-batched statement (node purge is a CTE inside
-                    # it); tasks follow. The all-backing-tasks-terminal guard
-                    # makes partial progress between tables safe. The
-                    # statement's rowcount counts workflows, which the node
-                    # budget keeps below :batch_size while backlog remains —
-                    # hence drained_when='empty_batch'.
+                    # it). The all-backing-tasks-terminal guard makes
+                    # partial progress safe. The statement's rowcount
+                    # counts workflows, which the node budget keeps below
+                    # :batch_size while backlog remains — hence
+                    # drained_when='empty_batch'.
                     deleted_workflows = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
-                        terminal_params,
+                        {
+                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                        },
                         deadline,
                         batch_size,
                         drained_when='empty_batch',
                     )
-                    deleted_tasks = await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_TASKS_SQL,
-                        {
-                            **terminal_params,
-                            'excluded_queues': sorted(queue_overrides),
-                        },
-                        deadline,
-                        batch_size,
-                    )
 
-                # Per-queue override windows govern plain (non-workflow)
-                # tasks on their queues and apply even when the global
-                # terminal window is disabled.
-                for queue_name, override_hours in sorted(
-                    queue_overrides.items(),
-                ):
-                    deleted_tasks += await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
-                        {
-                            'retention_hours': override_hours,
-                            'queue_name': queue_name,
-                        },
-                        deadline,
-                        batch_size,
-                    )
-
-                if (
-                    deleted_heartbeats > 0
-                    or deleted_worker_states > 0
-                    or deleted_workflows > 0
-                    or deleted_tasks > 0
-                ):
+                if deleted_worker_states > 0 or deleted_workflows > 0:
                     logger.info(
-                        'Reaper retention cleanup: heartbeats=%s worker_states=%s workflows=%s tasks=%s',
-                        deleted_heartbeats,
+                        'Reaper retention cleanup: worker_states=%s workflows=%s',
                         deleted_worker_states,
                         deleted_workflows,
-                        deleted_tasks,
                     )
             except Exception as cleanup_err:
                 logger.error(f'Retention cleanup error: {cleanup_err}')

@@ -6,7 +6,6 @@ from sqlalchemy import text
 
 from horsies.core.models.workflow import WORKFLOW_TERMINAL_STATES
 from horsies.core.schemas.indexes import (
-    TASK_TERMINAL_STATUS_SQL_LITERALS,
     WORKFLOW_TERMINAL_STATUS_SQL_LITERALS,
 )
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
@@ -419,15 +418,6 @@ INSERT_WORKER_STATE_SQL = text("""
 # prove the status predicate implies the index predicate, which a bound
 # array under a generic plan cannot.
 
-DELETE_EXPIRED_HEARTBEATS_SQL = text("""
-    DELETE FROM horsies_heartbeats
-    WHERE id IN (
-        SELECT id FROM horsies_heartbeats
-        WHERE sent_at < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-        LIMIT :batch_size
-        FOR UPDATE SKIP LOCKED
-    )
-""")
 
 DELETE_EXPIRED_WORKER_STATES_SQL = text("""
     DELETE FROM horsies_worker_states
@@ -529,31 +519,7 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
 # unconditional exclusion would leave them unreachable by both statements
 # and retained forever. The exclusion is a heap filter on the
 # already-bounded candidate scan, so the v11 index plan is unchanged.
-DELETE_EXPIRED_TASKS_SQL = text(f"""
-    WITH doomed AS (
-        SELECT t.id
-        FROM horsies_tasks t
-        WHERE t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
-          AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-          AND NOT (t.queue_name = ANY(CAST(:excluded_queues AS text[]))
-                   AND t.is_workflow_task = FALSE)
-          AND NOT EXISTS (
-              SELECT 1
-              FROM horsies_workflow_tasks wt
-              JOIN horsies_workflows w ON w.id = wt.workflow_id
-              WHERE wt.task_id = t.id
-                AND w.status NOT IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
-          )
-        LIMIT :batch_size
-        FOR UPDATE OF t SKIP LOCKED
-    ),
-    purged_attempts AS (
-        DELETE FROM horsies_task_attempts
-        WHERE task_id IN (SELECT id FROM doomed)
-    )
-    DELETE FROM horsies_tasks
-    WHERE id IN (SELECT id FROM doomed)
-""")
+
 
 # Per-queue override delete (queue_terminal_record_retention_hours). The
 # queue_name equality + COALESCE predicates must stay textually aligned
@@ -566,31 +532,7 @@ DELETE_EXPIRED_TASKS_SQL = text(f"""
 # non-terminal. The NOT EXISTS guard is kept as defense in depth (plain tasks
 # have no workflow_task linkage). Same purged_attempts mechanism as the global
 # delete.
-DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL = text(f"""
-    WITH doomed AS (
-        SELECT t.id
-        FROM horsies_tasks t
-        WHERE t.queue_name = :queue_name
-          AND t.status IN ({TASK_TERMINAL_STATUS_SQL_LITERALS})
-          AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST(:retention_hours || ' hours' AS INTERVAL)
-          AND t.is_workflow_task = FALSE
-          AND NOT EXISTS (
-              SELECT 1
-              FROM horsies_workflow_tasks wt
-              JOIN horsies_workflows w ON w.id = wt.workflow_id
-              WHERE wt.task_id = t.id
-                AND w.status NOT IN ({WORKFLOW_TERMINAL_STATUS_SQL_LITERALS})
-          )
-        LIMIT :batch_size
-        FOR UPDATE OF t SKIP LOCKED
-    ),
-    purged_attempts AS (
-        DELETE FROM horsies_task_attempts
-        WHERE task_id IN (SELECT id FROM doomed)
-    )
-    DELETE FROM horsies_tasks
-    WHERE id IN (SELECT id FROM doomed)
-""")
+
 
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,

@@ -182,7 +182,6 @@ class HealthMixin:
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
-                    'heartbeat_retention_hours': self.cfg.recovery_config.heartbeat_retention_hours,
                     'worker_state_retention_hours': self.cfg.recovery_config.worker_state_retention_hours,
                     'terminal_record_retention_hours': self.cfg.recovery_config.terminal_record_retention_hours,
                 }

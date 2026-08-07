@@ -24,9 +24,6 @@ from horsies.core.worker.finalize import _PersistedTaskOutcome
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
-    DELETE_EXPIRED_HEARTBEATS_SQL,
-    DELETE_EXPIRED_TASKS_SQL,
-    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     INSERT_CLAIMER_HEARTBEAT_SQL,
@@ -654,11 +651,50 @@ def _install_reaper_gate_session(worker: Worker) -> None:
 
 
 @pytest.mark.unit
-class TestReaperHeartbeatRetention:
-    """Tests for heartbeat retention cleanup in the reaper loop."""
+class TestReaperRetentionPass:
+    """The narrowed retention pass, and the flip as a structural pin.
+
+    Terminal task rows move to the task-history archive at
+    terminalization and age by retention class; heartbeat rows live in
+    partitions that drop whole. The reaper row-deletes ONLY worker
+    states and terminal workflows, and the flip from "the task and
+    heartbeat deletes behave correctly" to "NO such delete exists"
+    makes the removal a permanent structural invariant: restoring a
+    statement fails the inventory, not just a review.
+    """
+
+    def test_no_live_task_or_heartbeat_retention_delete_exists(
+        self,
+    ) -> None:
+        import inspect
+
+        import horsies.core.worker.reaper as reaper_module
+        import horsies.core.worker.sql as sql_module
+
+        for module in (sql_module, reaper_module):
+            source = inspect.getsource(module)
+            assert 'DELETE FROM horsies_tasks' not in source
+            assert 'DELETE FROM horsies_heartbeats' not in source
+        for name in (
+            'DELETE_EXPIRED_TASKS_SQL',
+            'DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL',
+            'DELETE_EXPIRED_HEARTBEATS_SQL',
+        ):
+            assert not hasattr(sql_module, name)
+
+    def test_removed_retention_knobs_are_rejected_with_successor(
+        self,
+    ) -> None:
+        with pytest.raises(Exception, match='retention class'):
+            RecoveryConfig(queue_terminal_record_retention_hours={'q': 1})
+        with pytest.raises(Exception, match='drop whole'):
+            RecoveryConfig(heartbeat_retention_hours=12)
+        # The surviving knob governs workflow terminal records.
+        cfg = RecoveryConfig(terminal_record_retention_hours=48)
+        assert cfg.terminal_record_retention_hours == 48
 
     @pytest.mark.asyncio
-    async def test_reaper_prunes_expired_heartbeats(
+    async def test_reaper_prunes_worker_states_and_workflows_only(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         worker = _make_worker()
@@ -667,20 +703,20 @@ class TestReaperHeartbeatRetention:
             auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
-            worker_state_retention_hours=None,
-            terminal_record_retention_hours=None,
+            worker_state_retention_hours=24,
+            terminal_record_retention_hours=48,
         )
 
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.commit = AsyncMock()
-        delete_result = MagicMock(rowcount=3)
+        executed: list[Any] = []
 
         async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
-            if stmt is DELETE_EXPIRED_HEARTBEATS_SQL:
+            executed.append(stmt)
+            if stmt is DELETE_EXPIRED_WORKFLOWS_SQL:
                 worker._stop.set()
-                return delete_result
             return MagicMock(rowcount=0)
 
         session.execute = AsyncMock(side_effect=_execute)
@@ -697,296 +733,28 @@ class TestReaperHeartbeatRetention:
                 created_brokers.append(self)
 
         recover_mock = AsyncMock(return_value=0)
-        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
         monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
+            'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
+        )
+        monkeypatch.setattr(
+            'horsies.core.workflows.recovery.recover_stuck_workflows',
+            recover_mock,
         )
 
         _install_reaper_gate_session(worker)
         await worker._reaper_loop()
 
         assert any(
-            call.args and call.args[0] is DELETE_EXPIRED_HEARTBEATS_SQL
-            for call in session.execute.await_args_list
+            stmt is DELETE_EXPIRED_WORKER_STATES_SQL for stmt in executed
         )
-        assert recover_mock.await_count >= 1
+        assert any(
+            stmt is DELETE_EXPIRED_WORKFLOWS_SQL for stmt in executed
+        )
         assert len(created_brokers) == 1
-        assert created_brokers[0].assume_initialized is True
         created_brokers[0].close_async.assert_awaited_once()
 
-    @pytest.mark.asyncio
-    async def test_reaper_reuses_worker_broker_when_available(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When worker broker exists, reaper should reuse it and not construct/close temp broker."""
-        worker = _make_worker()
-        worker.cfg.recovery_config = RecoveryConfig(
-            auto_requeue_stale_claimed=False,
-            auto_terminate_orphaned_workflow_tasks=False,
-            auto_fail_stale_running=False,
-            check_interval_ms=1_000,
-            heartbeat_retention_hours=12,
-            worker_state_retention_hours=None,
-            terminal_record_retention_hours=None,
-        )
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.commit = AsyncMock()
-
-        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
-            if stmt is DELETE_EXPIRED_HEARTBEATS_SQL:
-                worker._stop.set()
-                return MagicMock(rowcount=2)
-            return MagicMock(rowcount=0)
-
-        session.execute = AsyncMock(side_effect=_execute)
-
-        worker_broker = MagicMock()
-        worker_broker.session_factory = MagicMock(return_value=session)
-        worker_broker.close_async = AsyncMock(return_value=Ok(None))
-        worker.broker = worker_broker
-
-        class _UnexpectedBroker:
-            def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-                raise AssertionError(
-                    'Reaper should reuse worker broker, not create temp broker'
-                )
-
-        recover_mock = AsyncMock(return_value=0)
-        monkeypatch.setattr(
-            'horsies.core.brokers.postgres.PostgresBroker', _UnexpectedBroker
-        )
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
-        )
-
-        _install_reaper_gate_session(worker)
-        await worker._reaper_loop()
-
-        recover_mock.assert_awaited()
-        worker_broker.close_async.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_reaper_prunes_worker_state_and_terminal_rows(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        worker = _make_worker()
-        worker.cfg.recovery_config = RecoveryConfig(
-            auto_requeue_stale_claimed=False,
-            auto_terminate_orphaned_workflow_tasks=False,
-            auto_fail_stale_running=False,
-            check_interval_ms=1_000,
-            heartbeat_retention_hours=12,
-            worker_state_retention_hours=48,
-            terminal_record_retention_hours=72,
-        )
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.commit = AsyncMock()
-
-        expected_rowcounts = {
-            DELETE_EXPIRED_HEARTBEATS_SQL: 5,
-            DELETE_EXPIRED_WORKER_STATES_SQL: 7,
-            DELETE_EXPIRED_WORKFLOWS_SQL: 13,
-            DELETE_EXPIRED_TASKS_SQL: 17,
-        }
-        statement_calls: dict[Any, int] = {}
-
-        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
-            if stmt in expected_rowcounts:
-                if stmt is DELETE_EXPIRED_TASKS_SQL:
-                    worker._stop.set()
-                calls = statement_calls.get(stmt, 0)
-                statement_calls[stmt] = calls + 1
-                # The workflow statement runs until an EMPTY batch
-                # (drained_when='empty_batch'): report its rowcount once,
-                # then drained.
-                if stmt is DELETE_EXPIRED_WORKFLOWS_SQL and calls > 0:
-                    return MagicMock(rowcount=0)
-                return MagicMock(rowcount=expected_rowcounts[stmt])
-            return MagicMock(rowcount=0)
-
-        session.execute = AsyncMock(side_effect=_execute)
-
-        created_brokers: list[Any] = []
-
-        class _FakeBroker:
-            def __init__(self, config: Any, **kwargs: Any):
-                self.config = config
-                self.assume_initialized = kwargs.get('assume_initialized')
-                self.app = None
-                self.session_factory = MagicMock(return_value=session)
-                self.close_async = AsyncMock(return_value=Ok(None))
-                created_brokers.append(self)
-
-        recover_mock = AsyncMock(return_value=0)
-        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
-        )
-
-        _install_reaper_gate_session(worker)
-        await worker._reaper_loop()
-
-        executed_statements = [
-            call.args[0] for call in session.execute.await_args_list if call.args
-        ]
-        for statement in expected_rowcounts:
-            assert statement in executed_statements
-
-        assert session.commit.await_count >= 1
-        assert recover_mock.await_count >= 1
-        assert len(created_brokers) == 1
-        assert created_brokers[0].assume_initialized is True
-        created_brokers[0].close_async.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_reaper_runs_queue_overrides_and_excludes_them_globally(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """With the global window enabled, override queues each get their
-        own delete with their own window and the global tasks delete
-        receives the sorted exclusion list."""
-        worker = _make_worker()
-        worker.cfg.recovery_config = RecoveryConfig(
-            auto_requeue_stale_claimed=False,
-            auto_terminate_orphaned_workflow_tasks=False,
-            auto_fail_stale_running=False,
-            check_interval_ms=1_000,
-            heartbeat_retention_hours=None,
-            worker_state_retention_hours=None,
-            terminal_record_retention_hours=72,
-            queue_terminal_record_retention_hours={'metrics': 2, 'bulk': 6},
-        )
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.commit = AsyncMock()
-
-        executed: list[tuple[Any, dict[str, Any]]] = []
-
-        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
-            if args:
-                executed.append((stmt, args[0]))
-            return MagicMock(rowcount=0)
-
-        session.execute = AsyncMock(side_effect=_execute)
-
-        class _FakeBroker:
-            def __init__(self, config: Any, **kwargs: Any):
-                self.config = config
-                self.assume_initialized = kwargs.get('assume_initialized')
-                self.app = None
-                self.session_factory = MagicMock(return_value=session)
-                self.close_async = AsyncMock(return_value=Ok(None))
-
-        # Stop via the recovery seam, which runs BEFORE retention in every
-        # pass: the loop terminates after one full pass regardless of which
-        # retention statements execute (a revert of the override wiring
-        # must FAIL the assertions below, not hang the loop).
-        async def _recover_and_stop(*args: Any, **kwargs: Any) -> int:
-            worker._stop.set()
-            return 0
-
-        recover_mock = AsyncMock(side_effect=_recover_and_stop)
-        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
-        )
-
-        _install_reaper_gate_session(worker)
-        await worker._reaper_loop()
-
-        global_task_params = [
-            params for stmt, params in executed if stmt is DELETE_EXPIRED_TASKS_SQL
-        ]
-        assert global_task_params, 'global tasks delete ran'
-        assert global_task_params[0]['excluded_queues'] == ['bulk', 'metrics']
-
-        override_params = [
-            params
-            for stmt, params in executed
-            if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
-        ]
-        assert [(p['queue_name'], p['retention_hours']) for p in override_params] == [
-            ('bulk', 6),
-            ('metrics', 2),
-        ]
-
-    @pytest.mark.asyncio
-    async def test_reaper_runs_queue_overrides_with_global_window_disabled(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Overrides run when they are the ONLY terminal retention
-        configured: with terminal_record_retention_hours=None the
-        global tasks/workflow deletes never execute, the override
-        deletes still do."""
-        worker = _make_worker()
-        worker.cfg.recovery_config = RecoveryConfig(
-            auto_requeue_stale_claimed=False,
-            auto_terminate_orphaned_workflow_tasks=False,
-            auto_fail_stale_running=False,
-            check_interval_ms=1_000,
-            heartbeat_retention_hours=None,
-            worker_state_retention_hours=None,
-            terminal_record_retention_hours=None,
-            queue_terminal_record_retention_hours={'metrics': 2},
-        )
-
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=None)
-        session.commit = AsyncMock()
-
-        executed: list[tuple[Any, dict[str, Any]]] = []
-
-        async def _execute(stmt: Any, *args: Any, **kwargs: Any) -> Any:
-            if args:
-                executed.append((stmt, args[0]))
-            return MagicMock(rowcount=0)
-
-        session.execute = AsyncMock(side_effect=_execute)
-
-        class _FakeBroker:
-            def __init__(self, config: Any, **kwargs: Any):
-                self.config = config
-                self.assume_initialized = kwargs.get('assume_initialized')
-                self.app = None
-                self.session_factory = MagicMock(return_value=session)
-                self.close_async = AsyncMock(return_value=Ok(None))
-
-        async def _recover_and_stop(*args: Any, **kwargs: Any) -> int:
-            worker._stop.set()
-            return 0
-
-        recover_mock = AsyncMock(side_effect=_recover_and_stop)
-        monkeypatch.setattr('horsies.core.brokers.postgres.PostgresBroker', _FakeBroker)
-        monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows', recover_mock
-        )
-
-        _install_reaper_gate_session(worker)
-        await worker._reaper_loop()
-
-        executed_statements = [stmt for stmt, _ in executed]
-        assert DELETE_EXPIRED_TASKS_SQL not in executed_statements
-        assert DELETE_EXPIRED_WORKFLOWS_SQL not in executed_statements
-        override_params = [
-            params
-            for stmt, params in executed
-            if stmt is DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL
-        ]
-        assert [(p['queue_name'], p['retention_hours']) for p in override_params] == [
-            ('metrics', 2)
-        ]
 
 
-@pytest.mark.unit
 class TestRetentionBatchedDeletes:
     """_delete_expired_in_batches loop: batch bound, drain, deadline."""
 
@@ -1015,7 +783,7 @@ class TestRetentionBatchedDeletes:
 
         total = await worker._delete_expired_in_batches(
             broker,
-            DELETE_EXPIRED_TASKS_SQL,
+            DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() + 3600.0,
             batch_size=5,
@@ -1034,7 +802,7 @@ class TestRetentionBatchedDeletes:
 
         await worker._delete_expired_in_batches(
             broker,
-            DELETE_EXPIRED_HEARTBEATS_SQL,
+            DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 12},
             deadline_monotonic=time.monotonic() + 3600.0,
             batch_size=7,
@@ -1077,7 +845,7 @@ class TestRetentionBatchedDeletes:
 
         total = await worker._delete_expired_in_batches(
             broker,
-            DELETE_EXPIRED_TASKS_SQL,
+            DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() - 1.0,
             batch_size=5,
@@ -3408,7 +3176,6 @@ def _make_reaper_worker(
         auto_terminate_orphaned_workflow_tasks=auto_terminate,
         auto_fail_stale_running=auto_fail,
         check_interval_ms=1_000,
-        heartbeat_retention_hours=None,
         worker_state_retention_hours=None,
         terminal_record_retention_hours=None,
     )
@@ -3729,8 +3496,7 @@ class TestReaperMatchArms:
             auto_requeue_stale_claimed=True,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
-            heartbeat_retention_hours=None,
-            worker_state_retention_hours=None,
+                worker_state_retention_hours=None,
             terminal_record_retention_hours=None,
         )
 
@@ -3790,8 +3556,7 @@ class TestReaperMatchArms:
             auto_requeue_stale_claimed=True,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
-            heartbeat_retention_hours=None,
-            worker_state_retention_hours=None,
+                worker_state_retention_hours=None,
             terminal_record_retention_hours=None,
         )
 
