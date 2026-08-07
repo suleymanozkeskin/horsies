@@ -21,6 +21,7 @@ from horsies.core.history.terminalization.live_cutover import (
 )
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
+    cancellation_family_fragments,
     completion_family_fragments,
     disposition_case_expression,
     disposition_if_chain,
@@ -171,6 +172,7 @@ class TestLockOrderInvariant:
             *completion_family_fragments()[2:],
             *failure_family_fragments(),
             expiry_family_fragments()[0],
+            *cancellation_family_fragments()[:2],
         ],
     )
     def test_wire_functions_take_the_advisory_lock_first(
@@ -319,6 +321,98 @@ class TestCodecCrossPins:
         assert "'json-utf8'" in MOVE_BODY
         assert MOVE_BODY.count("'json-utf8'") == 2
         assert MOVE_BODY.count("'application/json'") == 2
+
+
+class TestBatchBuilder:
+    """The set-wise skeleton's invariants, pinned once at the builder.
+
+    Both discovery batches are builder output; the stage-order pin runs
+    against each rendering but is written here once, because the builder
+    is load-bearing infrastructure that owns its own invariants.
+    """
+
+    @pytest.mark.parametrize(
+        'batch',
+        [expiry_family_fragments()[1], cancellation_family_fragments()[2]],
+    )
+    def test_stage_order_is_the_builders(self, batch: str) -> None:
+        size_check = batch.index('p_batch_size must be a positive integer')
+        availability = batch.index('horsies_assert_archive_available')
+        discovery = batch.index('FOR UPDATE')
+        uniqueness = batch.index('exists in multiple locations')
+        insert = batch.index('INSERT INTO horsies_task_history')
+        reservation = batch.index('horsies_key_reservation_terminalize_batch')
+        outcome = batch.index("'APPLIED'::text")
+        deletes = batch.index('DELETE FROM horsies_task_attempts')
+        notify = batch.index("pg_notify('task_done'")
+        assert (
+            size_check < availability < discovery < uniqueness < insert
+            < reservation < outcome < deletes < notify
+        )
+
+    @pytest.mark.parametrize(
+        'batch',
+        [expiry_family_fragments()[1], cancellation_family_fragments()[2]],
+    )
+    def test_no_batch_takes_advisory_locks(self, batch: str) -> None:
+        assert 'pg_advisory_xact_lock' not in batch
+        assert 'FOR UPDATE SKIP LOCKED' in batch or (
+            'FOR UPDATE OF t2 SKIP LOCKED' in batch
+        )
+
+    def test_deferred_batch_has_fence_and_pending(self) -> None:
+        expiry = expiry_family_fragments()[1]
+        assert 'requires a result payload' in expiry
+        assert 'INSERT INTO horsies_workflow_phase2_pending' in expiry
+
+    def test_non_deferred_batch_has_neither(self) -> None:
+        sweep = cancellation_family_fragments()[2]
+        assert 'requires a result payload' not in sweep
+        assert 'INSERT INTO horsies_workflow_phase2_pending' not in sweep
+
+    def test_non_deferred_linkage_is_deterministic_first_link(self) -> None:
+        sweep = cancellation_family_fragments()[2]
+        assert 'ORDER BY wt.id' in sweep
+        assert 'task links to multiple workflows' in sweep
+
+    def test_sweep_discovery_is_deliberately_unordered(self) -> None:
+        sweep = cancellation_family_fragments()[2]
+        discovery_start = sweep.index('SELECT t2.id FROM')
+        discovery_end = sweep.index('FOR UPDATE OF t2 SKIP LOCKED')
+        assert 'ORDER BY' not in sweep[discovery_start:discovery_end]
+
+
+class TestCancellationFamily:
+    """The cancellation family's wire shape against the production contract."""
+
+    def test_move_case_covers_the_family(self) -> None:
+        assert "'administrative-cancel projection disagrees'" in MOVE_BODY
+        assert "'orphan-cancel projection disagrees'" in MOVE_BODY
+
+    def test_admin_cancel_rejects_workflow_tasks(self) -> None:
+        assert "'COMPLETE_FUSED', 'CANCEL_ADMIN'" in MOVE_BODY
+
+    def test_gate_8_swap_copies_prior_bytes_and_digests_them(self) -> None:
+        assert 'v_prior_result_payload := CASE' in MOVE_BODY
+        assert 'convert_to(v_task.result' in MOVE_BODY
+        assert 'sha256(v_prior_result_payload)' in MOVE_BODY
+
+    def test_admin_wire_owns_the_literals(self) -> None:
+        admin = cancellation_family_fragments()[0]
+        assert "'TASK_CANCELLED', 'Cancelled via monitoring API'" in admin
+        assert 't.is_workflow_task = FALSE' in admin
+
+    def test_node_lookup_shape_derives_from_deferral(self) -> None:
+        strict = MOVE_BODY.index('IF v_requires_deferred_phase2 THEN')
+        strict_lookup = MOVE_BODY.index('INTO STRICT v_workflow_node_row_id')
+        optional_lookup = MOVE_BODY.index('ORDER BY n.id')
+        assert strict < strict_lookup < optional_lookup
+        assert 'task links to multiple workflows' in MOVE_BODY
+
+    def test_orphan_refusal_carries_the_link_state(self) -> None:
+        orphan = cancellation_family_fragments()[1]
+        assert "'WORKFLOW_LINK_STATE'" in orphan
+        assert "jsonb_build_object('node_status', v_node_status)" in orphan
 
 
 class TestAttemptEncoder:

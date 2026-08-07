@@ -278,6 +278,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
             gated_fragment,
         )
         from horsies.core.history.terminalization.move import (
+            cancellation_family_fragments,
             completion_family_fragments,
             expiry_family_fragments,
             failure_family_fragments,
@@ -311,6 +312,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 *completion_family_fragments(),
                 *failure_family_fragments(),
                 *expiry_family_fragments(),
+                *cancellation_family_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))
