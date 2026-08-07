@@ -34,6 +34,9 @@ from tests.task_history_prototypes.recovery_evidence import (
 from tests.task_history_prototypes.registry_evidence import (
     collect_key_registry_evidence,
 )
+from tests.task_history_prototypes.rerun_terminalization_evidence import (
+    collect_rerun_terminalization_evidence,
+)
 from tests.task_history_prototypes.replacement_transcode_evidence import (
     collect_replacement_archive_transcode_evidence,
 )
@@ -73,6 +76,7 @@ def main(argv: list[str] | None = None) -> int:
             'uuid-index-economics',
             'key-registry',
             'operational-maintenance',
+            'rerun-input-terminalization',
         ),
     )
     parser.add_argument('--rows', type=int, default=100)
@@ -112,6 +116,15 @@ def main(argv: list[str] | None = None) -> int:
         action='append',
     )
     parser.add_argument('--partial-evidence-path', type=Path)
+    parser.add_argument(
+        '--data-path',
+        type=Path,
+        default=Path.cwd(),
+        help=(
+            'filesystem the measured bytes land on; the capacity preflight '
+            'reads free space here'
+        ),
+    )
     parser.add_argument('--progress-fd', type=int)
     parser.add_argument(
         '--payload-shape',
@@ -130,13 +143,15 @@ def main(argv: list[str] | None = None) -> int:
         'identity-lookup',
         'replacement-archive-transcode',
         'operational-maintenance',
+        'rerun-input-terminalization',
     } and (
         arguments.partial_evidence_path is not None
         or arguments.progress_fd is not None
     ):
         parser.error(
             '--partial-evidence-path and --progress-fd currently require '
-            '--scenario identity-lookup or replacement-archive-transcode'
+            '--scenario identity-lookup, replacement-archive-transcode, '
+            'operational-maintenance, or rerun-input-terminalization'
         )
     if (
         arguments.scenario == 'replacement-archive-transcode'
@@ -279,6 +294,25 @@ async def _run(
                         operations=arguments.rows,
                         producers=arguments.producers,
                         seed=arguments.seed,
+                    )
+                case 'rerun-input-terminalization':
+                    return await collect_rerun_terminalization_evidence(
+                        engine,
+                        commit=arguments.commit,
+                        run_kind=arguments.run_kind,
+                        server_image=arguments.server_image,
+                        host_description=arguments.host_description,
+                        storage_description=arguments.storage_description,
+                        demo_quiesced=arguments.demo_quiesced,
+                        observations=arguments.warm_observations,
+                        block_size=arguments.batch_size,
+                        resamples=arguments.bootstrap_resamples,
+                        seed=arguments.seed,
+                        envelope_bytes=arguments.rerun_input_bytes,
+                        result_bytes=arguments.result_bytes,
+                        data_path=arguments.data_path,
+                        checkpoint_path=arguments.partial_evidence_path,
+                        progress=progress,
                     )
                 case 'operational-maintenance':
                     return await collect_operational_maintenance_evidence(
