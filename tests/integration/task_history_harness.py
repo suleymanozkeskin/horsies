@@ -242,6 +242,15 @@ CREATE TABLE horsies_task_attempts (
 )
 """
 
+HEARTBEATS_STANDIN_DDL = """
+CREATE TABLE horsies_heartbeats (
+    task_id uuid NOT NULL,
+    role text NOT NULL,
+    sent_at timestamptz NOT NULL
+)
+"""
+"""Stand-in with the production column names the stale capture reads."""
+
 WORKFLOW_TASKS_STANDIN_DDL = """
 CREATE TABLE horsies_workflow_tasks (
     id uuid UNIQUE NOT NULL,
@@ -270,6 +279,7 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         )
         from horsies.core.history.terminalization.move import (
             completion_family_fragments,
+            failure_family_fragments,
         )
         from horsies.core.history.terminalization.outcome import (
             outcome_fragments,
@@ -295,8 +305,10 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
                 FULL_LIVE_STANDIN_DDL,
                 ATTEMPTS_STANDIN_DDL,
                 WORKFLOW_TASKS_STANDIN_DDL,
+                HEARTBEATS_STANDIN_DDL,
                 *outcome_fragments(),
                 *completion_family_fragments(),
+                *failure_family_fragments(),
             )
             for statement in statements:
                 await connection.execute(text(statement))
@@ -307,6 +319,112 @@ def terminalization_schema_fixture(schema_name: str):  # type: ignore[no-untyped
         await admin_engine.dispose()
 
     return terminalization_schema
+
+
+async def prepare_move_storage(
+    connection: AsyncConnection,
+    class_key: str,
+) -> None:
+    """Register a class and publish coverage for terminalization tests."""
+    from horsies.core.history.commands import EnsureLeafCoverage
+    from horsies.core.history.partitions.manager import ensure_leaf_coverage
+    from horsies.core.history.reads.publisher import StagedLoaderPublisher
+
+    await register_class(connection, class_key)
+    outcomes = await ensure_leaf_coverage(
+        connection,
+        EnsureLeafCoverage(class_key=class_key, horizon_days=2),
+        StagedLoaderPublisher(),
+    )
+    assert len(outcomes) == 3
+
+
+async def insert_live_task(
+    connection: AsyncConnection,
+    *,
+    class_key: str,
+    status: str = 'RUNNING',
+    worker: str | None = 'worker-1',
+    key_digest: bytes | None = None,
+    retain: bool = True,
+    prepared_disposition: str = 'DECLINED_BY_POLICY',
+    prepared_inline: bytes | None = None,
+    is_workflow_task: bool = False,
+    started_at_offset: timedelta = timedelta(0),
+) -> str:
+    """Insert one post-cutover live row and return its minted v7 id."""
+    from horsies.core.history.identity.uuid7 import mint_task_id
+
+    task_id = mint_task_id()
+    now = datetime.now(timezone.utc)
+    envelope: dict[str, object] = {
+        'version': None,
+        'codec': None,
+        'content_type': None,
+        'digest': None,
+        'inline': None,
+        'reference': None,
+    }
+    if prepared_disposition == 'INLINE':
+        payload = prepared_inline if prepared_inline is not None else b'{"x":1}'
+        envelope = {
+            'version': 1,
+            'codec': 'json-utf8',
+            'content_type': 'application/json',
+            'digest': sha256(payload).digest(),
+            'inline': payload,
+            'reference': None,
+        }
+    await connection.execute(
+        text(
+            """
+            INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, status,
+                enqueued_at, created_at, started_at, claimed_at,
+                retry_count, max_retries,
+                claimed_by_worker_id, worker_hostname, worker_pid,
+                worker_process_name, is_workflow_task,
+                command_fingerprint_version, command_fingerprint,
+                retention_class_key, idempotency_key_digest,
+                retain_rerun_input, prepared_rerun_input_disposition,
+                prepared_rerun_input_version, prepared_rerun_input_codec,
+                prepared_rerun_input_content_type,
+                prepared_rerun_input_digest, prepared_rerun_input_inline,
+                prepared_rerun_input_reference
+            ) VALUES (
+                CAST(:task_id AS uuid), 'it.move', 'default', 50, :status,
+                :now, :now, :started_at, :now,
+                0, 0,
+                :worker, 'it-host', 4242, 'it-proc', :is_workflow_task,
+                1, :fingerprint,
+                :class_key, :key_digest,
+                :retain, :disposition,
+                :env_version, :env_codec, :env_content_type,
+                :env_digest, :env_inline, :env_reference
+            )
+            """
+        ),
+        {
+            'task_id': task_id,
+            'status': status,
+            'now': now,
+            'started_at': now + started_at_offset,
+            'worker': worker,
+            'is_workflow_task': is_workflow_task,
+            'fingerprint': sha256(task_id.encode()).digest(),
+            'class_key': class_key,
+            'key_digest': key_digest,
+            'retain': retain,
+            'disposition': prepared_disposition,
+            'env_version': envelope['version'],
+            'env_codec': envelope['codec'],
+            'env_content_type': envelope['content_type'],
+            'env_digest': envelope['digest'],
+            'env_inline': envelope['inline'],
+            'env_reference': envelope['reference'],
+        },
+    )
+    return task_id
 
 
 def day_bounds(day: datetime) -> tuple[datetime, datetime]:

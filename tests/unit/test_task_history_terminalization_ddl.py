@@ -22,6 +22,7 @@ from horsies.core.history.terminalization.live_cutover import (
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
     completion_family_fragments,
+    failure_family_fragments,
 )
 from horsies.core.history.terminalization.outcome import (
     MISS_CLASSIFIER_DDL,
@@ -161,14 +162,53 @@ class TestLockOrderInvariant:
     body must acquire the advisory lock ahead of its guard select.
     """
 
-    @pytest.mark.parametrize('index', [2, 3])
+    @pytest.mark.parametrize(
+        'body',
+        [
+            *completion_family_fragments()[2:],
+            *failure_family_fragments(),
+        ],
+    )
     def test_wire_functions_take_the_advisory_lock_first(
-        self, index: int
+        self, body: str
     ) -> None:
-        body = completion_family_fragments()[index]
         advisory = body.index('pg_advisory_xact_lock')
         guard_select = body.index('FROM horsies_tasks')
         assert advisory < guard_select
+
+
+class TestFailureFamily:
+    """The failure family's wire shape against the production contract."""
+
+    def test_move_case_covers_both_failure_kinds(self) -> None:
+        assert "'running-failure projection disagrees'" in MOVE_BODY
+        assert "'stale-failure projection disagrees'" in MOVE_BODY
+
+    def test_stale_capture_reads_the_runner_heartbeat_in_one_snapshot(
+        self,
+    ) -> None:
+        stale = failure_family_fragments()[1]
+        capture = stale.index("h.role = 'runner'")
+        judged = stale.index('NOW()')
+        refusal = stale.index('jsonb_build_object')
+        assert capture < judged < refusal
+        for field in (
+            'last_heartbeat_at',
+            'started_at',
+            'finalizing_at',
+            'stale_after_ms',
+            'finalizing_stale_after_ms',
+            'evaluated_at',
+        ):
+            assert f"'{field}'" in stale
+
+    def test_stale_miss_path_uses_null_claim_parameters(self) -> None:
+        stale = failure_family_fragments()[1]
+        assert 'NULL::text, NULL::timestamptz' in stale
+
+    def test_locked_failure_passes_reason_and_code_to_the_move(self) -> None:
+        locked = failure_family_fragments()[0]
+        assert 'p_result, p_error_code, p_failed_reason' in locked
 
 
 class TestCodecCrossPins:

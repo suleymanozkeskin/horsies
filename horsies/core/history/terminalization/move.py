@@ -46,6 +46,8 @@ ATTEMPT_ENCODER_FUNCTION: Final = 'horsies_encode_task_attempts'
 MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
 COMPLETE_LOCKED_FUNCTION: Final = 'horsies_complete_locked_task'
 COMPLETE_FUSED_FUNCTION: Final = 'horsies_complete_task_fused'
+FAIL_LOCKED_FUNCTION: Final = 'horsies_fail_locked_task'
+FAIL_STALE_FUNCTION: Final = 'horsies_fail_stale_task'
 
 _TASK_LOCK_SEED: Final = 731
 
@@ -98,6 +100,8 @@ $function$
 def _move_ddl() -> str:
     complete_locked = TerminalizationKind.COMPLETE_LOCKED.value
     complete_fused = TerminalizationKind.COMPLETE_FUSED.value
+    fail_running = TerminalizationKind.FAIL_RUNNING.value
+    fail_stale = TerminalizationKind.FAIL_STALE.value
     return f"""
 CREATE FUNCTION {MOVE_FUNCTION}(
     p_task_id uuid,
@@ -141,6 +145,16 @@ BEGIN
                 RAISE EXCEPTION 'completion-fused projection disagrees';
             END IF;
             v_requires_deferred_phase2 := FALSE;
+        WHEN '{fail_running}' THEN
+            IF p_terminal_status <> 'FAILED' THEN
+                RAISE EXCEPTION 'running-failure projection disagrees';
+            END IF;
+            v_requires_deferred_phase2 := TRUE;
+        WHEN '{fail_stale}' THEN
+            IF p_terminal_status <> 'FAILED' THEN
+                RAISE EXCEPTION 'stale-failure projection disagrees';
+            END IF;
+            v_requires_deferred_phase2 := TRUE;
         ELSE
             RAISE EXCEPTION
                 'terminalization kind % has no move family yet',
@@ -423,6 +437,163 @@ BEGIN
 END
 $function$
 """
+
+
+def _fail_locked_ddl() -> str:
+    kind = TerminalizationKind.FAIL_RUNNING.value
+    return f"""
+CREATE FUNCTION {FAIL_LOCKED_FUNCTION}(
+    p_task_id uuid,
+    p_worker_id text,
+    p_result text,
+    p_error_code text,
+    p_failed_reason text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_claimed_at timestamptz;
+    v_terminal_at timestamptz;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
+    SELECT claimed_at INTO v_claimed_at
+    FROM {LIVE_TASKS}
+    WHERE id = p_task_id
+      AND status = 'RUNNING'
+      AND claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
+            p_task_id, ARRAY['{kind}']::text[],
+            p_worker_id, NULL::timestamptz
+        );
+        RETURN;
+    END IF;
+
+    v_terminal_at := NOW();
+    PERFORM {MOVE_FUNCTION}(
+        p_task_id, 'FAILED', '{kind}', v_terminal_at,
+        p_result, p_error_code, p_failed_reason
+    );
+    RETURN QUERY SELECT
+        p_task_id, NULL::bigint, 'APPLIED'::text,
+        v_terminal_at, '{kind}'::text,
+        'RUNNING'::text, CAST(p_worker_id AS VARCHAR), v_claimed_at,
+        NULL::text, NULL::jsonb;
+END
+$function$
+"""
+
+
+def _fail_stale_ddl() -> str:
+    kind = TerminalizationKind.FAIL_STALE.value
+    return f"""
+CREATE FUNCTION {FAIL_STALE_FUNCTION}(
+    p_task_id uuid,
+    p_stale_after_ms integer,
+    p_finalizing_stale_after_ms integer,
+    p_result text,
+    p_error_code text,
+    p_failed_reason text
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_status text;
+    v_worker varchar;
+    v_claimed_at timestamptz;
+    v_started_at timestamptz;
+    v_finalizing_at timestamptz;
+    v_last_heartbeat timestamptz;
+    v_evaluated_at timestamptz;
+    v_terminal_at timestamptz;
+BEGIN
+    PERFORM pg_advisory_xact_lock(
+        hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
+    );
+    -- One capture: the row locked, the heartbeat read beside it, and the
+    -- instant both arms are judged at. Nothing is reread after a refusal,
+    -- so the evidence cannot show a heartbeat the guard never saw.
+    SELECT t.status, t.claimed_by_worker_id, t.claimed_at,
+           t.started_at, t.finalizing_at,
+           (
+               SELECT h.sent_at
+               FROM horsies_heartbeats h
+               WHERE h.task_id = t.id AND h.role = 'runner'
+               ORDER BY h.sent_at DESC
+               LIMIT 1
+           ),
+           NOW()
+    INTO v_status, v_worker, v_claimed_at, v_started_at, v_finalizing_at,
+         v_last_heartbeat, v_evaluated_at
+    FROM {LIVE_TASKS} t
+    WHERE t.id = p_task_id
+    FOR UPDATE;
+
+    IF FOUND AND v_status = 'RUNNING' THEN
+        IF v_started_at IS NOT NULL
+           AND (
+               v_finalizing_at IS NULL
+               OR v_finalizing_at
+                  < v_evaluated_at
+                    - make_interval(
+                        secs => p_finalizing_stale_after_ms::double precision
+                            / 1000.0
+                    )
+           )
+           AND COALESCE(v_last_heartbeat, v_started_at)
+               < v_evaluated_at
+                    - make_interval(
+                        secs => p_stale_after_ms::double precision / 1000.0
+                    )
+        THEN
+            v_terminal_at := NOW();
+            PERFORM {MOVE_FUNCTION}(
+                p_task_id, 'FAILED', '{kind}', v_terminal_at,
+                p_result, p_error_code, p_failed_reason
+            );
+            -- Cross-worker by design: the observed claim is whichever
+            -- worker's silence the guard just judged, from the capture.
+            RETURN QUERY SELECT
+                p_task_id, NULL::bigint, 'APPLIED'::text,
+                v_terminal_at, '{kind}'::text,
+                'RUNNING'::text, v_worker, v_claimed_at,
+                NULL::text, NULL::jsonb;
+            RETURN;
+        END IF;
+
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'STALENESS'::text,
+            jsonb_build_object(
+                'last_heartbeat_at', v_last_heartbeat,
+                'started_at', v_started_at,
+                'finalizing_at', v_finalizing_at,
+                'stale_after_ms', p_stale_after_ms,
+                'finalizing_stale_after_ms', p_finalizing_stale_after_ms,
+                'evaluated_at', v_evaluated_at
+            );
+        RETURN;
+    END IF;
+
+    RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
+        p_task_id, ARRAY['{kind}']::text[],
+        NULL::text, NULL::timestamptz
+    );
+END
+$function$
+"""
+
+
+def failure_family_fragments() -> tuple[str, ...]:
+    """The failure-family wire functions, in installation order."""
+    return (_fail_locked_ddl(), _fail_stale_ddl())
 
 
 def completion_family_fragments() -> tuple[str, ...]:

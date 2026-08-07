@@ -13,7 +13,7 @@ it.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta, timezone
 from hashlib import sha256
 from typing import Any
 from uuid import uuid4
@@ -25,14 +25,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.history.archive.attempts import decode_attempt_snapshot
 from horsies.core.history.archive.versions import DecodedArchiveValue
-from horsies.core.history.commands import EnsureLeafCoverage
-from horsies.core.history.identity.uuid7 import mint_task_id
-from horsies.core.history.partitions.manager import ensure_leaf_coverage
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
-
 from tests.integration.task_history_harness import (
     HistorySchema,
-    register_class,
+    insert_live_task as insert_live_task_for,
+    prepare_move_storage,
     terminalization_schema_fixture,
 )
 
@@ -48,13 +44,7 @@ terminalization_schema = terminalization_schema_fixture(
 
 
 async def prepare_storage(connection: AsyncConnection) -> None:
-    await register_class(connection, CLASS_KEY)
-    outcomes = await ensure_leaf_coverage(
-        connection,
-        EnsureLeafCoverage(class_key=CLASS_KEY, horizon_days=2),
-        StagedLoaderPublisher(),
-    )
-    assert len(outcomes) == 3
+    await prepare_move_storage(connection, CLASS_KEY)
 
 
 async def insert_live_task(
@@ -67,74 +57,16 @@ async def insert_live_task(
     prepared_disposition: str = 'DECLINED_BY_POLICY',
     prepared_inline: bytes | None = None,
 ) -> str:
-    task_id = mint_task_id()
-    now = datetime.now(UTC)
-    envelope: dict[str, object] = {
-        'version': None,
-        'codec': None,
-        'content_type': None,
-        'digest': None,
-        'inline': None,
-        'reference': None,
-    }
-    if prepared_disposition == 'INLINE':
-        payload = prepared_inline if prepared_inline is not None else b'{"x":1}'
-        envelope = {
-            'version': 1,
-            'codec': 'json-utf8',
-            'content_type': 'application/json',
-            'digest': sha256(payload).digest(),
-            'inline': payload,
-            'reference': None,
-        }
-    await connection.execute(
-        text(
-            """
-            INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, status,
-                enqueued_at, created_at, started_at, claimed_at,
-                retry_count, max_retries,
-                claimed_by_worker_id, worker_hostname, worker_pid,
-                worker_process_name, is_workflow_task,
-                command_fingerprint_version, command_fingerprint,
-                retention_class_key, idempotency_key_digest,
-                retain_rerun_input, prepared_rerun_input_disposition,
-                prepared_rerun_input_version, prepared_rerun_input_codec,
-                prepared_rerun_input_content_type,
-                prepared_rerun_input_digest, prepared_rerun_input_inline,
-                prepared_rerun_input_reference
-            ) VALUES (
-                CAST(:task_id AS uuid), 'it.move', 'default', 50, :status,
-                :now, :now, :now, :now,
-                0, 0,
-                :worker, 'it-host', 4242, 'it-proc', FALSE,
-                1, :fingerprint,
-                :class_key, :key_digest,
-                :retain, :disposition,
-                :env_version, :env_codec, :env_content_type,
-                :env_digest, :env_inline, :env_reference
-            )
-            """
-        ),
-        {
-            'task_id': task_id,
-            'status': status,
-            'now': now,
-            'worker': worker,
-            'fingerprint': sha256(task_id.encode()).digest(),
-            'class_key': CLASS_KEY,
-            'key_digest': key_digest,
-            'retain': retain,
-            'disposition': prepared_disposition,
-            'env_version': envelope['version'],
-            'env_codec': envelope['codec'],
-            'env_content_type': envelope['content_type'],
-            'env_digest': envelope['digest'],
-            'env_inline': envelope['inline'],
-            'env_reference': envelope['reference'],
-        },
+    return await insert_live_task_for(
+        connection,
+        class_key=CLASS_KEY,
+        status=status,
+        worker=worker,
+        key_digest=key_digest,
+        retain=retain,
+        prepared_disposition=prepared_disposition,
+        prepared_inline=prepared_inline,
     )
-    return task_id
 
 
 async def complete_fused(
