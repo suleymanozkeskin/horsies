@@ -588,3 +588,48 @@ class TestLiveCutover:
     def test_no_defaults_on_classification_columns(self) -> None:
         combined = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
         assert 'DEFAULT' not in combined
+
+
+class TestTighteningRendering:
+    """Three renderings, one structured authority, no text parsing."""
+
+    def test_set_not_null_covers_exactly_the_declared_columns(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+            tightening_cutover_ddl,
+        )
+
+        rendered = '\n'.join(tightening_cutover_ddl())
+        for column in CUTOVER_COLUMNS:
+            clause = f'ALTER COLUMN {column.name} SET NOT NULL'
+            assert (clause in rendered) is column.not_null, column.name
+
+    def test_every_declared_check_lands_once(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+            tightening_cutover_ddl,
+        )
+
+        rendered = tightening_cutover_ddl()
+        checked = [c for c in CUTOVER_COLUMNS if c.check is not None]
+        constraint_statements = [
+            s for s in rendered if 'ADD CONSTRAINT' in s
+        ]
+        # One per declared column check, plus the lineage pair.
+        assert len(constraint_statements) == len(checked) + 1
+        assert any(
+            'rerun_lineage_pair' in s for s in constraint_statements
+        )
+
+    def test_final_and_transitional_share_the_column_set(self) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            LIVE_CUTOVER_COLUMNS_DDL,
+            cutover_column_definitions,
+            transitional_cutover_columns_ddl,
+        )
+
+        final = '\n'.join(LIVE_CUTOVER_COLUMNS_DDL)
+        transitional = transitional_cutover_columns_ddl()
+        for name, _ in cutover_column_definitions():
+            assert f'ADD COLUMN {name} ' in final
+            assert f'ADD COLUMN IF NOT EXISTS {name} ' in transitional
