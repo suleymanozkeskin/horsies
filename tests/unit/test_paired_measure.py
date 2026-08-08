@@ -638,6 +638,26 @@ def test_the_steady_state_step_returns_rows_before_it_vacuums() -> None:
     assert len(STEADY_STATE_STATEMENTS) == 2
     assert "status = 'PENDING'" in STEADY_STATE_STATEMENTS[0]
     assert STEADY_STATE_STATEMENTS[1] == 'VACUUM ANALYZE horsies_tasks'
+    assert 'VACUUM' not in STEADY_STATE_STATEMENTS[0]
+
+
+def test_the_steady_state_step_returns_a_row_whole() -> None:
+    """A partial reset leaves an incoherent row, and the product refuses it.
+
+    ck_horsies_tasks_terminal_at_terminal_only rejects a PENDING row whose
+    terminal_at still carries a terminal timestamp, so every column the claim,
+    the RUNNING setup and the terminalization write must be cleared.
+    """
+    from tests.task_history_prototypes.paired_measure import (
+        RUNNING_SETUP_COLUMNS,
+        STEADY_STATE_COLUMNS,
+    )
+
+    assert RUNNING_SETUP_COLUMNS <= STEADY_STATE_COLUMNS
+    for column in ('terminal_at', 'terminalization_kind', 'result', 'completed_at'):
+        assert column in STEADY_STATE_COLUMNS
+    for column in STEADY_STATE_COLUMNS:
+        assert f'{column} =' in STEADY_STATE_STATEMENTS[0]
 
 
 def test_a_complete_run_is_gated_on_flatness_too() -> None:
@@ -708,3 +728,108 @@ def test_the_claim_body_takes_the_statement_from_the_build_under_test() -> None:
     )
     assert 'from horsies.core.worker.sql import HORSIES_CLAIM_SQL' in body
     assert 'horsies_claim(' not in body
+
+
+BASELINE_CHILD_RUNNER = Path(
+    'ignored-content/.throughput-venvs/horsies-0.4.7/lib/python3.13/'
+    'site-packages/horsies/core/worker/child_runner.py'
+)
+CANDIDATE_CHILD_RUNNER = Path('horsies/core/worker/child_runner.py')
+
+
+def test_the_setup_is_pinned_to_what_the_product_writes() -> None:
+    """The harness authors this statement, so it is checked against the product.
+
+    Read out of each build's own source rather than from what this harness
+    remembers: a product change to the transition breaks the pin instead of
+    silently leaving the harness establishing a different precondition.
+    """
+    from tests.task_history_prototypes.paired_measure import (
+        RUNNING_SETUP_COLUMNS,
+        running_transition_columns,
+    )
+
+    if not BASELINE_CHILD_RUNNER.exists():
+        pytest.skip('the released build is not installed in this environment')
+    baseline = running_transition_columns(BASELINE_CHILD_RUNNER.read_text())
+    candidate = running_transition_columns(CANDIDATE_CHILD_RUNNER.read_text())
+    assert RUNNING_SETUP_COLUMNS == baseline & candidate
+
+
+def test_the_setup_writes_every_column_the_candidate_writes() -> None:
+    """A RUNNING row missing a column would exercise paths production never runs."""
+    from tests.task_history_prototypes.paired_measure import (
+        RUNNING_SETUP_COLUMNS,
+        RUNNING_SETUP_STATEMENT,
+        running_transition_columns,
+    )
+
+    product = running_transition_columns(CANDIDATE_CHILD_RUNNER.read_text())
+    assert RUNNING_SETUP_COLUMNS == product
+    for column in product:
+        assert f'{column} =' in RUNNING_SETUP_STATEMENT
+
+
+def test_a_moved_transition_breaks_the_pin_rather_than_passing() -> None:
+    from tests.task_history_prototypes.paired_measure import (
+        running_transition_columns,
+    )
+
+    with pytest.raises(MeasurementError, match='no CLAIMED -> RUNNING'):
+        running_transition_columns('def something_else(): pass\n')
+
+
+def test_the_terminalization_body_checks_the_outcome() -> None:
+    """A refused command still runs, and costs a fraction of applying."""
+    from tests.task_history_prototypes.paired_measure import (
+        TerminalizePlan,
+        terminalize_source,
+    )
+
+    body = terminalize_source(
+        TerminalizePlan(task_name='p', result_bytes=200, payload_seed=1),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=0,
+    )
+    assert 'decode_outcome_row' in body
+    assert "!= 'APPLIED'" in body
+    assert 'terminalization did not apply' in body
+
+
+def test_the_terminalization_body_establishes_running_before_timing() -> None:
+    from tests.task_history_prototypes.paired_measure import (
+        TerminalizePlan,
+        terminalize_source,
+    )
+
+    body = terminalize_source(
+        TerminalizePlan(task_name='p', result_bytes=200, payload_seed=1),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=0,
+    )
+    setup = body.index('_to_running(_conn, _row, _row_worker_id)')
+    timing = body.index('_started = _time.perf_counter_ns()')
+    assert setup < timing
+    # The predicate, not only its message: a message left in place while the
+    # check is gone would satisfy a test that only looked for the words.
+    assert 'if len(_updated) != 1:' in body
+    assert 'the CLAIMED to RUNNING setup updated' in body
+
+
+def test_the_setup_declares_itself_as_harness_authored() -> None:
+    """Conditions name it for what it is, and name the source it replicates."""
+    from tests.task_history_prototypes.paired_measure import (
+        RUNNING_SETUP_PROVENANCE,
+        TerminalizePlan,
+    )
+
+    payload = TerminalizePlan(
+        task_name='p', result_bytes=200, payload_seed=1
+    ).as_payload()
+    assert payload['running_setup_provenance'] == RUNNING_SETUP_PROVENANCE
+    assert 'harness-authored' in RUNNING_SETUP_PROVENANCE
+    assert 'child_runner.py' in RUNNING_SETUP_PROVENANCE
