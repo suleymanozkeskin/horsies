@@ -90,8 +90,8 @@ async def _measure_wide_candidate(
         text(
             f"""
             CREATE TABLE {schema.sql}.wide_pending_candidate (
-                task_id varchar(36) PRIMARY KEY,
-                workflow_id varchar(36) NOT NULL,
+                task_id uuid PRIMARY KEY,
+                workflow_id uuid NOT NULL,
                 node_id varchar(255) NOT NULL,
                 task_name varchar(255) NOT NULL,
                 terminal_status text NOT NULL,
@@ -102,8 +102,8 @@ async def _measure_wide_candidate(
                 history_anchor timestamptz,
                 history_schema_version smallint NOT NULL,
                 result_digest bytea NOT NULL,
-                quarantine_task_id varchar(36),
-                phase2_generation varchar(36) NOT NULL,
+                quarantine_task_id uuid,
+                phase2_generation uuid NOT NULL,
                 created_at timestamptz NOT NULL,
                 attempt_count integer NOT NULL,
                 last_attempt_at timestamptz,
@@ -219,7 +219,7 @@ async def _measure_compact_candidate(
                     created_at, attempt_count, last_attempt_at,
                     last_failure_class
                 )
-                SELECT CAST(:task_id AS varchar), node.workflow_id, node.id,
+                SELECT CAST(:task_id AS uuid), node.workflow_id, node.id,
                        'COMPLETED',
                        statement_timestamp(),
                        repeat('k', 32), CAST(:source AS {schema.sql}.recovery_source_kind),
@@ -228,12 +228,12 @@ async def _measure_compact_candidate(
                             THEN statement_timestamp() END,
                        32767, :digest,
                        CASE WHEN :source = 'QUARANTINE'
-                            THEN CAST(:task_id AS varchar) END,
-                       CAST(:generation AS varchar), statement_timestamp(),
+                            THEN CAST(:task_id AS uuid) END,
+                       CAST(:generation AS uuid), statement_timestamp(),
                        2147483647,
                        statement_timestamp(), repeat('é', 32)
                 FROM {schema.sql}.phase2_nodes AS node
-                WHERE node.task_id = CAST(:task_id AS varchar)
+                WHERE node.task_id = CAST(:task_id AS uuid)
                 """
             ),
             {

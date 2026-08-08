@@ -159,10 +159,10 @@ async def _seed_recovery(
                 history_class, history_anchor, history_schema_version,
                 result_digest, phase2_generation, created_at
             ) VALUES (
-                CAST(:task_id AS varchar(36)),
+                CAST(:task_id AS uuid),
                 :workflow_id,
                 (SELECT id FROM {schema.sql}.phase2_nodes
-                 WHERE task_id = CAST(:task_id AS varchar(36))),
+                 WHERE task_id = CAST(:task_id AS uuid)),
                 'COMPLETED', :terminal_at,
                 'COMPLETE_LOCKED', 'HISTORY', 'finite_30d_v1', :terminal_at,
                 :version, :pending_digest, :generation,
@@ -182,7 +182,7 @@ async def _quarantine(connection: AsyncConnection, task_id: str) -> str:
             text(
                 f"""
                 SELECT {schema.sql}.quarantine_phase2_pending(
-                    CAST(:task_id AS varchar(36)),
+                    CAST(:task_id AS uuid),
                     '2026-06-01T00:00:00Z'::timestamptz,
                     '2026-06-02T00:00:00Z'::timestamptz,
                     interval '1 day', 'detach horizon exceeded'
@@ -201,8 +201,8 @@ async def _apply(connection: AsyncConnection, task_id: str, generation: str) -> 
             text(
                 f"""
                 SELECT {schema.sql}.apply_phase2(
-                    CAST(:task_id AS varchar(36)),
-                    CAST(:generation AS varchar(36))
+                    CAST(:task_id AS uuid),
+                    CAST(:generation AS uuid)
                 )::text
                 """
             ),
