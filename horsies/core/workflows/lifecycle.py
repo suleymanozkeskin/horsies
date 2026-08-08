@@ -254,6 +254,21 @@ async def start_workflow_async(
 
     # ── Zone 1: Prevalidation (never retried) ────────────────────────
     try:
+        if workflow_id is not None:
+            try:
+                uuid.UUID(workflow_id)
+            except ValueError as exc:
+                raise WorkflowValidationError(
+                    message='workflow_id is not a UUID',
+                    code=ErrorCode.WORKFLOW_INVALID_ID,
+                    notes=[f'received {workflow_id!r}'],
+                    help_text=(
+                        'workflow identity is a UUID; supply one (for '
+                        'example uuid.uuid4()) or omit workflow_id to have '
+                        'one minted'
+                    ),
+                ) from exc
+
         spec._require_definition_key()
 
         # Validate output type matches declared generic (HRS-025)

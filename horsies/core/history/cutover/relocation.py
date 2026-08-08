@@ -23,6 +23,17 @@ guards and effects BY DESIGN. Each omission, named:
 
 Kind projection carries recorded provenance and never invents absent
 provenance: ``COALESCE(terminalization_kind, 'LEGACY_TERMINAL')``.
+Retention class reads the same way, and must: the class key is the
+history table's partition key and it drives deletion, so a row whose
+deployment never chose a class relocates into ``forever``. Assigning
+the finite default instead would put every legacy row past that
+duration on the drop path at the first retention pass — a deletion
+policy nobody chose. No policy recorded therefore means no policy
+applied; an operator who wants legacy rows to age re-classes them
+deliberately. The forever class needs no separate guarantee here: its
+metadata row and its partition are emitted in the same frozen fragment
+sequence as the history parent, and relocation refuses to start
+without that parent.
 Rows with a recorded ``CANCEL_ADMIN`` take the ruled result-swap
 projection (the archive's exclusivity constraint requires it); rows
 with no recorded family relocate as ``LEGACY_TERMINAL`` with their
@@ -52,6 +63,7 @@ from typing import Final
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import TASK_HISTORY_PARENT
 from ..terminalization.move import (
     ATTEMPT_ENCODER_FUNCTION,
@@ -118,7 +130,9 @@ def relocation_insert_sql() -> str:
             ),
             'terminal_at': 't.terminal_at',
             'retention_anchor_at': 't.terminal_at',
-            'retention_class_key': 't.retention_class_key',
+            'retention_class_key': (
+                f"COALESCE(t.retention_class_key, '{FOREVER_CLASS_KEY}')"
+            ),
             'sent_at': 't.sent_at',
             'enqueued_at': 't.enqueued_at',
             'claimed_at': 't.claimed_at',

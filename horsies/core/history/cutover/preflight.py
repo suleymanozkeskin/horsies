@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import TASK_HISTORY_PARENT
 from ..terminalization.move import LIVE_TASKS
 from ...schemas.migrations import SCHEMA_VERSION
@@ -67,10 +68,16 @@ class CutoverPreflight:
     unrecorded_kind_rows: int
     unfingerprinted_rows: int
     unprepared_envelope_rows: int
+    unclassified_rows: int
     class_day_pairs: int
     workflow_rows: int
     heartbeat_rows: int
     estimate: CutoverEstimate
+    advisories: tuple[str, ...]
+    """Inventory findings that change what the operator should do.
+
+    An advisory states the consequence, not the count alone: a number
+    the operator must interpret is not a decision surface."""
 
 
 class PreflightError(Exception):
@@ -156,6 +163,9 @@ async def run_preflight(
                         WHERE terminal
                           AND prepared_rerun_input_disposition IS NULL
                     ) AS unprepared_rows,
+                    count(*) FILTER (
+                        WHERE terminal AND retention_class_key IS NULL
+                    ) AS unclassified_rows,
                     count(DISTINCT CASE WHEN terminal THEN
                         (retention_class_key,
                          date_trunc('day', terminal_at AT TIME ZONE 'UTC'))
@@ -179,6 +189,15 @@ async def run_preflight(
         )
     ).one()
     terminal_rows = int(inventory.terminal_rows)
+    unclassified_rows = int(inventory.unclassified_rows)
+    advisories: list[str] = []
+    if unclassified_rows:
+        advisories.append(
+            f'{unclassified_rows} terminal rows carry no retention class; '
+            f"relocation will place them in the '{FOREVER_CLASS_KEY}' class "
+            '(no automatic aging); backfill a class before cutover to age '
+            'them'
+        )
     return CutoverPreflight(
         stored_schema_version=stored,
         history_parent_present=parent_present,
@@ -186,8 +205,10 @@ async def run_preflight(
         unrecorded_kind_rows=int(inventory.unrecorded_kind_rows),
         unfingerprinted_rows=int(inventory.unfingerprinted_rows),
         unprepared_envelope_rows=int(inventory.unprepared_rows),
+        unclassified_rows=unclassified_rows,
         class_day_pairs=int(inventory.class_day_pairs),
         workflow_rows=int(counts.wf),
         heartbeat_rows=int(counts.hb),
         estimate=estimate_relocation(coefficients, rows=terminal_rows),
+        advisories=tuple(advisories),
     )

@@ -31,6 +31,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.cutover.identity import (
     normalize_attempt_identity,
 )
+from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
 from horsies.core.history.cutover.relocation import (
     RELOCATION_LEDGER_DDL,
     RelocationBatch,
@@ -165,9 +166,13 @@ async def insert_legacy_task(
     kwargs_json: str | None = None,
     task_options: str | None = None,
     retain: bool | None = False,
+    class_key: str | None = CLASS_KEY,
 ) -> str:
     """One row as 0.4.x left it, with the transitional columns in their
-    post-backfill state."""
+    post-backfill state.
+
+    ``class_key=None`` is the row a deployment that predates retention
+    classes left behind: terminal, retained, and carrying no class."""
     task_id = str(uuid.uuid4())
     now = datetime.now(UTC)
     terminal = status not in ('PENDING', 'CLAIMED', 'RUNNING')
@@ -213,7 +218,7 @@ async def insert_legacy_task(
             'is_workflow_task': is_workflow_task,
             'enqueue_sha': 'a' * 64,
             'fingerprint': uuid.uuid4().bytes + uuid.uuid4().bytes,
-            'class_key': CLASS_KEY,
+            'class_key': class_key,
             'retain': retain,
             'disposition': disposition,
             'args_json': args_json,
@@ -380,6 +385,60 @@ class TestRelocation:
                 ).all()
                 assert [(r.rows_relocated) for r in ledger] == [2, 2]
                 assert sum(r.legacy_kind_rows for r in ledger) == 2
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_classless_legacy_row_relocates_into_forever(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """A row whose deployment never chose a class lands in forever.
+
+        The class key is the history table's partition key, so a NULL
+        does not degrade — it aborts the batch with 'no partition of
+        relation found for row'. Forever rather than the finite default
+        is the ruled target: no recorded policy means no deletion
+        policy applied, and the finite default would put every legacy
+        row past its duration on the drop path at the first retention
+        pass.
+        """
+        url = await make_database()
+        await _prepare(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                classless = await insert_legacy_task(
+                    connection,
+                    status='COMPLETED',
+                    kind='COMPLETE_LOCKED',
+                    class_key=None,
+                )
+                outcome = await relocate_all(connection)
+                assert outcome.rows_relocated == 1
+                landed = (
+                    await connection.execute(
+                        text(
+                            'SELECT retention_class_key '
+                            'FROM horsies_task_history '
+                            'WHERE task_id = CAST(:t AS uuid)'
+                        ),
+                        {'t': classless},
+                    )
+                ).scalar_one()
+                assert landed == FOREVER_CLASS_KEY
+                # No live row survives: the relocation completed rather
+                # than aborting on the partition route.
+                remaining = (
+                    await connection.execute(
+                        text(
+                            'SELECT count(*) FROM horsies_tasks '
+                            'WHERE id = CAST(:t AS uuid)'
+                        ),
+                        {'t': classless},
+                    )
+                ).scalar_one()
+                assert int(remaining) == 0
         finally:
             await engine.dispose()
 

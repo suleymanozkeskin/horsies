@@ -317,13 +317,19 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at,
              claimed, claimed_at, claimed_by_worker_id, claim_expires_at,
-             retry_count, max_retries, enqueue_sha, is_workflow_task)
+             retry_count, max_retries, enqueue_sha, is_workflow_task,
+             retention_class_key, command_fingerprint_version,
+             command_fingerprint, retain_rerun_input,
+             prepared_rerun_input_disposition)
         VALUES
             (:id, 'workflow_join_barrier', 'normal', 50, '[]', '{}',
              'CLAIMED', :sent_at, NOW() - INTERVAL '48 hours',
              NOW() - INTERVAL '48 hours', NOW() - INTERVAL '48 hours',
              TRUE, NOW() - INTERVAL '48 hours', 'worker-retention-repro',
-             NOW() + INTERVAL '5 minutes', 0, 0, :enqueue_sha, TRUE)
+             NOW() + INTERVAL '5 minutes', 0, 0, :enqueue_sha, TRUE,
+             'standard_30d', 1,
+             sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+             FALSE, 'DECLINED_BY_POLICY')
     """), {
         'id': task_id,
         'sent_at': sent_at,

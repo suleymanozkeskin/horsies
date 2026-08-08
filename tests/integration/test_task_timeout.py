@@ -83,12 +83,18 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_pid, task_options)
+                 worker_pid, task_options,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'timeout_test', 'default', 100, '[]', '{}', :status,
                  :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :sha, :owner,
-                 :worker_pid, :task_options)
+                 :worker_pid, :task_options,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,

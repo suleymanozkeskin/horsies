@@ -85,11 +85,17 @@ async def _insert_claimed_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, claimed_at, claimed_by_worker_id, enqueue_sha,
-                 is_workflow_task)
+                 is_workflow_task,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'fence_test', 'default', 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, :claimed_at, :worker_id, :enqueue_sha, TRUE)
+                 0, :claimed_at, :worker_id, :enqueue_sha, TRUE,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -352,11 +358,17 @@ async def test_real_claim_path_arms_the_fence(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, enqueued_at, created_at, updated_at,
                  claimed, retry_count, max_retries, enqueue_sha,
-                 is_workflow_task)
+                 is_workflow_task,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'fence_test', 'default', 100, '[]', '{}',
                  'PENDING', :sent_at, NOW(), NOW(), NOW(),
-                 FALSE, 0, 0, :enqueue_sha, TRUE)
+                 FALSE, 0, 0, :enqueue_sha, TRUE,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )

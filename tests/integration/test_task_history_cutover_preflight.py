@@ -100,6 +100,75 @@ async def test_preflight_inventories_the_work(
 
 
 @pytest.mark.asyncio
+async def test_preflight_reports_the_consequence_of_an_absent_class(
+    make_database: MakeDatabase,
+) -> None:
+    """Class-less terminal rows are inventoried WITH what will happen.
+
+    Counting them alone would leave the operator to work out that
+    relocation routes them to forever and that nothing will ever age
+    them; the advisory states it, which is what makes the number a
+    decision surface. It is an advisory and not a refusal: the cutover
+    completes either way.
+    """
+    url = await make_database()
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    try:
+        await broker.ensure_schema_initialized()
+    finally:
+        await broker.close_async()
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await install_program_state(connection)
+            await insert_legacy_task(
+                connection,
+                status='COMPLETED',
+                kind='COMPLETE_LOCKED',
+                class_key=None,
+            )
+            await insert_legacy_task(
+                connection, status='COMPLETED', kind='COMPLETE_LOCKED'
+            )
+            plan = await run_preflight(connection, coefficients=COEFFICIENTS)
+    finally:
+        await engine.dispose()
+
+    assert plan.unclassified_rows == 1
+    assert plan.advisories == (
+        "1 terminal rows carry no retention class; relocation will place "
+        "them in the 'forever' class (no automatic aging); backfill a "
+        "class before cutover to age them",
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_is_silent_when_every_row_is_classified(
+    make_database: MakeDatabase,
+) -> None:
+    """No advisory where there is nothing for the operator to decide."""
+    url = await make_database()
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    try:
+        await broker.ensure_schema_initialized()
+    finally:
+        await broker.close_async()
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await install_program_state(connection)
+            await insert_legacy_task(
+                connection, status='COMPLETED', kind='COMPLETE_LOCKED'
+            )
+            plan = await run_preflight(connection, coefficients=COEFFICIENTS)
+    finally:
+        await engine.dispose()
+
+    assert plan.unclassified_rows == 0
+    assert plan.advisories == ()
+
+
+@pytest.mark.asyncio
 async def test_preflight_refuses_a_stale_schema(
     make_database: MakeDatabase,
 ) -> None:

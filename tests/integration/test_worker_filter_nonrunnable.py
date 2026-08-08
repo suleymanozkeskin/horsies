@@ -51,11 +51,17 @@ async def _insert_claimed_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha)
+                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'filter_test', 'default', 100, '[]', '{}',
                  'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, NOW(), :claimed_by_worker_id, :enqueue_sha)
+                 0, NOW(), :claimed_by_worker_id, :enqueue_sha,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,

@@ -1,6 +1,6 @@
 ---
 name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-031. Use when building, validating, or troubleshooting workflows.
+description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-032. Use when building, validating, or troubleshooting workflows.
 ---
 
 # horsies — Workflows
@@ -503,7 +503,7 @@ def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-031)
+## Validation Errors (HRS-001–HRS-032)
 
 | Code | Name | Trigger |
 |---|---|---|
@@ -538,6 +538,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
+| HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 
 ## Known Constraints
 
