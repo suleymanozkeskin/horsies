@@ -83,6 +83,12 @@ class Operation(StrEnum):
     ORDINARY_ENQUEUE = 'ordinary-enqueue'
     OPTIONS_ORDINARY_ENQUEUE = 'options-ordinary-enqueue'
     KEYED_ENQUEUE = 'keyed-enqueue'
+    CLAIM = 'claim'
+
+
+# Operations that are a database statement rather than a task send. They need a
+# different body, and their observations consume rows rather than create them.
+STATEMENT_OPERATIONS: Final = frozenset({Operation.CLAIM})
 
 
 # The operations the released baseline cannot perform. Refused there rather
@@ -236,6 +242,147 @@ print(
 '''
 
 
+_CLAIM_TAIL_TEMPLATE: Final = '''
+import uuid as _uuid
+from sqlalchemy import create_engine as _create_engine
+
+_plan = _json.loads(__PLAN_JSON__)
+_observations = _json.loads(__OBSERVATIONS_JSON__)
+_block = _json.loads(__BLOCK_JSON__)
+
+# The statement is the product's own, taken from the build under measurement.
+# Copying its text into this harness would let the two sides run a statement
+# neither build ships.
+from horsies.core.worker.sql import HORSIES_CLAIM_SQL as _claim_sql
+
+_engine = _create_engine(
+    _app_config.broker.database_url.get_secret_value(),
+    pool_size=_config_spec['pool_size'],
+    max_overflow=_config_spec['max_overflow'],
+)
+
+# Every parameter is declared rather than read out of a worker config, so the
+# two sides call the function with values a reader can check. No caps are
+# configured, so the lock-key list is empty and the queue list is the default
+# one -- which is what the product itself computes under this configuration.
+def _params(_worker_id):
+    return {
+        'p_worker_id': _worker_id,
+        'p_queues': _json.dumps(_plan['queues']),
+        'p_queue_priority': _json.dumps(
+            {_q: 100 for _q in _plan['queues']}
+        ),
+        'p_queue_max_concurrency': _json.dumps({}),
+        'p_hard_cap_mode': True,
+        'p_processes': _plan['processes'],
+        'p_prefetch_buffer': 0,
+        'p_max_claim_per_worker': _plan['max_claim_per_worker'],
+        'p_max_claim_batch': _plan['max_claim_batch'],
+        'p_cluster_wide_cap': None,
+        'p_lease_ms': _plan['lease_ms'],
+        'p_lock_keys': _json.dumps([]),
+    }
+
+
+# A fresh worker id per observation. Reusing one would let the per-worker cap
+# block every claim after the first, and an empty claim is a different
+# operation from a claim that finds work.
+_worker_ids = [
+    'qual-' + str(_block) + '-' + str(_index)
+    for _index in range(_observations + _plan['priming_sends'])
+]
+
+_samples = []
+_claimed_total = 0
+with _engine.connect() as _conn:
+    for _index in range(_plan['priming_sends']):
+        _rows = _conn.execute(_claim_sql, _params(_worker_ids[_index])).fetchall()
+        _conn.commit()
+
+    for _index in range(_observations):
+        _worker_id = _worker_ids[_plan['priming_sends'] + _index]
+        _started = _time.perf_counter_ns()
+        _rows = _conn.execute(_claim_sql, _params(_worker_id)).fetchall()
+        _conn.commit()
+        _elapsed = _time.perf_counter_ns() - _started
+        if not _rows:
+            raise RuntimeError(
+                'claim returned no rows at observation ' + str(_index)
+                + '; an empty claim does the lock and the scan but claims '
+                'nothing, which is a different operation from the one this '
+                'row judges. Seed more pending work'
+            )
+        _claimed_total += len(_rows)
+        _samples.append(_elapsed / 1000000.0)
+
+print(
+    __SAMPLES_MARKER__ + ' '
+    + _json.dumps({'samples': _samples, 'claimed_rows': _claimed_total}),
+    flush=True,
+)
+'''
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimPlan:
+    """The claim call's parameters, declared rather than read from a worker.
+
+    The statement itself comes from each build; only its arguments are fixed
+    here, so the two sides call the same function with the same inputs and any
+    difference is the function's.
+    """
+
+    task_name: str
+    queues: tuple[str, ...] = ('default',)
+    processes: int = 1
+    max_claim_per_worker: int = 1
+    max_claim_batch: int = 1
+    lease_ms: int = 30_000
+    priming_sends: int = 8
+    operation: Operation = Operation.CLAIM
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            'task_name': self.task_name,
+            'operation': self.operation.value,
+            'queues': list(self.queues),
+            'processes': self.processes,
+            'max_claim_per_worker': self.max_claim_per_worker,
+            'max_claim_batch': self.max_claim_batch,
+            'lease_ms': self.lease_ms,
+            'priming_sends': self.priming_sends,
+        }
+
+
+def claim_source(
+    plan: ClaimPlan,
+    *,
+    config_spec: SeedConfigSpec,
+    database_url: str,
+    observations: int,
+    block: int,
+) -> str:
+    """One claim block's body, for one side."""
+    if observations < 1:
+        raise MeasurementError(
+            f'a block needs at least one observation, got {observations}'
+        )
+    return substitute_seed_tokens(
+        CONFIG_SOURCE_SNIPPET + _CLAIM_TAIL_TEMPLATE,
+        {
+            '__CONFIG_JSON__': json.dumps(json.dumps(config_spec.as_payload())),
+            '__DSN_JSON__': json.dumps(json.dumps(database_url)),
+            '__CONFIG_MARKER__': json.dumps(SIDE_CONFIG_MARKER),
+            '__SECRET_SENTINEL__': json.dumps(SECRET_SENTINEL),
+            '__REQUIRED_SENTINEL__': json.dumps(REQUIRED_FIELD_SENTINEL),
+            '__PLAN_JSON__': json.dumps(json.dumps(plan.as_payload())),
+            '__OBSERVATIONS_JSON__': json.dumps(str(observations)),
+            '__BLOCK_JSON__': json.dumps(str(block)),
+            '__SAMPLES_MARKER__': json.dumps(SIDE_SAMPLES_MARKER),
+        },
+    )
+
+
 def measure_source(
     plan: MeasurementPlan,
     *,
@@ -315,7 +462,7 @@ def run_block(
     arm: PairedSide | None = None,
     block: int,
     observations: int,
-    plan: MeasurementPlan,
+    plan: MeasurementPlan | ClaimPlan,
     config_spec: SeedConfigSpec,
     cwd: Path,
     environment: Mapping[str, str] | None = None,
@@ -337,15 +484,26 @@ def run_block(
             'candidate, never as a cross-build delta'
         )
     started = clock()
+    match plan:
+        case ClaimPlan():
+            body = claim_source(
+                plan,
+                config_spec=config_spec,
+                database_url=runtime.database_url,
+                observations=observations,
+                block=block,
+            )
+        case MeasurementPlan():
+            body = measure_source(
+                plan,
+                config_spec=config_spec,
+                database_url=runtime.database_url,
+                observations=observations,
+                block=block,
+            )
     completed = run_side(
         runtime.interpreter,
-        measure_source(
-            plan,
-            config_spec=config_spec,
-            database_url=runtime.database_url,
-            observations=observations,
-            block=block,
-        ),
+        body,
         environment=(
             measurement_environment() if environment is None else environment
         ),
@@ -403,6 +561,93 @@ def assert_blocks_ran_in_schedule_order(
                 f'block {position} ran as {result.arm}, the schedule assigns '
                 f'it to {arm}'
             )
+
+
+# Run before every block, on both sides and both arms alike, outside the timed
+# region. Order matters: rows return to PENDING first, then the table is
+# vacuumed so the dead versions those claims left behind are actually removed,
+# and ANALYZE pins planner statistics rather than leaving them to drift with
+# whatever autovacuum happened to do between blocks.
+STEADY_STATE_STATEMENTS: Final = (
+    "UPDATE horsies_tasks SET status = 'PENDING', claimed_at = NULL "
+    "WHERE status = 'CLAIMED'",
+    'VACUUM ANALYZE horsies_tasks',
+)
+
+# What the steady-state step costs a reader: absolute levels describe a
+# vacuumed table, which is not every production state. The quoted quantity is
+# the delta between two sides that both saw the same pre-block state.
+STEADY_STATE_CONSEQUENCE: Final = (
+    'absolute levels reflect a freshly vacuumed table; the quoted quantity is '
+    'the delta between two sides given identical pre-block state'
+)
+
+# Derived from the control run rather than chosen. In steady state the per-block
+# medians spanned 0.617-0.709 ms, a relative spread of 0.149. Without the step
+# the same six blocks ran 0.598-2.144 ms, a spread of 2.586. The bound sits
+# about 2.7x above the measured noise and about 6.5x below the defect, so it
+# separates them without sitting on either.
+BLOCK_MEDIAN_SPREAD_BOUND: Final = 0.40
+
+
+def block_median_spread(
+    spec: InterleaveSpec, blocks: Sequence[BlockResult]
+) -> float:
+    """Relative spread of per-block medians over the measured half.
+
+    The failure this detects is the measurand moving during the run: an
+    operation that mutates the rows it reads gets slower as the versions it
+    must skip accumulate. Counterbalancing cannot help — it holds the mean
+    position gap at zero, which cancels the effect on a location statistic
+    while leaving it in the tail.
+    """
+    medians = [
+        _median(result.samples)
+        for result in blocks
+        if result.block >= spec.warmup_blocks
+    ]
+    if not medians:
+        raise MeasurementError(
+            'no measured blocks, so the run has no steady state to check'
+        )
+    lowest = min(medians)
+    if lowest <= 0.0:
+        raise MeasurementError(
+            f'a block reported a non-positive median ({lowest}); a spread '
+            'against it is undefined'
+        )
+    return (max(medians) - lowest) / lowest
+
+
+def _median(values: Sequence[float]) -> float:
+    ordered = sorted(values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+def assert_block_medians_are_flat(
+    spec: InterleaveSpec,
+    blocks: Sequence[BlockResult],
+    *,
+    bound: float = BLOCK_MEDIAN_SPREAD_BOUND,
+) -> None:
+    """The row must prove its own steady state, not assert it.
+
+    Having a steady-state step is a claim about the harness. Refusing a run
+    whose blocks did not hold still is a property of the row.
+    """
+    spread = block_median_spread(spec, blocks)
+    if spread > bound:
+        raise MeasurementError(
+            f'per-block medians span {spread:.3f} relative, over the {bound} '
+            'this row allows: the operation changed while it was being '
+            'measured, so the row reports an average over a moving measurand. '
+            'A zero mean-position gap cancels this in a location statistic and '
+            'leaves it in the tail, which is why such a run can look stable at '
+            'p50 and disagree with itself at p99'
+        )
 
 
 def assert_configurations_held(blocks: Sequence[BlockResult]) -> None:
@@ -470,6 +715,7 @@ def assert_run_is_measurable(
     """Every check that must hold before a cell may be built from this run."""
     assert_blocks_ran_in_schedule_order(spec, blocks)
     assert_configurations_held(blocks)
+    assert_block_medians_are_flat(spec, blocks)
     schedule = observations_in_schedule_order(spec, blocks)
     assert_schedule_matches_its_model(spec, schedule)
     assert_no_long_runs(spec, schedule)
@@ -477,7 +723,7 @@ def assert_run_is_measurable(
 
 
 def run_conditions(
-    plan: MeasurementPlan,
+    plan: MeasurementPlan | ClaimPlan,
     blocks: Sequence[BlockResult],
     *,
     unit: SampleUnit,
@@ -499,4 +745,9 @@ def run_conditions(
         'wall_clock_seconds_total': sum(
             result.wall_clock_seconds for result in blocks
         ),
+        'steady_state': {
+            'statements': list(STEADY_STATE_STATEMENTS),
+            'applied': 'before every block, both sides and both arms',
+            'consequence': STEADY_STATE_CONSEQUENCE,
+        },
     }
