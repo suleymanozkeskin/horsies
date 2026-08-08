@@ -1,0 +1,122 @@
+"""The per-batch trend gate, checked against the shapes that motivated it."""
+
+from __future__ import annotations
+
+import pytest
+
+from horsies.core.history.cutover.ladder import BatchCommit
+from tests.task_history_prototypes.migration_ladder_evidence import (
+    PER_BATCH_TREND_GATE_FRACTION,
+    RungMeasurementError,
+    Trajectory,
+    compute_per_batch_trend,
+)
+
+BATCH_SIZE = 10_000
+
+
+def _trajectory(stage: str, durations: list[float]) -> Trajectory:
+    """Build a trajectory whose per-batch durations are exactly `durations`."""
+    commits: list[BatchCommit] = []
+    elapsed = 0.0
+    for index, duration in enumerate(durations, start=1):
+        elapsed += duration
+        commits.append(
+            BatchCommit(
+                cumulative_rows=index * BATCH_SIZE,
+                elapsed_seconds=elapsed,
+            )
+        )
+    return Trajectory(
+        stage=stage,
+        batch_size=BATCH_SIZE,
+        batches=len(durations),
+        rows=len(durations) * BATCH_SIZE,
+        seconds=elapsed,
+        commits=tuple(commits),
+    )
+
+
+def _linear(count: int, *, start: float, step: float) -> list[float]:
+    return [start + step * index for index in range(count)]
+
+
+def test_flat_stage_passes_the_gate() -> None:
+    trend = compute_per_batch_trend(
+        _trajectory('relocation', [1.1] * 100)
+    )
+    assert trend.within_gate
+    assert trend.trend_seconds_per_batch == pytest.approx(0.0, abs=1e-12)
+
+
+def test_measured_relocation_shape_passes() -> None:
+    """The copy stage as actually measured: mean 1.12s, drifting -1.3%."""
+    trend = compute_per_batch_trend(
+        _trajectory(
+            'relocation', _linear(100, start=1.1297, step=-0.000147)
+        )
+    )
+    assert trend.drift_fraction_of_mean == pytest.approx(-0.0131, abs=5e-4)
+    assert trend.within_gate
+
+
+def test_measured_preparation_shape_fails() -> None:
+    """The counterfactual the gate exists for.
+
+    Preparation as measured on the first rung: a mean batch near 6.1s with
+    per-batch cost rising 13.5ms per batch, because the batch selection
+    rescanned rows it had already prepared. Extrapolating that stage's
+    averaged slope is what cost the next rung five hours.
+    """
+    trend = compute_per_batch_trend(
+        _trajectory('preparation', _linear(100, start=5.4335, step=0.0135))
+    )
+    assert trend.trend_seconds_per_batch == pytest.approx(0.0135, abs=1e-5)
+    assert trend.drift_fraction_of_mean == pytest.approx(0.22, abs=0.01)
+    assert not trend.within_gate
+
+
+def test_gate_is_symmetric() -> None:
+    """A stage getting faster is also not a constant per-row cost."""
+    rising = compute_per_batch_trend(
+        _trajectory('preparation', _linear(100, start=5.4335, step=0.0135))
+    )
+    falling = compute_per_batch_trend(
+        _trajectory('preparation', _linear(100, start=6.7835, step=-0.0135))
+    )
+    assert not falling.within_gate
+    assert falling.drift_fraction_of_mean == pytest.approx(
+        -rising.drift_fraction_of_mean, abs=0.01
+    )
+
+
+@pytest.mark.parametrize(
+    ('fraction_of_gate', 'expected_within'),
+    [(0.99, True), (1.01, False)],
+)
+def test_gate_decides_on_either_side_of_the_threshold(
+    fraction_of_gate: float, expected_within: bool
+) -> None:
+    """Just inside passes, just outside fails.
+
+    The exact boundary is not asserted: a drift constructed to land on it
+    arrives a float epsilon above or below, so a test pinning it would be
+    testing arithmetic noise rather than the gate.
+    """
+    count = 100
+    mean = 1.0
+    target = PER_BATCH_TREND_GATE_FRACTION * fraction_of_gate
+    step = target * mean / count
+    trend = compute_per_batch_trend(
+        _trajectory(
+            'relocation',
+            _linear(count, start=mean - step * (count - 1) / 2, step=step),
+        )
+    )
+    assert trend.drift_fraction_of_mean == pytest.approx(target, rel=1e-6)
+    assert trend.within_gate is expected_within
+
+
+def test_single_batch_cannot_show_drift() -> None:
+    with pytest.raises(RungMeasurementError, match='two committed batches'):
+        compute_per_batch_trend(_trajectory('relocation', [1.1]))
