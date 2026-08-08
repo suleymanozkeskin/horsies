@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
+
+from pydantic import BaseModel, Field
 
 import pytest
 
@@ -447,3 +450,72 @@ def test_conditions_name_the_databases_without_their_credentials() -> None:
         'candidate': 'cand_db',
     }
     assert 'secret' not in json.dumps(conditions)
+
+
+def _walk_defaults_from_snippet() -> Any:
+    """Execute the SHIPPED defaults walker, not a copy of it.
+
+    The walker lives inside a source string that runs in each side's
+    subprocess. A test that reimplemented it would pass while the string it
+    describes drifted, so the function is sliced out of the string itself.
+    """
+    from tests.task_history_prototypes.paired_seed import (
+        CONFIG_SOURCE_SNIPPET,
+        REQUIRED_FIELD_SENTINEL,
+    )
+
+    start = CONFIG_SOURCE_SNIPPET.index('def _walk_defaults')
+    end = CONFIG_SOURCE_SNIPPET.index('_effective = {}', start)
+    source = CONFIG_SOURCE_SNIPPET[start:end].replace(
+        '__REQUIRED_SENTINEL__', repr(REQUIRED_FIELD_SENTINEL)
+    )
+    def leaf(value: Any) -> Any:
+        # The boolean keeps the narrowed union out of the return expression;
+        # this stand-in only has to preserve values, not classify them.
+        keep = isinstance(value, (str, int, float, bool, dict, list)) or value is None
+        return cast(Any, value) if keep else repr(cast(object, value))
+
+    namespace: dict[str, Any] = {'_leaf': leaf}
+    exec(source, namespace)  # noqa: S102 - the shipped source is the subject
+    return namespace['_walk_defaults']
+
+
+class _Nested(BaseModel):
+    plain: int = 7
+
+
+class _ConfigShape(BaseModel):
+    """The three field shapes the walker has to tell apart."""
+
+    from_factory: dict[str, int] = Field(default_factory=dict)
+    plain_default: int = 3
+    nested: _Nested = Field(default_factory=_Nested)
+
+
+def test_a_factory_built_default_is_recorded_as_its_value() -> None:
+    """`FieldInfo.default` is pydantic's undefined marker when a factory is set.
+
+    Reading it alone records the marker as though it were the shipped value, so
+    every factory-built field looks non-default and a side carrying one is
+    refused for sitting at a default it is actually sitting at.
+    """
+    walk = _walk_defaults_from_snippet()
+    out: dict[str, Any] = {}
+    walk(_ConfigShape(), (), out)
+    assert out['from_factory'] == {}
+    assert 'PydanticUndefined' not in repr(out['from_factory'])
+
+
+def test_a_plain_default_is_still_recorded() -> None:
+    walk = _walk_defaults_from_snippet()
+    out: dict[str, Any] = {}
+    walk(_ConfigShape(), (), out)
+    assert out['plain_default'] == 3
+
+
+def test_a_factory_built_submodel_is_walked_into_not_flattened() -> None:
+    """A nested model built by a factory still reports its children."""
+    walk = _walk_defaults_from_snippet()
+    out: dict[str, Any] = {}
+    walk(_ConfigShape(), (), out)
+    assert out['nested.plain'] == 7
