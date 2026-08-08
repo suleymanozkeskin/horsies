@@ -459,8 +459,12 @@ class ReaperMixin:
             # its own session from the same pool — peak two connections.
             # A single-connection coordinator pool would deadlock on the
             # second checkout until pool timeout, every interval, so the
-            # gate is skipped there: SKIP LOCKED keeps concurrent passes
-            # safe — the gate only dedupes redundant work across workers.
+            # gate is skipped there. Ungated concurrency is safe for
+            # every step the pass runs: SKIP LOCKED covers the recovery
+            # and retention statements, and the coverage/publication
+            # ensure is idempotent (registration, leaf creation, and
+            # republication all converge under concurrent callers) — the
+            # gate only dedupes redundant work across workers.
             gate_enabled = self._reaper_gate_enabled()
             if not gate_enabled:
                 logger.warning(
