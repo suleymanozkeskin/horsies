@@ -149,7 +149,7 @@ async def _insert_running_task_with_retry(
 async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read current status of a task."""
     result = await session.execute(
-        text("SELECT status FROM horsies_tasks WHERE id = :id"),
+        text("SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)"),
         {'id': task_id},
     )
     row = result.fetchone()
@@ -443,7 +443,7 @@ async def test_reaper_then_complete_race_sequence(
     # T=3: Verify reaper's result is preserved
     row = (
         await session.execute(
-            text("SELECT status, result FROM horsies_tasks WHERE id = :id"),
+            text("SELECT status, result FROM itest_task_rows WHERE id = CAST(:id AS uuid)"),
             {'id': task_id},
         )
     ).fetchone()
@@ -705,7 +705,7 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
         await session.execute(
             text("""
                 SELECT status, claimed_by_worker_id, result
-                FROM horsies_tasks WHERE id = :id
+                FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

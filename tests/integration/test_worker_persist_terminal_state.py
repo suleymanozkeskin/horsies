@@ -199,7 +199,7 @@ async def _get_task_row(
         await session.execute(
             text(
                 'SELECT status, result, failed_reason, retry_count '
-                'FROM horsies_tasks WHERE id = :id'
+                'FROM itest_task_rows WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )

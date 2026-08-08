@@ -440,7 +440,7 @@ async def test_finalizer_row_lock_wins_reaper_race(
 
     async with AsyncSession(engine, expire_on_commit=False) as finalizer:
         locked = await finalizer.execute(
-            text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+            text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
             {'id': task_id},
         )
         assert locked.scalar_one() == task_id

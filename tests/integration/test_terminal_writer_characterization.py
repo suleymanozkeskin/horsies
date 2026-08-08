@@ -192,7 +192,7 @@ async def _task_state(
 ) -> tuple[str, datetime | None]:
     row = (
         await session.execute(
-            text('SELECT status, terminal_at FROM horsies_tasks WHERE id = :id'),
+            text('SELECT status, terminal_at FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
             {'id': task_id},
         )
     ).fetchone()
@@ -232,7 +232,7 @@ async def _t01_monitoring_cancel(ctx: Context, eligible: bool) -> str:
     # The caller supplies the permitted source statuses; ineligible here means
     # the row's status is outside the set the caller allows.
     await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': task.task_id},
     )
     permitted = (
@@ -297,7 +297,7 @@ async def _cancelled_batch(ctx: Context, eligible: bool) -> str:
 async def _fail_worker(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
     await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': task.task_id},
     )
     await apply_async(
@@ -319,7 +319,7 @@ async def _fail_worker(ctx: Context, eligible: bool) -> str:
 async def _fail_running(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
     await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': task.task_id},
     )
     await apply_async(
@@ -341,7 +341,7 @@ async def _fail_running(ctx: Context, eligible: bool) -> str:
 async def _complete_running(ctx: Context, eligible: bool) -> str:
     task = await _seed_task(ctx.session, status='RUNNING', claimed_at=_now())
     await ctx.session.execute(
-        text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+        text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
         {'id': task.task_id},
     )
     await apply_async(

@@ -246,7 +246,7 @@ async def _get_task_error_code(
     """Read horsies_tasks.error_code for a task."""
     row = (
         await session.execute(
-            text('SELECT error_code FROM horsies_tasks WHERE id = :id'),
+            text('SELECT error_code FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
             {'id': task_id},
         )
     ).fetchone()
@@ -593,7 +593,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
     row = (
         await session.execute(
             text(
-                'SELECT status, retry_count, next_retry_at, error_code FROM horsies_tasks WHERE id = :id'
+                'SELECT status, retry_count, next_retry_at, error_code FROM itest_task_rows WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
@@ -845,7 +845,7 @@ async def test_expire_pending_task_transitions_to_expired(
 
     row = (
         await session.execute(
-            text('SELECT status, error_code, result FROM horsies_tasks WHERE id = :id'),
+            text('SELECT status, error_code, result FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
             {'id': task_id},
         )
     ).fetchone()
