@@ -351,24 +351,20 @@ class TestAppliedTransitions:
         self,
         session: AsyncSession,
     ) -> None:
-        """The fusion exists to do this in one statement; it still does."""
+        """The fusion exists to do this in one statement; it still does.
+
+        The move purges live attempt rows into the history snapshot, so
+        the fused attempt's evidence is read from there.
+        """
         task_id = await _seed(session)
         outcome = await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
 
         assert isinstance(outcome, Applied)
         assert outcome.kind is TerminalizationKind.COMPLETE_FUSED
-        row = (
-            await session.execute(
-                text("""
-                    SELECT outcome, will_retry FROM horsies_task_attempts
-                    WHERE task_id = :id
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.outcome == 'COMPLETED'
-        assert row.will_retry is False
+        assert await read_attempt_history(session, task_id) == [
+            (1, 'COMPLETED', None),
+        ]
 
     async def test_transition_leaves_the_row_terminal_and_attributed(
         self,
@@ -503,14 +499,15 @@ class TestAlreadyApplied:
         assert evidence.committed_kind is TerminalizationKind.CANCEL_ADMIN
         assert evidence.terminal_at is not None
 
-    async def test_a_row_with_no_kind_is_never_a_replay(
+    async def test_a_relocated_row_is_never_a_replay(
         self,
         session: AsyncSession,
     ) -> None:
-        """Rows terminalized before the column existed prove nothing.
+        """Rows terminalized before kinds existed prove nothing.
 
-        Their provenance is unknown, and unknown provenance classifies
-        conservatively rather than being inferred from the status alone.
+        Post-cutover they carry LEGACY_TERMINAL — family unrecorded by
+        design — and the classifier treats that kind as foreign rather
+        than inferring a replay from the status alone.
         """
         task_id = await _seed(session)
         await _force_terminal(session, task_id, status='COMPLETED', kind=None)
@@ -519,7 +516,10 @@ class TestAlreadyApplied:
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is None
+        assert (
+            outcome.evidence.committed_kind
+            is TerminalizationKind.LEGACY_TERMINAL
+        )
 
 
 class TestRefusals:
@@ -1703,9 +1703,11 @@ class TestCancelLockedTask:
         assert row.failed_reason == 'Cancelled via monitoring API'
         assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
+        # No claim state survives the move; the claim's timestamp is
+        # preserved on the history record as provenance.
         assert row.claimed is False
         assert row.claimed_by_worker_id is None
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
         assert row.finalizing_at is None
         assert row.finalizing_by_worker_id is None
 
@@ -2197,15 +2199,18 @@ class TestAbandonOwnedNode:
             )
         ).one()
         assert row.status == 'CANCELLED'
+        # No claim state survives the move; the claim's timestamp is
+        # preserved on the history record as provenance, and the
+        # terminal instant lands in failed_at beside CANCELLED.
         assert row.claimed is False
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
         assert row.claimed_by_worker_id is None
         assert row.claim_expires_at is None
         assert row.finalizing_at is None
         assert row.finalizing_by_worker_id is None
         assert row.error_code == 'TASK_CANCELLED'
         assert row.failed_reason == 'Workflow paused before task start'
-        assert row.failed_at is None
+        assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
         assert row.terminalization_kind == 'PAUSE_ABANDON_CLAIM'
 
@@ -2349,16 +2354,24 @@ class TestCancelOwnedNode:
         ).scalar_one()
         assert status == 'PENDING'
 
-    async def test_preserves_error_summary_columns_it_does_not_own(
+    async def test_the_terminal_record_carries_its_own_summary(
         self,
         session: AsyncSession,
     ) -> None:
+        """Requeue residue does not travel onto the immutable record.
+
+        The move writes the operation's own error summary; a worker-side
+        node cancellation has none, so stale error_code/failed_reason
+        left by an earlier requeue end with the live row rather than
+        being frozen into history as if they described the cancellation.
+        The terminal instant lands in failed_at beside CANCELLED.
+        """
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
         await session.execute(
             text("""
                 UPDATE horsies_tasks
                 SET error_code = 'OLD_CODE', failed_reason = 'old reason'
-                WHERE id = :id
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
@@ -2378,9 +2391,9 @@ class TestCancelOwnedNode:
                 {'id': task_id},
             )
         ).one()
-        assert row.error_code == 'OLD_CODE'
-        assert row.failed_reason == 'old reason'
-        assert row.failed_at is None
+        assert row.error_code is None
+        assert row.failed_reason is None
+        assert row.failed_at is not None
 
     async def test_a_stale_claim_is_lost(self, session: AsyncSession) -> None:
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
@@ -2808,7 +2821,7 @@ class TestWorkflowScopedBatches:
         ).one()
         assert row.error_code == 'TASK_CANCELLED'
         assert row.failed_reason == 'Workflow paused before task start'
-        assert row.failed_at is None
+        assert row.failed_at is not None
         persisted = (
             await session.execute(
                 text("""
@@ -2822,7 +2835,8 @@ class TestWorkflowScopedBatches:
         assert persisted.status == 'CANCELLED'
         assert persisted.terminalization_kind == 'PAUSE_ABANDON_WORKFLOW'
         assert persisted.claimed_by_worker_id is None
-        assert persisted.claimed_at is None
+        # The claim's timestamp is preserved on the record as provenance.
+        assert persisted.claimed_at == GENERATION
         refused_rows = (
             await session.execute(
                 text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
@@ -2886,6 +2900,10 @@ class TestWorkflowScopedBatches:
             if isinstance(outcome, Applied)
         )
         assert all(outcome.ordinality is None for outcome in outcomes)
+        # The workflow-cancel sweep carries no error summary of its own;
+        # requeue residue ends with the live row rather than being
+        # frozen into the record, and the terminal instant lands in
+        # failed_at beside CANCELLED.
         summary = (
             await session.execute(
                 text("""
@@ -2895,9 +2913,9 @@ class TestWorkflowScopedBatches:
                 {'id': task_ids[0]},
             )
         ).one()
-        assert summary.error_code == 'OLD_CODE'
-        assert summary.failed_reason == 'old reason'
-        assert summary.failed_at is None
+        assert summary.error_code is None
+        assert summary.failed_reason is None
+        assert summary.failed_at is not None
 
     async def test_cancel_refuses_a_live_workflow_or_non_enqueued_link(
         self,
