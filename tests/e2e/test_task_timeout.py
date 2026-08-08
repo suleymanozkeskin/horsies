@@ -24,6 +24,7 @@ from tests.e2e.helpers.assertions import unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
+from tests.integration.history_seeding import read_attempts
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -89,16 +90,11 @@ async def test_timeout_fails_task_and_worker_survives(
                 '__builtin_task_code__': OutcomeCode.TASK_TIMEOUT.value
             }
 
-            attempt = (
-                await session.execute(
-                    text("""
-                        SELECT outcome, will_retry, error_code
-                        FROM horsies_task_attempts WHERE task_id = :id
-                    """),
-                    {'id': handle.task_id},
-                )
-            ).fetchone()
-            assert attempt is not None
+            # The move purges live attempt rows into the record's
+            # snapshot; one reader answers for both homes.
+            attempts = await read_attempts(session, handle.task_id)
+            assert len(attempts) == 1
+            attempt = attempts[0]
             assert attempt.outcome == 'FAILED'
             assert attempt.will_retry is False
             assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value

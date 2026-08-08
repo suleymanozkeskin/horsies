@@ -8,12 +8,12 @@ import os
 import pytest
 import pytest_asyncio
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.app import Horsies
 
+from tests.e2e.helpers.db import cleanup_tables
 from tests.e2e.helpers.worker import kill_stale_workers
 from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_custom
@@ -161,16 +161,6 @@ def app() -> Horsies:
     return default_instance.app
 
 
-async def _cleanup_tables(session: AsyncSession) -> None:
-    """Truncate tables between tests."""
-    await session.execute(
-        text("""
-            TRUNCATE horsies_tasks, horsies_workflow_tasks, horsies_workflows, horsies_schedule_state, horsies_heartbeats CASCADE
-        """),
-    )
-    await session.commit()
-
-
 @pytest_asyncio.fixture(autouse=True, loop_scope='session')
 async def clean_db(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]:
     """Auto-cleanup before and after each e2e test."""
@@ -181,12 +171,12 @@ async def clean_db(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]
 
     await default_instance.broker.ensure_schema_initialized()
     async with default_instance.broker.session_factory() as session:
-        await _cleanup_tables(session)
+        await cleanup_tables(session)
     try:
         yield
     finally:
         async with default_instance.broker.session_factory() as session:
-            await _cleanup_tables(session)
+            await cleanup_tables(session)
 
 
 @pytest.fixture(scope='session', autouse=True)
