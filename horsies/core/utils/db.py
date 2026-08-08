@@ -32,7 +32,13 @@ def register_identity_text_reads(engine: AsyncEngine) -> None:
     never assumed onto engines a consumer application builds — their
     uuid reads keep whatever presentation their driver configuration
     chooses.
+
+    A test double standing in for the engine cannot host driver
+    events; registration is a no-op for anything that is not a real
+    ``AsyncEngine``.
     """
+    if not isinstance(engine, AsyncEngine):
+        return
 
     @event.listens_for(engine.sync_engine, 'connect')
     def _register_uuid_text_loader(

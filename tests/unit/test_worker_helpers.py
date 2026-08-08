@@ -3112,9 +3112,30 @@ class TestWorkerStartConnectionOrdering:
     """Tests for fork-safe worker startup ordering."""
 
     @pytest.mark.asyncio
-    async def test_warms_children_before_parent_listener_starts(self) -> None:
+    async def test_warms_children_before_parent_listener_starts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         worker = _make_worker()
         events: list[str] = []
+
+        # The coverage ensure is the maintenance owner's concern with
+        # its own suites; here it only matters that it runs AFTER the
+        # children are warmed (it opens a parent DB session), which the
+        # event ordering below observes through the stub.
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        async def _ensured(*_args: Any, **_kwargs: Any) -> Any:
+            events.append('coverage-ensure')
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                heartbeat_covered_now=True,
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage', _ensured
+        )
 
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
         worker._create_executor = MagicMock(  # type: ignore[assignment]
@@ -3144,7 +3165,12 @@ class TestWorkerStartConnectionOrdering:
 
         await worker.start()
 
-        assert events == ['create-executor', 'warm-executor', 'listener-start']
+        assert events == [
+            'create-executor',
+            'warm-executor',
+            'coverage-ensure',
+            'listener-start',
+        ]
 
 
 # ---------------------------------------------------------------------------
