@@ -10,10 +10,12 @@ import pytest
 from horsies.core.history.cutover.ladder import BatchCommit
 from tests.task_history_prototypes.migration_ladder_evidence import (
     PER_BATCH_TREND_GATE_FRACTION,
+    RESIDUAL_TREND_GATE_FRACTION,
     LadderProgressSnapshot,
     RungMeasurementError,
     Trajectory,
     compute_per_batch_trend,
+    fit_trajectory,
 )
 from tests.task_history_prototypes.qualification_io import (
     AtomicEvidenceWriter,
@@ -127,6 +129,58 @@ def test_gate_decides_on_either_side_of_the_threshold(
 def test_single_batch_cannot_show_drift() -> None:
     with pytest.raises(RungMeasurementError, match='two committed batches'):
         compute_per_batch_trend(_trajectory('relocation', [1.1]))
+
+
+def test_declared_intercept_gates_the_residual_not_the_raw_series() -> None:
+    """A stage fitted with an intercept is judged on model conformance.
+
+    The warm-up shape: per-batch cost decays over the first batches, then
+    holds. Raw, it drifts far outside the raw gate; against its own declared
+    model the residual is inside the residual gate. Rejecting it raw would
+    reject the stage for having exactly the shape it was fitted with.
+    """
+    durations = [
+        1.7 + 0.85 * (0.86**index) for index in range(100)
+    ]
+    trajectory = _trajectory('preparation', durations)
+
+    raw = compute_per_batch_trend(trajectory)
+    residual = compute_per_batch_trend(
+        trajectory, declared_fit=fit_trajectory(trajectory)
+    )
+
+    assert raw.mode == 'raw'
+    assert not raw.within_gate
+    assert residual.mode == 'residual'
+    assert residual.gate_fraction == RESIDUAL_TREND_GATE_FRACTION
+    assert abs(residual.drift_fraction_of_mean) < abs(
+        raw.drift_fraction_of_mean
+    )
+    assert residual.within_gate
+
+
+def test_growth_still_fails_against_its_own_declared_model() -> None:
+    """The counterfactual survives the looser residual threshold.
+
+    Raising the gate from 5% to 8% for the residual measurand must not buy
+    the candidate its pass by giving up the detection the gate exists for.
+    The quadratic shape — per-batch cost rising 13.5ms per batch — is fitted
+    with an intercept and still fails, because an intercept cannot absorb
+    growth that never stops.
+    """
+    trajectory = _trajectory(
+        'preparation', _linear(100, start=5.4335, step=0.0135)
+    )
+    declared = fit_trajectory(trajectory)
+
+    residual = compute_per_batch_trend(trajectory, declared_fit=declared)
+
+    assert residual.drift_fraction_of_mean == pytest.approx(0.108, abs=0.01)
+    assert residual.drift_fraction_of_mean > RESIDUAL_TREND_GATE_FRACTION
+    assert not residual.within_gate
+    # The fit itself reports the mismatch: absorbing rising cost drives the
+    # head cost negative, which is not a quantity a stage can have.
+    assert declared.intercept_seconds < 0.0
 
 
 def test_progress_snapshot_survives_the_evidence_writer(

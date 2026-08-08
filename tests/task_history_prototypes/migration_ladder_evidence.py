@@ -66,6 +66,19 @@ FLUSH_EVERY_BATCHES: Final = 50
 # and 4.4x below the failing one.
 PER_BATCH_TREND_GATE_FRACTION: Final = 0.05
 
+# The same question asked of a stage whose declared model carries an
+# intercept: does the model describe the stage across the whole run. The
+# quantity is the residual after the model is removed, so the threshold is
+# re-derived rather than carried over — a bound derived for one measurand does
+# not transfer to another merely because both are percentages. Anchors: a
+# stage with quadratic growth left +13.79% and +13.92% residual drift, while
+# the provably linear copy stage left between +0.44% and +4.62% across two
+# independent runs. Eight percent is the geometric midpoint, 1.73x margin on
+# each side. It sits above the KNOWN-GOOD control's own noise deliberately: a
+# gate below that would fail a linear stage by construction, whatever it did
+# to the candidate under test.
+RESIDUAL_TREND_GATE_FRACTION: Final = 0.08
+
 # Called with a stage name and the commits recorded so far.
 ProgressSink = Callable[[str, tuple[BatchCommit, ...]], None]
 
@@ -119,6 +132,45 @@ class LadderProgressSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class StageFit:
+    """One stage's declared model: a per-row slope and a head cost.
+
+    The intercept is reported beside the slope, never folded into it. A
+    one-time cost inside a per-row term inflates every extrapolation of that
+    term, and the inflation is invisible at the scale it was fitted.
+    """
+
+    stage: str
+    seconds_per_million_rows: float
+    intercept_seconds: float
+
+
+def fit_trajectory(trajectory: Trajectory) -> StageFit:
+    """Least squares of cumulative elapsed against cumulative rows."""
+    commits = trajectory.commits
+    if len({commit.cumulative_rows for commit in commits}) < 2:
+        raise RungMeasurementError(
+            f'{trajectory.stage} needs at least two distinct commit points; '
+            'one point cannot separate a slope from an intercept'
+        )
+    xs = [commit.cumulative_rows / 1_000_000 for commit in commits]
+    ys = [commit.elapsed_seconds for commit in commits]
+    count = len(xs)
+    mean_x = sum(xs) / count
+    mean_y = sum(ys) / count
+    denominator = sum((x - mean_x) ** 2 for x in xs)
+    slope = (
+        sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+        / denominator
+    )
+    return StageFit(
+        stage=trajectory.stage,
+        seconds_per_million_rows=slope,
+        intercept_seconds=mean_y - slope * mean_x,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PerBatchTrend:
     """Whether one stage's per-batch cost holds still across the run.
 
@@ -129,6 +181,7 @@ class PerBatchTrend:
     """
 
     stage: str
+    mode: str  # 'raw' | 'residual'
     batches: int
     mean_batch_seconds: float
     trend_seconds_per_batch: float
@@ -138,12 +191,23 @@ class PerBatchTrend:
     within_gate: bool
 
 
-def compute_per_batch_trend(trajectory: Trajectory) -> PerBatchTrend:
-    """Fit per-batch duration against batch index and gate the drift.
+def compute_per_batch_trend(
+    trajectory: Trajectory, *, declared_fit: StageFit | None = None
+) -> PerBatchTrend:
+    """Gate a stage on whether its declared model describes the whole run.
+
+    With no declared fit the raw per-batch durations are gated: the stage is
+    claimed to have a constant per-row cost, so any drift contradicts it.
+
+    With a declared fit the residual is gated instead — what remains after
+    the model's own intercept and slope are removed. A one-time head cost is
+    part of a model that declares an intercept, not a departure from it, so
+    gating the raw series there would reject the stage for having exactly the
+    shape it was fitted with.
 
     Durations are differences of the cumulative elapsed series, so the first
-    batch carries any stage entry cost. That is the honest reading: it is
-    time the stage spent before its first commit.
+    batch carries any stage entry cost, and the declared intercept is
+    subtracted from that batch alone.
     """
     commits = trajectory.commits
     if len(commits) < 2:
@@ -162,6 +226,24 @@ def compute_per_batch_trend(trajectory: Trajectory) -> PerBatchTrend:
             f'{trajectory.stage} reported a non-positive mean batch '
             f'duration ({mean_duration}); the trend gate cannot be applied'
         )
+    # The drift is always expressed against the stage's real mean batch, so
+    # the two modes report on the same scale and remain comparable.
+    if declared_fit is None:
+        gated = durations
+        mode = 'raw'
+        gate = PER_BATCH_TREND_GATE_FRACTION
+    else:
+        predicted_batch = (
+            declared_fit.seconds_per_million_rows
+            * trajectory.batch_size
+            / 1_000_000
+        )
+        gated = [
+            durations[0] - predicted_batch - declared_fit.intercept_seconds
+        ] + [duration - predicted_batch for duration in durations[1:]]
+        mode = 'residual'
+        gate = RESIDUAL_TREND_GATE_FRACTION
+    mean_gated = sum(gated) / count
     indexes = list(range(count))
     mean_index = sum(indexes) / count
     denominator = sum((index - mean_index) ** 2 for index in indexes)
@@ -172,8 +254,8 @@ def compute_per_batch_trend(trajectory: Trajectory) -> PerBatchTrend:
         )
     trend = (
         sum(
-            (index - mean_index) * (duration - mean_duration)
-            for index, duration in zip(indexes, durations)
+            (index - mean_index) * (value - mean_gated)
+            for index, value in zip(indexes, gated)
         )
         / denominator
     )
@@ -181,13 +263,14 @@ def compute_per_batch_trend(trajectory: Trajectory) -> PerBatchTrend:
     fraction = drift / mean_duration
     return PerBatchTrend(
         stage=trajectory.stage,
+        mode=mode,
         batches=count,
         mean_batch_seconds=mean_duration,
         trend_seconds_per_batch=trend,
         total_drift_seconds=drift,
         drift_fraction_of_mean=fraction,
-        gate_fraction=PER_BATCH_TREND_GATE_FRACTION,
-        within_gate=abs(fraction) <= PER_BATCH_TREND_GATE_FRACTION,
+        gate_fraction=gate,
+        within_gate=abs(fraction) <= gate,
     )
 
 
@@ -203,6 +286,7 @@ class RungMeasurement:
     preparation: Trajectory
     fitted: FittedRun
     preparation_seconds_per_million_rows: float
+    preparation_fit: StageFit
     trends: tuple[PerBatchTrend, ...]
     fixed_seconds: float
     total_seconds: float
@@ -405,24 +489,6 @@ async def _drive_relocation(
     )
 
 
-def _slope_per_million(trajectory: Trajectory) -> float:
-    """Least-squares slope over one trajectory, in seconds per million rows."""
-    if len({commit.cumulative_rows for commit in trajectory.commits}) < 2:
-        raise RungMeasurementError(
-            f'{trajectory.stage} needs at least two distinct commit points; '
-            'one point cannot separate a slope from an intercept'
-        )
-    xs = [c.cumulative_rows / 1_000_000 for c in trajectory.commits]
-    ys = [c.elapsed_seconds for c in trajectory.commits]
-    n = len(xs)
-    mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
-    denominator = sum((x - mean_x) ** 2 for x in xs)
-    return sum(
-        (x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)
-    ) / denominator
-
-
 async def measure_rung(
     connection: AsyncConnection,
     *,
@@ -516,6 +582,11 @@ async def measure_rung(
     relocation = await _drive_relocation(
         connection, batch_size=batch_size, on_progress=on_progress
     )
+    # Preparation's declared model carries an intercept: the stage has a
+    # head transient spanning a fixed number of batches, and an intercept is
+    # what a one-time head cost is. Fitting it here keeps that mass out of
+    # the per-row slope by construction rather than by choosing a window.
+    preparation_fit = fit_trajectory(preparation)
     stages.append(
         StageDuration(
             name='relocation', seconds=relocation.seconds, term='per_row'
@@ -557,9 +628,14 @@ async def measure_rung(
         relocation=relocation,
         preparation=preparation,
         fitted=fitted,
-        preparation_seconds_per_million_rows=_slope_per_million(preparation),
+        preparation_seconds_per_million_rows=(
+            preparation_fit.seconds_per_million_rows
+        ),
+        preparation_fit=preparation_fit,
         trends=(
-            compute_per_batch_trend(preparation),
+            compute_per_batch_trend(
+                preparation, declared_fit=preparation_fit
+            ),
             compute_per_batch_trend(relocation),
         ),
         fixed_seconds=fixed_seconds,
