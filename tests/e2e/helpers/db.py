@@ -101,10 +101,15 @@ async def cleanup_tables(session: AsyncSession) -> None:
     The history table is half of task storage: every task that reaches a
     terminal status lives there and nowhere else, so leaving it behind
     carries one test's finished tasks into the next one's counts.
+
+    The phase-2 outbox goes with them. A pending row whose workflow was
+    truncated away is unresolvable, and the recovery pass re-reads it
+    every second for the rest of the session — the accumulated backlog
+    then competes with live work for a bounded discovery.
     """
     await session.execute(
         text("""
-            TRUNCATE horsies_tasks, horsies_task_history, horsies_workflow_tasks, horsies_workflows, horsies_schedule_state, horsies_heartbeats CASCADE
+            TRUNCATE horsies_tasks, horsies_task_history, horsies_workflow_tasks, horsies_workflows, horsies_workflow_phase2_pending, horsies_schedule_state, horsies_heartbeats CASCADE
         """),
     )
     await session.commit()

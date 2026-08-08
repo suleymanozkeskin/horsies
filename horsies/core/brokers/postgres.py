@@ -989,6 +989,9 @@ class PostgresBroker:
                     installation_fragments,
                     teardown_statements,
                 )
+                from horsies.core.history.ddl.fragments import (
+                    cutover_fragments,
+                )
                 from horsies.core.history.heartbeats.partitioning import (
                     HEARTBEATS_PARTITIONED_DDL,
                 )
@@ -1035,6 +1038,23 @@ class PostgresBroker:
                 ))).scalar_one()
                 if not columns_tightened:
                     for statement in tightening_cutover_ddl():
+                        await conn.execute(text(statement))
+
+                # The locator contract, which the tighten stage also
+                # applies: the composite key structurally pins a node's
+                # identity to its workflow while a phase-2 pending row
+                # exists. Without it the outbox has no referential tie
+                # to the node, so deleting a workflow leaves pending
+                # rows whose workflow is gone — unresolvable, retried
+                # every pass, and competing with real work for the
+                # bounded discovery.
+                locator_present = (await conn.execute(text(
+                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname =
+                        'horsies_workflow_tasks_node_workflow_key')"""
+                ))).scalar_one()
+                if not locator_present:
+                    for statement in cutover_fragments():
                         await conn.execute(text(statement))
 
             await conn.execute(

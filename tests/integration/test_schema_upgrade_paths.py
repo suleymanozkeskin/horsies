@@ -432,6 +432,47 @@ class TestFreshWorldParity:
         assert 'horsies_tasks_rerun_lineage_pair' in constraints
         assert 'horsies_tasks_live_status_only' in constraints
 
+    async def test_fresh_database_carries_the_locator_contract(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The composite key the phase-2 outbox references.
+
+        Named here because it is an end-state part that is not a cutover
+        column — the class the docstring above says would need naming.
+        Without it a fresh install's outbox has no referential tie to
+        the node, and a deleted workflow leaves pending rows nothing can
+        resolve.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                names = frozenset(
+                    row.conname
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT conname FROM pg_constraint
+                                WHERE conname IN (
+                                    'horsies_workflow_tasks'
+                                    '_node_workflow_key',
+                                    'horsies_workflow_phase2_pending'
+                                    '_node_fkey'
+                                )
+                                """
+                            )
+                        )
+                    ).all()
+                )
+        finally:
+            await engine.dispose()
+        assert names == {
+            'horsies_workflow_tasks_node_workflow_key',
+            'horsies_workflow_phase2_pending_node_fkey',
+        }, sorted(names)
+
 
 class TestUpgradePaths:
     async def test_fresh_database_reaches_the_current_version(
