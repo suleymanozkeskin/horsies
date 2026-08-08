@@ -59,7 +59,10 @@ async def _seed_orphaned_claimed_workflow_task(
 async def _task_status(session: AsyncSession, task_id: str) -> str:
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).one()
@@ -73,7 +76,8 @@ async def _terminalization_kind(
     row = (
         await session.execute(
             text(
-                'SELECT terminalization_kind FROM horsies_tasks WHERE id = :id'
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )

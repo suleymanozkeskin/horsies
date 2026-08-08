@@ -128,8 +128,8 @@ async def _task_row(session: AsyncSession, task_id: str) -> _TaskRow:
                 SELECT status, retry_count, error_code, result, next_retry_at,
                        finalizing_at, finalizing_by_worker_id,
                        terminalization_kind
-                FROM horsies_tasks
-                WHERE id = :id
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

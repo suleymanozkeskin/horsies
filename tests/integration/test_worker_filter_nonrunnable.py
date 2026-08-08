@@ -118,7 +118,10 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read horsies_tasks.status for a given task_id."""
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).fetchone()
@@ -133,8 +136,8 @@ async def _get_terminalization_kind(
     return (
         await session.execute(
             text(
-                'SELECT terminalization_kind FROM horsies_tasks '
-                'WHERE id = :id'
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
@@ -147,8 +150,8 @@ async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str,
         await session.execute(
             text("""
                 SELECT status, claimed, claimed_by_worker_id
-                FROM horsies_tasks
-                WHERE id = :id
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

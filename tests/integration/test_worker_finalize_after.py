@@ -181,7 +181,10 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read current status of a task."""
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).fetchone()
@@ -425,8 +428,8 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
             text("""
                 SELECT status, claimed, claimed_by_worker_id, started_at,
                        worker_hostname, worker_pid, worker_process_name, error_code
-                FROM horsies_tasks
-                WHERE id = :id
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

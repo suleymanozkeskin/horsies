@@ -118,7 +118,7 @@ async def _get_row(session: AsyncSession, task_id: str) -> Row[Any]:
             text("""
                 SELECT status, error_code, retry_count, claimed_by_worker_id,
                        terminalization_kind
-                FROM horsies_tasks WHERE id = :id
+                FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
