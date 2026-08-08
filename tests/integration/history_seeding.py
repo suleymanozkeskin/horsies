@@ -474,16 +474,18 @@ async def force_terminal(
                    h.status, h.terminal_at, h.terminalization_kind,
                    'HISTORY', h.retention_class_key, h.retention_anchor_at,
                    h.history_schema_version,
-                   COALESCE(
-                       h.result_digest,
-                       sha256(convert_to(CAST(h.task_id AS text), 'UTF8'))
-                   ),
+                   sha256(h.result_payload),
                    gen_random_uuid(), h.terminal_at, 0
             FROM horsies_task_history h
             JOIN horsies_workflow_tasks wt ON wt.task_id = h.task_id
             WHERE h.task_id = CAST(:id AS uuid)
               AND wt.status NOT IN
                   ('COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED')
+              -- The digest is the payload's, as the move writes it, and
+              -- a deferred terminalization without a payload is refused
+              -- at the source; so no payload means no evidence, rather
+              -- than evidence carrying a digest of nothing.
+              AND h.result_payload IS NOT NULL
             ON CONFLICT (task_id) DO NOTHING
         """),
         {'id': task_id},
