@@ -13,7 +13,11 @@ from tests.task_history_prototypes.paired_interleave import (
     InterleaveSpec,
 )
 from tests.task_history_prototypes.paired_measure import (
+    BLOCK_MEDIAN_SPREAD_BOUND,
     SIDE_SAMPLES_MARKER,
+    STEADY_STATE_STATEMENTS,
+    assert_block_medians_are_flat,
+    block_median_spread,
     BlockResult,
     MeasurementError,
     MeasurementPlan,
@@ -558,3 +562,149 @@ def test_an_operation_paired_row_interleaves_on_one_build() -> None:
         PairedSide.BASELINE, PairedSide.CANDIDATE
     }
     assert {result.side for result in blocks} == {PairedSide.CANDIDATE}
+
+
+def _blocks_with_medians(medians: list[float]) -> list[BlockResult]:
+    """One block per median, in schedule order, each block flat internally."""
+    from tests.task_history_prototypes.paired_interleave import block_sides
+
+    return [
+        BlockResult(
+            block=index,
+            side=arm,
+            arm=arm,
+            identity=_identity(arm),
+            config=_config(arm),
+            samples=(medians[index],) * SPEC.block_size,
+            wall_clock_seconds=0.5,
+        )
+        for index, arm in enumerate(block_sides(SPEC))
+    ]
+
+
+def test_a_steady_run_passes_the_flatness_gate() -> None:
+    """The control run's own shape: per-block medians 0.617-0.709 ms."""
+    blocks = _blocks_with_medians(
+        [0.6, 0.6, 0.6, 0.6, 0.617, 0.647, 0.709, 0.639]
+    )
+    assert block_median_spread(SPEC, blocks) == pytest.approx(0.149, abs=0.001)
+    assert_block_medians_are_flat(SPEC, blocks)
+
+
+def test_a_run_whose_measurand_moved_is_refused() -> None:
+    """The defect's own shape: medians climbing 0.598 -> 2.144 ms.
+
+    Counterbalancing holds the mean-position gap at zero, which cancels this in
+    a location statistic and leaves it in the tail — so such a run looks stable
+    at p50 and disagrees with itself at p99.
+    """
+    blocks = _blocks_with_medians(
+        [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
+    )
+    assert block_median_spread(SPEC, blocks) > BLOCK_MEDIAN_SPREAD_BOUND
+    with pytest.raises(MeasurementError, match='changed while it was being measured'):
+        assert_block_medians_are_flat(SPEC, blocks)
+
+
+def test_the_gate_reads_only_the_measured_half() -> None:
+    """Warm-up blocks are discarded, so their shape cannot fail a good run."""
+    blocks = _blocks_with_medians(
+        [0.5, 5.0, 0.5, 9.0, 0.617, 0.647, 0.709, 0.639]
+    )
+    assert_block_medians_are_flat(SPEC, blocks)
+
+
+def test_the_bound_separates_the_measured_noise_from_the_defect() -> None:
+    """Derived, not chosen: above the control run, far below the defect."""
+    steady = _blocks_with_medians(
+        [0.6, 0.6, 0.6, 0.6, 0.617, 0.647, 0.709, 0.639]
+    )
+    moving = _blocks_with_medians(
+        [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
+    )
+    assert block_median_spread(SPEC, steady) < BLOCK_MEDIAN_SPREAD_BOUND
+    assert block_median_spread(SPEC, moving) > BLOCK_MEDIAN_SPREAD_BOUND
+    assert BLOCK_MEDIAN_SPREAD_BOUND / block_median_spread(SPEC, steady) > 2.5
+    assert block_median_spread(SPEC, moving) / BLOCK_MEDIAN_SPREAD_BOUND > 6.0
+
+
+def test_a_run_with_no_measured_blocks_has_no_steady_state_to_check() -> None:
+    with pytest.raises(MeasurementError, match='no measured blocks'):
+        block_median_spread(SPEC, [])
+
+
+def test_the_steady_state_step_returns_rows_before_it_vacuums() -> None:
+    """Order matters: vacuuming first would leave the rows still claimed."""
+    assert len(STEADY_STATE_STATEMENTS) == 2
+    assert "status = 'PENDING'" in STEADY_STATE_STATEMENTS[0]
+    assert STEADY_STATE_STATEMENTS[1] == 'VACUUM ANALYZE horsies_tasks'
+
+
+def test_a_complete_run_is_gated_on_flatness_too() -> None:
+    """The gate is part of what a run must discharge, not an optional check."""
+    blocks = _blocks_with_medians(
+        [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
+    )
+    with pytest.raises(MeasurementError, match='changed while it was being measured'):
+        assert_run_is_measurable(SPEC, blocks)
+
+
+def test_the_claim_body_refuses_an_empty_claim() -> None:
+    """An empty claim does the lock and the scan but claims nothing.
+
+    It is a different operation from the one this row judges, and it is what a
+    drained queue produces — so a row that timed it would report a cheaper
+    number the longer it ran.
+    """
+    from tests.task_history_prototypes.paired_measure import (
+        ClaimPlan,
+        claim_source,
+    )
+
+    body = claim_source(
+        ClaimPlan(task_name='p'),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=0,
+    )
+    assert 'if not _rows:' in body
+    assert 'claim returned no rows' in body
+    refusal = body.index('if not _rows:')
+    recording = body.index('_samples.append')
+    assert refusal < recording
+
+
+def test_the_claim_body_uses_a_fresh_worker_per_observation() -> None:
+    """One worker id would let the per-worker cap empty every later claim."""
+    from tests.task_history_prototypes.paired_measure import (
+        ClaimPlan,
+        claim_source,
+    )
+
+    body = claim_source(
+        ClaimPlan(task_name='p'),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=2,
+    )
+    assert "'qual-' + str(_block) + '-' + str(_index)" in body
+
+
+def test_the_claim_body_takes_the_statement_from_the_build_under_test() -> None:
+    """Copying its text here would run a statement neither build ships."""
+    from tests.task_history_prototypes.paired_measure import (
+        ClaimPlan,
+        claim_source,
+    )
+
+    body = claim_source(
+        ClaimPlan(task_name='p'),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=0,
+    )
+    assert 'from horsies.core.worker.sql import HORSIES_CLAIM_SQL' in body
+    assert 'horsies_claim(' not in body
