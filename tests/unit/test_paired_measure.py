@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from tests.task_history_prototypes.paired_cell import SampleUnit
 from tests.task_history_prototypes.paired_interleave import (
-    BlockOrder,
     InterleaveError,
     InterleaveSpec,
 )
@@ -104,6 +104,7 @@ def _blocks(
             BlockResult(
                 block=index,
                 side=actual,
+                arm=actual,
                 identity=_identity(actual),
                 config=_config(actual),
                 samples=tuple(
@@ -162,10 +163,20 @@ def test_the_body_primes_outside_the_timed_region() -> None:
     assert '_primed' not in body[timing:]
 
 
-def test_the_two_enqueue_operations_differ_only_by_the_key() -> None:
-    """The one group A item whose control is its neighbour, not the baseline."""
+def test_the_keyed_row_and_its_control_differ_only_by_the_key() -> None:
+    """The control is the same options call with the key set to None.
+
+    Comparing keyed against a plain send would fold the options call into the
+    delta. This is the row whose control is a sibling operation rather than the
+    baseline build, which is forced: the released build takes no key at all.
+    """
     ordinary = measure_source(
-        PLAN,
+        MeasurementPlan(
+            task_name=PLAN.task_name,
+            operation=Operation.OPTIONS_ORDINARY_ENQUEUE,
+            payload_bytes=PLAN.payload_bytes,
+            payload_seed=PLAN.payload_seed,
+        ),
         config_spec=SeedConfigSpec(),
         database_url='postgresql://x/y',
         observations=5,
@@ -194,12 +205,14 @@ def test_the_two_enqueue_operations_differ_only_by_the_key() -> None:
     # expression. The other is the plan literal, which records which operation
     # was asked for and must therefore differ.
     assert len(differences) == 2
-    behavioural = [pair for pair in differences if '_key = ' in pair[0]]
+    behavioural = [pair for pair in differences if '_sent = ' in pair[0]]
     assert len(behavioural) == 1
-    assert behavioural[0][0].strip() == '_key = None'
-    assert behavioural[0][1].strip() == (
-        "_key = _plan['key_prefix'] + str(_index)"
-    )
+    control_call, keyed_call = behavioural[0]
+    assert 'idempotency_key=None' in control_call
+    assert 'idempotency_key=_keys[_index]' in keyed_call
+    assert control_call.replace(
+        'idempotency_key=None', 'idempotency_key=_keys[_index]'
+    ) == keyed_call
 
     def _plan_literal(line: str) -> dict[str, object]:
         inner = line[line.index('(') + 1 : line.rindex(')')]
@@ -278,7 +291,7 @@ def test_blocks_in_schedule_order_are_accepted() -> None:
     assert_blocks_ran_in_schedule_order(SPEC, _blocks())
 
 
-def test_a_block_that_ran_on_the_wrong_side_is_refused() -> None:
+def test_a_block_that_ran_on_the_wrong_arm_is_refused() -> None:
     """The ordering's whole guarantee is positional."""
     with pytest.raises(MeasurementError, match='the schedule assigns it'):
         assert_blocks_ran_in_schedule_order(SPEC, _blocks(swap_sides=(2,)))
@@ -306,6 +319,7 @@ def test_a_configuration_that_changed_midway_is_refused() -> None:
     blocks[4] = BlockResult(
         block=4,
         side=blocks[4].side,
+        arm=blocks[4].arm,
         identity=blocks[4].identity,
         config=_config(blocks[4].side, effective={'broker.pool_size': 25}),
         samples=blocks[4].samples,
@@ -321,6 +335,7 @@ def test_the_two_sides_configurations_are_compared_across_the_run() -> None:
         BlockResult(
             block=result.block,
             side=result.side,
+            arm=result.side,
             identity=result.identity,
             config=(
                 _config(result.side, effective={'broker.pool_size': 25})
@@ -336,23 +351,31 @@ def test_the_two_sides_configurations_are_compared_across_the_run() -> None:
         assert_configurations_held(replaced)
 
 
-def test_a_run_with_one_side_missing_is_refused() -> None:
-    spec = InterleaveSpec(
-        blocks=8, block_size=5, warmup_blocks=4, order=BlockOrder.ALTERNATING
-    )
+def test_a_run_with_no_blocks_at_all_is_refused() -> None:
+    with pytest.raises(MeasurementError, match='no blocks ran at all'):
+        assert_configurations_held([])
+
+
+def test_all_blocks_on_one_build_is_allowed_when_the_arms_alternate() -> None:
+    """An operation-paired row runs both arms on the candidate by design.
+
+    The safety that used to come from requiring both builds now comes from the
+    arm check: a cross-build row whose blocks all landed on one build fails
+    because its arms no longer match the schedule.
+    """
     blocks = [
         BlockResult(
             block=result.block,
-            side=PairedSide.BASELINE,
-            identity=_identity(PairedSide.BASELINE),
-            config=_config(PairedSide.BASELINE),
+            side=PairedSide.CANDIDATE,
+            arm=result.arm,
+            identity=_identity(PairedSide.CANDIDATE),
+            config=_config(PairedSide.CANDIDATE),
             samples=result.samples,
             wall_clock_seconds=result.wall_clock_seconds,
         )
-        for result in _blocks(spec)
+        for result in _blocks()
     ]
-    with pytest.raises(MeasurementError, match='no blocks ran on'):
-        assert_configurations_held(blocks)
+    assert_configurations_held(blocks)
 
 
 def test_the_realised_schedule_marks_warmup_by_block() -> None:
@@ -379,6 +402,7 @@ def _resized(
         BlockResult(
             block=result.block,
             side=result.side,
+            arm=result.side,
             identity=result.identity,
             config=result.config,
             samples=tuple(
@@ -416,6 +440,7 @@ def test_a_run_with_an_overlong_warmup_stretch_is_refused() -> None:
         BlockResult(
             block=result.block,
             side=result.side,
+            arm=result.side,
             identity=result.identity,
             config=result.config,
             samples=tuple(
@@ -446,3 +471,90 @@ def test_conditions_record_the_cost_of_every_block() -> None:
     assert conditions['wall_clock_seconds_total'] == pytest.approx(
         0.5 * SPEC.blocks
     )
+
+
+def test_the_baseline_cannot_be_asked_for_an_operation_it_lacks() -> None:
+    """The released build takes no idempotency key, so the row is not a delta.
+
+    Refused before the block runs. Left to fail inside the block it would
+    surface as a send error and read as a product fault.
+    """
+    from tests.task_history_prototypes.paired_measure import (
+        CANDIDATE_ONLY_OPERATIONS,
+        SideRuntime,
+        run_block,
+    )
+
+    assert Operation.KEYED_ENQUEUE in CANDIDATE_ONLY_OPERATIONS
+    assert Operation.ORDINARY_ENQUEUE not in CANDIDATE_ONLY_OPERATIONS
+    runtime = SideRuntime(
+        side=PairedSide.BASELINE,
+        interpreter=Path('/baseline/bin/python'),
+        expected_root=Path('/baseline'),
+        expected_schema_version=BASELINE_SCHEMA_VERSION,
+        database_url='postgresql://h/base',
+    )
+    with pytest.raises(MeasurementError, match='does not have it'):
+        run_block(
+            runtime,
+            block=0,
+            observations=5,
+            plan=MeasurementPlan(
+                task_name='p',
+                operation=Operation.KEYED_ENQUEUE,
+                payload_bytes=200,
+                payload_seed=1,
+            ),
+            config_spec=SeedConfigSpec(),
+            cwd=Path('/'),
+            clock=lambda: 0.0,
+        )
+
+
+def test_keys_are_unique_per_observation() -> None:
+    """A repeated idempotency key is a deduplicated send, not this operation."""
+    body = measure_source(
+        MeasurementPlan(
+            task_name='p',
+            operation=Operation.KEYED_ENQUEUE,
+            payload_bytes=200,
+            payload_seed=1,
+        ),
+        config_spec=SeedConfigSpec(),
+        database_url='postgresql://x/y',
+        observations=5,
+        block=3,
+    )
+    assert "str(_block) + '-' + str(_index)" in body
+
+
+def test_an_operation_paired_row_interleaves_on_one_build() -> None:
+    """Both arms on the candidate, still interleaved by the schedule.
+
+    The keyed row's control is a sibling operation because the released build
+    has no keyed enqueue at all. Without an arm distinct from the build, the
+    two operations would be measured in separate windows and the drift between
+    those windows would be attributed to the key.
+    """
+    from tests.task_history_prototypes.paired_interleave import block_sides
+
+    blocks = [
+        BlockResult(
+            block=index,
+            side=PairedSide.CANDIDATE,
+            arm=arm,
+            identity=_identity(PairedSide.CANDIDATE),
+            config=_config(PairedSide.CANDIDATE),
+            samples=tuple(
+                1.0 + position * 0.001 for position in range(SPEC.block_size)
+            ),
+            wall_clock_seconds=0.5,
+        )
+        for index, arm in enumerate(block_sides(SPEC))
+    ]
+    schedule, samples = assert_run_is_measurable(SPEC, blocks)
+    assert len(schedule) == len(samples)
+    assert {entry.side for entry in schedule} == {
+        PairedSide.BASELINE, PairedSide.CANDIDATE
+    }
+    assert {result.side for result in blocks} == {PairedSide.CANDIDATE}

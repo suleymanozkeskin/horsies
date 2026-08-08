@@ -69,22 +69,44 @@ class MeasurementError(Exception):
 class Operation(StrEnum):
     """The hot path a cell times.
 
-    Keyed enqueue is present because its control is *ordinary enqueue* rather
-    than the baseline build — the one item in group A whose control differs
-    from its nine neighbours, and so the one most likely to be wired against
-    the wrong thing.
+    Keyed enqueue's control is *ordinary enqueue* rather than the baseline
+    build, and that is forced rather than chosen: ``with_options`` on the
+    released baseline takes no ``idempotency_key`` at all, so there is no
+    baseline keyed enqueue for a cross-build delta to be taken against.
+
+    ``OPTIONS_ORDINARY_ENQUEUE`` exists to be that control. Comparing keyed
+    against a plain ``send`` would fold the options call into the delta; this
+    goes through the same call with the key set to ``None``, so the two differ
+    in the key and in nothing else.
     """
 
     ORDINARY_ENQUEUE = 'ordinary-enqueue'
+    OPTIONS_ORDINARY_ENQUEUE = 'options-ordinary-enqueue'
     KEYED_ENQUEUE = 'keyed-enqueue'
 
 
-# What each operation may vary. Keyed and ordinary enqueue must differ by the
-# key and by nothing else, so the difference is expressed as one flag over one
-# body rather than as two bodies that happen to look similar.
-_OPERATION_SOURCE: Final = {
-    Operation.ORDINARY_ENQUEUE: 'None',
-    Operation.KEYED_ENQUEUE: "_plan['key_prefix'] + str(_index)",
+# The operations the released baseline cannot perform. Refused there rather
+# than left to fail as a send error inside a block, which would look like a
+# product fault in the transcript.
+CANDIDATE_ONLY_OPERATIONS: Final = frozenset(
+    {Operation.OPTIONS_ORDINARY_ENQUEUE, Operation.KEYED_ENQUEUE}
+)
+
+# The one line each operation varies. Written as one expression per operation
+# over one body, so that what differs between two operations is visible as a
+# diff rather than argued from two bodies that look similar.
+_SEND_EXPRESSION: Final = {
+    Operation.ORDINARY_ENQUEUE: (
+        '_measured.send(blob=_blobs[_index], tag=_index)'
+    ),
+    Operation.OPTIONS_ORDINARY_ENQUEUE: (
+        '_measured.with_options(idempotency_key=None)'
+        '.send(blob=_blobs[_index], tag=_index)'
+    ),
+    Operation.KEYED_ENQUEUE: (
+        '_measured.with_options(idempotency_key=_keys[_index])'
+        '.send(blob=_blobs[_index], tag=_index)'
+    ),
 }
 
 
@@ -132,10 +154,20 @@ class MeasurementPlan:
 
 @dataclass(frozen=True, slots=True)
 class BlockResult:
-    """One block's observations, with the identity of the run that took them."""
+    """One block's observations, with the identity of the run that took them.
+
+    ``arm`` is the schedule's half; ``side`` is the build that ran it. They
+    coincide for a cross-build row and diverge for a row whose control is a
+    sibling operation, where both arms run on the candidate. Keeping them
+    separate is what lets an operation-paired row be interleaved at all:
+    without it the schedule sees one side, and the two operations end up
+    measured in different windows with the drift between them attributed to
+    the operation.
+    """
 
     block: int
     side: PairedSide
+    arm: PairedSide
     identity: SideIdentity
     config: SideConfig
     samples: tuple[float, ...]
@@ -180,14 +212,18 @@ for _index in range(_plan['priming_sends']):
     if not _primed.is_ok():
         raise RuntimeError('priming send failed: ' + repr(_primed.err()))
 
+# Keys are built before the timed region and are unique per observation: a
+# repeated idempotency key is a deduplicated send, which is a different
+# operation from the one this row is judging.
+_keys = [
+    _plan['key_prefix'] + str(_block) + '-' + str(_index)
+    for _index in range(_observations)
+]
+
 _samples = []
 for _index in range(_observations):
-    _key = __OPERATION_KEY__
     _started = _time.perf_counter_ns()
-    if _key is None:
-        _sent = _measured.send(blob=_blobs[_index], tag=_index)
-    else:
-        _sent = _measured.send(blob=_blobs[_index], tag=_index, key=_key)
+    _sent = __SEND_EXPRESSION__
     _elapsed = _time.perf_counter_ns() - _started
     if not _sent.is_ok():
         raise RuntimeError('measured send failed: ' + repr(_sent.err()))
@@ -225,7 +261,7 @@ def measure_source(
             '__OBSERVATIONS_JSON__': json.dumps(str(observations)),
             '__BLOCK_JSON__': json.dumps(str(block)),
             '__SAMPLES_MARKER__': json.dumps(SIDE_SAMPLES_MARKER),
-            '__OPERATION_KEY__': _OPERATION_SOURCE[plan.operation],
+            '__SEND_EXPRESSION__': _SEND_EXPRESSION[plan.operation],
         },
     )
 
@@ -276,6 +312,7 @@ class SideRuntime:
 def run_block(
     runtime: SideRuntime,
     *,
+    arm: PairedSide | None = None,
     block: int,
     observations: int,
     plan: MeasurementPlan,
@@ -289,6 +326,16 @@ def run_block(
     ``clock`` is supplied rather than read here so the wall-clock a dry pass
     reports comes from the caller's one source of time.
     """
+    if (
+        runtime.side is PairedSide.BASELINE
+        and plan.operation in CANDIDATE_ONLY_OPERATIONS
+    ):
+        raise MeasurementError(
+            f'{plan.operation} was scheduled on the baseline, which does not '
+            'have it: the released build takes no idempotency key. A row for '
+            'this operation is measured against a sibling operation on the '
+            'candidate, never as a cross-build delta'
+        )
     started = clock()
     completed = run_side(
         runtime.interpreter,
@@ -321,6 +368,7 @@ def run_block(
     return BlockResult(
         block=block,
         side=runtime.side,
+        arm=runtime.side if arm is None else arm,
         identity=identity,
         config=config_from_output(completed.stdout, side=runtime.side),
         samples=samples_from_output(
@@ -344,16 +392,16 @@ def assert_blocks_ran_in_schedule_order(
         raise MeasurementError(
             f'{len(blocks)} blocks ran, the schedule describes {len(expected)}'
         )
-    for position, (result, side) in enumerate(zip(blocks, expected, strict=True)):
+    for position, (result, arm) in enumerate(zip(blocks, expected, strict=True)):
         if result.block != position:
             raise MeasurementError(
                 f'block at position {position} reports index {result.block}; '
                 'the blocks did not run in schedule order'
             )
-        if result.side is not side:
+        if result.arm is not arm:
             raise MeasurementError(
-                f'block {position} ran on {result.side}, the schedule assigns '
-                f'it to {side}'
+                f'block {position} ran as {result.arm}, the schedule assigns '
+                f'it to {arm}'
             )
 
 
@@ -370,9 +418,13 @@ def assert_configurations_held(blocks: Sequence[BlockResult]) -> None:
     }
     for result in blocks:
         by_side[result.side].append(result)
+    if not any(by_side.values()):
+        raise MeasurementError('no blocks ran at all')
     for side, results in by_side.items():
         if not results:
-            raise MeasurementError(f'no blocks ran on {side}')
+            # An operation-paired row runs both arms on one build, so the
+            # other build having no blocks is expected rather than a fault.
+            continue
         first = results[0]
         for other in results[1:]:
             if dict(other.config.effective) != dict(first.config.effective):
@@ -381,10 +433,11 @@ def assert_configurations_held(blocks: Sequence[BlockResult]) -> None:
                     f'configuration from block {first.block}; the run changed '
                     'underneath the cell'
                 )
-    assert_config_equivalence(
-        by_side[PairedSide.BASELINE][0].config,
-        by_side[PairedSide.CANDIDATE][0].config,
-    )
+    if by_side[PairedSide.BASELINE] and by_side[PairedSide.CANDIDATE]:
+        assert_config_equivalence(
+            by_side[PairedSide.BASELINE][0].config,
+            by_side[PairedSide.CANDIDATE][0].config,
+        )
 
 
 def observations_in_schedule_order(
@@ -398,7 +451,7 @@ def observations_in_schedule_order(
                 ScheduledObservation(
                     global_index=len(schedule),
                     block=result.block,
-                    side=result.side,
+                    side=result.arm,
                     warmup=result.block < spec.warmup_blocks,
                 )
             )
@@ -437,6 +490,7 @@ def run_conditions(
             {
                 'block': result.block,
                 'side': result.side.value,
+                'arm': result.arm.value,
                 'observations': len(result.samples),
                 'wall_clock_seconds': result.wall_clock_seconds,
             }
