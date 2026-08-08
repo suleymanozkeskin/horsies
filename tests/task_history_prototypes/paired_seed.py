@@ -222,8 +222,8 @@ class SeedOutcome:
 # only through JSON literals, so nothing in this checkout is importable from
 # it. The leading underscores keep its names clear of anything the product
 # exposes.
-_SEED_BODY_TEMPLATE: Final = '''
-import base64 as _b64, json as _json, random as _random
+CONFIG_SOURCE_SNIPPET: Final = '''
+import base64 as _b64, json as _json, random as _random, time as _time
 from pydantic import SecretStr as _SecretStr
 from horsies import TaskError as _TaskError, TaskResult as _TaskResult
 from horsies import TaskStatus as _TaskStatus
@@ -232,18 +232,8 @@ from horsies.core.models.app import AppConfig as _AppConfig
 from horsies.core.models.broker import PostgresConfig as _PostgresConfig
 from horsies.core.models.queues import QueueMode as _QueueMode
 
-_spec = _json.loads(__SPEC_JSON__)
 _config_spec = _json.loads(__CONFIG_JSON__)
 _dsn = _json.loads(__DSN_JSON__)
-
-_known_statuses = {_status.value for _status in _TaskStatus}
-for _bucket in _spec['buckets']:
-    if _bucket['status'] not in _known_statuses:
-        raise RuntimeError(
-            'this build has no task status named ' + repr(_bucket['status'])
-            + '; the seed spec declares a status the build does not define, '
-            'so the two sides would record different status vocabularies'
-        )
 
 _app_config = _AppConfig(
     queue_mode=_QueueMode.DEFAULT,
@@ -300,6 +290,23 @@ print(
     + _json.dumps({'effective': _effective, 'defaults': _defaults}),
     flush=True,
 )
+'''
+
+# Everything after the shared configuration. Seeding and measuring are two
+# bodies over ONE configuration snippet: a measurement whose configuration was
+# written separately from the seed's could differ from the run that filled the
+# database it measures, and the difference would be attributed to the build.
+_SEED_TAIL_TEMPLATE: Final = '''
+_spec = _json.loads(__SPEC_JSON__)
+
+_known_statuses = {_status.value for _status in _TaskStatus}
+for _bucket in _spec['buckets']:
+    if _bucket['status'] not in _known_statuses:
+        raise RuntimeError(
+            'this build has no task status named ' + repr(_bucket['status'])
+            + '; the seed spec declares a status the build does not define, '
+            'so the two sides would record different status vocabularies'
+        )
 
 _app = _Horsies(config=_app_config, run_schema_migrations=True)
 
@@ -394,7 +401,7 @@ def seed_source(
     or task name cannot become code.
     """
     return substitute_seed_tokens(
-        _SEED_BODY_TEMPLATE,
+        CONFIG_SOURCE_SNIPPET + _SEED_TAIL_TEMPLATE,
         {
             '__SPEC_JSON__': json.dumps(json.dumps(spec.as_payload())),
             '__CONFIG_JSON__': json.dumps(json.dumps(config_spec.as_payload())),
