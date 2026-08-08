@@ -37,12 +37,18 @@ async def _seed_orphaned_claimed_workflow_task(
                 id, task_name, queue_name, priority, args, kwargs,
                 status, sent_at, enqueued_at, created_at, updated_at,
                 claimed, claimed_at, claimed_by_worker_id, claim_expires_at,
-                retry_count, max_retries, enqueue_sha, is_workflow_task
+                retry_count, max_retries, enqueue_sha, is_workflow_task,
+                retention_class_key, command_fingerprint_version,
+                command_fingerprint, retain_rerun_input,
+                prepared_rerun_input_disposition
             ) VALUES (
                 :id, 'workflow_join_barrier', 'default', 100, '[]', '{}',
                 'CLAIMED', :sent_at, NOW(), NOW(), NOW(),
                 TRUE, NOW(), :worker_id, NOW() + INTERVAL '5 minutes',
-                0, 0, :enqueue_sha, TRUE
+                0, 0, :enqueue_sha, TRUE,
+                'standard_30d', 1,
+                sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                FALSE, 'NEVER_ELIGIBLE'
             )
         """),
         {
