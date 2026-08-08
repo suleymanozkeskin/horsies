@@ -25,6 +25,7 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_PHASE2,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
 
@@ -51,35 +52,38 @@ async def _insert_task(
     queue_name: str = 'default',
     status: str = 'COMPLETED',
 ) -> str:
-    """Insert a horsies_tasks row and return its id."""
+    """Seed a task in the given status and return its id.
+
+    A terminal status arrives through terminalization's move: the row is
+    born running, then forced terminal into history.
+    """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(
         task_name='wf_phase_test',
         queue_name=queue_name,
     )
+    is_terminal = status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, terminal_at)
+                 max_retries, started_at, enqueue_sha)
             VALUES
                 (:id, 'wf_phase_test', :queue, 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha,
-                 -- Terminal exactly when dated, as the database requires.
-                 CASE WHEN CAST(:status AS VARCHAR)
-                          IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                      THEN NOW() ELSE NULL END)
+                 0, NOW(), :enqueue_sha)
         """),
         {
             'id': task_id,
             'queue': queue_name,
-            'status': status,
+            'status': 'RUNNING' if is_terminal else status,
             'sent_at': sent_at,
             'enqueue_sha': sha,
         },
     )
+    if is_terminal:
+        await force_terminal(session, task_id, status=status)
     await session.commit()
     return task_id
 

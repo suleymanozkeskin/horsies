@@ -46,6 +46,7 @@ from horsies.core.worker.worker import (
     UNCLAIM_CLAIMED_TASK_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
 
@@ -174,20 +175,24 @@ async def _set_task_status(
     task_id: str,
     status: str,
 ) -> None:
-    """Force-set a task's status (simulating reaper intervention)."""
+    """Force-set a task's status (simulating reaper intervention).
+
+    A terminal status is forced the way terminalization delivers it —
+    the row moves to history — while a non-terminal status is a live
+    transition. Production holds the same split, so a fixture that wrote
+    a terminal status into the live table would be simulating a state
+    the database cannot hold.
+    """
+    if status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'):
+        await force_terminal(session, task_id, status=status)
+        await session.flush()
+        return
     await session.execute(
-        # Terminal exactly when dated, in both directions: a forced terminal
-        # status dates the row, and a forced revival clears it. Production
-        # holds the same invariant, so a fixture that broke it would be
-        # simulating a state the database cannot hold.
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                terminal_at = CASE
-                    WHEN CAST(:status AS VARCHAR)
-                         IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                    THEN NOW() ELSE NULL END
-            WHERE id = :id
+                terminal_at = NULL
+            WHERE id = CAST(:id AS uuid)
         """),
         {'status': status, 'id': task_id},
     )
@@ -429,17 +434,12 @@ async def test_reaper_then_complete_race_sequence(
 
     # T=1: Reaper marks FAILED with WORKER_CRASHED result
     reaper_result = '{"err": {"error_code": "WORKER_CRASHED", "message": "stale"}}'
-    await session.execute(
-        text("""
-            UPDATE horsies_tasks
-            SET status = 'FAILED',
-                failed_at = NOW(),
-                result = :result,
-                updated_at = NOW(),
-                    terminal_at = NOW()
-            WHERE id = :id AND status = 'RUNNING'
-        """),
-        {'id': task_id, 'result': reaper_result},
+    await force_terminal(
+        session,
+        task_id,
+        status='FAILED',
+        result_json=reaper_result,
+        error_code='WORKER_CRASHED',
     )
     await session.flush()
 

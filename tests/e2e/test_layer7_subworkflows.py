@@ -45,6 +45,7 @@ from tests.e2e.helpers.workflow import get_workflow_status, wait_for_workflow_co
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks.instance import app
+from tests.integration.history_seeding import force_terminal
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -258,14 +259,11 @@ async def _mark_workflow_task_completed(
         assert row is not None, f'workflow task {node_id} not found'
         task_id = row.task_id
         if isinstance(task_id, str):
-            await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED', result = :result,
-                        terminal_at = NOW(), updated_at = NOW()
-                    WHERE id = :task_id
-                """),
-                {'task_id': task_id, 'result': result_json},
+            await force_terminal(
+                session,
+                task_id,
+                status='COMPLETED',
+                result_json=result_json,
             )
         await session.execute(
             text("""

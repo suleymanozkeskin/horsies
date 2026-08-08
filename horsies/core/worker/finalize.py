@@ -29,6 +29,12 @@ from horsies.core.codec.typed import (
     decode_task_result,
     validate_task_result_envelope,
 )
+from horsies.core.history.identity.uuid7 import UUID
+from horsies.core.history.reads.detail import (
+    HistoryTaskDetail,
+    read_task_detail,
+    staged_detail_published,
+)
 from horsies.core.lifecycle.classify import (
     AbortedBeforeResult,
     ApplyTerminalization,
@@ -106,8 +112,23 @@ logger = get_logger('worker')
 GET_TASK_STATUS_RESULT_SQL = text("""
     SELECT status, task_name, queue_name, is_workflow_task, result
     FROM horsies_tasks
-    WHERE id = :id
+    WHERE id = CAST(:id AS uuid)
 """)
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedTaskRow:
+    """The persisted terminal facts phase-2 replay decodes.
+
+    Sourced from whichever side of the lifecycle holds the task: the live
+    row before its terminalization moves it, the history record after.
+    """
+
+    status: str
+    task_name: str | None
+    queue_name: str | None
+    is_workflow_task: bool
+    result: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1015,14 +1036,59 @@ class FinalizeMixin:
                 )
             )
 
+    async def _read_persisted_task_row(
+        self,
+        task_id: str,
+        session: AsyncSession,
+    ) -> _PersistedTaskRow | None:
+        """Resolve the persisted terminal facts from live, else from history.
+
+        Phase-2 replay runs after phase 1 has terminalized the task, and
+        terminalization moves the row out of the live table. A live miss is
+        therefore the expected shape on replay, not an absent task: the
+        record answers from history, where its result payload also lives.
+        """
+        res = await session.execute(GET_TASK_STATUS_RESULT_SQL, {'id': task_id})
+        live_row = res.fetchone()
+        if live_row is not None:
+            return _PersistedTaskRow(
+                status=str(live_row.status) if live_row.status is not None else '',
+                task_name=live_row.task_name,
+                queue_name=live_row.queue_name,
+                is_workflow_task=bool(live_row.is_workflow_task),
+                result=live_row.result,
+            )
+        try:
+            UUID(task_id)
+        except ValueError:
+            return None
+        connection = await session.connection()
+        if not await staged_detail_published(connection):
+            return None
+        detail = await read_task_detail(connection, task_id=task_id)
+        match detail:
+            case HistoryTaskDetail():
+                return _PersistedTaskRow(
+                    status=detail.status,
+                    task_name=detail.task_name,
+                    queue_name=detail.queue_name,
+                    is_workflow_task=detail.is_workflow_task,
+                    result=(
+                        detail.result_payload.decode('utf-8')
+                        if detail.result_payload is not None
+                        else None
+                    ),
+                )
+            case _:
+                return None
+
     async def _read_persisted_task_result(
         self,
         task_id: str,
         session: AsyncSession,
     ) -> Result[_PersistedTaskOutcome, _FinalizeError]:
         """Read and decode a persisted result through the supplied transaction."""
-        res = await session.execute(GET_TASK_STATUS_RESULT_SQL, {'id': task_id})
-        row = res.fetchone()
+        row = await self._read_persisted_task_row(task_id, session)
         if row is None:
             return Err(
                 self._make_finalize_error(
@@ -1032,7 +1098,7 @@ class FinalizeMixin:
                     retryable=False,
                 )
             )
-        status = str(row.status) if row.status is not None else ''
+        status = row.status
         raw_result = row.result
         if status not in ('COMPLETED', 'FAILED', 'EXPIRED') or raw_result is None:
             return Err(

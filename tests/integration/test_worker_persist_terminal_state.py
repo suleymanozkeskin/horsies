@@ -30,6 +30,7 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
 
@@ -225,18 +226,21 @@ async def _set_task_status(
     task_id: str,
     status: str,
 ) -> None:
-    """Force-set a task's status (simulating reaper intervention)."""
+    """Force-set a task's status (simulating reaper intervention).
+
+    A terminal status moves the row to history, as terminalization does;
+    a non-terminal status is a live transition.
+    """
+    if status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'):
+        await force_terminal(session, task_id, status=status)
+        await session.commit()
+        return
     await session.execute(
-        # Terminal exactly when dated, in both directions: a forced terminal
-        # status dates the row, a forced revival clears it.
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                terminal_at = CASE
-                    WHEN CAST(:status AS VARCHAR)
-                         IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                    THEN NOW() ELSE NULL END
-            WHERE id = :id
+                terminal_at = NULL
+            WHERE id = CAST(:id AS uuid)
         """),
         {'status': status, 'id': task_id},
     )

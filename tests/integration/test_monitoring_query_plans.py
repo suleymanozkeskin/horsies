@@ -35,7 +35,12 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function'
 
 
 async def _seed_tasks(session: AsyncSession) -> None:
-    """~500 terminal rows plus a deep PENDING backlog, committed and analyzed.
+    """~500 running rows plus a deep PENDING backlog, committed and analyzed.
+
+    The non-PENDING half is running rather than terminal because the live
+    table no longer holds terminal rows; what the planner needs from it is
+    a second status and a spread of task names and enqueue instants, which
+    running rows supply exactly as terminal ones did.
 
     The backlog is deliberately large (2,000 rows): with only a handful of
     PENDING rows the sort above the low-cardinality status index costs the
@@ -50,11 +55,11 @@ async def _seed_tasks(session: AsyncSession) -> None:
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, completed_at, enqueue_sha, terminal_at)
-        SELECT gen_random_uuid()::text,
+             retry_count, max_retries, started_at, enqueue_sha)
+        SELECT gen_random_uuid(),
                'plan_task_' || (g % 5), 'default', 100, '[]', '{}',
-               'COMPLETED', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), FALSE, 0, 0, NOW(), 'plan-test-sha', NOW()
+               'RUNNING', NOW(), NOW() - (g || ' seconds')::interval,
+               NOW(), NOW(), TRUE, 0, 0, NOW(), 'plan-test-sha'
         FROM generate_series(1, 500) AS g
     """))
     await session.execute(text("""
@@ -62,7 +67,7 @@ async def _seed_tasks(session: AsyncSession) -> None:
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at, claimed,
              retry_count, max_retries, enqueue_sha)
-        SELECT gen_random_uuid()::text,
+        SELECT gen_random_uuid(),
                'plan_task_pending', 'default', 100, '[]', '{}',
                'PENDING', NOW(), NOW() - (g || ' seconds')::interval,
                NOW(), NOW(), FALSE, 0, 0, 'plan-test-sha'

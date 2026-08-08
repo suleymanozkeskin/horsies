@@ -16,6 +16,7 @@ from horsies.core.workflows.engine import on_workflow_task_complete
 
 from .conftest import make_simple_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
+from tests.integration.history_seeding import force_terminal
 
 
 @pytest.mark.integration
@@ -221,17 +222,10 @@ class TestDAGPatterns:
 
         handle = await start_ok(spec, broker)
 
-        # Mark root task as completed in tasks table so claim SQL won't pick it
+        # Terminalize the root task so the claim SQL won't pick it up
         root_task_id = await self._get_task_id(session, handle.workflow_id, 0)
         assert root_task_id is not None
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW(), terminal_at = NOW()
-                WHERE id = :task_id
-            """),
-            {'task_id': root_task_id},
-        )
+        await force_terminal(session, root_task_id, status='COMPLETED')
         await session.commit()
 
         # Complete A -> B and C become ENQUEUED (tasks table has PENDING rows)

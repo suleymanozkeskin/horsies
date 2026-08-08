@@ -35,6 +35,7 @@ from tests.e2e.helpers.assertions import (
     unwrap_send,
 )
 from tests.e2e.helpers.db import poll_max_during
+from tests.integration.history_seeding import force_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import retry as retry_tasks
@@ -920,13 +921,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
 
     # Cancel directly in DB (no cancel API exists)
     async with broker.session_factory() as session:
-        await session.execute(
-            text(
-                'UPDATE horsies_tasks '
-                "SET status = 'CANCELLED', terminal_at = NOW() WHERE id = :tid"
-            ),
-            {'tid': task_id},
-        )
+        await force_terminal(session, task_id, status='CANCELLED')
         await session.commit()
 
     result = unwrap_get_result(app.get_result(task_id, timeout_ms=1000))
@@ -1175,13 +1170,19 @@ async def test_legacy_pydantic_result_envelope_rejected(
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
-                    (id, task_name, queue_name, status, result, priority, sent_at, completed_at,
-                     claimed, retry_count, max_retries, enqueue_sha, terminal_at)
+                    (id, task_name, queue_name, status, priority, sent_at,
+                     claimed, retry_count, max_retries, enqueue_sha)
                 VALUES
-                    (:tid, 'e2e_simple', 'default', 'COMPLETED', :result, 100, :sent_at, now(),
-                     FALSE, 0, 0, :enqueue_sha, now())
+                    (:tid, 'e2e_simple', 'default', 'RUNNING', 100, :sent_at,
+                     FALSE, 0, 0, :enqueue_sha)
             """),
-            {'tid': task_id, 'result': legacy_result, 'sent_at': sent_at, 'enqueue_sha': sha},
+            {'tid': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
+        )
+        await force_terminal(
+            session,
+            task_id,
+            status='COMPLETED',
+            result_json=legacy_result,
         )
         await session.commit()
 
