@@ -90,14 +90,20 @@ async def _insert_owned_running_task(
                  claimed, retry_count, max_retries, started_at, enqueue_sha,
                  claimed_by_worker_id, worker_hostname, worker_pid,
                  worker_process_name, task_options, finalizing_at,
-                 finalizing_by_worker_id)
+                 finalizing_by_worker_id,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'lifecycle_regression_task', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), NOW(),
                  FALSE, 0, :max_retries, :started_at, :enqueue_sha,
                  :worker_id, 'itest-host', 4321,
                  'itest-process', :task_options, :finalizing_at,
-                 :finalizing_by_worker_id)
+                 :finalizing_by_worker_id,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -174,12 +180,18 @@ async def _insert_retry_window_workflow_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, enqueued_at, created_at, updated_at, claimed, claimed_at,
                  claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
-                 enqueue_sha, is_workflow_task)
+                 enqueue_sha, is_workflow_task,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:task_id, 'lifecycle_regression_task', 'default', 100, '[]', '{}',
                  'CLAIMED', :sent_at, NOW(), NOW(), NOW(), TRUE, NOW(),
                  :worker_id, NOW() + INTERVAL '60 seconds', 1, 3,
-                 :enqueue_sha, TRUE)
+                 :enqueue_sha, TRUE,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:task_id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'task_id': task_id,

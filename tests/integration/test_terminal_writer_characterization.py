@@ -122,13 +122,19 @@ async def _seed_task(
                  claimed, retry_count, max_retries, claimed_at,
                  claimed_by_worker_id, enqueue_sha, is_workflow_task,
                  good_until, started_at, worker_hostname, worker_pid,
-                 worker_process_name)
+                 worker_process_name,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'characterize', 'default', 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), NOW(),
                  :claimed, 0, 0, :claimed_at,
                  :worker_id, :sha, :is_wf,
-                 :good_until, :started_at, 'host', 1, 'proc')
+                 :good_until, :started_at, 'host', 1, 'proc',
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,

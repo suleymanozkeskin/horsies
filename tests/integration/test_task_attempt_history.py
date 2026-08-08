@@ -26,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.archive.attempts import decode_attempt_snapshot
+from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
@@ -138,13 +140,19 @@ async def _insert_running_task(
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha,
                  claimed_by_worker_id, worker_hostname, worker_pid,
-                 worker_process_name, good_until, task_options)
+                 worker_process_name, good_until, task_options,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, :task_name, 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :enqueue_sha,
                  :worker_id, :worker_hostname, :worker_pid,
-                 :worker_process_name, :good_until, :task_options)
+                 :worker_process_name, :good_until, :task_options,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -207,7 +215,12 @@ async def _get_attempts(
     session: AsyncSession,
     task_id: str,
 ) -> list[dict[str, Any]]:
-    """Read all attempt rows for a task, ordered by attempt ASC."""
+    """All attempts for a task, wherever they live, attempt ASC.
+
+    Live attempt rows while the task is live; after terminalization the
+    move purges them and the history snapshot is their only home — the
+    snapshot preserves every field this suite asserts on.
+    """
     result = await session.execute(
         text("""
             SELECT task_id, attempt, outcome, will_retry,
@@ -215,7 +228,7 @@ async def _get_attempts(
                    error_code, error_message, failed_reason,
                    worker_id, worker_hostname, worker_pid, worker_process_name
             FROM horsies_task_attempts
-            WHERE task_id = :task_id
+            WHERE task_id = CAST(:task_id AS uuid)
             ORDER BY attempt ASC
         """),
         {'task_id': task_id},
@@ -236,7 +249,51 @@ async def _get_attempts(
         'worker_pid',
         'worker_process_name',
     ]
-    return [dict(zip(cols, row)) for row in rows]
+    if rows:
+        return [dict(zip(cols, row)) for row in rows]
+    snapshot = (
+        await session.execute(
+            text("""
+                SELECT attempt_archive_version, attempt_snapshot_codec,
+                       attempt_snapshot_content_type, attempt_snapshot,
+                       attempt_snapshot_digest
+                FROM horsies_task_history
+                WHERE task_id = CAST(:task_id AS uuid)
+            """),
+            {'task_id': task_id},
+        )
+    ).first()
+    if snapshot is None:
+        return []
+    decoded = decode_attempt_snapshot(
+        version=snapshot.attempt_archive_version,
+        codec=snapshot.attempt_snapshot_codec,
+        content_type=snapshot.attempt_snapshot_content_type,
+        payload=bytes(snapshot.attempt_snapshot),
+        digest=bytes(snapshot.attempt_snapshot_digest),
+    )
+    match decoded:
+        case DecodedArchiveValue(value=records):
+            return [
+                {
+                    'task_id': task_id,
+                    'attempt': record.attempt,
+                    'outcome': record.outcome,
+                    'will_retry': record.will_retry,
+                    'started_at': record.started_at,
+                    'finished_at': record.finished_at,
+                    'error_code': record.error_code,
+                    'error_message': record.error_message,
+                    'failed_reason': record.failed_reason,
+                    'worker_id': record.worker_id,
+                    'worker_hostname': record.worker_hostname,
+                    'worker_pid': record.worker_pid,
+                    'worker_process_name': record.worker_process_name,
+                }
+                for record in records
+            ]
+        case _:
+            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
 
 
 async def _get_task_error_code(
@@ -491,12 +548,18 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha,
                  claimed_by_worker_id, worker_hostname, worker_pid,
-                 worker_process_name)
+                 worker_process_name,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'stale_attempt_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, :stale_started_at, :enqueue_sha,
-                 'w-stale-1', 'stale-host', 1234, 'stale-proc')
+                 'w-stale-1', 'stale-host', 1234, 'stale-proc',
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -567,12 +630,18 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, task_options,
                  claimed_by_worker_id, worker_hostname, worker_pid,
-                 worker_process_name)
+                 worker_process_name,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'stale_retry_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  3, :stale_started_at, :enqueue_sha, :task_options,
-                 'w-stale-retry', 'stale-host', 9999, 'stale-proc')
+                 'w-stale-retry', 'stale-host', 9999, 'stale-proc',
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -823,11 +892,17 @@ async def test_expire_pending_task_transitions_to_expired(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, enqueue_sha, good_until)
+                 max_retries, enqueue_sha, good_until,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'expire_test', 'default', 100, '[]', '{}',
                  'PENDING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, :enqueue_sha, :good_until)
+                 0, :enqueue_sha, :good_until,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
