@@ -76,7 +76,7 @@ async def test_timeout_fails_task_and_worker_survives(
                 await session.execute(
                     text("""
                         SELECT error_code, result
-                        FROM horsies_tasks WHERE id = :id
+                        FROM itest_task_rows WHERE id = :id
                     """),
                     {'id': handle.task_id},
                 )
@@ -160,7 +160,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
                 await session.execute(
                     text("""
                         SELECT id, error_code
-                        FROM horsies_tasks
+                        FROM itest_task_rows
                         WHERE id = ANY(:ids)
                     """),
                     {'ids': [h.task_id for h in handles]},
@@ -226,7 +226,7 @@ async def test_pool_breaker_storm_does_not_kill_worker(
             rows = (
                 await session.execute(
                     text("""
-                        SELECT error_code FROM horsies_tasks
+                        SELECT error_code FROM itest_task_rows
                         WHERE id = ANY(:ids)
                     """),
                     {'ids': [h.task_id for h in handles]},

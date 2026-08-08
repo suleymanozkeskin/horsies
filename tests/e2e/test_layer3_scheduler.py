@@ -86,7 +86,7 @@ async def test_schedule_executes_after_due_time(
                     result = await session.execute(
                         text(
                             """
-                            SELECT created_at FROM horsies_tasks
+                            SELECT created_at FROM itest_task_rows
                             WHERE task_name = 'e2e_scheduled_simple'
                             ORDER BY created_at ASC
                             LIMIT 1
@@ -146,7 +146,7 @@ async def test_schedule_does_not_execute_early(
             result = await session.execute(
                 text(
                     """
-                    SELECT COUNT(*) FROM horsies_tasks
+                    SELECT COUNT(*) FROM itest_task_rows
                     WHERE task_name = 'e2e_scheduled_simple'
                 """
                 )
@@ -195,7 +195,7 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
                 result = await session.execute(
                     text(
                         """
-                        SELECT created_at FROM horsies_tasks
+                        SELECT created_at FROM itest_task_rows
                         WHERE task_name = 'e2e_scheduled_simple'
                         ORDER BY created_at ASC
                     """
@@ -374,7 +374,7 @@ async def test_schedule_with_args_passes_arguments(
                     result = await session.execute(
                         text(
                             """
-                            SELECT result FROM horsies_tasks
+                            SELECT result FROM itest_task_rows
                             WHERE task_name = 'e2e_scheduled_with_args'
                             AND status = 'COMPLETED'
                             LIMIT 1
@@ -504,7 +504,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
         result = await session.execute(
             text(
                 """
-                SELECT COUNT(*) FROM horsies_tasks
+                SELECT COUNT(*) FROM itest_task_rows
                 WHERE task_name = 'e2e_catch_up_task'
             """
             )
@@ -542,7 +542,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
                 result = await session.execute(
                     text(
                         """
-                        SELECT COUNT(*) FROM horsies_tasks
+                        SELECT COUNT(*) FROM itest_task_rows
                         WHERE task_name = 'e2e_catch_up_task'
                     """
                     )
@@ -685,7 +685,7 @@ async def test_cron_schedule_fires_on_due_minute(
             result = await session.execute(
                 text(
                     """
-                    SELECT COUNT(*) FROM horsies_tasks
+                    SELECT COUNT(*) FROM itest_task_rows
                     WHERE task_name = 'e2e_cron_task'
                 """
                 )

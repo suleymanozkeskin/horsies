@@ -96,10 +96,15 @@ async def read_task(session: AsyncSession, task_id: str) -> TaskRow | None:
 
 
 async def cleanup_tables(session: AsyncSession) -> None:
-    """Truncate task-related tables between tests."""
+    """Truncate task-related tables between tests.
+
+    The history table is half of task storage: every task that reaches a
+    terminal status lives there and nowhere else, so leaving it behind
+    carries one test's finished tasks into the next one's counts.
+    """
     await session.execute(
         text("""
-            TRUNCATE horsies_tasks, horsies_workflow_tasks, horsies_workflows, horsies_schedule_state, horsies_heartbeats CASCADE
+            TRUNCATE horsies_tasks, horsies_task_history, horsies_workflow_tasks, horsies_workflows, horsies_schedule_state, horsies_heartbeats CASCADE
         """),
     )
     await session.commit()

@@ -120,7 +120,8 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            claimed_by_worker_id AS last_claimed_worker_id,
            claim_expires_at, finalizing_at, finalizing_by_worker_id,
            retry_count, max_retries, worker_pid, worker_hostname,
-           worker_process_name, retention_class_key, terminalization_kind
+           worker_process_name, retention_class_key, terminalization_kind,
+           created_at
     FROM horsies_tasks
     UNION ALL
     SELECT task_id AS id, task_name, queue_name, priority, status,
@@ -143,7 +144,8 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            last_worker_pid AS worker_pid,
            last_worker_hostname AS worker_hostname,
            last_worker_process_name AS worker_process_name,
-           retention_class_key, terminalization_kind
+           retention_class_key, terminalization_kind,
+           created_at
     FROM horsies_task_history
     """
 )
