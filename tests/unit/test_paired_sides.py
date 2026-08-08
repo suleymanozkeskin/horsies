@@ -4,15 +4,20 @@ from __future__ import annotations
 
 import pytest
 
+from pathlib import Path
+
 from tests.task_history_prototypes.paired_sides import (
     BASELINE_SCHEMA_VERSION,
     CANDIDATE_SCHEMA_VERSION,
+    SIDE_IDENTITY_MARKER,
     PairedSide,
     SideIdentity,
     SideIdentityError,
     assert_side_identity,
     assert_sides_differ,
+    measurement_environment,
     side_conditions,
+    side_identity_from_output,
 )
 
 VENV = '/tmp/v047'
@@ -142,3 +147,48 @@ def test_conditions_record_what_each_side_imported() -> None:
     assert recorded['baseline']['module_path'] != (
         recorded['candidate']['module_path']
     )
+
+
+def test_environment_is_the_single_invocation_authority() -> None:
+    """One place decides how a side is launched.
+
+    An earlier version set the protective variable inside the checker, so the
+    checker could not observe a lane that launched without it — the detector
+    was blind to the one failure it existed for. The setting now has one
+    owner, and removing it is reachable through the shipped path so a
+    revert-proof does not have to edit the code it is testing.
+    """
+    protected = measurement_environment(base={}, protect_import_path=True)
+    unprotected = measurement_environment(base={}, protect_import_path=False)
+    assert protected['PYTHONSAFEPATH'] == '1'
+    assert 'PYTHONSAFEPATH' not in unprotected
+
+
+def test_identity_is_read_from_what_the_measurement_reported() -> None:
+    output = (
+        'measured something\n'
+        f'{SIDE_IDENTITY_MARKER} '
+        '{"module_path": "/tmp/v047/horsies/__init__.py", '
+        '"schema_version": 26}\n'
+    )
+    identity = side_identity_from_output(
+        output,
+        side=PairedSide.BASELINE,
+        interpreter=Path('/tmp/v047/bin/python'),
+        expected_root=Path('/tmp/v047'),
+        expected_schema_version=BASELINE_SCHEMA_VERSION,
+    )
+    assert identity.schema_version == BASELINE_SCHEMA_VERSION
+    assert_side_identity(identity)
+
+
+def test_output_without_an_identity_line_is_refused() -> None:
+    """Numbers that name no build are not attributable to one."""
+    with pytest.raises(SideIdentityError, match='no identity line'):
+        side_identity_from_output(
+            'measured something\n',
+            side=PairedSide.CANDIDATE,
+            interpreter=Path('/repo/.venv/bin/python'),
+            expected_root=Path('/repo'),
+            expected_schema_version=CANDIDATE_SCHEMA_VERSION,
+        )

@@ -9,16 +9,21 @@ report the baseline's version.
 That failure produces deltas near zero and passes every limit. It flatters
 rather than alarms, which is the direction nobody investigates.
 
-The defence is two things, because either alone is insufficient:
+**The measurement reports its own identity.** The marker line below is emitted
+by the measurement process itself, from inside the same interpreter and the
+same working directory that produced the numbers, and the harness asserts on
+what that line says.
 
-- every baseline invocation sets ``PYTHONSAFEPATH``, keeping the working
-  directory off ``sys.path``;
-- every side asserts, at measurement time, which module it actually imported
-  and which schema version that module declares.
+An earlier version of this module probed the sides in a separate subprocess
+and set the protective environment variable itself. That detector could not
+see the failure it existed for: with the flag baked into the probe, a probe
+always resolved correctly while the measurement that dropped the flag imported
+the checkout, and the probe vouched for it. Probe and measurement were two
+owners of one setting, and their divergence was the hazard. A measurand that
+reports itself cannot diverge from itself.
 
-The assertion is **symmetric**. A candidate that imports the venv's copy is
-exactly as silent as a baseline that imports the checkout, and a guard that
-only watches one direction is a guard against the failure you thought of.
+The environment is therefore built in one place and passed to whatever runs —
+never constructed inside a checker.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -35,19 +41,32 @@ from typing import Final
 # it is pinned: a baseline reporting anything else is not the baseline.
 BASELINE_SCHEMA_VERSION: Final = 26
 
-# The checkout's schema at the time this batch was declared. Bumping the
-# product's schema is expected to fail this pin, which is the point — a
-# candidate whose schema moved mid-batch is not comparable with cells measured
-# before it moved.
+# The checkout's schema when this batch was declared. A product schema bump is
+# expected to fail this pin, which is the point: a candidate whose schema moved
+# mid-batch is not comparable with cells measured before it moved.
 CANDIDATE_SCHEMA_VERSION: Final = 30
 
-_PROBE: Final = (
-    'import json, horsies;'
-    ' from horsies.core.schemas.migrations import SCHEMA_VERSION;'
-    ' print(json.dumps({'
-    '"module_path": horsies.__file__,'
-    ' "schema_version": SCHEMA_VERSION}))'
+SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
+
+# Prepended to every measurement body. It is a source string rather than an
+# import because the baseline must not import anything from this checkout —
+# importing from here is the very thing the protection prevents.
+SIDE_IDENTITY_SNIPPET: Final = f"""
+import json as _json, horsies as _horsies
+from horsies.core.schemas.migrations import (
+    SCHEMA_VERSION as _schema_version,
 )
+print(
+    '{SIDE_IDENTITY_MARKER} '
+    + _json.dumps(
+        {{
+            'module_path': _horsies.__file__,
+            'schema_version': _schema_version,
+        }}
+    ),
+    flush=True,
+)
+"""
 
 
 class PairedSide(StrEnum):
@@ -61,7 +80,7 @@ class SideIdentityError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class SideIdentity:
-    """What a side imported, as measured rather than as intended."""
+    """What a side imported, as reported by the run that measured it."""
 
     side: PairedSide
     interpreter: str
@@ -71,49 +90,72 @@ class SideIdentity:
     expected_schema_version: int
 
 
-def probe_side_identity(
-    interpreter: Path,
-    *,
-    side: PairedSide,
-    expected_root: Path,
-    expected_schema_version: int,
-    cwd: Path,
-) -> SideIdentity:
-    """Ask an interpreter what it imports, from the directory it will run in.
+def measurement_environment(
+    *, base: Mapping[str, str] | None = None, protect_import_path: bool = True
+) -> dict[str, str]:
+    """The one authority over how a side's process is launched.
 
-    `cwd` is the directory the measurement itself runs from, because the
-    hazard is a property of the working directory. Probing from somewhere
-    safer than the measurement would answer a question nobody asked.
+    Everything that runs a side takes its environment from here, so there is
+    no second place where the protection could be present or absent. The
+    parameter exists so a revert-proof can remove the protection through the
+    shipped path rather than by editing it.
     """
-    environment = dict(os.environ)
-    environment['PYTHONSAFEPATH'] = '1'
-    completed = subprocess.run(
-        [str(interpreter), '-c', _PROBE],
+    environment = dict(os.environ if base is None else base)
+    if protect_import_path:
+        environment['PYTHONSAFEPATH'] = '1'
+    else:
+        environment.pop('PYTHONSAFEPATH', None)
+    return environment
+
+
+def run_side(
+    interpreter: Path,
+    body: str,
+    *,
+    environment: Mapping[str, str],
+    cwd: Path,
+) -> subprocess.CompletedProcess[str]:
+    """Run one side's work, with its identity emitted by the run itself."""
+    return subprocess.run(
+        [str(interpreter), '-c', SIDE_IDENTITY_SNIPPET + body],
         capture_output=True,
         text=True,
         cwd=str(cwd),
-        env=environment,
+        env=dict(environment),
         check=False,
     )
-    if completed.returncode != 0:
-        raise SideIdentityError(
-            f'{side} interpreter {interpreter} could not import horsies: '
-            f'{completed.stderr.strip()[:400]}'
+
+
+def side_identity_from_output(
+    output: str,
+    *,
+    side: PairedSide,
+    interpreter: Path,
+    expected_root: Path,
+    expected_schema_version: int,
+) -> SideIdentity:
+    """Read the identity the measurement process reported about itself."""
+    for line in output.splitlines():
+        if not line.startswith(SIDE_IDENTITY_MARKER):
+            continue
+        try:
+            payload = json.loads(line[len(SIDE_IDENTITY_MARKER) :].strip())
+        except ValueError as error:
+            raise SideIdentityError(
+                f'{side} emitted an unparseable identity line: {line[:200]!r}'
+            ) from error
+        return SideIdentity(
+            side=side,
+            interpreter=str(interpreter),
+            module_path=str(payload['module_path']),
+            schema_version=int(payload['schema_version']),
+            expected_root=str(expected_root),
+            expected_schema_version=expected_schema_version,
         )
-    try:
-        payload = json.loads(completed.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError) as error:
-        raise SideIdentityError(
-            f'{side} identity probe returned unparseable output: '
-            f'{completed.stdout.strip()[:200]!r}'
-        ) from error
-    return SideIdentity(
-        side=side,
-        interpreter=str(interpreter),
-        module_path=str(payload['module_path']),
-        schema_version=int(payload['schema_version']),
-        expected_root=str(expected_root),
-        expected_schema_version=expected_schema_version,
+    raise SideIdentityError(
+        f'{side} produced no identity line. The measurement must report the '
+        'build it imported; output that omits it cannot be attributed to a '
+        'build and is not usable as a measurement'
     )
 
 
