@@ -89,6 +89,43 @@ async def complete_fused(
     ).one()
 
 
+async def complete_locked(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker: str = WORKER,
+    result: str = '{"ok":true}',
+) -> Any:
+    """The other member of the completion class."""
+    return (
+        await connection.execute(
+            text(
+                'SELECT * FROM horsies_complete_locked_task('
+                'CAST(:task_id AS uuid), :worker, :result)'
+            ),
+            {'task_id': task_id, 'worker': worker, 'result': result},
+        )
+    ).one()
+
+
+async def cancel_admin(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    permitted: tuple[str, ...] = ('PENDING', 'CLAIMED', 'RUNNING'),
+) -> Any:
+    """A member of a different class — CANCEL_ADMIN stands alone."""
+    return (
+        await connection.execute(
+            text(
+                'SELECT * FROM horsies_cancel_locked_task('
+                'CAST(:task_id AS uuid), :permitted)'
+            ),
+            {'task_id': task_id, 'permitted': list(permitted)},
+        )
+    ).one()
+
+
 class TestAppliedCompletion:
     @pytest.mark.asyncio
     async def test_fused_completion_moves_the_row(
@@ -249,29 +286,46 @@ class TestMissClassification:
             assert replay.observed_status == 'COMPLETED'
 
     @pytest.mark.asyncio
+    async def test_a_different_kind_of_the_same_class_is_already_applied(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """Class membership decides replay, not kind equality.
+
+        COMPLETE_LOCKED and COMPLETE_FUSED commit the same effect, so a
+        locked completion arriving after a fused one learns that nothing
+        new happened. The classifier is told the whole class; a
+        single-member array here would report the sibling as foreign.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_storage(connection)
+            task_id = await insert_live_task(connection)
+            first = await complete_fused(connection, task_id)
+            sibling = await complete_locked(connection, task_id)
+            assert sibling.outcome == 'ALREADY_APPLIED'
+            assert sibling.terminalization_kind == 'COMPLETE_FUSED'
+            assert sibling.terminal_at == first.terminal_at
+            assert sibling.observed_status == 'COMPLETED'
+            assert sibling.guard_kind is None
+
+    @pytest.mark.asyncio
     async def test_foreign_kind_is_a_source_state_conflict(
         self, terminalization_schema: HistorySchema
     ) -> None:
+        """A kind from another class means a different event won.
+
+        An administrative cancellation stands in its own class, so
+        finding a committed completion is not its own replay: the caller
+        is told it was overtaken, and by what.
+        """
         async with terminalization_schema.engine.begin() as connection:
             await prepare_storage(connection)
             task_id = await insert_live_task(connection)
             await complete_fused(connection, task_id)
-            foreign = (
-                await connection.execute(
-                    text(
-                        'SELECT * FROM horsies_complete_locked_task('
-                        'CAST(:task_id AS uuid), :worker, :result)'
-                    ),
-                    {
-                        'task_id': task_id,
-                        'worker': WORKER,
-                        'result': '{"ok":true}',
-                    },
-                )
-            ).one()
+            foreign = await cancel_admin(connection, task_id)
             assert foreign.outcome == 'SOURCE_STATE_CONFLICT'
             assert foreign.guard_kind == 'FOREIGN_TERMINALIZATION'
             assert foreign.terminalization_kind == 'COMPLETE_FUSED'
+            assert foreign.observed_status == 'COMPLETED'
 
     @pytest.mark.asyncio
     async def test_never_seen_task_is_absent(
