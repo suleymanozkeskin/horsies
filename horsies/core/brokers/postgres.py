@@ -994,6 +994,7 @@ class PostgresBroker:
                 )
                 from horsies.core.history.terminalization.live_cutover import (
                     LIVE_STATUS_DOMAIN_DDL,
+                    tightening_cutover_ddl,
                 )
 
                 domain_present = (await conn.execute(text(
@@ -1016,6 +1017,25 @@ class PostgresBroker:
                         text('DROP TABLE horsies_heartbeats')
                     )
                     await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
+
+                # Migration (v32): the fourth part of the end state.
+                # v27 adds the cutover columns TRANSITIONALLY — nullable
+                # and unchecked — because an upgraded install's old
+                # writers would violate the declared shape before the
+                # backfill. A uuid-born install has no old writers and
+                # never runs the offline tighten, so without this it
+                # would wear the transitional shape permanently while
+                # this arm claims it is born at the end state. Same
+                # renderer the tighten stage uses: a fourth shape cannot
+                # drift into existence.
+                columns_tightened = (await conn.execute(text(
+                    """SELECT attnotnull FROM pg_attribute
+                    WHERE attrelid = 'horsies_tasks'::regclass
+                      AND attname = 'retention_class_key'"""
+                ))).scalar_one()
+                if not columns_tightened:
+                    for statement in tightening_cutover_ddl():
+                        await conn.execute(text(statement))
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,

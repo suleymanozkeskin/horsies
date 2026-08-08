@@ -334,6 +334,105 @@ def _pg_spelling(declared: str) -> str:
     }[declared]
 
 
+async def _tasks_constraint_shape(
+    engine: AsyncEngine,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """(required columns, named constraints) on the live task table."""
+    async with engine.connect() as connection:
+        required = frozenset(
+            row.attname
+            for row in (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT attname FROM pg_attribute
+                        WHERE attrelid = 'horsies_tasks'::regclass
+                          AND attnum > 0
+                          AND NOT attisdropped
+                          AND attnotnull
+                        """
+                    )
+                )
+            ).all()
+        )
+        constraints = frozenset(
+            row.conname
+            for row in (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT conname FROM pg_constraint
+                        WHERE conrelid = 'horsies_tasks'::regclass
+                          AND contype = 'c'
+                        """
+                    )
+                )
+            ).all()
+        )
+    return required, constraints
+
+
+class TestFreshWorldParity:
+    """A uuid-born database is born at the cutover's end state.
+
+    The arm's contract is a parity claim, and it held for three of its
+    four parts by inspection alone — the status domain, the move family
+    and the heartbeat shape were each asserted, and the column
+    tightening, which no assertion named, was absent. This compares the
+    fresh catalog against the SAME structured authority the tighten
+    stage renders from, so a column added to that authority enters this
+    test by construction rather than by anyone remembering.
+
+    What it does not cover, stated rather than implied: an end-state
+    part that is neither a cutover column nor one of the two named
+    constraints below would need naming here too. The cutover pipeline
+    suite already builds a tightened database, so a cross-database
+    structural comparison could close that class from there; the
+    tighten cannot be run against a fresh database to the same end,
+    because it adds its constraints unconditionally and would error
+    rather than report a difference.
+    """
+
+    async def test_fresh_database_carries_the_tightened_task_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            required, constraints = await _tasks_constraint_shape(engine)
+        finally:
+            await engine.dispose()
+
+        # Presence half: the authority is non-empty in both halves, so
+        # neither subset assertion below can pass vacuously.
+        declared_required = {
+            column.name for column in CUTOVER_COLUMNS if column.not_null
+        }
+        declared_checks = {
+            f'horsies_tasks_{column.name}_cutover'
+            for column in CUTOVER_COLUMNS
+            if column.check is not None
+        }
+        assert declared_required
+        assert declared_checks
+
+        assert declared_required <= required, (
+            'cutover columns that the tighten stage requires are nullable '
+            f'on a fresh database: {sorted(declared_required - required)}'
+        )
+        assert declared_checks <= constraints, (
+            'cutover column checks the tighten stage adds are absent on a '
+            f'fresh database: {sorted(declared_checks - constraints)}'
+        )
+        assert 'horsies_tasks_rerun_lineage_pair' in constraints
+        assert 'horsies_tasks_live_status_only' in constraints
+
+
 class TestUpgradePaths:
     async def test_fresh_database_reaches_the_current_version(
         self,

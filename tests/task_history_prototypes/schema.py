@@ -31,7 +31,14 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # models the workflow retention index or the workflow terminal literal
 # set; the frozen fragments and rendered programs the prototypes install
 # are unchanged by v31, so the base advances with the bump.
-_EXPECTED_BASE_SCHEMA_VERSION = 31
+# v32 tightens the live cutover columns on a fresh install (NOT NULL and
+# the declared CHECKs, from the same renderer the tighten stage uses). It
+# DOES touch horsies_tasks, so this guard is re-litigated rather than
+# widened: the LIKE clone drops every cutover column by the same
+# structured authority that names them, taking their NOT NULL with them,
+# and LIKE without INCLUDING CONSTRAINTS never inherits a CHECK. The
+# qualified clone shape is therefore unchanged and the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 32
 
 
 @dataclass(frozen=True, slots=True)

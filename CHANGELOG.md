@@ -8,7 +8,7 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
-Task-history live/history split. Schema v31. **This release requires an
+Task-history live/history split. Schema v32. **This release requires an
 offline cutover for existing deployments**: stop all units, upgrade the
 package, run migrations, run the cutover program, start units. Fresh
 installs are born at the cutover's end state; the history subsystem is
@@ -16,6 +16,17 @@ dormant until invoked and adds no cost to deployments before cutover.
 
 ### Changed
 
+- **Enqueue-time facts are required columns on a fresh install.** The
+  retention class, command fingerprint, rerun-input flag and prepared
+  disposition are added nullable so that an upgraded deployment's
+  running fleet cannot violate them before the cutover backfills; the
+  cutover's tighten stage makes them required. A database created by
+  this release has no such fleet and never runs that stage, so it
+  applies the same tightening at creation: the columns are required and
+  their declared checks present from the first row. Upgraded
+  deployments are unchanged — the columns tighten at the cutover, where
+  they always did. The cutover now refuses to tighten while any live row
+  carries no retention class, naming the count.
 - **Terminal task records move to a partitioned history archive at
   terminalization.** The live table holds only live rows (`PENDING`,
   `CLAIMED`, `RUNNING`); completed, failed, cancelled, and expired

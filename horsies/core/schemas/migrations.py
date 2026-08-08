@@ -261,7 +261,22 @@ from sqlalchemy import text
 #      DELETEs' IN-lists render from the same literal set and begin
 #      admitting expired workflows, which is the point.
 
-SCHEMA_VERSION = 31
+# v32: the fresh-world arm reaches the cutover's end state. v27 adds
+#      the live cutover columns TRANSITIONALLY — nullable, unchecked —
+#      because an upgraded install's old writers would violate the
+#      declared shape before the cutover backfills it, and the offline
+#      tighten stage is what brings those installs to the final shape.
+#      A uuid-born install has no old writers and never runs that
+#      stage, so it wore the transitional shape permanently while the
+#      fresh-world arm claimed it was born at the end state: three of
+#      the end state's four parts (status domain, move-family program,
+#      partitioned heartbeats) were applied and the column tightening
+#      was not. The arm now applies the same rendered statements the
+#      tighten stage applies, guarded on the class column already being
+#      required. Upgraded installs are unchanged — the chain runs at
+#      broker init, before the cutover, where legacy NULLs still exist.
+
+SCHEMA_VERSION = 32
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

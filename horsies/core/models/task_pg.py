@@ -178,9 +178,16 @@ class TaskModel(Base):
     # Live cutover columns (schema v27, transitional): every column is
     # Optional because the catalog at v27 is nullable and check-free —
     # the model must never claim a strictness the catalog does not
-    # enforce. The cutover migration backfills, tightens the DDL to the
-    # declared fragment, and flips these typings in the same change.
-    # The converted enqueue writes real values into all of them.
+    # enforce. The converted enqueue writes real values into all of them.
+    #
+    # v32 tightens them on a uuid-born install, so the two worlds now
+    # disagree: fresh catalogs require these columns, and an upgraded
+    # catalog does not until its operator runs the offline cutover. The
+    # typings stay Optional while that is true — flipping them would
+    # claim, on every pre-cutover install, exactly the strictness the
+    # rule above forbids claiming. They flip when both worlds enforce
+    # it, which is a decision about which pre-cutover states remain
+    # supported, not a consequence of v32.
     command_fingerprint_version: Mapped[Optional[int]] = mapped_column(
         SmallInteger, nullable=True
     )

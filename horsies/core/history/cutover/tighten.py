@@ -80,7 +80,10 @@ async def _entry_violations(
                     ) AS unprepared_rows,
                     count(*) FILTER (
                         WHERE command_fingerprint IS NULL
-                    ) AS unfingerprinted_rows
+                    ) AS unfingerprinted_rows,
+                    count(*) FILTER (
+                        WHERE retention_class_key IS NULL
+                    ) AS unclassified_live_rows
                 FROM {LIVE_TASKS}
                 """
             )
@@ -121,6 +124,16 @@ async def _entry_violations(
         violations.append(
             f'{counts.unfingerprinted_rows} rows lack a command '
             'fingerprint (preparation incomplete)'
+        )
+    if int(counts.unclassified_live_rows):
+        # Distinct from the preflight's unclassified count, which is
+        # about TERMINAL rows: those relocate, and the relocation
+        # coalesces a missing class to forever. These are LIVE rows,
+        # which nothing relocates and nothing coalesces, and they are
+        # what the class column's SET NOT NULL fails on.
+        violations.append(
+            f'{counts.unclassified_live_rows} live rows carry no '
+            'retention class (backfill a class before tightening)'
         )
     if not attempts_uuid:
         violations.append(
