@@ -677,7 +677,11 @@ async def _seed_running(engine: AsyncEngine) -> str:
                     :id, 'upgrade.test', 'default', 'RUNNING', '[]', '{}',
                     repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW(),
                     'standard_30d', 1,
-                    sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                    -- A literal, not the id: this helper seeds both the
+                    -- uuid-born and the rewound varchar world, and one
+                    -- parameter used as both types is ambiguous to the
+                    -- planner.
+                    sha256(convert_to('upgrade.test', 'UTF8')),
                     FALSE, 'DECLINED_BY_POLICY'
                 )
             """),
