@@ -370,3 +370,126 @@ def bootstrap_delta(
         resamples=resamples,
         seed=seed,
     )
+
+
+class IntervalVerdict(StrEnum):
+    """What an interval says about the bound it was judged against."""
+
+    WITHIN = 'within'
+    EXCEEDED = 'exceeded'
+    UNDECIDED = 'undecided'
+
+
+def judge_containment(
+    interval: BootstrapInterval,
+    *,
+    bound: float,
+) -> IntervalVerdict:
+    """Decide a one-sided budget by where the WHOLE interval falls.
+
+    A point estimate below the bound is not a verdict: the interval it came
+    from may reach well past the bound, in which case the run did not measure
+    the answer. The interval decides only when every value it admits agrees.
+    Straddling the bound is not a near miss to be rounded — it is the run
+    saying it cannot tell, and it is recorded as such.
+
+    This gate carries no threshold and needs no derivation. Applied to the four
+    no-blocking intervals it reproduces every verdict reached by hand,
+    including the p99 at 100 observations per arm that was withheld as
+    unconstrained.
+    """
+    if bound <= 0.0:
+        raise LimitError(
+            f'a one-sided budget bound must be positive, got {bound}'
+        )
+    match (interval.high < bound, interval.low > bound):
+        case (True, False):
+            return IntervalVerdict.WITHIN
+        case (False, True):
+            return IntervalVerdict.EXCEEDED
+        case _:
+            return IntervalVerdict.UNDECIDED
+
+
+# The width gate ships as form without number. Deriving a threshold needs
+# measured noise below it and a demonstrated failure above it; the only
+# refusal on record — p99 over 100 observations per arm, 18.19x its bound —
+# was refused by CONTAINMENT, not by width, so it pins nothing about where a
+# width limit belongs. That leaves the span from 0.86x to 18.19x holding no
+# observation, and a number chosen inside it would be preference wearing a
+# derivation. The deriving instance is a row whose verdict is DECIDED while
+# its magnitude stays unquotable; until one is measured twice, this stays None
+# and the ratio is recorded rather than enforced.
+WIDTH_THRESHOLD_RATIO: Final[float | None] = None
+
+
+@dataclass(frozen=True, slots=True)
+class MagnitudeJudgement:
+    """Whether the delta may be quoted as a NUMBER, apart from its verdict.
+
+    A verdict and a magnitude are separate claims resting on the same
+    interval. ``high < bound`` can settle 'within budget' while the interval
+    still spans zero — the budget question is answered and the size of the
+    effect is not. Quoting the point estimate there reports a number whose
+    sign the run never established.
+    """
+
+    sign_resolved: bool
+    width: float
+    width_ratio: float
+    width_threshold: float | None
+    width_within_threshold: bool
+
+    @property
+    def quotable(self) -> bool:
+        return self.sign_resolved and self.width_within_threshold
+
+    def as_conditions(self) -> dict[str, Any]:
+        return {
+            'quotable': self.quotable,
+            'sign_resolved': self.sign_resolved,
+            'width': self.width,
+            'width_ratio': self.width_ratio,
+            'width_threshold': self.width_threshold,
+            'width_enforced': self.width_threshold is not None,
+            'width_within_threshold': self.width_within_threshold,
+        }
+
+
+def judge_magnitude(
+    interval: BootstrapInterval,
+    *,
+    bound: float,
+    width_threshold: float | None = WIDTH_THRESHOLD_RATIO,
+) -> MagnitudeJudgement:
+    """Judge the delta's quotability as a number.
+
+    Two conditions, one of them derived and one not. Sign resolution is
+    thresholdless and enforced now: an interval containing zero has not
+    established that the delta has a direction. The width ratio — interval
+    width over the bound the row is judged by, so that the same width is fatal
+    for a 100 ms bound and irrelevant for a 5 s one — is recorded always and
+    enforced only once ``width_threshold`` carries a derived number. Supplying
+    one here enforces it immediately; nothing further has to be wired.
+    """
+    if bound <= 0.0:
+        raise LimitError(
+            f'a one-sided budget bound must be positive, got {bound}'
+        )
+    width = interval.high - interval.low
+    match width_threshold:
+        case None:
+            within = True
+        case threshold if threshold <= 0.0:
+            raise LimitError(
+                f'a width threshold must be positive, got {threshold}'
+            )
+        case threshold:
+            within = width / bound <= threshold
+    return MagnitudeJudgement(
+        sign_resolved=interval.excludes_zero,
+        width=width,
+        width_ratio=width / bound,
+        width_threshold=width_threshold,
+        width_within_threshold=within,
+    )

@@ -6,13 +6,18 @@ import pytest
 
 from tests.task_history_prototypes.paired_cell import SampleUnit
 from tests.task_history_prototypes.paired_limit import (
+    WIDTH_THRESHOLD_RATIO,
+    BootstrapInterval,
     ConfirmedRow,
     ControlKind,
+    IntervalVerdict,
     LimitArm,
     LimitError,
     PassReading,
     RowOutcome,
     TwoArmedLimit,
+    judge_containment,
+    judge_magnitude,
     median,
     percentile,
 )
@@ -296,3 +301,129 @@ def test_the_conditions_carry_the_seed_and_the_resample_count() -> None:
     assert conditions['resamples'] == BOOTSTRAP_RESAMPLES
     assert conditions['seed'] == BOOTSTRAP_SEED
     assert conditions['confidence'] == 0.95
+
+
+def _interval(low: float, high: float, statistic: str = 'p99') -> BootstrapInterval:
+    return BootstrapInterval(
+        statistic=statistic,
+        point=(low + high) / 2.0,
+        low=low,
+        high=high,
+        confidence=0.95,
+        resamples=1_000,
+        seed=20260808,
+    )
+
+
+# The four intervals below are the measured no-blocking rows: a paired leaf
+# creation under an unrelated class parent while a detach waits behind a
+# reader, judged against a 100 ms budget, at 100 and at 1,000 observations per
+# arm.
+NO_BLOCKING_INTERVALS = (
+    ('p50 at 100 per arm', _interval(-6.8, 3.1, 'p50'), IntervalVerdict.WITHIN),
+    ('p50 at 1000 per arm', _interval(14.3, 17.8, 'p50'), IntervalVerdict.WITHIN),
+    ('p99 at 100 per arm', _interval(-126.8, 1692.5), IntervalVerdict.UNDECIDED),
+    ('p99 at 1000 per arm', _interval(-35.5, 50.5), IntervalVerdict.WITHIN),
+)
+
+
+def test_an_interval_wholly_beneath_the_bound_is_within() -> None:
+    verdict = judge_containment(_interval(-35.5, 50.5), bound=100.0)
+    assert verdict is IntervalVerdict.WITHIN
+
+
+def test_an_interval_wholly_above_the_bound_is_exceeded() -> None:
+    verdict = judge_containment(_interval(140.0, 260.0), bound=100.0)
+    assert verdict is IntervalVerdict.EXCEEDED
+
+
+def test_an_interval_straddling_the_bound_decides_nothing() -> None:
+    """The point estimate sits well inside the budget; the interval does not."""
+    straddling = _interval(-126.8, 1692.5)
+    assert straddling.point < 100.0 or straddling.high > 100.0
+    assert judge_containment(straddling, bound=100.0) is IntervalVerdict.UNDECIDED
+
+
+def test_containment_reproduces_the_measured_no_blocking_verdicts() -> None:
+    """Regression: the gate must return the verdicts these rows were held at,
+    including the p99 at 100 per arm that was withheld as unconstrained."""
+    judged = {
+        name: judge_containment(interval, bound=100.0)
+        for name, interval, _ in NO_BLOCKING_INTERVALS
+    }
+    assert judged == {
+        name: expected for name, _, expected in NO_BLOCKING_INTERVALS
+    }
+
+
+@pytest.mark.parametrize('bound', [0.0, -1.0])
+def test_containment_against_a_non_positive_bound_is_refused(
+    bound: float,
+) -> None:
+    with pytest.raises(LimitError, match='must be positive'):
+        judge_containment(_interval(1.0, 2.0), bound=bound)
+
+
+def test_a_decided_verdict_can_still_carry_an_unquotable_magnitude() -> None:
+    """p99 at 1,000 per arm: within the budget, sign of the delta unresolved."""
+    interval = _interval(-35.5, 50.5)
+    assert judge_containment(interval, bound=100.0) is IntervalVerdict.WITHIN
+    judgement = judge_magnitude(interval, bound=100.0)
+    assert not judgement.sign_resolved
+    assert not judgement.quotable
+
+
+def test_a_magnitude_whose_sign_is_established_is_quotable() -> None:
+    judgement = judge_magnitude(_interval(14.3, 17.8, 'p50'), bound=100.0)
+    assert judgement.sign_resolved
+    assert judgement.quotable
+
+
+def test_the_shipped_width_gate_records_its_ratio_without_enforcing_it() -> None:
+    """Form without number: the threshold is underived, so width cannot refuse."""
+    assert WIDTH_THRESHOLD_RATIO is None
+    judgement = judge_magnitude(_interval(-126.8, 1692.5), bound=100.0)
+    assert judgement.width_ratio == pytest.approx(18.193, abs=0.001)
+    assert judgement.width_threshold is None
+    assert judgement.width_within_threshold
+    assert judgement.as_conditions()['width_enforced'] is False
+
+
+def test_supplying_a_width_threshold_refuses_a_too_wide_magnitude() -> None:
+    """The width predicate fires the moment a number exists to fire on."""
+    interval = _interval(-35.5, 50.5)
+    assert judge_magnitude(interval, bound=100.0).width_within_threshold
+    judgement = judge_magnitude(interval, bound=100.0, width_threshold=0.5)
+    assert judgement.width_ratio == pytest.approx(0.86)
+    assert not judgement.width_within_threshold
+    assert not judgement.quotable
+    assert judgement.as_conditions()['width_enforced'] is True
+
+
+def test_a_width_threshold_a_narrow_interval_meets_leaves_it_quotable() -> None:
+    judgement = judge_magnitude(
+        _interval(14.3, 17.8, 'p50'), bound=100.0, width_threshold=0.5
+    )
+    assert judgement.width_ratio == pytest.approx(0.035)
+    assert judgement.quotable
+
+
+@pytest.mark.parametrize('threshold', [0.0, -0.25])
+def test_a_non_positive_width_threshold_is_refused(threshold: float) -> None:
+    with pytest.raises(LimitError, match='width threshold must be positive'):
+        judge_magnitude(_interval(1.0, 2.0), bound=100.0, width_threshold=threshold)
+
+
+def test_a_magnitude_against_a_non_positive_bound_is_refused() -> None:
+    with pytest.raises(LimitError, match='must be positive'):
+        judge_magnitude(_interval(1.0, 2.0), bound=0.0)
+
+
+def test_an_established_sign_does_not_by_itself_make_a_magnitude_quotable() -> None:
+    """Both conditions bind: the sign is settled here and the width still refuses."""
+    judgement = judge_magnitude(
+        _interval(10.0, 90.0), bound=100.0, width_threshold=0.5
+    )
+    assert judgement.sign_resolved
+    assert not judgement.width_within_threshold
+    assert not judgement.quotable
