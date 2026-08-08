@@ -550,3 +550,40 @@ async def force_terminal(
         text('DELETE FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
         {'id': task_id},
     )
+
+
+async def relax_cutover_columns(connection: AsyncConnection) -> None:
+    """Return the live cutover columns to their transitional shape.
+
+    A fresh database is now born with these columns required and
+    checked. The cutover battery tests the OTHER world — the one a real
+    pre-cutover deployment brings, whose rows predate every one of these
+    values — so it demotes explicitly. Rendered from the same structured
+    authority the tightening renders from, so a column added there is
+    relaxed here without anyone remembering to.
+    """
+    from horsies.core.history.terminalization.live_cutover import (
+        CUTOVER_COLUMNS,
+    )
+
+    for column in CUTOVER_COLUMNS:
+        if column.check is not None:
+            await connection.execute(
+                text(
+                    'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
+                    f'horsies_tasks_{column.name}_cutover'
+                )
+            )
+        if column.not_null:
+            await connection.execute(
+                text(
+                    f'ALTER TABLE horsies_tasks ALTER COLUMN {column.name} '
+                    'DROP NOT NULL'
+                )
+            )
+    await connection.execute(
+        text(
+            'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
+            'horsies_tasks_rerun_lineage_pair'
+        )
+    )

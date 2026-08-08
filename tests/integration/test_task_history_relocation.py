@@ -69,12 +69,16 @@ async def demote_to_upgraded_world(connection: AsyncConnection) -> None:
     (uuid identities, live-only domain, move program, partitioned
     heartbeats); the cutover battery tests the OTHER world — the one a
     real 0.4.7 deployment brings — so it demotes explicitly: in-place
-    program reinstated, domain lifted, identities back to varchar with
-    their keys re-added on the varchar shape, heartbeats flat. Not a
-    production path; the mirror of the emission suite's rewind."""
+    program reinstated, domain lifted, cutover columns back to their
+    transitional shape, identities back to varchar with their keys
+    re-added on the varchar shape, heartbeats flat. Not a production
+    path; the mirror of the emission suite's rewind."""
     from horsies.core.history.cutover.program import uninstall_programs
 
+    from tests.integration.history_seeding import relax_cutover_columns
+
     await uninstall_programs(connection)
+    await relax_cutover_columns(connection)
     await connection.execute(
         text(
             'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '

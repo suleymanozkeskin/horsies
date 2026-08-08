@@ -55,22 +55,34 @@ async def _seed_tasks(session: AsyncSession) -> None:
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, started_at, enqueue_sha)
+             retry_count, max_retries, started_at, enqueue_sha,
+             retention_class_key, command_fingerprint_version,
+             command_fingerprint, retain_rerun_input,
+             prepared_rerun_input_disposition)
         SELECT gen_random_uuid(),
                'plan_task_' || (g % 5), 'default', 100, '[]', '{}',
                'RUNNING', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), TRUE, 0, 0, NOW(), 'plan-test-sha'
+               NOW(), NOW(), TRUE, 0, 0, NOW(), 'plan-test-sha',
+               'standard_30d', 1,
+               sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
+               FALSE, 'DECLINED_BY_POLICY'
         FROM generate_series(1, 500) AS g
     """))
     await session.execute(text("""
         INSERT INTO horsies_tasks
             (id, task_name, queue_name, priority, args, kwargs,
              status, sent_at, enqueued_at, created_at, updated_at, claimed,
-             retry_count, max_retries, enqueue_sha)
+             retry_count, max_retries, enqueue_sha,
+             retention_class_key, command_fingerprint_version,
+             command_fingerprint, retain_rerun_input,
+             prepared_rerun_input_disposition)
         SELECT gen_random_uuid(),
                'plan_task_pending', 'default', 100, '[]', '{}',
                'PENDING', NOW(), NOW() - (g || ' seconds')::interval,
-               NOW(), NOW(), FALSE, 0, 0, 'plan-test-sha'
+               NOW(), NOW(), FALSE, 0, 0, 'plan-test-sha',
+               'standard_30d', 1,
+               sha256(convert_to(gen_random_uuid()::text, 'UTF8')),
+               FALSE, 'DECLINED_BY_POLICY'
         FROM generate_series(1, 2000) AS g
     """))
     await session.commit()

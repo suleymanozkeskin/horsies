@@ -52,11 +52,17 @@ async def _seed(
             INSERT INTO horsies_tasks
               (id, task_name, queue_name, priority, status, enqueued_at,
                is_workflow_task, enqueue_sha, created_at, updated_at,
-               retry_count, max_retries)
+               retry_count, max_retries,
+               retention_class_key, command_fingerprint_version,
+               command_fingerprint, retain_rerun_input,
+               prepared_rerun_input_disposition)
             VALUES
               (:id,'bench',:q,:p,'PENDING',
                now() - (:age * interval '1 second'),
-               false, :sha, now(), now(), 0, 0)
+               false, :sha, now(), now(), 0, 0,
+               'standard_30d', 1,
+               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+               false, 'DECLINED_BY_POLICY')
             """
         ),
         {'id': task_id, 'q': queue, 'p': priority, 'age': age_secs, 'sha': '0' * 64},
@@ -73,9 +79,15 @@ async def _seed_n(
             INSERT INTO horsies_tasks
               (id, task_name, queue_name, priority, status, enqueued_at,
                is_workflow_task, enqueue_sha, created_at, updated_at,
-               retry_count, max_retries)
+               retry_count, max_retries,
+               retention_class_key, command_fingerprint_version,
+               command_fingerprint, retain_rerun_input,
+               prepared_rerun_input_disposition)
             SELECT gen_random_uuid(),'bench',:q,:p,'PENDING',now(),
-                   false,:sha,now(),now(),0,0
+                   false,:sha,now(),now(),0,0,
+                   'standard_30d',1,
+                   sha256(convert_to(gen_random_uuid()::text,'UTF8')),
+                   false,'DECLINED_BY_POLICY'
             FROM generate_series(1,:n)
             """
         ),

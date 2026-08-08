@@ -57,11 +57,17 @@ async def _seed(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, enqueue_sha, claimed_by_worker_id,
-                 claim_expires_at)
+                 claim_expires_at,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'counts_seed', :queue, 100, '[]', '{{}}', :status,
                  :sent_at, NOW(), NOW(), FALSE, 0, 0, :sha, :worker,
-                 {lease_sql})
+                 {lease_sql},
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': str(uuid.uuid4()),

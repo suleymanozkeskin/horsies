@@ -668,11 +668,17 @@ async def _seed_running(engine: AsyncEngine) -> str:
                 INSERT INTO horsies_tasks (
                     id, task_name, queue_name, status, args, kwargs,
                     enqueue_sha, is_workflow_task, claimed,
-                    claimed_by_worker_id, claimed_at, started_at
+                    claimed_by_worker_id, claimed_at, started_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input,
+                    prepared_rerun_input_disposition
                 )
                 VALUES (
                     :id, 'upgrade.test', 'default', 'RUNNING', '[]', '{}',
-                    repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW()
+                    repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW(),
+                    'standard_30d', 1,
+                    sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                    FALSE, 'DECLINED_BY_POLICY'
                 )
             """),
             {'id': task_id},

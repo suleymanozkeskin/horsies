@@ -32,10 +32,16 @@ INSERT_TEST_TASK_SQL = text("""
     INSERT INTO horsies_tasks (
         id, task_name, queue_name, priority, args, kwargs,
         status, sent_at, created_at, updated_at, claimed,
-        retry_count, max_retries, enqueue_sha
+        retry_count, max_retries, enqueue_sha,
+        retention_class_key, command_fingerprint_version,
+        command_fingerprint, retain_rerun_input,
+        prepared_rerun_input_disposition
     ) VALUES (
         :id, :task_name, :queue_name, 100, '[]', '{}',
-        'PENDING', :sent_at, NOW(), NOW(), FALSE, 0, 0, :enqueue_sha
+        'PENDING', :sent_at, NOW(), NOW(), FALSE, 0, 0, :enqueue_sha,
+        'standard_30d', 1,
+        sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+        FALSE, 'DECLINED_BY_POLICY'
     )
 """)
 
