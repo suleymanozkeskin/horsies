@@ -10,7 +10,6 @@ Full pipeline (phase-1 → phase-2) is tested in test_worker_finalize_two_phase.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -829,88 +828,15 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
     assert len(await read_attempt_history(session, task_id)) == 1
 
 
-@pytest.mark.asyncio(loop_scope='function')
-async def test_phase1_replay_holds_row_lock_through_persisted_result_read(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """A concurrent in-place revival cannot race the replay result read."""
-    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
-    task_id = await _insert_running_task(
-        session,
-        is_workflow_task=True,
-        claimed_at=generation,
-    )
-    worker = _make_worker(engine)
-    result_json = _serialize_ok('persisted-before-revival')
-    first = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='persist_terminal_test',
-        queue_name='default',
-        is_workflow_task=True,
-        claimed_at=generation,
-    )
-    assert is_ok(first) and first.ok_value is not None
-
-    read_complete = asyncio.Event()
-    release_replay = asyncio.Event()
-    original_reader = worker._read_persisted_task_result
-
-    async def hold_after_read(
-        held_task_id: str,
-        locked_session: AsyncSession,
-    ):
-        loaded = await original_reader(held_task_id, locked_session)
-        read_complete.set()
-        await release_replay.wait()
-        return loaded
-
-    worker._read_persisted_task_result = hold_after_read  # type: ignore[method-assign]
-    replay_task = asyncio.create_task(
-        worker._persist_task_terminal_state(
-            task_id=task_id,
-            now=NOW,
-            ok=True,
-            result_json_str=result_json,
-            failed_reason=None,
-            task_name='persist_terminal_test',
-            queue_name='default',
-            is_workflow_task=True,
-            claimed_at=generation,
-        )
-    )
-    await asyncio.wait_for(read_complete.wait(), timeout=2)
-
-    sf = async_sessionmaker(engine, expire_on_commit=False)
-
-    async def revive() -> None:
-        async with sf() as revival_session:
-            await revival_session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'PENDING', terminal_at = NULL, result = NULL
-                    WHERE id = :id
-                """),
-                {'id': task_id},
-            )
-            await revival_session.commit()
-
-    revival_task = asyncio.create_task(revive())
-    try:
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(revival_task), timeout=0.1)
-    finally:
-        release_replay.set()
-
-    replay = await replay_task
-    await asyncio.wait_for(revival_task, timeout=2)
-    assert is_ok(replay) and replay.ok_value is not None
-    assert replay.ok_value.result.unwrap() == 'persisted-before-revival'
+# RETIRED: test_phase1_replay_holds_row_lock_through_persisted_result_read
+# asserted that a concurrent revival UPDATE BLOCKS on the row lock a
+# phase-1 replay holds. After the move there is no live row to revive:
+# the UPDATE matches zero rows and returns at once, so the race it
+# guarded against cannot occur. The invariant the impossibility rests on
+# — a terminal record is immutable, nothing writes to a history row — is
+# pinned in tests/unit/test_terminal_writer_inventory.py
+# (test_no_runtime_statement_updates_a_history_record), with a presence
+# half proving the scanner detects before its silence means anything.
 
 
 @pytest.mark.asyncio(loop_scope='function')

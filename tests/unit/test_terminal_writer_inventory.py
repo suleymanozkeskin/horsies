@@ -386,6 +386,33 @@ def _scan_runtime_revival_windows() -> list[tuple[str, str, str]]:
     return windows
 
 
+
+_HISTORY_UPDATE_RE = re.compile(
+    r'UPDATE\s+(?:horsies_task_history|\{TASK_HISTORY_PARENT\})',
+    re.IGNORECASE,
+)
+"""An UPDATE against the history relation, named or interpolated.
+
+The DDL builds its statements by interpolating TASK_HISTORY_PARENT, so a
+scan for the literal name alone would read as clean while the generated
+SQL said otherwise."""
+
+
+def _scan_history_updates(text: str) -> list[str]:
+    """Every UPDATE-against-history window in one blob of source."""
+    return [m.group(0) for m in _HISTORY_UPDATE_RE.finditer(text)]
+
+
+def _scan_runtime_history_updates() -> list[tuple[str, str]]:
+    """(module, matched window) per UPDATE against the history relation."""
+    found: list[tuple[str, str]] = []
+    for path in sorted(_RUNTIME_ROOT.rglob('*.py')):
+        rel = str(path.relative_to(_RUNTIME_ROOT.parent))
+        for window in _scan_history_updates(path.read_text(encoding='utf-8')):
+            found.append((rel, window))
+    return found
+
+
 class TestTerminalWriterInventory:
     """The reviewed terminal-writer set and the scanner that enforces it."""
 
@@ -553,4 +580,41 @@ class TestTerminalWriterInventory:
         assert not windows, (
             'Statements that move a terminal status back to a live one: '
             f'{sorted((module, context) for module, context, _ in windows)}'
+        )
+
+    def test_the_scanner_finds_a_history_update_when_one_exists(self) -> None:
+        """Presence half: the detector detects, before its absence means anything.
+
+        A scan that cannot find what it is looking for reports every
+        codebase as clean. Both spellings are checked because the DDL
+        interpolates the relation name rather than writing it.
+        """
+        assert _scan_history_updates(
+            "UPDATE horsies_task_history SET result_payload = NULL"
+        )
+        assert _scan_history_updates(
+            'f"UPDATE {TASK_HISTORY_PARENT} SET status = \'PENDING\'"'
+        )
+        assert not _scan_history_updates(
+            "UPDATE horsies_tasks SET status = 'PENDING'"
+        )
+
+    def test_no_runtime_statement_updates_a_history_record(self) -> None:
+        """A terminal record is immutable IN THE RELATION THAT HOLDS IT.
+
+        The revival pin above covers the live table: nothing walks a
+        terminal status back to a live one there. This covers the other
+        half, which the split created — once a record moves to history,
+        no runtime statement writes to it at all. Rerun mints a new task
+        with recorded lineage; retention drops whole partitions. Neither
+        is an UPDATE.
+
+        This is why the phase-1 replay could not race a revival and why
+        the lock-contention test that asserted it was retired: the race
+        needs a row that can be changed, and there is none.
+        """
+        updates = _scan_runtime_history_updates()
+        assert not updates, (
+            'Runtime statements that UPDATE a history record: '
+            f'{sorted(updates)}'
         )
