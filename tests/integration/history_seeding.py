@@ -33,6 +33,7 @@ from horsies.core.history.archive.attempts import (
 )
 from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.history.commands import EnsureLeafCoverage
+from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.ddl.classes import (
     ClassAlreadyRegistered,
     ClassRegistered,
@@ -453,6 +454,39 @@ async def force_terminal(
             'snapshot_payload': snapshot.payload,
             'snapshot_digest': snapshot.digest,
         },
+    )
+    # A workflow-backing task's move also records the pending progression
+    # in the outbox, which is where phase-2 recovery finds it. Simulating
+    # the move without the outbox row would simulate a terminalization
+    # that cannot be recovered from, which is not a state the wire
+    # produces. The node whose progression is owed is the one still
+    # holding this task and not yet terminal.
+    await session.execute(
+        text(f"""
+            INSERT INTO {WORKFLOW_PHASE2_PENDING} (
+                task_id, workflow_id, workflow_node_row_id,
+                terminal_status, terminal_at, terminalization_kind,
+                recovery_source, history_class, history_anchor,
+                history_schema_version, result_digest,
+                phase2_generation, created_at, attempt_count
+            )
+            SELECT h.task_id, wt.workflow_id, wt.id,
+                   h.status, h.terminal_at, h.terminalization_kind,
+                   'HISTORY', h.retention_class_key, h.retention_anchor_at,
+                   h.history_schema_version,
+                   COALESCE(
+                       h.result_digest,
+                       sha256(convert_to(CAST(h.task_id AS text), 'UTF8'))
+                   ),
+                   gen_random_uuid(), h.terminal_at, 0
+            FROM horsies_task_history h
+            JOIN horsies_workflow_tasks wt ON wt.task_id = h.task_id
+            WHERE h.task_id = CAST(:id AS uuid)
+              AND wt.status NOT IN
+                  ('COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED')
+            ON CONFLICT (task_id) DO NOTHING
+        """),
+        {'id': task_id},
     )
     await session.execute(
         text(

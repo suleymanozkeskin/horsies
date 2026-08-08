@@ -35,8 +35,6 @@ class TestWorkflowRecoveryDelegation:
                 return _rows_result([])
             if stmt is recovery.GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_CRASHED_WORKER_TASKS_SQL:
-                return _rows_result([])
             if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
                 return _rows_result([SimpleNamespace(id='wf-1')])
             return _rows_result([])
@@ -92,8 +90,6 @@ class TestWorkflowRecoveryDelegation:
                         status='FAILED',
                     ),
                 ])
-            if stmt is recovery.GET_CRASHED_WORKER_TASKS_SQL:
-                return _rows_result([])
             if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
                 return _rows_result([])
             return _rows_result([])
@@ -145,7 +141,7 @@ class TestRecoveryScanRowCap:
         recovered = await recovery.recover_stuck_workflows(session, MagicMock())
 
         assert recovered == 0
-        assert len(captured) == 6
+        assert len(captured) == 5
         assert all(value == recovery.GLOBAL_SCAN_ROW_CAP for value in captured)
 
     @pytest.mark.asyncio
@@ -158,5 +154,5 @@ class TestRecoveryScanRowCap:
         )
 
         assert recovered == 0
-        assert len(captured) == 6
+        assert len(captured) == 5
         assert all(value is None for value in captured)

@@ -29,6 +29,13 @@ dormant until invoked and adds no cost to deployments before cutover.
   deleting rows. The default retention class keeps terminal records
   30 days; passing `retention_class_key=None` at enqueue keeps a
   record forever.
+- **Crashed-worker workflow recovery flows through the terminalization
+  outbox.** A worker that dies between recording a task's terminal state
+  and advancing its workflow node used to be found by scanning the live
+  table for terminal tasks; terminalization now records the owed
+  progression as it moves the task, and the reaper consumes those
+  records. Same outcome, different mechanism, and the same grace window
+  and per-pass bound as before.
 - **Manual retry of a terminal task is removed.** A terminal record is
   immutable; re-execution is a new request through the rerun API, with
   a new task id and recorded lineage. The dashboard's retry action is

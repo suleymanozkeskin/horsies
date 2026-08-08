@@ -12,28 +12,17 @@ This module handles recovery of stuck workflows:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession as _RuntimeAsyncSession
 
-from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.json_io import loads_json
-from horsies.core.codec.typed import (
-    decode_task_error,
-    decode_task_result,
-    validate_task_result_envelope,
-)
 from horsies.core.logging import get_logger
-from horsies.core.types.result import is_err
 from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
-from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
-    from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
-    from horsies.core.models.tasks import TaskResult, TaskError
 
 logger = get_logger('workflow.recovery')
 
@@ -85,114 +74,6 @@ async def _run_recovery_candidate(
         return False
 
 
-def _decode_recovered_task_result(
-    raw_task_result: str,
-    *,
-    app: 'Horsies | None',
-    task_name: str | None,
-    task_id: str,
-    task_status: str,
-) -> 'TaskResult[Any, TaskError]':
-    """Decode a stored TaskResult during workflow recovery.
-
-    Strict-serde phase 6: typed decode via ``decode_task_result`` using
-    the source task's ``task_ok_type``. An err-only envelope is decoded
-    via ``decode_task_error`` *without* requiring ``task_ok_type`` —
-    ``TaskError`` is a fixed-schema internal type, so the real failure
-    survives even if the task isn't registered in the recovery process.
-    Only an ok-slot envelope without a registered ``task_ok_type`` (or
-    any decode failure) falls back to the synthetic ``WORKER_CRASHED``
-    error so the recovery flow keeps progressing.
-    """
-    from horsies.core.models.tasks import (
-        TaskResult,
-        TaskError,
-        OperationalErrorCode,
-    )
-
-    synthetic: 'TaskResult[Any, TaskError]' = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_CRASHED,
-            message='Stored task result could not be decoded during recovery',
-            data={
-                'task_id': task_id,
-                'task_status': task_status,
-                'recovery': 'case_1_7',
-            },
-        ),
-    )
-
-    loaded_r = loads_json(raw_task_result)
-    if is_err(loaded_r):
-        logger.warning(
-            f'Recovery: task {task_id} result JSON corrupt: '
-            f'{loaded_r.err_value}'
-        )
-        return synthetic
-
-    # Err-fast-path: TaskError is fixed-schema; an err-only payload is
-    # decodable without the source task's ok_type. Skips the
-    # registration check that would otherwise discard the real err.
-    try:
-        envelope = validate_task_result_envelope(loaded_r.ok_value)
-    except StrictJsonError as exc:
-        logger.warning(
-            f'Recovery: task {task_id} envelope invalid: {exc}'
-        )
-        return synthetic
-    err_slot = envelope.get('err')
-    if err_slot is not None:
-        try:
-            return TaskResult(err=decode_task_error(err_slot))
-        except (StrictJsonError, ValidationError) as exc:
-            logger.warning(
-                f'Recovery: task {task_id} decode_task_error failed: {exc}'
-            )
-            return synthetic
-
-    source_task = (
-        app.tasks.get(task_name)
-        if (app is not None and isinstance(task_name, str))
-        else None
-    )
-    source_ok_type = (
-        getattr(source_task, 'task_ok_type', None)
-        if source_task is not None
-        else None
-    )
-    if source_ok_type is None:
-        logger.warning(
-            f'Recovery: task {task_id} ({task_name!r}) not registered or '
-            f'missing task_ok_type; using synthetic error'
-        )
-        return synthetic
-    try:
-        return decode_task_result(loaded_r.ok_value, source_ok_type)
-    except (StrictJsonError, ValidationError) as exc:
-        logger.warning(
-            f'Recovery: task {task_id} decode_task_result failed: {exc}'
-        )
-        return synthetic
-
-
-# Each candidate query carries a uniform scope filter:
-#   AND (CAST(:scope_ids AS uuid[]) IS NULL OR <wf_col> = ANY(CAST(:scope_ids AS uuid[])))
-# When ``:scope_ids`` is NULL (global reaper), the OR short-circuits and the
-# query behaves exactly as before. When a list of workflow ids is bound
-# (resume-time race closure), candidates are restricted to that tree. The
-# explicit ``::uuid[]`` cast avoids "could not determine data type" on the
-# NULL bind (workflow ids are uuid columns).
-#
-# Each query also carries ``LIMIT CAST(:max_rows AS bigint)``: the global
-# reaper pass binds GLOBAL_SCAN_ROW_CAP so one pass cannot hold its session
-# and transaction across an unbounded backlog (every recovered row does
-# engine work — enqueues, completion callbacks). ``LIMIT NULL`` is a no-op,
-# which is what scoped resume passes bind: a resumed tree must be recovered
-# completely, not left partially processed until the next reaper cycle.
-# Processed candidates leave the result set by changing status, so
-# successive capped passes converge without an ORDER BY.
-
-# Rows a single global recovery pass will process per candidate query.
 GLOBAL_SCAN_ROW_CAP = 200
 
 GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
@@ -248,31 +129,6 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     LIMIT CAST(:max_rows AS bigint)
 """)
 
-GET_CRASHED_WORKER_TASKS_SQL = text("""
-    SELECT wt.workflow_id, wt.task_index, wt.task_id, wt.task_name,
-           UPPER(t.status) as task_status, t.result as task_result
-    FROM horsies_workflow_tasks wt
-    JOIN horsies_tasks t ON t.id = wt.task_id
-    JOIN horsies_workflows w ON w.id = wt.workflow_id
-    WHERE NOT (wt.status = ANY(:wf_task_terminal_states))
-      AND wt.task_id IS NOT NULL
-      AND wt.is_subworkflow = FALSE
-      AND w.status = 'RUNNING'
-      AND UPPER(t.status) IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-      AND (CAST(:scope_ids AS uuid[]) IS NULL OR wt.workflow_id = ANY(CAST(:scope_ids AS uuid[])))
-      -- Grace window: skip tasks that went terminal recently — their parent
-      -- finalizer's Phase 2 (workflow progression) is likely still in flight.
-      -- COALESCE picks the precise terminal stamp (completed_at/failed_at) and
-      -- falls back to updated_at (CANCELLED has no dedicated column). A
-      -- non-positive grace disables the window (legacy immediate recovery).
-      AND (
-          CAST(:finalizing_grace_ms AS bigint) <= 0
-          OR COALESCE(t.completed_at, t.failed_at, t.updated_at)
-             < NOW() - (CAST(:finalizing_grace_ms AS double precision) / 1000.0) * INTERVAL '1 second'
-      )
-    LIMIT CAST(:max_rows AS bigint)
-""")
-
 GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
     SELECT w.id, w.error, w.success_policy,
            COUNT(*) FILTER (WHERE wt.status = 'FAILED') as failed_count
@@ -306,8 +162,6 @@ async def recover_stuck_workflows(
     session: 'AsyncSession',
     broker: 'PostgresBroker | None' = None,
     scope_workflow_ids: list[str] | None = None,
-    *,
-    finalizing_grace_ms: int = 0,
 ) -> int:
     """
     Find and recover workflows in inconsistent states.
@@ -326,14 +180,6 @@ async def recover_stuck_workflows(
             scans all workflows globally. Resume passes the resumed
             workflow's tree so the pause-resume race is closed without a
             full-DB sweep.
-        finalizing_grace_ms: Grace window (ms) for Case 1.7 (task terminal but
-            its workflow progression not yet applied). A task that went terminal
-            within this window is left alone, because its parent finalizer's
-            Phase 2 is likely still in flight — recovering it would race the
-            healthy finalizer and add ~one reaper interval of latency. ``0``
-            (default) disables the window (immediate recovery); the periodic
-            reaper passes ``RecoveryConfig.crashed_worker_recovery_grace_ms``.
-
     Returns:
         Count of recovered workflow tasks.
     """
@@ -527,102 +373,6 @@ async def recover_stuck_workflows(
             task_index=parent_task_idx,
             child_id=child_id,
             action=_recover_completed_child,
-        ):
-            recovered += 1
-
-    # Case 1.7: workflow_tasks stuck non-terminal but underlying task is already terminal.
-    # This happens when a worker crashes mid-execution:
-    # - Reaper marks tasks.status = FAILED (WORKER_CRASHED)
-    # - on_workflow_task_complete() was never called (worker died)
-    # - workflow_tasks row stays RUNNING/ENQUEUED indefinitely
-    crashed_worker_tasks = await session.execute(
-        GET_CRASHED_WORKER_TASKS_SQL,
-        {
-            'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
-            'scope_ids': scope_ids,
-            'max_rows': max_rows,
-            'finalizing_grace_ms': finalizing_grace_ms,
-        },
-    )
-
-    for row in crashed_worker_tasks.fetchall():
-        workflow_id = row.workflow_id
-        task_index = row.task_index
-        task_id = row.task_id
-        task_name = row.task_name
-        task_status = row.task_status  # uppercase: COMPLETED, FAILED, CANCELLED, or EXPIRED
-        raw_task_result = row.task_result
-
-        async def _recover_crashed_worker_task() -> bool:
-            from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
-
-            result: TaskResult[Any, TaskError]
-            # Strict-serde phase 6: typed decode against the source task's
-            # ``task_ok_type``. Recovery has no direct app reference; resolve
-            # via the broker that owns this recovery cycle.
-            recovery_app = broker.app if broker is not None else None
-            if raw_task_result is not None:
-                result = _decode_recovered_task_result(
-                    raw_task_result,
-                    app=recovery_app,
-                    task_name=task_name,
-                    task_id=task_id,
-                    task_status=task_status,
-                )
-            else:
-                # No result stored (e.g. crash before result, DB issue, or cancellation)
-                error_code: OutcomeCode | RetrievalCode | OperationalErrorCode
-                match task_status:
-                    case 'CANCELLED':
-                        error_code = OutcomeCode.TASK_CANCELLED
-                        message = 'Task was cancelled before producing a result'
-                    case 'EXPIRED':
-                        error_code = OutcomeCode.TASK_EXPIRED
-                        message = 'Task expired before execution started (good_until passed)'
-                    case 'COMPLETED':
-                        error_code = RetrievalCode.RESULT_NOT_AVAILABLE
-                        message = 'Task completed but result is missing'
-                    case _:
-                        error_code = OperationalErrorCode.WORKER_CRASHED
-                        message = (
-                            'Worker crashed during task execution '
-                            f'(task_status={task_status}, no result stored)'
-                        )
-
-                result = TaskResult(
-                    err=TaskError(
-                        error_code=error_code,
-                        message=message,
-                        data={
-                            'task_id': task_id,
-                            'task_status': task_status,
-                            'recovery': 'case_1_7',
-                        },
-                    ),
-                )
-
-            # Reuse the existing completion handler to update workflow_tasks,
-            # apply on_error policy, process dependents, and check workflow completion.
-            from horsies.core.workflows.engine import on_workflow_task_complete
-
-            await on_workflow_task_complete(
-                session, task_id, result, broker, task_name=task_name,
-            )
-            logger.info(
-                f'Recovered stuck workflow task (task terminal, workflow '
-                f'progression was not applied): workflow={workflow_id}, '
-                f'task_index={task_index}, task_id={task_id}, '
-                f'task_status={task_status}'
-            )
-            return True
-
-        if await _run_recovery_candidate(
-            session,
-            case='crashed_worker_task_terminal',
-            workflow_id=workflow_id,
-            task_index=task_index,
-            task_id=task_id,
-            action=_recover_crashed_worker_task,
         ):
             recovered += 1
 

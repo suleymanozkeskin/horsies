@@ -51,6 +51,7 @@ class ReaperMixin:
         _app: Horsies | None
         _stop: asyncio.Event
         _partition_coverage_health: dict[str, Any] | None
+        _phase2_recovery_health: dict[str, Any] | None
 
     def _advisory_key_reaper(self) -> int:
         """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
@@ -224,13 +225,7 @@ class ReaperMixin:
             )
 
             async with temp_broker.session_factory() as s:
-                recovered = await recover_stuck_workflows(
-                    s,
-                    temp_broker,
-                    finalizing_grace_ms=(
-                        recovery_cfg.crashed_worker_recovery_grace_ms
-                    ),
-                )
+                recovered = await recover_stuck_workflows(s, temp_broker)
                 if recovered > 0:
                     logger.info(
                         f'Reaper recovered {recovered} stuck workflow task(s)'
@@ -238,6 +233,45 @@ class ReaperMixin:
                 await s.commit()
         except Exception as wf_err:
             logger.error(f'Workflow recovery error: {wf_err}')
+
+        # Phase-2 recovery: the crashed-worker case, driven by the
+        # terminalization outbox rather than by a scan of terminal live
+        # rows, which the split made unreachable. Rides the same
+        # cluster-wide gate as the rest of this pass, so no second
+        # holder is taken; the grace window and the row cap are the ones
+        # the retired scan carried.
+        try:
+            from horsies.core.workflows.phase2_recovery import (
+                drive_phase2_recovery,
+            )
+            from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP
+
+            phase2 = await drive_phase2_recovery(
+                temp_broker.session_factory,
+                temp_broker,
+                grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
+                max_rows=GLOBAL_SCAN_ROW_CAP,
+            )
+            if phase2.applied or phase2.retained or phase2.failed:
+                logger.info(
+                    'Phase-2 recovery: '
+                    f'{phase2.applied} applied, '
+                    f'{phase2.already_applied} already applied, '
+                    f'{phase2.superseded} superseded, '
+                    f'{phase2.retained} retained, '
+                    f'{phase2.failed} failed'
+                )
+            self._phase2_recovery_health = {
+                'considered': phase2.considered,
+                'applied': phase2.applied,
+                'already_applied': phase2.already_applied,
+                'superseded': phase2.superseded,
+                'retained': phase2.retained,
+                'failed': phase2.failed,
+                'retained_details': list(phase2.retained_details),
+            }
+        except Exception as phase2_err:
+            logger.error(f'Phase-2 recovery error: {phase2_err}')
 
         now_monotonic = time.monotonic()
         if now_monotonic >= state.next_retention_cleanup_at:

@@ -55,6 +55,7 @@ class HealthMixin:
         _ping_queue: asyncio.Queue[Any] | None
         _started_at: datetime
         _partition_coverage_health: dict[str, Any] | None
+        _phase2_recovery_health: dict[str, Any] | None
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
@@ -217,9 +218,16 @@ class HealthMixin:
                                 'partition_coverage': (
                                     self._partition_coverage_health
                                 ),
+                                'phase2_recovery': (
+                                    self._phase2_recovery_health
+                                ),
                             }
                         )
-                        if (recovery_dict or self._partition_coverage_health)
+                        if (
+                            recovery_dict
+                            or self._partition_coverage_health
+                            or self._phase2_recovery_health
+                        )
                         else None,
                         'running': running,
                         'claimed': claimed,
