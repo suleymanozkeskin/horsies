@@ -42,6 +42,12 @@ from horsies.core.history.reads.lookup_generation import (
     manifest_from_catalog,
     render_staged_lookup_function,
 )
+from horsies.core.history.names import (
+    TASK_DETAIL_FUNCTION,
+    TASK_LOOKUP_FUNCTION,
+    TASK_PROVENANCE_FUNCTION,
+    TASK_PROVENANCE_TYPE,
+)
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
 
 from tests.integration.task_history_harness import (
@@ -417,16 +423,34 @@ class TestHeartbeatLeafExclusion:
                 'horsies_task_lookup_staged',
                 'horsies_task_provenance_staged',
             ):
-                body = (
+                # Scoped to this schema and asserted to be a single
+                # entry: an unqualified pg_proc read also matches the
+                # same function published into another schema of the
+                # shared test database, and a changed argument list
+                # would leave a second overload beside the current one.
+                # Both arrive as MultipleResultsFound, which names
+                # neither.
+                published = (
                     await connection.execute(
                         text(
-                            'SELECT prosrc FROM pg_proc '
-                            'WHERE proname = :name'
+                            'SELECT procedure.prosrc, '
+                            'pg_get_function_identity_arguments('
+                            'procedure.oid) AS identity_arguments '
+                            'FROM pg_proc AS procedure '
+                            'JOIN pg_namespace AS namespace '
+                            '  ON namespace.oid = procedure.pronamespace '
+                            'WHERE namespace.nspname = current_schema() '
+                            '  AND procedure.proname = :name'
                         ),
                         {'name': function_name},
                     )
-                ).scalar_one()
-                assert heartbeat_leaf not in body
+                ).all()
+                assert len(published) == 1, (
+                    f'{function_name} has {len(published)} signatures in '
+                    f'this schema: '
+                    f'{[row.identity_arguments for row in published]}'
+                )
+                assert heartbeat_leaf not in published[0].prosrc
             manifest_names = {
                 row.leaf_name
                 for row in (
@@ -447,6 +471,95 @@ class TestHeartbeatLeafExclusion:
                 await lookup_task_identity(connection, row_b),
                 HistoryTaskIdentity,
             )
+
+
+STAGED_SIGNATURES = {
+    TASK_LOOKUP_FUNCTION: 'p_task_id uuid',
+    TASK_PROVENANCE_FUNCTION: 'p_task_id uuid, p_include_live boolean',
+    TASK_DETAIL_FUNCTION: 'p_task_id uuid',
+}
+"""The one signature each staged function may have after publication.
+
+Names come from the program's own constants so a rename cannot skip the
+pin; the argument lists are literals, because the change this guards
+against is a changed argument list. A fourth staged function has to be
+added here by hand — the authority belongs beside the renderers, which
+publish the three individually and expose no manifest to iterate.
+"""
+
+
+class TestSupersededSignatures:
+    """Republication replaces a staged function; it never accumulates one.
+
+    PostgreSQL overloads by argument list, so CREATE OR REPLACE against a
+    changed signature installs a second function beside the first and
+    leaves both callable — and a call matching both is refused as
+    ambiguous. The publisher drops the superseded provenance signature
+    for exactly this reason.
+
+    This guards the NEXT argument-list change. No shipped database
+    carries the ambiguous pair: the history program is unreleased, so
+    the stale overload has to be planted here to be observed at all.
+    """
+
+    @pytest.mark.asyncio
+    async def test_republish_leaves_one_signature_per_staged_function(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            await seed_two_classes(connection)
+
+            # Plant the superseded single-parameter provenance overload.
+            await connection.execute(
+                text(
+                    f'CREATE FUNCTION {TASK_PROVENANCE_FUNCTION}'
+                    '(p_task_id uuid) '
+                    f'RETURNS {TASK_PROVENANCE_TYPE} '
+                    'LANGUAGE sql STABLE AS '
+                    f"$$ SELECT NULL::{TASK_PROVENANCE_TYPE} $$"
+                )
+            )
+
+            # Presence half: the plant is really installed beside the
+            # current signature, so the assertion below is non-vacuous.
+            planted = await _staged_signatures(connection)
+            assert planted[TASK_PROVENANCE_FUNCTION] == [
+                'p_task_id uuid',
+                'p_task_id uuid, p_include_live boolean',
+            ]
+
+            await StagedLoaderPublisher().republish(connection)
+
+            published = await _staged_signatures(connection)
+            assert published == {
+                name: [arguments]
+                for name, arguments in STAGED_SIGNATURES.items()
+            }
+
+
+async def _staged_signatures(
+    connection: AsyncConnection,
+) -> dict[str, list[str]]:
+    """Installed argument lists per staged function, this schema only."""
+    rows = (
+        await connection.execute(
+            text(
+                'SELECT procedure.proname, '
+                'pg_get_function_identity_arguments(procedure.oid) '
+                '    AS identity_arguments '
+                'FROM pg_proc AS procedure '
+                'JOIN pg_namespace AS namespace '
+                '  ON namespace.oid = procedure.pronamespace '
+                'WHERE namespace.nspname = current_schema() '
+                '  AND procedure.proname = ANY(CAST(:names AS text[]))'
+            ),
+            {'names': list(STAGED_SIGNATURES)},
+        )
+    ).all()
+    installed: dict[str, list[str]] = {}
+    for row in rows:
+        installed.setdefault(row.proname, []).append(row.identity_arguments)
+    return {name: sorted(arguments) for name, arguments in installed.items()}
 
 
 class TestFalseAbsenceSeamRegression:
