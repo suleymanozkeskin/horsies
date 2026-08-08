@@ -69,6 +69,13 @@ class CutoverPreflight:
     unfingerprinted_rows: int
     unprepared_envelope_rows: int
     unclassified_rows: int
+    unclassified_live_bytes: int
+    """What the class-less rows occupy on the LIVE table.
+
+    The backfill decision trades deletion risk against storage
+    commitment — rows that never age hold their space forever — so the
+    advisory carries both quantities. This is the live figure and says
+    so: the relocated record also carries its attempt snapshot."""
     class_day_pairs: int
     workflow_rows: int
     heartbeat_rows: int
@@ -166,6 +173,9 @@ async def run_preflight(
                     count(*) FILTER (
                         WHERE terminal AND retention_class_key IS NULL
                     ) AS unclassified_rows,
+                    COALESCE(sum(row_bytes) FILTER (
+                        WHERE terminal AND retention_class_key IS NULL
+                    ), 0) AS unclassified_bytes,
                     count(DISTINCT CASE WHEN terminal THEN
                         (retention_class_key,
                          date_trunc('day', terminal_at AT TIME ZONE 'UTC'))
@@ -173,7 +183,12 @@ async def run_preflight(
                 FROM (
                     SELECT *,
                            status NOT IN ('PENDING', 'CLAIMED', 'RUNNING')
-                               AS terminal
+                               AS terminal,
+                           -- The LIVE size of the row, which is what
+                           -- this pass can measure honestly; the
+                           -- post-relocation footprint also carries
+                           -- the attempt snapshot and is not this.
+                           pg_column_size({LIVE_TASKS}) AS row_bytes
                     FROM {LIVE_TASKS}
                 ) rows
                 """
@@ -190,13 +205,15 @@ async def run_preflight(
     ).one()
     terminal_rows = int(inventory.terminal_rows)
     unclassified_rows = int(inventory.unclassified_rows)
+    unclassified_live_bytes = int(inventory.unclassified_bytes)
     advisories: list[str] = []
     if unclassified_rows:
+        megabytes = unclassified_live_bytes / (1024 * 1024)
         advisories.append(
-            f'{unclassified_rows} terminal rows carry no retention class; '
-            f"relocation will place them in the '{FOREVER_CLASS_KEY}' class "
-            '(no automatic aging); backfill a class before cutover to age '
-            'them'
+            f'{unclassified_rows} terminal rows ({megabytes:.1f} MB live) '
+            'carry no retention class; relocation will place them in the '
+            f"'{FOREVER_CLASS_KEY}' class (no automatic aging); backfill a "
+            'class before cutover to age them'
         )
     return CutoverPreflight(
         stored_schema_version=stored,
@@ -206,6 +223,7 @@ async def run_preflight(
         unfingerprinted_rows=int(inventory.unfingerprinted_rows),
         unprepared_envelope_rows=int(inventory.unprepared_rows),
         unclassified_rows=unclassified_rows,
+        unclassified_live_bytes=unclassified_live_bytes,
         class_day_pairs=int(inventory.class_day_pairs),
         workflow_rows=int(counts.wf),
         heartbeat_rows=int(counts.hb),

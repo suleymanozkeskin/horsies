@@ -428,12 +428,14 @@ class TestRelocation:
                 ).scalar_one()
                 assert landed == FOREVER_CLASS_KEY
                 # No live row survives: the relocation completed rather
-                # than aborting on the partition route.
+                # than aborting on the partition route. The identity is
+                # compared as varchar because this battery runs the
+                # upgraded world, where the live id has not converted.
                 remaining = (
                     await connection.execute(
                         text(
                             'SELECT count(*) FROM horsies_tasks '
-                            'WHERE id = CAST(:t AS uuid)'
+                            'WHERE id = CAST(:t AS varchar)'
                         ),
                         {'t': classless},
                     )

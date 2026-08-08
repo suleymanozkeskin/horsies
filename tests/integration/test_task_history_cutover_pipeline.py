@@ -45,6 +45,7 @@ from tests.integration.task_history_harness import prepare_move_storage
 from tests.integration.test_task_history_preparation import run_preparation_to_complete
 from tests.integration.test_task_history_relocation import (
     CLASS_KEY,
+    demote_to_upgraded_world,
     insert_legacy_task,
     relocate_all,
 )
@@ -78,7 +79,13 @@ async def test_the_offline_program_end_to_end(
     engine = create_async_engine(url)
     try:
         async with engine.begin() as connection:
-            # The legacy population a deployment brings to the cutover.
+            # The legacy population a deployment brings to the cutover
+            # is only reachable in the world that deployment is in: the
+            # fresh chain now installs the cutover's END state, so the
+            # upgraded world is reinstated before anything legacy is
+            # written. Without it the live-only status domain refuses
+            # the very rows the program exists to relocate.
+            await demote_to_upgraded_world(connection)
             await prepare_move_storage(connection, CLASS_KEY)
             await connection.execute(text(RELOCATION_LEDGER_DDL))
             terminal_completed = await insert_legacy_task(

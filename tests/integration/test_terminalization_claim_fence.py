@@ -154,7 +154,10 @@ async def _link_to_workflow(
 async def _status_of(session: AsyncSession, task_id: str) -> str:
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).fetchone()

@@ -135,10 +135,16 @@ async def test_preflight_reports_the_consequence_of_an_absent_class(
         await engine.dispose()
 
     assert plan.unclassified_rows == 1
+    # Measured, not assumed: the row's live size varies with its
+    # payload, so the pin holds the wording and the format while the
+    # figure comes from the plan — and a separate assertion holds that
+    # the figure is a real measurement rather than a zero.
+    assert plan.unclassified_live_bytes > 0
+    megabytes = plan.unclassified_live_bytes / (1024 * 1024)
     assert plan.advisories == (
-        "1 terminal rows carry no retention class; relocation will place "
-        "them in the 'forever' class (no automatic aging); backfill a "
-        "class before cutover to age them",
+        f'1 terminal rows ({megabytes:.1f} MB live) carry no retention '
+        "class; relocation will place them in the 'forever' class (no "
+        'automatic aging); backfill a class before cutover to age them',
     )
 
 
