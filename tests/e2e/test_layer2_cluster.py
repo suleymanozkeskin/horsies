@@ -167,10 +167,10 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         async with broker.session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT DISTINCT claimed_by_worker_id
+                    SELECT DISTINCT last_claimed_worker_id
                     FROM itest_task_rows
                     WHERE id = ANY(CAST(:ids AS uuid[]))
-                    AND claimed_by_worker_id IS NOT NULL
+                    AND last_claimed_worker_id IS NOT NULL
                 """),
                 {'ids': task_ids},
             )
@@ -988,10 +988,10 @@ async def test_single_worker_crash_remaining_continue(
 
         result = await session.execute(
             text("""
-                SELECT DISTINCT claimed_by_worker_id FROM itest_task_rows
+                SELECT DISTINCT last_claimed_worker_id FROM itest_task_rows
                 WHERE id = ANY(CAST(:ids AS uuid[]))
                 AND status = 'COMPLETED'
-                AND claimed_by_worker_id IS NOT NULL
+                AND last_claimed_worker_id IS NOT NULL
             """),
             {'ids': task_ids},
         )

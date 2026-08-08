@@ -30,7 +30,10 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
-from tests.integration.history_seeding import force_terminal
+from tests.integration.history_seeding import (
+    force_terminal,
+    read_attempt_history,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -811,19 +814,19 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
     assert is_ok(first) and first.ok_value is not None
     assert is_ok(replay) and replay.ok_value is not None
     assert replay.ok_value.result.unwrap() == 'persisted'
-    summary = (
+    kind = (
         await session.execute(
-            text("""
-                SELECT terminalization_kind,
-                       (SELECT COUNT(*) FROM horsies_task_attempts a
-                        WHERE a.task_id = t.id) AS attempt_count
-                FROM horsies_tasks t WHERE t.id = :id
-            """),
+            text(
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
-    ).one()
-    assert summary.terminalization_kind == 'COMPLETE_LOCKED'
-    assert summary.attempt_count == 1
+    ).scalar_one()
+    assert kind == 'COMPLETE_LOCKED'
+    # The move archives the attempts and purges the live rows, so the
+    # snapshot is where the one attempt now lives.
+    assert len(await read_attempt_history(session, task_id)) == 1
 
 
 @pytest.mark.asyncio(loop_scope='function')

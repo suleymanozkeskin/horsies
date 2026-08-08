@@ -117,6 +117,7 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            error_code, failed_reason, failed_at, completed_at, terminal_at,
            sent_at, started_at, enqueued_at, good_until, next_retry_at,
            result, claimed, claimed_at, claimed_by_worker_id,
+           claimed_by_worker_id AS last_claimed_worker_id,
            claim_expires_at, finalizing_at, finalizing_by_worker_id,
            retry_count, max_retries, worker_pid, worker_hostname,
            worker_process_name, retention_class_key, terminalization_kind
@@ -132,9 +133,8 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            NULL::timestamptz AS next_retry_at,
            convert_from(result_payload, 'UTF8') AS result,
            FALSE AS claimed, claimed_at,
-           -- The lease is gone but the claimant is recorded: the move
-           -- keeps who ran the task even though nothing holds it now.
-           last_claimed_worker_id AS claimed_by_worker_id,
+           NULL AS claimed_by_worker_id,
+           last_claimed_worker_id,
            NULL::timestamptz AS claim_expires_at,
            NULL::timestamptz AS finalizing_at,
            NULL AS finalizing_by_worker_id,
@@ -148,9 +148,13 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
 )
 """Test-only readback surface: one task per row regardless of which
 lifecycle side holds it, presented with the live column names. The
-terminal instant lands in completed_at/failed_at by status; the claim
-LEASE is structurally absent on a history row, while the claimant that
-ran the task survives as recorded provenance."""
+terminal instant lands in completed_at/failed_at by status. The two
+claimant columns say different things and are NOT interchangeable:
+`claimed_by_worker_id` is the LEASE — who holds the task now — and is
+structurally absent on a history row, while `last_claimed_worker_id` is
+PROVENANCE — who ran it — and survives the move. A reader asking "who
+ran this" must ask for the second; the first answering NULL after
+terminalization is correct, not a gap."""
 
 
 def _attempt_record(row: TaskAttemptModel) -> AttemptRecord:
