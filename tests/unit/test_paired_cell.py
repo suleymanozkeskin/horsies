@@ -7,6 +7,8 @@ import pytest
 from tests.task_history_prototypes.paired_cell import (
     EquivalenceError,
     EquivalenceFacts,
+    PairedCell,
+    SampleUnit,
     assert_equivalent_inputs,
     paired_cell,
 )
@@ -54,6 +56,7 @@ def _facts(side: PairedSide, *, rows: int = 1000) -> EquivalenceFacts:
 
 def _cell(**overrides: object):
     arguments: dict[str, object] = {
+        'unit': SampleUnit.MILLISECONDS,
         'baseline_identity': _identity(PairedSide.BASELINE),
         'candidate_identity': _identity(PairedSide.CANDIDATE),
         'baseline_equivalence': _facts(PairedSide.BASELINE),
@@ -76,6 +79,7 @@ def test_a_well_formed_cell_records_both_builds() -> None:
     )
     assert conditions['equivalence']['baseline']['rows'] == 1000
     assert conditions['observations']['candidate'] == 2
+    assert conditions['unit'] == 'ms'
 
 
 def test_a_shadowed_side_cannot_reach_a_cell() -> None:
@@ -125,3 +129,50 @@ def test_equivalence_compares_inputs_not_storage() -> None:
     assert_equivalent_inputs(
         _facts(PairedSide.BASELINE), _facts(PairedSide.CANDIDATE)
     )
+
+
+def test_the_type_refuses_direct_construction_too() -> None:
+    """The guarantee is the type's, not the helper's.
+
+    A validating helper holds only until someone calls the constructor, and
+    the constructor of a public dataclass is always callable. The checks live
+    in __post_init__ so the polite door and the direct one enforce alike.
+    """
+    with pytest.raises(SideIdentityError):
+        PairedCell(
+            name='claim',
+            unit=SampleUnit.MILLISECONDS,
+            baseline_identity=SideIdentity(
+                side=PairedSide.BASELINE,
+                interpreter=f'{VENV}/bin/python',
+                module_path=f'{CHECKOUT}/horsies/__init__.py',
+                schema_version=CANDIDATE_SCHEMA_VERSION,
+                expected_root=VENV,
+                expected_schema_version=BASELINE_SCHEMA_VERSION,
+            ),
+            candidate_identity=_identity(PairedSide.CANDIDATE),
+            baseline_equivalence=_facts(PairedSide.BASELINE),
+            candidate_equivalence=_facts(PairedSide.CANDIDATE),
+            baseline_samples=(1.0,),
+            candidate_samples=(1.0,),
+        )
+
+
+def test_direct_construction_also_refuses_unequal_work() -> None:
+    with pytest.raises(EquivalenceError, match='row counts differ'):
+        PairedCell(
+            name='claim',
+            unit=SampleUnit.MILLISECONDS,
+            baseline_identity=_identity(PairedSide.BASELINE),
+            candidate_identity=_identity(PairedSide.CANDIDATE),
+            baseline_equivalence=_facts(PairedSide.BASELINE),
+            candidate_equivalence=_facts(PairedSide.CANDIDATE, rows=999),
+            baseline_samples=(1.0,),
+            candidate_samples=(1.0,),
+        )
+
+
+def test_the_unit_is_recorded_for_every_cell() -> None:
+    """Numbers without a unit are dimensionless, and a reader supplies one."""
+    for unit in SampleUnit:
+        assert _cell(unit=unit).conditions()['unit'] == unit.value

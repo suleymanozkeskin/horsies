@@ -5,14 +5,16 @@ remember. This makes it a property of the type instead: a cell result carries
 both side identities and both sides' equivalence facts as required fields, so
 a cell without them is unrepresentable rather than merely forbidden.
 
-`paired_cell` is the only way to obtain one, and it reads each identity from
-the measurement's own reported output before it will build the result.
+The checks live in ``__post_init__``, so constructing the type directly runs
+them too. A helper that validates is discipline wearing a type's clothes: it
+holds until someone calls the constructor.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from .paired_sides import (
@@ -22,6 +24,19 @@ from .paired_sides import (
     assert_sides_differ,
     side_conditions,
 )
+
+class SampleUnit(StrEnum):
+    """What a cell's numbers are.
+
+    Required, because a quoted measurement without a unit is dimensionless
+    and a reader supplies the missing one from expectation.
+    """
+
+    MILLISECONDS = 'ms'
+    SECONDS = 's'
+    ROWS_PER_SECOND = 'rows/s'
+    BYTES = 'bytes'
+
 
 class EquivalenceError(Exception):
     """The two sides were not fed equivalent work."""
@@ -97,6 +112,7 @@ class PairedCell:
     """
 
     name: str
+    unit: SampleUnit
     baseline_identity: SideIdentity
     candidate_identity: SideIdentity
     baseline_equivalence: EquivalenceFacts
@@ -104,10 +120,44 @@ class PairedCell:
     baseline_samples: tuple[float, ...]
     candidate_samples: tuple[float, ...]
 
+    def __post_init__(self) -> None:
+        if self.baseline_identity.side is not PairedSide.BASELINE:
+            raise EquivalenceError(
+                f'cell {self.name}: the baseline identity reports side '
+                f'{self.baseline_identity.side}'
+            )
+        if self.candidate_identity.side is not PairedSide.CANDIDATE:
+            raise EquivalenceError(
+                f'cell {self.name}: the candidate identity reports side '
+                f'{self.candidate_identity.side}'
+            )
+        assert_side_identity(self.baseline_identity)
+        assert_side_identity(self.candidate_identity)
+        assert_sides_differ(self.baseline_identity, self.candidate_identity)
+        if self.baseline_equivalence.side is not PairedSide.BASELINE:
+            raise EquivalenceError(
+                f'cell {self.name}: baseline equivalence facts report side '
+                f'{self.baseline_equivalence.side}'
+            )
+        if self.candidate_equivalence.side is not PairedSide.CANDIDATE:
+            raise EquivalenceError(
+                f'cell {self.name}: candidate equivalence facts report side '
+                f'{self.candidate_equivalence.side}'
+            )
+        assert_equivalent_inputs(
+            self.baseline_equivalence, self.candidate_equivalence
+        )
+        if not self.baseline_samples or not self.candidate_samples:
+            raise EquivalenceError(
+                f'cell {self.name}: a side produced no observations; an '
+                'empty side yields a delta against nothing'
+            )
+
     def conditions(self) -> dict[str, Any]:
         """Everything a reader needs to judge whether this cell means what it says."""
         return {
             'cell': self.name,
+            'unit': self.unit.value,
             'sides': side_conditions(
                 self.baseline_identity, self.candidate_identity
             ),
@@ -125,6 +175,7 @@ class PairedCell:
 def paired_cell(
     name: str,
     *,
+    unit: SampleUnit,
     baseline_identity: SideIdentity,
     candidate_identity: SideIdentity,
     baseline_equivalence: EquivalenceFacts,
@@ -132,49 +183,20 @@ def paired_cell(
     baseline_samples: Sequence[float],
     candidate_samples: Sequence[float],
 ) -> PairedCell:
-    """Build a cell, refusing anything that cannot be trusted.
+    """Documented entrypoint; normalizes the sample sequences.
 
-    The checks run here rather than at the point of judgement because a cell
-    that reaches judgement has already been recorded, quoted and compared. The
-    place to refuse an untrustworthy measurement is where it is made.
+    Every check lives in the type, so this is a convenience and not the
+    enforcement. Constructing `PairedCell` directly is equally safe, which is
+    what makes the guarantee a property of the type rather than of the caller
+    choosing the polite door.
     """
-    if baseline_identity.side is not PairedSide.BASELINE:
-        raise EquivalenceError(
-            f'cell {name}: the baseline identity reports side '
-            f'{baseline_identity.side}'
-        )
-    if candidate_identity.side is not PairedSide.CANDIDATE:
-        raise EquivalenceError(
-            f'cell {name}: the candidate identity reports side '
-            f'{candidate_identity.side}'
-        )
-    assert_side_identity(baseline_identity)
-    assert_side_identity(candidate_identity)
-    assert_sides_differ(baseline_identity, candidate_identity)
-    if baseline_equivalence.side is not PairedSide.BASELINE:
-        raise EquivalenceError(
-            f'cell {name}: baseline equivalence facts report side '
-            f'{baseline_equivalence.side}'
-        )
-    if candidate_equivalence.side is not PairedSide.CANDIDATE:
-        raise EquivalenceError(
-            f'cell {name}: candidate equivalence facts report side '
-            f'{candidate_equivalence.side}'
-        )
-    assert_equivalent_inputs(baseline_equivalence, candidate_equivalence)
-    baseline_values = tuple(baseline_samples)
-    candidate_values = tuple(candidate_samples)
-    if not baseline_values or not candidate_values:
-        raise EquivalenceError(
-            f'cell {name}: a side produced no observations; an empty side '
-            'yields a delta against nothing'
-        )
     return PairedCell(
         name=name,
+        unit=unit,
         baseline_identity=baseline_identity,
         candidate_identity=candidate_identity,
         baseline_equivalence=baseline_equivalence,
         candidate_equivalence=candidate_equivalence,
-        baseline_samples=baseline_values,
-        candidate_samples=candidate_values,
+        baseline_samples=tuple(baseline_samples),
+        candidate_samples=tuple(candidate_samples),
     )
