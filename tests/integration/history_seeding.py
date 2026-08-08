@@ -113,7 +113,7 @@ async def ensure_history_seedable(connection: AsyncConnection) -> None:
 ITEST_TASK_ROWS_VIEW_DDL = text(
     """
     CREATE OR REPLACE VIEW itest_task_rows AS
-    SELECT id, task_name, queue_name, status, is_workflow_task,
+    SELECT id, task_name, queue_name, priority, status, is_workflow_task,
            error_code, failed_reason, failed_at, completed_at, terminal_at,
            sent_at, started_at, enqueued_at, good_until, next_retry_at,
            result, claimed, claimed_at, claimed_by_worker_id,
@@ -123,7 +123,8 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            worker_process_name, retention_class_key, terminalization_kind
     FROM horsies_tasks
     UNION ALL
-    SELECT task_id AS id, task_name, queue_name, status, is_workflow_task,
+    SELECT task_id AS id, task_name, queue_name, priority, status,
+           is_workflow_task,
            error_code,
            final_failed_reason AS failed_reason,
            CASE WHEN status <> 'COMPLETED' THEN terminal_at END AS failed_at,

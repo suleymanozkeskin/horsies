@@ -1,4 +1,9 @@
-"""Database helpers for e2e tests."""
+"""Database helpers for e2e tests.
+
+The waiters poll the readback view rather than the live table: a task
+that reaches a terminal status LEAVES the live table in the same
+transaction, so a live-only poll can never observe the status it was
+told to wait for."""
 
 from __future__ import annotations
 
@@ -129,8 +134,8 @@ async def wait_for_all_terminal(
         async with session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT COUNT(*) FROM horsies_tasks
-                    WHERE id = ANY(:ids)
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
                     AND status NOT IN ('COMPLETED', 'FAILED', 'ERROR')
                 """),
                 {'ids': task_ids},
@@ -157,7 +162,8 @@ async def wait_for_status(
         async with session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT status FROM horsies_tasks WHERE id = :id
+                    SELECT status FROM itest_task_rows
+                    WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -185,8 +191,8 @@ async def wait_for_any_status(
         async with session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT COUNT(*) FROM horsies_tasks
-                    WHERE id = ANY(:ids) AND status = :status
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[])) AND status = :status
                 """),
                 {'ids': task_ids, 'status': target_status},
             )
