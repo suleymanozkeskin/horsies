@@ -84,11 +84,14 @@ class Operation(StrEnum):
     OPTIONS_ORDINARY_ENQUEUE = 'options-ordinary-enqueue'
     KEYED_ENQUEUE = 'keyed-enqueue'
     CLAIM = 'claim'
+    TERMINALIZE = 'terminalize'
 
 
 # Operations that are a database statement rather than a task send. They need a
 # different body, and their observations consume rows rather than create them.
-STATEMENT_OPERATIONS: Final = frozenset({Operation.CLAIM})
+STATEMENT_OPERATIONS: Final = frozenset(
+    {Operation.CLAIM, Operation.TERMINALIZE}
+)
 
 
 # The operations the released baseline cannot perform. Refused there rather
@@ -383,6 +386,302 @@ def claim_source(
     )
 
 
+# Harness-authored, replicating the product. The CLAIMED -> RUNNING transition
+# lives as inline SQL inside `horsies/core/worker/child_runner.py` rather than
+# as a shared constant, so unlike the claim statement and the terminalization
+# command there is nothing to borrow. This is SETUP: it establishes the state
+# the measurand requires, and it is not the thing being timed.
+#
+# Fidelity is derived rather than guessed. The product's statement writes eight
+# columns, and all eight are written here, because the measurand's fence and
+# its projection read this row: a RUNNING row missing a column the product sets
+# would exercise NULL paths production never runs.
+RUNNING_SETUP_STATEMENT: Final = """
+UPDATE horsies_tasks
+SET status = 'RUNNING',
+    claimed = FALSE,
+    claim_expires_at = NULL,
+    started_at = NOW(),
+    worker_pid = :worker_pid,
+    worker_hostname = :worker_hostname,
+    worker_process_name = :worker_process_name,
+    updated_at = NOW()
+WHERE id = :task_id
+  AND status = 'CLAIMED'
+  AND claimed_by_worker_id = :worker_id
+RETURNING id
+"""
+
+# What the statement above writes, named so the pin can compare it against what
+# the product writes on each build.
+RUNNING_SETUP_COLUMNS: Final = frozenset(
+    {
+        'status',
+        'claimed',
+        'claim_expires_at',
+        'started_at',
+        'worker_pid',
+        'worker_hostname',
+        'worker_process_name',
+        'updated_at',
+    }
+)
+
+# How the artifact describes it: not the product's own statement, and not
+# something invented either.
+RUNNING_SETUP_PROVENANCE: Final = (
+    'harness-authored, replicating the CLAIMED -> RUNNING transition inline in '
+    'horsies/core/worker/child_runner.py over the columns both schemas share'
+)
+
+
+def running_transition_columns(child_runner_source: str) -> frozenset[str]:
+    """The columns the product's inline CLAIMED -> RUNNING statement writes.
+
+    Read out of a build's own source so the pin compares against what that
+    build does, rather than against what this harness remembers it doing. A
+    product change to the transition then breaks the pin instead of silently
+    leaving the harness establishing a different precondition.
+    """
+    anchor = child_runner_source.find("UPDATE horsies_tasks\n                SET status = 'RUNNING'")
+    if anchor < 0:
+        raise MeasurementError(
+            'no CLAIMED -> RUNNING transition found in the child runner '
+            'source; the product moved it, and the setup this harness writes '
+            'can no longer be checked against it'
+        )
+    body = child_runner_source[anchor : child_runner_source.index('WHERE', anchor)]
+    columns: set[str] = set()
+    for line in body.splitlines():
+        stripped = line.strip().rstrip(',')
+        if '=' not in stripped or stripped.startswith('UPDATE'):
+            continue
+        name = stripped.split('=', 1)[0].strip()
+        if name.startswith('SET '):
+            name = name[4:].strip()
+        if name.isidentifier():
+            columns.add(name)
+    if not columns:
+        raise MeasurementError(
+            'the child runner transition was found but no columns were read '
+            'out of it'
+        )
+    return frozenset(columns)
+
+
+_TERMINALIZE_TAIL_TEMPLATE: Final = '''
+from sqlalchemy import create_engine as _create_engine, text as _text
+
+_plan = _json.loads(__PLAN_JSON__)
+_observations = _json.loads(__OBSERVATIONS_JSON__)
+_block = _json.loads(__BLOCK_JSON__)
+
+# Both the claim statement and the terminalization command come from the build
+# under measurement. The command is the product's own vocabulary and its SQL is
+# produced by the product's own call_for, so the two sides run each build's
+# terminalization rather than a statement this harness invented.
+from horsies.core.worker.sql import HORSIES_CLAIM_SQL as _claim_sql
+from horsies.core.lifecycle.commands import (
+    CompleteTaskFused as _CompleteTaskFused,
+    OwnedClaim as _OwnedClaim,
+)
+from horsies.core.lifecycle.persistence import (
+    call_for as _call_for,
+    decode_outcome_row as _decode_outcome_row,
+)
+
+_engine = _create_engine(
+    _app_config.broker.database_url.get_secret_value(),
+    pool_size=_config_spec['pool_size'],
+    max_overflow=_config_spec['max_overflow'],
+)
+
+
+def _claim_params(_worker_id):
+    return {
+        'p_worker_id': _worker_id,
+        'p_queues': _json.dumps(_plan['queues']),
+        'p_queue_priority': _json.dumps({_q: 100 for _q in _plan['queues']}),
+        'p_queue_max_concurrency': _json.dumps({}),
+        'p_hard_cap_mode': True,
+        'p_processes': 1,
+        'p_prefetch_buffer': 0,
+        'p_max_claim_per_worker': 1,
+        'p_max_claim_batch': 1,
+        'p_cluster_wide_cap': None,
+        'p_lease_ms': _plan['lease_ms'],
+        'p_lock_keys': _json.dumps([]),
+    }
+
+
+# The result payload is incompressible for the same reason the seed's is: a
+# repeated character would be stored at a fraction of its declared size, so a
+# row claiming a 1 MiB result would be timing a much smaller one.
+_rng = _random.Random(_plan['payload_seed'] + _block)
+_size = _plan['result_bytes']
+_results = []
+for _index in range(_observations + _plan['priming_sends']):
+    _blob = _b64.b64encode(_rng.randbytes(_size)).decode('ascii')[:_size]
+    if len(_blob) != _size:
+        raise RuntimeError('result generator produced ' + str(len(_blob)))
+    _results.append(_json.dumps({'ok': _blob}))
+
+
+def _to_running(_conn, _row, _worker_id):
+    \'\'\'Setup, outside the timed region: the state a completion requires.\'\'\'
+    _updated = _conn.execute(
+        _text(_plan['running_setup_statement']),
+        {
+            'task_id': str(_row.id),
+            'worker_id': _worker_id,
+            'worker_pid': _plan['worker_pid'],
+            'worker_hostname': _plan['worker_hostname'],
+            'worker_process_name': _plan['worker_process_name'],
+        },
+    ).fetchall()
+    _conn.commit()
+    if len(_updated) != 1:
+        raise RuntimeError(
+            'the CLAIMED to RUNNING setup updated ' + str(len(_updated))
+            + ' rows, expected 1; the completion would then be refused for a '
+            'source state the harness failed to establish'
+        )
+
+
+def _terminalize(_conn, _row, _result_json):
+    _command = _CompleteTaskFused(
+        task_id=str(_row.id),
+        fence=_OwnedClaim(
+            worker_id=_row_worker_id, claimed_at=_row.claimed_at,
+        ),
+        result_json=_result_json,
+        notify_channel='task_queue_' + str(_row.queue_name or 'default'),
+        notify_payload='capacity:' + str(_row.id),
+    )
+    _statement, _params = _call_for(_command)
+    _returned = _conn.execute(_statement, _params).fetchall()
+    _conn.commit()
+    # The statement reports what it did. A rejected command still runs -- it
+    # takes the lock, reads the row and returns an outcome -- so timing one
+    # without reading the outcome measures a refusal at plausible,
+    # sub-millisecond, stable cost while nothing is written.
+    if len(_returned) != 1:
+        raise RuntimeError(
+            'terminalization returned ' + str(len(_returned))
+            + ' outcome rows, expected exactly 1'
+        )
+    _outcome = dict(_returned[0]._mapping)
+    if _outcome.get('outcome') != 'APPLIED':
+        raise RuntimeError(
+            'terminalization did not apply: outcome='
+            + str(_outcome.get('outcome'))
+            + ' observed_status=' + str(_outcome.get('observed_status'))
+            + '. A command that is refused is not the operation this row '
+            'judges, and it costs a fraction of what applying costs'
+        )
+
+
+_samples = []
+with _engine.connect() as _conn:
+    for _index in range(_observations + _plan['priming_sends']):
+        _row_worker_id = 'qual-t-' + str(_block) + '-' + str(_index)
+        _rows = _conn.execute(
+            _claim_sql, _claim_params(_row_worker_id)
+        ).fetchall()
+        _conn.commit()
+        if not _rows:
+            raise RuntimeError(
+                'no task to terminalize at observation ' + str(_index)
+                + '; seed more pending work'
+            )
+        _row = _rows[0]
+        _to_running(_conn, _row, _row_worker_id)
+        if _index < _plan['priming_sends']:
+            _terminalize(_conn, _row, _results[_index])
+            continue
+        _started = _time.perf_counter_ns()
+        _terminalize(_conn, _row, _results[_index])
+        _elapsed = _time.perf_counter_ns() - _started
+        _samples.append(_elapsed / 1000000.0)
+
+print(
+    __SAMPLES_MARKER__ + ' ' + _json.dumps({'samples': _samples}),
+    flush=True,
+)
+'''
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalizePlan:
+    """One terminalization observation: claim a task, then complete it.
+
+    The claim is setup and sits outside the timed region -- the row judges the
+    terminalization, not the claim that made it possible.
+    """
+
+    task_name: str
+    result_bytes: int
+    payload_seed: int
+    queues: tuple[str, ...] = ('default',)
+    lease_ms: int = 30_000
+    priming_sends: int = 8
+    worker_pid: int = 424242
+    worker_hostname: str = 'qual-harness'
+    worker_process_name: str = 'qual-terminalize'
+    operation: Operation = Operation.TERMINALIZE
+
+    def __post_init__(self) -> None:
+        if self.result_bytes < 1:
+            raise MeasurementError(
+                f'result_bytes must be at least 1, got {self.result_bytes}'
+            )
+
+    def as_payload(self) -> dict[str, Any]:
+        return {
+            'task_name': self.task_name,
+            'operation': self.operation.value,
+            'result_bytes': self.result_bytes,
+            'payload_seed': self.payload_seed,
+            'queues': list(self.queues),
+            'lease_ms': self.lease_ms,
+            'priming_sends': self.priming_sends,
+            'worker_pid': self.worker_pid,
+            'worker_hostname': self.worker_hostname,
+            'worker_process_name': self.worker_process_name,
+            'running_setup_statement': RUNNING_SETUP_STATEMENT,
+            'running_setup_provenance': RUNNING_SETUP_PROVENANCE,
+        }
+
+
+def terminalize_source(
+    plan: TerminalizePlan,
+    *,
+    config_spec: SeedConfigSpec,
+    database_url: str,
+    observations: int,
+    block: int,
+) -> str:
+    """One terminalization block's body, for one side."""
+    if observations < 1:
+        raise MeasurementError(
+            f'a block needs at least one observation, got {observations}'
+        )
+    return substitute_seed_tokens(
+        CONFIG_SOURCE_SNIPPET + _TERMINALIZE_TAIL_TEMPLATE,
+        {
+            '__CONFIG_JSON__': json.dumps(json.dumps(config_spec.as_payload())),
+            '__DSN_JSON__': json.dumps(json.dumps(database_url)),
+            '__CONFIG_MARKER__': json.dumps(SIDE_CONFIG_MARKER),
+            '__SECRET_SENTINEL__': json.dumps(SECRET_SENTINEL),
+            '__REQUIRED_SENTINEL__': json.dumps(REQUIRED_FIELD_SENTINEL),
+            '__PLAN_JSON__': json.dumps(json.dumps(plan.as_payload())),
+            '__OBSERVATIONS_JSON__': json.dumps(str(observations)),
+            '__BLOCK_JSON__': json.dumps(str(block)),
+            '__SAMPLES_MARKER__': json.dumps(SIDE_SAMPLES_MARKER),
+        },
+    )
+
+
 def measure_source(
     plan: MeasurementPlan,
     *,
@@ -462,7 +761,7 @@ def run_block(
     arm: PairedSide | None = None,
     block: int,
     observations: int,
-    plan: MeasurementPlan | ClaimPlan,
+    plan: MeasurementPlan | ClaimPlan | TerminalizePlan,
     config_spec: SeedConfigSpec,
     cwd: Path,
     environment: Mapping[str, str] | None = None,
@@ -485,6 +784,14 @@ def run_block(
         )
     started = clock()
     match plan:
+        case TerminalizePlan():
+            body = terminalize_source(
+                plan,
+                config_spec=config_spec,
+                database_url=runtime.database_url,
+                observations=observations,
+                block=block,
+            )
         case ClaimPlan():
             body = claim_source(
                 plan,
@@ -568,10 +875,71 @@ def assert_blocks_ran_in_schedule_order(
 # vacuumed so the dead versions those claims left behind are actually removed,
 # and ANALYZE pins planner statistics rather than leaving them to drift with
 # whatever autovacuum happened to do between blocks.
+# A row is returned WHOLE, not just relabelled. The product's own
+# ck_horsies_tasks_terminal_at_terminal_only refuses a row whose status says
+# PENDING while terminal_at still carries a terminal timestamp -- so a partial
+# reset does not quietly leave an incoherent row, it fails. Every column the
+# claim, the RUNNING setup and the terminalization write is cleared here.
+#
+# Every column touched here is present in BOTH schemas. The released build's
+# task table is a strict subset of the checkout's -- 35 columns against 50, no
+# baseline-only column -- and status, claimed_at, result and completed_at are
+# all in the shared 35. A reset that named a candidate-only column would fail
+# on the baseline half and leave that side unreset.
 STEADY_STATE_STATEMENTS: Final = (
-    "UPDATE horsies_tasks SET status = 'PENDING', claimed_at = NULL "
-    "WHERE status = 'CLAIMED'",
+    """
+    UPDATE horsies_tasks
+    SET status = 'PENDING',
+        claimed = FALSE,
+        claimed_at = NULL,
+        claimed_by_worker_id = NULL,
+        claim_expires_at = NULL,
+        started_at = NULL,
+        completed_at = NULL,
+        failed_at = NULL,
+        failed_reason = NULL,
+        error_code = NULL,
+        finalizing_at = NULL,
+        finalizing_by_worker_id = NULL,
+        terminal_at = NULL,
+        terminalization_kind = NULL,
+        result = NULL,
+        next_retry_at = NULL,
+        retry_count = 0,
+        worker_pid = NULL,
+        worker_hostname = NULL,
+        worker_process_name = NULL,
+        updated_at = NOW()
+    WHERE status <> 'PENDING' OR claimed OR terminal_at IS NOT NULL
+    """,
     'VACUUM ANALYZE horsies_tasks',
+)
+
+# The columns above, named so a test can check the claim rather than trust it.
+STEADY_STATE_COLUMNS: Final = frozenset(
+    {
+        'status',
+        'claimed',
+        'claimed_at',
+        'claimed_by_worker_id',
+        'claim_expires_at',
+        'started_at',
+        'completed_at',
+        'failed_at',
+        'failed_reason',
+        'error_code',
+        'finalizing_at',
+        'finalizing_by_worker_id',
+        'terminal_at',
+        'terminalization_kind',
+        'result',
+        'next_retry_at',
+        'retry_count',
+        'worker_pid',
+        'worker_hostname',
+        'worker_process_name',
+        'updated_at',
+    }
 )
 
 # What the steady-state step costs a reader: absolute levels describe a
@@ -723,7 +1091,7 @@ def assert_run_is_measurable(
 
 
 def run_conditions(
-    plan: MeasurementPlan | ClaimPlan,
+    plan: MeasurementPlan | ClaimPlan | TerminalizePlan,
     blocks: Sequence[BlockResult],
     *,
     unit: SampleUnit,
