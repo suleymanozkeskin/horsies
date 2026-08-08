@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from horsies.core.history.cutover.ladder import BatchCommit
 from tests.task_history_prototypes.migration_ladder_evidence import (
     PER_BATCH_TREND_GATE_FRACTION,
+    LadderProgressSnapshot,
     RungMeasurementError,
     Trajectory,
     compute_per_batch_trend,
+)
+from tests.task_history_prototypes.qualification_io import (
+    AtomicEvidenceWriter,
 )
 
 BATCH_SIZE = 10_000
@@ -120,3 +127,56 @@ def test_gate_decides_on_either_side_of_the_threshold(
 def test_single_batch_cannot_show_drift() -> None:
     with pytest.raises(RungMeasurementError, match='two committed batches'):
         compute_per_batch_trend(_trajectory('relocation', [1.1]))
+
+
+def test_progress_snapshot_survives_the_evidence_writer(
+    tmp_path: Path,
+) -> None:
+    """The flush path is executed, not merely constructed.
+
+    The writer serializes through `asdict`, which accepts dataclass
+    instances and nothing else. A snapshot built as a plain mapping raises
+    at the first flush — which is at the first stage boundary, so the run
+    dies immediately and the flush that exists to preserve evidence
+    destroys the run instead.
+    """
+    destination = tmp_path / 'partial.json'
+    snapshot = LadderProgressSnapshot(
+        status='in_progress',
+        scenario='migration-ladder',
+        last_stage='preparation',
+        batches_committed=2,
+        commits=_trajectory('preparation', [6.0, 6.1]).commits,
+        workload={
+            'rung_rows': 1_000_000,
+            'attempts_per_task': 1,
+            'batch_size': BATCH_SIZE,
+            'next_rung_rows': 10_000_000,
+        },
+    )
+
+    AtomicEvidenceWriter(destination).write(snapshot)
+
+    written = json.loads(destination.read_text(encoding='utf-8'))
+    assert written['status'] == 'in_progress'
+    assert written['last_stage'] == 'preparation'
+    assert len(written['commits']) == 2
+    assert written['commits'][1]['cumulative_rows'] == 2 * BATCH_SIZE
+    assert written['workload']['rung_rows'] == 1_000_000
+    # A snapshot must not be readable as a finished measurement.
+    assert 'measurement' not in written
+    assert 'footprint' not in written
+
+
+def test_disabled_writer_accepts_the_snapshot() -> None:
+    """A run without a checkpoint path flushes into nothing, not into a crash."""
+    AtomicEvidenceWriter(None).write(
+        LadderProgressSnapshot(
+            status='in_progress',
+            scenario='migration-ladder',
+            last_stage='drain',
+            batches_committed=0,
+            commits=(),
+            workload={'rung_rows': 1},
+        )
+    )
