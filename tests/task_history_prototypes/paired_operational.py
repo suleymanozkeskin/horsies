@@ -343,3 +343,92 @@ class CompetingReader:
             'relations': list(self.relations),
             'backend_label': self.backend_label,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ThresholdVerdict:
+    """A budget stated as a threshold, judged as one.
+
+    Some budgets name no percentile — "completes within 5 seconds for a
+    1-million-row detached leaf" is a bound on the operation, not on a
+    distribution. Choosing a percentile for such a line invents a statistic the
+    budget never stated, which is the authoring-omission trap in another guise.
+
+    So every observation must individually satisfy the threshold, and the
+    verdict reports how many there were and the worst of them. The rank-limit
+    machinery is inapplicable here by construction rather than by exemption:
+    there is no percentile to be the maximum of, because the maximum IS what is
+    judged.
+    """
+
+    row: str
+    interval: OperationalInterval
+    limit_ms: float
+    count: int
+    maximum_ms: float
+    exceeded: tuple[float, ...]
+
+    @property
+    def within_limit(self) -> bool:
+        return not self.exceeded
+
+    def as_conditions(self) -> dict[str, Any]:
+        return {
+            'row': self.row,
+            'interval': self.interval.value,
+            'verdict_form': 'threshold',
+            'limit_ms': self.limit_ms,
+            'count': self.count,
+            'max_ms': self.maximum_ms,
+            'exceeded': list(self.exceeded),
+            'within_limit': self.within_limit,
+            'rank_limit': (
+                'inapplicable by construction: a threshold judges every '
+                'observation individually, so there is no percentile that '
+                'could resolve to the sample maximum'
+            ),
+        }
+
+
+MINIMUM_THRESHOLD_OBSERVATIONS: Final = 3
+
+
+def judge_threshold(
+    report: OperationalReport,
+    *,
+    interval: OperationalInterval,
+    limit_ms: float,
+    minimum_observations: int = MINIMUM_THRESHOLD_OBSERVATIONS,
+) -> ThresholdVerdict:
+    """Judge a stated threshold across repeats, never on a single draw.
+
+    One observation under a bound is a lucky draw wearing a verdict. Several,
+    each individually under it, is a claim.
+    """
+    statistics = report.by_interval()
+    if interval not in statistics:
+        raise OperationalReportError(
+            f'{report.row}: no observations fell in the {interval} interval, '
+            'so it cannot be judged. An interval with no observations is a row '
+            'that was not measured, not a row that passed'
+        )
+    values = tuple(
+        observation.duration_ms
+        for observation in report.observations
+        if observation.interval is interval
+    )
+    if len(values) < minimum_observations:
+        raise OperationalReportError(
+            f'{report.row}: {len(values)} observation(s) in the {interval} '
+            f'interval, and a threshold verdict rests on at least '
+            f'{minimum_observations}. One observation under a bound is a lucky '
+            'draw wearing a verdict'
+        )
+    return ThresholdVerdict(
+        row=report.row,
+        interval=interval,
+        limit_ms=limit_ms,
+        count=len(values),
+        maximum_ms=max(values),
+        exceeded=tuple(value for value in values if value > limit_ms),
+    )

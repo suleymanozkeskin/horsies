@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from tests.task_history_prototypes.paired_operational import (
+    MINIMUM_THRESHOLD_OBSERVATIONS,
     ClassifiedObservation,
     CompetingReader,
     OperationalInterval,
@@ -14,6 +15,7 @@ from tests.task_history_prototypes.paired_operational import (
     classify,
     classify_observations,
     judge_interval,
+    judge_threshold,
 )
 
 
@@ -284,3 +286,62 @@ def test_a_well_populated_interval_is_not_rank_limited() -> None:
     statistics = report.by_interval()[OperationalInterval.STEADY_STATE]
     assert statistics.rank_limited == frozenset()
     assert report.as_conditions()['intervals']['steady-state']['rank_limited'] == []
+
+
+def test_a_threshold_judges_every_observation_individually() -> None:
+    """Some budgets bound the operation, not a distribution."""
+    report = _report([(268.6, OperationalInterval.STEADY_STATE)] * 4)
+    verdict = judge_threshold(
+        report, interval=OperationalInterval.STEADY_STATE, limit_ms=5000.0
+    )
+    assert verdict.within_limit
+    assert verdict.count == 4
+    assert verdict.maximum_ms == pytest.approx(268.6)
+    assert verdict.exceeded == ()
+
+
+def test_one_observation_over_the_threshold_fails_the_row() -> None:
+    """Every observation individually, not most of them."""
+    report = _report(
+        [(268.6, OperationalInterval.STEADY_STATE)] * 3
+        + [(5300.0, OperationalInterval.STEADY_STATE)]
+    )
+    verdict = judge_threshold(
+        report, interval=OperationalInterval.STEADY_STATE, limit_ms=5000.0
+    )
+    assert not verdict.within_limit
+    assert verdict.exceeded == (5300.0,)
+    assert verdict.maximum_ms == pytest.approx(5300.0)
+
+
+def test_a_single_draw_cannot_carry_a_threshold_verdict() -> None:
+    """One observation under a bound is a lucky draw wearing a verdict."""
+    report = _report([(268.6, OperationalInterval.STEADY_STATE)])
+    with pytest.raises(OperationalReportError, match='lucky draw'):
+        judge_threshold(
+            report, interval=OperationalInterval.STEADY_STATE, limit_ms=5000.0
+        )
+
+
+def test_a_threshold_needs_the_interval_to_have_been_measured() -> None:
+    report = _report([(268.6, OperationalInterval.STEADY_STATE)] * 4)
+    with pytest.raises(OperationalReportError, match='not a row that passed'):
+        judge_threshold(
+            report, interval=OperationalInterval.CHECKPOINT, limit_ms=5000.0
+        )
+
+
+def test_the_threshold_verdict_says_rank_limits_are_inapplicable() -> None:
+    """By construction, not by exemption: the maximum IS what is judged."""
+    report = _report([(268.6, OperationalInterval.STEADY_STATE)] * 4)
+    conditions = judge_threshold(
+        report, interval=OperationalInterval.STEADY_STATE, limit_ms=5000.0
+    ).as_conditions()
+    assert conditions['verdict_form'] == 'threshold'
+    assert 'inapplicable by construction' in conditions['rank_limit']
+    assert conditions['max_ms'] == pytest.approx(268.6)
+    assert conditions['count'] == 4
+
+
+def test_the_minimum_is_more_than_one() -> None:
+    assert MINIMUM_THRESHOLD_OBSERVATIONS >= 3
