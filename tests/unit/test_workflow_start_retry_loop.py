@@ -24,6 +24,10 @@ from horsies.core.workflows.start_types import (
 )
 
 
+WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
+"""A caller-supplied id; workflow identity is a UUID."""
+
+
 def _make_spec(name: str = 'test-wf') -> Any:
     """Create a minimal mock spec for start_workflow_async."""
     spec = MagicMock()
@@ -85,7 +89,7 @@ class TestRetryDisabled:
         broker.session_factory.return_value = session_ctx
 
         result = await start_workflow_async(
-            spec, broker, 'wf-1', resend_on_transient_err=False,
+            spec, broker, WORKFLOW_ID, resend_on_transient_err=False,
         )
 
         assert is_err(result)
@@ -100,7 +104,7 @@ class TestRetryDisabled:
         broker = _make_broker(schema_ok=False, schema_retryable=True)
 
         result = await start_workflow_async(
-            spec, broker, 'wf-1', resend_on_transient_err=False,
+            spec, broker, WORKFLOW_ID, resend_on_transient_err=False,
         )
 
         assert is_err(result)
@@ -127,7 +131,7 @@ class TestRetryOnTransientErrors:
         mock_session = AsyncMock()
         mock_session.info = {}
         insert_result = MagicMock()
-        insert_result.scalar_one_or_none.return_value = 'wf-1'
+        insert_result.scalar_one_or_none.return_value = WORKFLOW_ID
         mock_session.execute = AsyncMock(return_value=insert_result)
         mock_session.commit = AsyncMock()
 
@@ -148,7 +152,7 @@ class TestRetryOnTransientErrors:
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
-                    spec, broker, 'wf-1', resend_on_transient_err=True,
+                    spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
 
         assert is_ok(result)
@@ -172,7 +176,7 @@ class TestRetryOnTransientErrors:
         mock_session = AsyncMock()
         mock_session.info = {}
         insert_result = MagicMock()
-        insert_result.scalar_one_or_none.return_value = 'wf-1'
+        insert_result.scalar_one_or_none.return_value = WORKFLOW_ID
         mock_session.execute = AsyncMock(return_value=insert_result)
         mock_session.commit = AsyncMock()
 
@@ -187,7 +191,7 @@ class TestRetryOnTransientErrors:
 
         with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
-                spec, broker, 'wf-1', resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
 
         assert is_ok(result)
@@ -208,7 +212,7 @@ class TestRetryOnTransientErrors:
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
-                    spec, broker, 'wf-1', resend_on_transient_err=True,
+                    spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
 
         assert is_err(result)
@@ -240,7 +244,7 @@ class TestNonRetryableErrorsNoRetry:
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=False):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
-                    spec, broker, 'wf-1', resend_on_transient_err=True,
+                    spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
 
         assert is_err(result)
@@ -257,7 +261,7 @@ class TestNonRetryableErrorsNoRetry:
 
         with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
-                spec, broker, 'wf-1', resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
 
         assert is_err(result)
@@ -288,7 +292,7 @@ class TestNonRetryableErrorsNoRetry:
 
         with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
             result = await start_workflow_async(
-                spec, broker, 'wf-1', resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
 
         assert is_err(result)
@@ -319,7 +323,7 @@ class TestBackoffValues:
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 await start_workflow_async(
-                    spec, broker, 'wf-1', resend_on_transient_err=True,
+                    spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
                 )
 
         sleep_args = [call.args[0] for call in mock_sleep.call_args_list]
@@ -355,7 +359,7 @@ class TestSyncWrapperForwarding:
             mock_get_runner.return_value = mock_runner
 
             result = start_workflow(
-                spec, broker, 'wf-1', resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
             )
 
         assert is_ok(result)
