@@ -1163,7 +1163,8 @@ jobs:
           jq -e '.footprint.fits_same_lane != null' "$output"
           # Flat or explained. A stage whose per-batch cost drifts is not a
           # per-row cost, and extrapolating it is how the next rung is lost.
-          jq -r '.measurement.trends[] | "trend \(.stage): \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -r '.measurement.trends[] | "trend \(.stage) [\(.mode)]: \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -e '.measurement.preparation_fit.intercept_seconds != null' "$output"
           jq -e '[.measurement.trends[] | select(.within_gate == false)] | length == 0' "$output"
 
       - name: Preserve rung-1 evidence
@@ -1288,7 +1289,8 @@ jobs:
           jq -e '.measurement.fitted.regression_intercept_seconds != null' "$output"
           jq -e '.footprint.fits_same_lane != null' "$output"
           # Flat or explained, on this rung too: rung 3 would extrapolate it.
-          jq -r '.measurement.trends[] | "trend \(.stage): \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -r '.measurement.trends[] | "trend \(.stage) [\(.mode)]: \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -e '.measurement.preparation_fit.intercept_seconds != null' "$output"
           jq -e '[.measurement.trends[] | select(.within_gate == false)] | length == 0' "$output"
 
       - name: Preserve rung-2 evidence
