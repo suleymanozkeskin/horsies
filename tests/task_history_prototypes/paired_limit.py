@@ -21,10 +21,11 @@ are recorded as a disagreement rather than resolved by preferring one.
 
 from __future__ import annotations
 
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, Final
 
 from .paired_cell import SampleUnit
 
@@ -259,3 +260,113 @@ def median(values: Sequence[float]) -> float:
     if len(ordered) % 2:
         return ordered[midpoint]
     return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
+
+
+# Section 2.1: bootstrap comparisons use at least 1,000 resamples and a
+# recorded seed. Both are properties of the result, not of the run that
+# produced it: a reader who has the seed and the samples gets the same interval
+# back, and a reader who has neither is being asked to trust an interval.
+BOOTSTRAP_RESAMPLES: Final = 1_000
+BOOTSTRAP_SEED: Final = 20260808
+
+
+@dataclass(frozen=True, slots=True)
+class BootstrapInterval:
+    """A percentile interval for the paired delta, with what produced it.
+
+    The two sides are resampled INDEPENDENTLY, because they are independent
+    samples: the ordering pairs them in position, not observation by
+    observation, so there is no pairing to preserve when resampling.
+    """
+
+    statistic: str
+    point: float
+    low: float
+    high: float
+    confidence: float
+    resamples: int
+    seed: int
+
+    @property
+    def excludes_zero(self) -> bool:
+        """Whether the interval says a difference exists at all."""
+        return self.low > 0.0 or self.high < 0.0
+
+    def as_conditions(self) -> dict[str, Any]:
+        return {
+            'statistic': self.statistic,
+            'point': self.point,
+            'low': self.low,
+            'high': self.high,
+            'confidence': self.confidence,
+            'resamples': self.resamples,
+            'seed': self.seed,
+            'excludes_zero': self.excludes_zero,
+        }
+
+
+def _statistic_of(values: Sequence[float], statistic: str) -> float:
+    match statistic:
+        case 'p50':
+            return median(values)
+        case 'p99':
+            return percentile(values, 0.99)
+        case _:
+            raise LimitError(f'no bootstrap defined for statistic {statistic}')
+
+
+def bootstrap_delta(
+    control: Sequence[float],
+    candidate: Sequence[float],
+    *,
+    statistic: str,
+    confidence: float = 0.95,
+    resamples: int = BOOTSTRAP_RESAMPLES,
+    seed: int = BOOTSTRAP_SEED,
+) -> BootstrapInterval:
+    """Resample both sides to put an interval around the delta.
+
+    A point delta says where the two sides landed; it does not say how much of
+    that is the sample. The interval is what lets a reader see whether a delta
+    inside its limit is a delta at all.
+    """
+    if resamples < BOOTSTRAP_RESAMPLES:
+        raise LimitError(
+            f'{resamples} resamples, the mode requires at least '
+            f'{BOOTSTRAP_RESAMPLES}'
+        )
+    if not 0.0 < confidence < 1.0:
+        raise LimitError(f'confidence must be in (0, 1), got {confidence}')
+    if not control or not candidate:
+        raise LimitError('both sides need observations to be resampled')
+    generator = random.Random(seed)
+    deltas: list[float] = []
+    control_size = len(control)
+    candidate_size = len(candidate)
+    for _ in range(resamples):
+        control_sample = [
+            control[generator.randrange(control_size)]
+            for _ in range(control_size)
+        ]
+        candidate_sample = [
+            candidate[generator.randrange(candidate_size)]
+            for _ in range(candidate_size)
+        ]
+        deltas.append(
+            _statistic_of(candidate_sample, statistic)
+            - _statistic_of(control_sample, statistic)
+        )
+    deltas.sort()
+    tail = (1.0 - confidence) / 2.0
+    low_index = int(round(tail * (resamples - 1)))
+    high_index = int(round((1.0 - tail) * (resamples - 1)))
+    return BootstrapInterval(
+        statistic=statistic,
+        point=_statistic_of(candidate, statistic)
+        - _statistic_of(control, statistic),
+        low=deltas[low_index],
+        high=deltas[high_index],
+        confidence=confidence,
+        resamples=resamples,
+        seed=seed,
+    )

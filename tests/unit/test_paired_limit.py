@@ -218,3 +218,81 @@ def test_a_median_of_nothing_is_refused() -> None:
 def test_a_relative_delta_against_a_zero_control_is_refused() -> None:
     with pytest.raises(LimitError, match='undefined'):
         _reading(0, 0.0, 1.0).relative_delta
+
+
+def test_a_bootstrap_interval_is_reproducible_from_its_seed() -> None:
+    """A reader with the samples and the seed gets the same interval back."""
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    control = [1.5 + (index % 7) * 0.01 for index in range(500)]
+    candidate = [1.6 + (index % 7) * 0.01 for index in range(500)]
+    first = bootstrap_delta(control, candidate, statistic='p50')
+    second = bootstrap_delta(control, candidate, statistic='p50')
+    assert (first.low, first.high) == (second.low, second.high)
+    assert first.seed == second.seed
+
+
+def test_a_different_seed_gives_a_different_interval() -> None:
+    """Which is why the seed is recorded rather than left implicit.
+
+    Uses samples with the variety a real run has: on low-cardinality data every
+    resample returns the same median and the interval collapses regardless of
+    seed, which would make this test pass for the wrong reason.
+    """
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    control = [1.5 + index * 0.0007 for index in range(500)]
+    candidate = [1.6 + index * 0.0009 for index in range(500)]
+    first = bootstrap_delta(control, candidate, statistic='p50', seed=1)
+    second = bootstrap_delta(control, candidate, statistic='p50', seed=2)
+    assert (first.low, first.high) != (second.low, second.high)
+
+
+def test_the_interval_brackets_its_point_estimate() -> None:
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    control = [1.5 + (index % 7) * 0.01 for index in range(500)]
+    candidate = [1.6 + (index % 7) * 0.01 for index in range(500)]
+    interval = bootstrap_delta(control, candidate, statistic='p50')
+    assert interval.low <= interval.point <= interval.high
+    assert interval.excludes_zero
+
+
+def test_two_samples_from_one_population_do_not_exclude_zero() -> None:
+    """The check that says a delta inside its limit is a delta at all."""
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    values = [1.5 + (index % 17) * 0.03 for index in range(600)]
+    interval = bootstrap_delta(values, list(values), statistic='p50')
+    assert not interval.excludes_zero
+
+
+def test_too_few_resamples_are_refused() -> None:
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    with pytest.raises(LimitError, match='at least 1000'):
+        bootstrap_delta([1.0, 2.0], [1.0, 2.0], statistic='p50', resamples=100)
+
+
+def test_an_empty_side_cannot_be_resampled() -> None:
+    from tests.task_history_prototypes.paired_limit import bootstrap_delta
+
+    with pytest.raises(LimitError, match='both sides need observations'):
+        bootstrap_delta([], [1.0], statistic='p50')
+
+
+def test_the_conditions_carry_the_seed_and_the_resample_count() -> None:
+    from tests.task_history_prototypes.paired_limit import (
+        BOOTSTRAP_RESAMPLES,
+        BOOTSTRAP_SEED,
+        bootstrap_delta,
+    )
+
+    control = [1.5 + (index % 7) * 0.01 for index in range(500)]
+    candidate = [1.6 + (index % 7) * 0.01 for index in range(500)]
+    conditions = bootstrap_delta(
+        control, candidate, statistic='p50'
+    ).as_conditions()
+    assert conditions['resamples'] == BOOTSTRAP_RESAMPLES
+    assert conditions['seed'] == BOOTSTRAP_SEED
+    assert conditions['confidence'] == 0.95
