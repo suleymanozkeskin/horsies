@@ -157,6 +157,16 @@ def _percentile(values: Sequence[float], fraction: float) -> float:
     return ordered[rank]
 
 
+def _rank_limited(count: int, fraction: float) -> bool:
+    """Whether this percentile resolves to the sample's maximum.
+
+    An interval with few observations still has a p99 arithmetically, and that
+    p99 is its largest value. Reporting it is useful; judging a budget against
+    it is not, because one outlier sets it.
+    """
+    return int(round(fraction * (count - 1))) >= count - 1
+
+
 @dataclass(frozen=True, slots=True)
 class IntervalStatistics:
     """One interval's numbers, reported on their own."""
@@ -167,6 +177,7 @@ class IntervalStatistics:
     p95: float
     p99: float
     maximum: float
+    rank_limited: frozenset[str]
 
     def as_conditions(self) -> dict[str, Any]:
         return {
@@ -176,6 +187,7 @@ class IntervalStatistics:
             'p95': self.p95,
             'p99': self.p99,
             'max': self.maximum,
+            'rank_limited': sorted(self.rank_limited),
         }
 
 
@@ -211,6 +223,13 @@ class OperationalReport:
                 p95=_percentile(values, 0.95),
                 p99=_percentile(values, 0.99),
                 maximum=max(values),
+                rank_limited=frozenset(
+                    name
+                    for name, fraction in (
+                        ('p50', 0.50), ('p95', 0.95), ('p99', 0.99)
+                    )
+                    if _rank_limited(len(values), fraction)
+                ),
             )
             for interval, values in grouped.items()
         }
@@ -271,6 +290,13 @@ def judge_interval(
     if value is None:
         raise OperationalReportError(
             f'no statistic named {statistic} on an interval report'
+        )
+    if statistic in measured.rank_limited:
+        raise OperationalReportError(
+            f'{report.row}: {statistic} over {measured.count} observations in '
+            f'the {interval} interval is the maximum of that sample, not a '
+            'percentile; one outlier sets it, so it cannot carry a budget '
+            'verdict'
         )
     return {
         'row': report.row,
