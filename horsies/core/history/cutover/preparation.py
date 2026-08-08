@@ -41,13 +41,23 @@ from ..terminalization.move import LIVE_TASKS
 
 @dataclass(frozen=True, slots=True)
 class PreparationBatch:
-    """One committed batch of prepared legacy rows."""
+    """One committed batch of prepared legacy rows.
+
+    ``last_id`` is the keyset watermark: the caller passes it as the
+    next call's ``after_id`` so the selection never re-walks rows this
+    run already prepared. Without it every batch restarts the id-order
+    scan and discards all previously prepared rows before finding work
+    — per-batch cost then grows with the batch index and total
+    preparation is quadratic in rows (measured at +13.5 ms/batch on a
+    1M-row run, ~3.5 hours of pure skipping at 10M).
+    """
 
     rows_prepared: int
     inline_rows: int
     over_bound_rows: int
     policy_declined_rows: int
     decode_failed_rows: int
+    last_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,12 +161,27 @@ async def prepare_legacy_batch(
     *,
     retain_default: bool,
     batch_size: int,
+    after_id: str | None = None,
 ) -> PreparationBatch | PreparationComplete:
     """Prepare one bounded batch; the caller owns the transaction.
 
     Selection: terminal rows without a prepared disposition — the
-    unbackfilled marker, which also makes a resumed run idempotent.
+    unbackfilled marker, which also makes a resumed run idempotent —
+    strictly after the keyset watermark. The watermark, not an index,
+    removes the re-scan: a partial index on the IS NULL predicate would
+    need maintenance on every backfill UPDATE and bloat during exactly
+    the bulk write it is meant to help, while the watermark also stays
+    immune to dead-tuple accumulation. A run that resumes without its
+    watermark is still correct — every row at or below it is already
+    prepared and fails the disposition predicate.
     """
+    # The keyset predicate renders only when a watermark exists, so the
+    # parameter's type always resolves from the id column itself — the
+    # comparison stays in the column's own order in both identity eras.
+    keyset_condition = '' if after_id is None else 'AND id > :after_id'
+    parameters: dict[str, object] = {'batch_size': batch_size}
+    if after_id is not None:
+        parameters['after_id'] = after_id
     rows = (
         await connection.execute(
             text(
@@ -167,11 +192,12 @@ async def prepare_legacy_batch(
                 FROM {LIVE_TASKS}
                 WHERE status NOT IN ('PENDING', 'CLAIMED', 'RUNNING')
                   AND prepared_rerun_input_disposition IS NULL
+                  {keyset_condition}
                 ORDER BY id
                 LIMIT :batch_size
                 """
             ),
-            {'batch_size': batch_size},
+            parameters,
         )
     ).all()
     if not rows:
@@ -188,24 +214,26 @@ async def prepare_legacy_batch(
     prepared = [
         _prepare_one(row, retain_default=retain_default) for row in rows
     ]
-    for item in prepared:
-        await connection.execute(
-            text(
-                f"""
-                UPDATE {LIVE_TASKS} SET
-                    command_fingerprint_version = 1,
-                    command_fingerprint = :fingerprint,
-                    input_digest = :input_digest,
-                    retain_rerun_input = :retain,
-                    prepared_rerun_input_disposition = :disposition,
-                    prepared_rerun_input_version = :version,
-                    prepared_rerun_input_codec = :codec,
-                    prepared_rerun_input_content_type = :content_type,
-                    prepared_rerun_input_digest = :digest,
-                    prepared_rerun_input_inline = :inline
-                WHERE id = :task_id
-                """
-            ),
+    # One executemany, not one statement per row: the per-row loop cost
+    # 5.4x relocation per row purely in round trips (605 vs 112 s/M).
+    await connection.execute(
+        text(
+            f"""
+            UPDATE {LIVE_TASKS} SET
+                command_fingerprint_version = 1,
+                command_fingerprint = :fingerprint,
+                input_digest = :input_digest,
+                retain_rerun_input = :retain,
+                prepared_rerun_input_disposition = :disposition,
+                prepared_rerun_input_version = :version,
+                prepared_rerun_input_codec = :codec,
+                prepared_rerun_input_content_type = :content_type,
+                prepared_rerun_input_digest = :digest,
+                prepared_rerun_input_inline = :inline
+            WHERE id = :task_id
+            """
+        ),
+        [
             {
                 'task_id': item.task_id,
                 'fingerprint': item.fingerprint,
@@ -217,10 +245,13 @@ async def prepare_legacy_batch(
                 'content_type': item.content_type,
                 'digest': item.digest,
                 'inline': item.inline,
-            },
-        )
+            }
+            for item in prepared
+        ],
+    )
     return PreparationBatch(
         rows_prepared=len(prepared),
+        last_id=prepared[-1].task_id,
         inline_rows=sum(p.disposition == 'INLINE' for p in prepared),
         over_bound_rows=sum(p.disposition == 'OVER_BOUND' for p in prepared),
         policy_declined_rows=sum(

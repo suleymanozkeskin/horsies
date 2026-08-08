@@ -61,16 +61,26 @@ async def run_preparation_to_complete(
     retain_default: bool,
     batch_size: int = 2,
 ) -> tuple[list[PreparationBatch], PreparationComplete]:
+    """Drive batches to completion, threading the keyset watermark.
+
+    Each batch's ``last_id`` feeds the next call's ``after_id`` — the
+    driver contract that keeps preparation linear: without it every
+    batch re-walks all previously prepared rows and the stage goes
+    quadratic in rows.
+    """
     batches: list[PreparationBatch] = []
+    after_id: str | None = None
     while True:
         outcome = await prepare_legacy_batch(
             connection,
             retain_default=retain_default,
             batch_size=batch_size,
+            after_id=after_id,
         )
         if isinstance(outcome, PreparationComplete):
             return batches, outcome
         batches.append(outcome)
+        after_id = outcome.last_id
 
 
 class TestPreparation:
@@ -238,5 +248,78 @@ class TestPreparation:
                         args=[42], kwargs={}, options=None
                     )
                 )
+        finally:
+            await engine.dispose()
+
+class TestKeysetWatermark:
+    @pytest.mark.asyncio
+    async def test_the_watermark_bounds_the_selection(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """Rows at or below the watermark are never revisited.
+
+        The functional half of the linearity guarantee: a watermark past
+        every id selects nothing even while unprepared rows remain below
+        it, and a threaded watermark walks the remainder exactly once in
+        id order. If the keyset predicate is dropped, the past-everything
+        call finds rows again and this fails.
+        """
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                for _ in range(4):
+                    await insert_legacy_task(
+                        connection,
+                        status='FAILED',
+                        kind=None,
+                        disposition=None,
+                        retain=None,
+                        args_json='[]',
+                        kwargs_json='{}',
+                    )
+                ordered = [
+                    row.id
+                    for row in (
+                        await connection.execute(
+                            text('SELECT id FROM horsies_tasks ORDER BY id')
+                        )
+                    ).all()
+                ]
+
+                beyond = await prepare_legacy_batch(
+                    connection,
+                    retain_default=True,
+                    batch_size=2,
+                    after_id=ordered[-1],
+                )
+                assert isinstance(beyond, PreparationComplete)
+
+                first = await prepare_legacy_batch(
+                    connection, retain_default=True, batch_size=2
+                )
+                assert isinstance(first, PreparationBatch)
+                assert first.rows_prepared == 2
+                assert first.last_id == ordered[1]
+
+                second = await prepare_legacy_batch(
+                    connection,
+                    retain_default=True,
+                    batch_size=2,
+                    after_id=first.last_id,
+                )
+                assert isinstance(second, PreparationBatch)
+                assert second.rows_prepared == 2
+                assert second.last_id == ordered[-1]
+
+                done = await prepare_legacy_batch(
+                    connection,
+                    retain_default=True,
+                    batch_size=2,
+                    after_id=second.last_id,
+                )
+                assert isinstance(done, PreparationComplete)
         finally:
             await engine.dispose()
