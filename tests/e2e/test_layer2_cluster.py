@@ -27,6 +27,10 @@ from tests.e2e.helpers.db import (
     wait_for_any_status,
     wait_for_status,
 )
+from tests.integration.history_seeding import (
+    read_attempt_history,
+    read_attempt_workers,
+)
 from tests.e2e.helpers.assertions import unwrap_send
 from tests.e2e.helpers.worker import run_worker, run_workers
 from tests.e2e.tasks import basic as basic_tasks
@@ -716,33 +720,18 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
                     f'Task {task_id} has retry_count {task.retry_count}, expected 3'
                 )
 
-            # claimed_by_worker_id is the mutable current/last owner on the
-            # task row. Retry execution history lives in horsies_task_attempts,
-            # so use that table to prove worker participation across attempts.
-            attempt_counts_result = await session.execute(
-                text("""
-                    SELECT task_id, COUNT(*) AS attempt_count
-                    FROM horsies_task_attempts
-                    WHERE task_id = ANY(:ids)
-                    GROUP BY task_id
-                """),
-                {'ids': task_ids},
-            )
+            # The task row carries only its final owner; participation
+            # across attempts lives in the attempt history, which the
+            # move archives into the record's snapshot as it purges the
+            # live rows — so it is read from wherever it now lives.
             attempt_counts = {
-                str(row[0]): int(row[1])
-                for row in attempt_counts_result.fetchall()
+                task_id: len(await read_attempt_history(session, task_id))
+                for task_id in task_ids
             }
 
-            worker_ids_result = await session.execute(
-                text("""
-                    SELECT DISTINCT worker_id
-                    FROM horsies_task_attempts
-                    WHERE task_id = ANY(:ids)
-                      AND worker_id IS NOT NULL
-                """),
-                {'ids': task_ids},
-            )
-            worker_ids_seen = {str(row[0]) for row in worker_ids_result.fetchall()}
+            worker_ids_seen: set[str] = set()
+            for task_id in task_ids:
+                worker_ids_seen |= await read_attempt_workers(session, task_id)
 
         expected_attempts_per_task = 4  # initial attempt + 3 retries
         assert attempt_counts == {
@@ -1205,10 +1194,10 @@ async def test_softcap_expired_claim_requeued(
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
-                    'Reclaimed COMPLETED task must record a live owner'
+                assert task.last_claimed_worker_id is not None, (
+                    'Reclaimed COMPLETED task must record its final owner'
                 )
-                assert task.claimed_by_worker_id != dead_worker_id, (
+                assert task.last_claimed_worker_id != dead_worker_id, (
                     f'Task was not reclaimed: still assigned to {dead_worker_id}'
                 )
 
@@ -1312,10 +1301,10 @@ async def test_softcap_owner_transition_after_worker_crash(
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
+                assert task.last_claimed_worker_id is not None, (
                     'Completed task should retain final owner id'
                 )
-                assert task.claimed_by_worker_id != first_owner, (
+                assert task.last_claimed_worker_id != first_owner, (
                     f'Expected owner transition after crash, still owned by {first_owner}'
                 )
 
@@ -1482,10 +1471,10 @@ async def test_requeue_db_error_age_guard_recovery(
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
+                assert task.last_claimed_worker_id is not None, (
                     'Completed task should retain final owner id'
                 )
-                assert task.claimed_by_worker_id != worker_a_id, (
+                assert task.last_claimed_worker_id != worker_a_id, (
                     f'Expected owner transition from Worker A ({worker_a_id}), '
                     f'still owned by same worker'
                 )

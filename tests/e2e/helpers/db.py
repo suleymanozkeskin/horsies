@@ -39,6 +39,9 @@ class TaskRow:
     retry_count: int
     max_retries: int
     claimed_by_worker_id: str | None
+    """The LEASE: who holds the task now. Absent once it terminalizes."""
+    last_claimed_worker_id: str | None
+    """PROVENANCE: who ran it. Survives the move."""
     claimed_at: datetime | None
     next_retry_at: datetime | None
     sent_at: datetime | None
@@ -51,7 +54,8 @@ class TaskRow:
 
 _READ_TASK_SQL = text("""
     SELECT id, task_name, queue_name, status, result, retry_count,
-           max_retries, claimed_by_worker_id, claimed_at, next_retry_at,
+           max_retries, claimed_by_worker_id, last_claimed_worker_id,
+           claimed_at, next_retry_at,
            sent_at, enqueued_at, started_at, completed_at, failed_at,
            error_code
     FROM itest_task_rows
@@ -79,6 +83,7 @@ async def read_task(session: AsyncSession, task_id: str) -> TaskRow | None:
         retry_count=row.retry_count,
         max_retries=row.max_retries,
         claimed_by_worker_id=row.claimed_by_worker_id,
+        last_claimed_worker_id=row.last_claimed_worker_id,
         claimed_at=row.claimed_at,
         next_retry_at=row.next_retry_at,
         sent_at=row.sent_at,
