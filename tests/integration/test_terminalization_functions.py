@@ -2634,12 +2634,17 @@ class TestIdKeyedWorkflowBatches:
                 {'id': applied_id},
             )
         ).one()
+        # The record's error fields are projected from the operation, not
+        # carried over from the live row: the planted OLD_CODE belongs to
+        # a superseded attempt and must not ride into the record as if it
+        # were the terminal cause. Pause-abandon states its cause; a
+        # workflow cancellation has none to state, and its kind says so.
         if command_type is AbandonOwnedNodes:
             assert summary.error_code == 'TASK_CANCELLED'
             assert summary.failed_reason == 'Workflow paused before task start'
         else:
-            assert summary.error_code == 'OLD_CODE'
-            assert summary.failed_reason == 'old reason'
+            assert summary.error_code is None
+            assert summary.failed_reason is None
 
     @pytest.mark.parametrize(
         'function_name',
