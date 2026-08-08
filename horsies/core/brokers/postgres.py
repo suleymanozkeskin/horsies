@@ -2661,6 +2661,130 @@ class PostgresBroker:
             )
 
 
+
+    async def _history_task_info(
+        self,
+        session: 'AsyncSession',
+        task_id: str,
+        *,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> BrokerResult[TaskInfo | None]:
+        """The history side of a task-info read, or Ok(None) if absent.
+
+        The terminal instant lands in completed_at for COMPLETED and in
+        failed_at otherwise; claim state is structurally absent on a
+        history record, while the claim's timestamp survives as
+        provenance. Attempts decode from the record's snapshot — their
+        only home after the move.
+        """
+        from horsies.core.history.identity.uuid7 import UUID
+
+        try:
+            UUID(task_id)
+        except ValueError:
+            return Ok(None)
+        from horsies.core.history.reads.detail import (
+            HistoryTaskDetail,
+            read_task_detail,
+            staged_detail_published,
+        )
+
+        connection = await session.connection()
+        if not await staged_detail_published(connection):
+            return Ok(None)
+        detail = await read_task_detail(connection, task_id=task_id)
+        match detail:
+            case HistoryTaskDetail():
+                pass
+            case _:
+                return Ok(None)
+
+        status = TaskStatus(detail.status)
+        completed_at = (
+            detail.terminal_at if status is TaskStatus.COMPLETED else None
+        )
+        failed_at = (
+            detail.terminal_at if status is not TaskStatus.COMPLETED else None
+        )
+        raw_result_value: dict[str, Any] | None = None
+        if include_result and detail.result_payload is not None:
+            _lr = loads_json(detail.result_payload.decode('utf-8'))
+            if is_err(_lr):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=(
+                        f'Result JSON parse failed for task '
+                        f'{task_id}: {_lr.err_value}'
+                    ),
+                    retryable=False,
+                ))
+            loaded = _lr.ok_value
+            if loaded is not None and not isinstance(loaded, dict):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=(
+                        f'Result for task {task_id} is not a JSON '
+                        f'object; got {type(loaded).__name__}'
+                    ),
+                    retryable=False,
+                ))
+            raw_result_value = loaded
+
+        attempts: list[TaskAttemptInfo] | None = None
+        if include_attempts:
+            attempts = [
+                TaskAttemptInfo(
+                    task_id=task_id,
+                    attempt=record.attempt,
+                    outcome=TaskAttemptOutcome(record.outcome),
+                    will_retry=record.will_retry,
+                    started_at=record.started_at,
+                    finished_at=record.finished_at,
+                    error_code=record.error_code,
+                    error_message=record.error_message,
+                    failed_reason=record.failed_reason,
+                    worker_id=record.worker_id,
+                    worker_hostname=record.worker_hostname,
+                    worker_pid=record.worker_pid,
+                    worker_process_name=record.worker_process_name,
+                )
+                for record in detail.attempts
+            ]
+
+        return Ok(
+            TaskInfo(
+                task_id=detail.task_id,
+                task_name=detail.task_name,
+                status=status,
+                queue_name=detail.queue_name,
+                priority=detail.priority,
+                retry_count=detail.retry_count,
+                max_retries=detail.max_retries,
+                next_retry_at=None,
+                sent_at=detail.sent_at,
+                enqueued_at=detail.enqueued_at,
+                claimed_at=detail.claimed_at,
+                started_at=detail.started_at,
+                completed_at=completed_at,
+                failed_at=failed_at,
+                worker_hostname=detail.last_worker_hostname,
+                worker_pid=detail.last_worker_pid,
+                worker_process_name=None,
+                error_code=detail.error_code,
+                raw_result=raw_result_value,
+                decoded_result=None,
+                result_decoded=False,
+                failed_reason=(
+                    detail.final_failed_reason
+                    if include_failed_reason
+                    else None
+                ),
+                attempts=attempts,
+            )
+        )
+
     async def get_task_info_async(
         self,
         task_id: str,
@@ -2713,7 +2837,17 @@ class PostgresBroker:
                 result = await session.execute(query, {'id': task_id})
                 row = result.fetchone()
                 if row is None:
-                    return Ok(None)
+                    # Terminalization moves finished rows to history, so
+                    # a live miss is the normal terminal case: fall
+                    # through to the staged detail read, exactly like
+                    # the result surface. Ok(None) only on true absence.
+                    return await self._history_task_info(
+                        session,
+                        task_id,
+                        include_result=include_result,
+                        include_failed_reason=include_failed_reason,
+                        include_attempts=include_attempts,
+                    )
 
                 raw_result_value: dict[str, Any] | None = None
                 failed_reason = None

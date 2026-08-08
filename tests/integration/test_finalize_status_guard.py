@@ -83,7 +83,7 @@ async def _insert_running_task(
                  3, NOW(), :enqueue_sha, :claimed_by_worker_id,
                  :claimed_at,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
@@ -141,7 +141,7 @@ async def _insert_running_task_with_retry(
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
                  :good_until, :task_options, :enqueue_sha,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {

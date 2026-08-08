@@ -840,10 +840,16 @@ async def test_argument_deserialization_error(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries, enqueue_sha)
+                     claimed, retry_count, max_retries, enqueue_sha,
+                     retention_class_key, command_fingerprint_version,
+                     command_fingerprint, retain_rerun_input,
+                     prepared_rerun_input_disposition)
                 VALUES
                     (:tid, 'e2e_simple', 'default', 'PENDING', :args, '{}', 100, :sent_at,
-                     FALSE, 0, 0, :enqueue_sha)
+                     FALSE, 0, 0, :enqueue_sha,
+                     'standard_30d', 1,
+                     sha256(convert_to(CAST(CAST(:tid AS uuid) AS text), 'UTF8')),
+                     FALSE, 'DECLINED_BY_POLICY')
             """),
             {'tid': task_id, 'args': '"not_a_list"', 'sent_at': sent_at, 'enqueue_sha': sha},
         )
@@ -878,10 +884,16 @@ async def test_malformed_pydantic_args(
             text("""
                 INSERT INTO horsies_tasks
                     (id, task_name, queue_name, status, args, kwargs, priority, sent_at,
-                     claimed, retry_count, max_retries, enqueue_sha)
+                     claimed, retry_count, max_retries, enqueue_sha,
+                     retention_class_key, command_fingerprint_version,
+                     command_fingerprint, retain_rerun_input,
+                     prepared_rerun_input_disposition)
                 VALUES
                     (:tid, 'e2e_pydantic', 'default', 'PENDING', :args, '{}', 100, :sent_at,
-                     FALSE, 0, 0, :enqueue_sha)
+                     FALSE, 0, 0, :enqueue_sha,
+                     'standard_30d', 1,
+                     sha256(convert_to(CAST(CAST(:tid AS uuid) AS text), 'UTF8')),
+                     FALSE, 'DECLINED_BY_POLICY')
             """),
             {'tid': task_id, 'args': corrupted_args, 'sent_at': sent_at, 'enqueue_sha': sha},
         )

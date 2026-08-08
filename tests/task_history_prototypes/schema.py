@@ -26,7 +26,12 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # lists are UNAFFECTED. The base moves; the qualified behavior does
 # not. Any future base move re-litigates this guard the same way —
 # explicitly, never by widening it to a range.
-_EXPECTED_BASE_SCHEMA_VERSION = 30
+# v31 adds WorkflowStatus.EXPIRED to the workflow terminal set (with the
+# class-rule DROP+CREATE of the workflows retention index). No prototype
+# models the workflow retention index or the workflow terminal literal
+# set; the frozen fragments and rendered programs the prototypes install
+# are unchanged by v31, so the base advances with the bump.
+_EXPECTED_BASE_SCHEMA_VERSION = 31
 
 
 @dataclass(frozen=True, slots=True)

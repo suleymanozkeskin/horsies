@@ -37,6 +37,10 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance used by e2e tasks."""
     brk = default_instance.broker
     await brk.ensure_schema_initialized()
+    from tests.integration.history_seeding import ensure_history_seedable
+
+    async with brk.async_engine.begin() as connection:
+        await ensure_history_seedable(connection)
     yield brk
     try:
         await brk.close_async()

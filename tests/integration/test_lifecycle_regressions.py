@@ -102,7 +102,7 @@ async def _insert_owned_running_task(
                  'itest-process', :task_options, :finalizing_at,
                  :finalizing_by_worker_id,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
@@ -190,7 +190,7 @@ async def _insert_retry_window_workflow_task(
                  :worker_id, NOW() + INTERVAL '60 seconds', 1, 3,
                  :enqueue_sha, TRUE,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:task_id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:task_id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {

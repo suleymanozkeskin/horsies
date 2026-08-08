@@ -188,7 +188,7 @@ class TestKeyedEnqueue:
                         't.idempotency_key_digest '
                         'FROM horsies_key_reservations r '
                         'JOIN horsies_tasks t '
-                        'ON t.id = CAST(r.task_id AS varchar) '
+                        'ON t.id = r.task_id '
                         'WHERE r.task_id = CAST(:id AS uuid)'
                     ),
                     {'id': send.task_id},

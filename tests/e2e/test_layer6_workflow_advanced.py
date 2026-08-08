@@ -872,7 +872,7 @@ async def test_workflow_recovers_after_worker_crash(
     async with recovery_broker.session_factory() as session:
         result = await session.execute(
             sa_text("""
-                SELECT result FROM horsies_tasks WHERE id = :id
+                SELECT result FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id_c},
         )

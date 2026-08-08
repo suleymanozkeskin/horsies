@@ -101,7 +101,7 @@ _SEED_SQL = text("""
         CAST(:id AS uuid), 'terminalization.test', 'default', :status, '[]', '{}',
         repeat('0', 64), :is_workflow_task, :claimed,
         :worker_id, :claimed_at, NOW(),
-        :retention_class_key, 1, sha256(convert_to(CAST(:id AS text), 'UTF8')),
+        :retention_class_key, 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
         FALSE, 'DECLINED_BY_POLICY'
     )
 """)
@@ -1445,8 +1445,8 @@ class TestExpirePendingTasks:
         rows = (
             await session.execute(
                 text("""
-                    SELECT id, status FROM horsies_tasks
-                    WHERE id = ANY(:ids)
+                    SELECT id, status FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
                 """),
                 {'ids': eligible + [fresh, undated]},
             )
@@ -1846,11 +1846,14 @@ class TestCancelOwnedOrphan:
         assert row.failed_reason == (
             'Workflow task orphaned: no live workflow_task linkage'
         )
-        assert row.failed_at is None
+        # The terminal instant lands in failed_at beside CANCELLED, and
+        # the claim's timestamp survives on the record as provenance
+        # while no claim state does.
+        assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
         assert row.claimed is False
         assert row.claimed_by_worker_id is None
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
 
     async def test_a_terminal_link_still_leaves_the_backing_task_orphaned(
         self,
@@ -2054,8 +2057,8 @@ class TestCancelOrphanedTasks:
         remaining = (
             await session.execute(
                 text("""
-                    SELECT COUNT(*) FROM horsies_tasks
-                    WHERE id = ANY(:ids) AND status = 'CLAIMED'
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'CLAIMED'
                 """),
                 {'ids': ids},
             )
@@ -2614,7 +2617,12 @@ class TestIdKeyedWorkflowBatches:
         assert isinstance(outcomes[4].evidence, ObservedForeignTerminalization)
         assert isinstance(outcomes[5], SourceStateConflict)
         assert isinstance(outcomes[5].evidence, ObservedForeignTerminalization)
-        assert outcomes[5].evidence.committed_kind is None
+        # A forced kindless row carries LEGACY_TERMINAL post-cutover:
+        # relocated provenance, family unrecorded, classified foreign.
+        assert (
+            outcomes[5].evidence.committed_kind
+            is TerminalizationKind.LEGACY_TERMINAL
+        )
         assert isinstance(outcomes[6], TaskAbsent)
 
         summary = (

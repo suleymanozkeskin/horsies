@@ -133,7 +133,7 @@ async def _seed_task(
                  :worker_id, :sha, :is_wf,
                  :good_until, :started_at, 'host', 1, 'proc',
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {

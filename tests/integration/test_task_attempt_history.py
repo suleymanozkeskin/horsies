@@ -151,7 +151,7 @@ async def _insert_running_task(
                  :worker_id, :worker_hostname, :worker_pid,
                  :worker_process_name, :good_until, :task_options,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
@@ -558,7 +558,7 @@ async def test_stale_cleanup_writes_failed_attempt_worker_crashed(
                  0, :stale_started_at, :enqueue_sha,
                  'w-stale-1', 'stale-host', 1234, 'stale-proc',
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
@@ -640,7 +640,7 @@ async def test_stale_cleanup_with_retry_policy_schedules_retry(
                  3, :stale_started_at, :enqueue_sha, :task_options,
                  'w-stale-retry', 'stale-host', 9999, 'stale-proc',
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
@@ -901,7 +901,7 @@ async def test_expire_pending_task_transitions_to_expired(
                  'PENDING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, :enqueue_sha, :good_until,
                  'standard_30d', 1,
-                 sha256(convert_to(CAST(:id AS text), 'UTF8')),
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
                  FALSE, 'DECLINED_BY_POLICY')
         """),
         {
