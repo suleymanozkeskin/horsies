@@ -59,25 +59,33 @@ _CLASS_KEY = 'finite_30d_v1'
 FLUSH_EVERY_BATCHES: Final = 50
 
 # A stage whose per-batch duration drifts more than this fraction of its own
-# mean batch, across the whole run, is not extrapolated. Sandwiched from
-# measurement: a linear copy stage drifted 1% and 3% of its mean batch on the
-# two majors, while a stage whose selection rescanned already-finished rows
-# drifted +22%. Five percent sits 1.7x above the largest passing measurement
-# and 4.4x below the failing one.
-PER_BATCH_TREND_GATE_FRACTION: Final = 0.05
+# mean batch, across the whole run, is not extrapolated. Geometric midpoint
+# between the worst drift a known-good control produced (5.80%, from SIX
+# measurements of the copy stage, which is linear by mechanism and whose
+# fitted slope is stable across every run) and the smallest a known-bad shape
+# produced (22.15%, from the two runs that predate this decision). 1.95x
+# margin on each side.
+#
+# This replaces an earlier 5%, which was sandwiched against a control floor of
+# two readings. Two readings cannot estimate a spread: with six the control
+# reaches 5.80%, so that gate sat inside its own control's noise from the day
+# it was written and failed the control on the third run. The sample count is
+# stated because a threshold's authority is the data standing under it.
+PER_BATCH_TREND_GATE_FRACTION: Final = 0.11
 
 # The same question asked of a stage whose declared model carries an
 # intercept: does the model describe the stage across the whole run. The
 # quantity is the residual after the model is removed, so the threshold is
-# re-derived rather than carried over — a bound derived for one measurand does
-# not transfer to another merely because both are percentages. Anchors: a
-# stage with quadratic growth left +13.79% and +13.92% residual drift, while
-# the provably linear copy stage left between +0.44% and +4.62% across two
-# independent runs. Eight percent is the geometric midpoint, 1.73x margin on
-# each side. It sits above the KNOWN-GOOD control's own noise deliberately: a
-# gate below that would fail a linear stage by construction, whatever it did
-# to the candidate under test.
-RESIDUAL_TREND_GATE_FRACTION: Final = 0.08
+# derived for that measurand rather than carried over — a bound derived for
+# one quantity does not transfer to another merely because both are
+# percentages. Control worst 5.81% (n=6), failing shape 13.79% (n=2),
+# geometric midpoint 9%, 1.54x margin on each side.
+#
+# This gate is the WEAKER detector, which is a property and not an oversight:
+# removing a model shrinks the signal along with the noise, so separation
+# between known-good and known-bad falls from 3.8x in the raw measurand to
+# 2.4x here. Neither fact is visible from the threshold alone.
+RESIDUAL_TREND_GATE_FRACTION: Final = 0.09
 
 # Called with a stage name and the commits recorded so far.
 ProgressSink = Callable[[str, tuple[BatchCommit, ...]], None]
