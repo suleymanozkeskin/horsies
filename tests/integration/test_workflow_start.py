@@ -202,7 +202,7 @@ class TestWorkflowStart:
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(broker=broker, name='custom_id', tasks=[node_a])
 
-        custom_id = 'my-custom-workflow-id-123'
+        custom_id = '11111111-2222-4333-8444-555555555555'
         handle = await start_ok(spec, broker, custom_id)
 
         assert handle.workflow_id == custom_id
@@ -532,7 +532,7 @@ class TestWorkflowStart:
             broker=broker, name='idempotent_wf', tasks=[node_a],
         )
 
-        custom_id = 'idempotent-test-id'
+        custom_id = '21111111-2222-4333-8444-555555555555'
         handle_1 = await start_ok(spec, broker, custom_id)
 
         # Second call with same ID — must reuse existing workflow
@@ -579,7 +579,7 @@ class TestWorkflowStart:
             tasks=[TaskNode(fn=task_b, kwargs={'value': 2})],
         )
 
-        custom_id = 'idempotent-name-guard-id'
+        custom_id = '31111111-2222-4333-8444-555555555555'
         await start_ok(first, broker, custom_id)
         second_start = await second.start_async(custom_id)
 
@@ -600,7 +600,7 @@ class TestWorkflowStart:
             broker=broker, name='idempotent_wf_concurrent', tasks=[node_a],
         )
 
-        custom_id = 'idempotent-concurrent-test-id'
+        custom_id = '41111111-2222-4333-8444-555555555555'
         handle_1, handle_2 = await asyncio.gather(
             start_ok(spec, broker, custom_id),
             start_ok(spec, broker, custom_id),

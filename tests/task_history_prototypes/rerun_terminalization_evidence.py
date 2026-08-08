@@ -356,8 +356,8 @@ def stored_history_form(
 _LIVE_ENVELOPE_COLUMNS = """
     ADD COLUMN retention_class_key text NOT NULL
         REFERENCES {namespace}.retention_classes(class_key),
-    ADD COLUMN rerun_of_task_id varchar(36),
-    ADD COLUMN rerun_root_task_id varchar(36),
+    ADD COLUMN rerun_of_task_id uuid,
+    ADD COLUMN rerun_root_task_id uuid,
     ADD COLUMN input_digest bytea,
     ADD COLUMN retain_rerun_input boolean NOT NULL,
     ADD COLUMN prepared_rerun_input_disposition varchar(32) NOT NULL,
@@ -459,9 +459,15 @@ def _live_table_statements(relations: SideRelations) -> tuple[str, ...]:
 
 
 def _outcome_type_statement(relations: SideRelations) -> str:
-    """The wire row shape, taken from the production vocabulary."""
+    """The wire row shape, taken from the production vocabulary.
+
+    The chain vocabulary spells task_id varchar (its era); this side
+    renders the move program's uuid-era outcome, flipping only the
+    identity column so the shape keeps tracking the source.
+    """
     columns = ',\n            '.join(
-        f'{name} {kind}' for name, kind in OUTCOME_COLUMNS
+        f'{name} {"uuid" if name == "task_id" else kind}'
+        for name, kind in OUTCOME_COLUMNS
     )
     return f"""
     CREATE TYPE {relations.schema.sql}.rerun_terminalization_outcome AS (
@@ -480,7 +486,7 @@ def _attempt_snapshot_statement(relations: SideRelations) -> str:
     """
     return f"""
     CREATE FUNCTION {relations.schema.sql}.encode_candidate_attempts(
-        p_task_id varchar
+        p_task_id uuid
     )
     RETURNS bytea
     LANGUAGE sql
@@ -559,7 +565,7 @@ def _move_statement(
     )
     return f"""
     CREATE FUNCTION {namespace}.move_candidate_task_to_history(
-        p_task_id varchar,
+        p_task_id uuid,
         p_terminal_at timestamptz,
         p_result text,
         p_error_code text,
@@ -582,7 +588,7 @@ def _move_statement(
         v_deleted_rows bigint;
     BEGIN
         PERFORM {namespace}.assert_archive_available();
-        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id, 731));
+        PERFORM pg_advisory_xact_lock(hashtextextended(p_task_id::text, 731));
 
         SELECT * INTO STRICT v_task
         FROM {relations.live_tasks}
@@ -697,7 +703,7 @@ def _move_statement(
             RAISE EXCEPTION 'live task delete did not affect one row';
         END IF;
 
-        PERFORM pg_notify('task_done', p_task_id);
+        PERFORM pg_notify('task_done', p_task_id::text);
     END
     $function$
     """
@@ -715,7 +721,7 @@ def _candidate_fail_statement(relations: SideRelations) -> str:
     namespace = relations.schema.sql
     return f"""
     CREATE FUNCTION {namespace}.candidate_fail_locked_task(
-        p_task_id varchar,
+        p_task_id uuid,
         p_worker_id text,
         p_result text,
         p_error_code text,
@@ -1477,7 +1483,7 @@ async def seed_side(
                 :retention_class, :digest,
                 TRUE, 'INLINE', 1, 'json-utf8', 'application/json',
                 :digest, :envelope
-            FROM unnest(CAST(:task_ids AS varchar[])) AS candidate_id
+            FROM unnest(CAST(:task_ids AS uuid[])) AS candidate_id
             """
         ),
         {
@@ -1497,7 +1503,7 @@ async def seed_side(
             )
             SELECT candidate_id, attempt_number, 'FAILED', FALSE,
                    NOW(), NOW(), :worker
-            FROM unnest(CAST(:task_ids AS varchar[])) AS candidate_id
+            FROM unnest(CAST(:task_ids AS uuid[])) AS candidate_id
             CROSS JOIN generate_series(1, :attempts) AS attempt_number
             """
         ),

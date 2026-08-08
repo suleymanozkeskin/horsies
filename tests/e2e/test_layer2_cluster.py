@@ -14,7 +14,6 @@ from uuid import uuid4
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
@@ -23,9 +22,14 @@ from sqlalchemy import text
 
 from tests.e2e.helpers.db import (
     poll_max_during,
+    read_task,
     wait_for_all_terminal,
     wait_for_any_status,
     wait_for_status,
+)
+from tests.integration.history_seeding import (
+    read_attempt_history,
+    read_attempt_workers,
 )
 from tests.e2e.helpers.assertions import unwrap_send
 from tests.e2e.helpers.worker import run_worker, run_workers
@@ -84,8 +88,8 @@ async def _wait_for_claimed_owner(
                 text(
                     """
                     SELECT status, claimed_by_worker_id
-                    FROM horsies_tasks
-                    WHERE id = :id
+                    FROM itest_task_rows
+                    WHERE id = CAST(:id AS uuid)
                     """
                 ),
                 {'id': task_id},
@@ -167,10 +171,10 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         async with broker.session_factory() as session:
             result = await session.execute(
                 text("""
-                    SELECT DISTINCT claimed_by_worker_id
-                    FROM horsies_tasks
-                    WHERE id = ANY(:ids)
-                    AND claimed_by_worker_id IS NOT NULL
+                    SELECT DISTINCT last_claimed_worker_id
+                    FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
+                    AND last_claimed_worker_id IS NOT NULL
                 """),
                 {'ids': task_ids},
             )
@@ -184,7 +188,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully
         async with broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -248,7 +252,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully
         async with cluster_cap_broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED
 
@@ -312,7 +316,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully (prevents silent failures)
         async with custom_broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert (
                     task.status == TaskStatus.COMPLETED
@@ -433,7 +437,7 @@ async def test_softcap_db_ledger_race_single_execution(
             )
 
     async with softcap_broker.session_factory() as session:
-        ledger_task = await session.get(TaskModel, ledger_task_id)
+        ledger_task = await read_task(session, ledger_task_id)
         assert ledger_task is not None
         assert ledger_task.status == TaskStatus.COMPLETED, (
             f'Expected COMPLETED, got {ledger_task.status}'
@@ -529,7 +533,7 @@ async def test_stale_running_marked_failed_on_crash(
 
     # Verify status and error code
     async with recovery_broker.session_factory() as session:
-        task = await session.get(TaskModel, task_id)
+        task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.FAILED, (
             f'Expected FAILED, got {task.status}'
@@ -593,7 +597,7 @@ async def test_stale_claimed_requeued_and_completed(
 
     # Verify the task completed and was re-claimed by a live worker
     async with recovery_broker.session_factory() as session:
-        task = await session.get(TaskModel, task_id)
+        task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.COMPLETED, (
             f'Expected COMPLETED, got {task.status}'
@@ -644,7 +648,7 @@ async def test_cluster_cap_not_leaked_on_failure(
         # Verify all failed
         async with cluster_cap_broker.session_factory() as session:
             for task_id in fail_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.FAILED, (
                     f'Task {task_id} has status {task.status}, expected FAILED'
@@ -670,7 +674,7 @@ async def test_cluster_cap_not_leaked_on_failure(
         # Verify all slow tasks completed
         async with cluster_cap_broker.session_factory() as session:
             for task_id in slow_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -707,7 +711,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         # Verify all tasks failed with correct retry count
         async with broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.FAILED, (
                     f'Task {task_id} has status {task.status}, expected FAILED'
@@ -716,33 +720,18 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
                     f'Task {task_id} has retry_count {task.retry_count}, expected 3'
                 )
 
-            # claimed_by_worker_id is the mutable current/last owner on the
-            # task row. Retry execution history lives in horsies_task_attempts,
-            # so use that table to prove worker participation across attempts.
-            attempt_counts_result = await session.execute(
-                text("""
-                    SELECT task_id, COUNT(*) AS attempt_count
-                    FROM horsies_task_attempts
-                    WHERE task_id = ANY(:ids)
-                    GROUP BY task_id
-                """),
-                {'ids': task_ids},
-            )
+            # The task row carries only its final owner; participation
+            # across attempts lives in the attempt history, which the
+            # move archives into the record's snapshot as it purges the
+            # live rows — so it is read from wherever it now lives.
             attempt_counts = {
-                str(row[0]): int(row[1])
-                for row in attempt_counts_result.fetchall()
+                task_id: len(await read_attempt_history(session, task_id))
+                for task_id in task_ids
             }
 
-            worker_ids_result = await session.execute(
-                text("""
-                    SELECT DISTINCT worker_id
-                    FROM horsies_task_attempts
-                    WHERE task_id = ANY(:ids)
-                      AND worker_id IS NOT NULL
-                """),
-                {'ids': task_ids},
-            )
-            worker_ids_seen = {str(row[0]) for row in worker_ids_result.fetchall()}
+            worker_ids_seen: set[str] = set()
+            for task_id in task_ids:
+                worker_ids_seen |= await read_attempt_workers(session, task_id)
 
         expected_attempts_per_task = 4  # initial attempt + 3 retries
         assert attempt_counts == {
@@ -842,7 +831,7 @@ async def test_per_queue_caps_independent_across_queues(
         # All tasks completed
         async with custom_broker.session_factory() as session:
             for task_id in all_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -902,8 +891,8 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
         result = await session.execute(
             text("""
                 SELECT id, queue_name, completed_at
-                FROM horsies_tasks
-                WHERE id = ANY(:ids)
+                FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
                 ORDER BY completed_at ASC
             """),
             {'ids': all_ids},
@@ -979,8 +968,8 @@ async def test_single_worker_crash_remaining_continue(
     async with broker.session_factory() as session:
         result = await session.execute(
             text("""
-                SELECT COUNT(*) FROM horsies_tasks
-                WHERE id = ANY(:ids) AND status = 'COMPLETED'
+                SELECT COUNT(*) FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'COMPLETED'
             """),
             {'ids': task_ids},
         )
@@ -988,10 +977,10 @@ async def test_single_worker_crash_remaining_continue(
 
         result = await session.execute(
             text("""
-                SELECT DISTINCT claimed_by_worker_id FROM horsies_tasks
-                WHERE id = ANY(:ids)
+                SELECT DISTINCT last_claimed_worker_id FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
                 AND status = 'COMPLETED'
-                AND claimed_by_worker_id IS NOT NULL
+                AND last_claimed_worker_id IS NOT NULL
             """),
             {'ids': task_ids},
         )
@@ -1072,7 +1061,7 @@ async def test_concurrent_enqueue_during_processing(
         # Verify all completed
         async with broker.session_factory() as session:
             for task_id in all_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -1200,15 +1189,15 @@ async def test_softcap_expired_claim_requeued(
 
             # Verify task completed successfully and was reclaimed
             async with softcap_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
-                    'Reclaimed COMPLETED task must record a live owner'
+                assert task.last_claimed_worker_id is not None, (
+                    'Reclaimed COMPLETED task must record its final owner'
                 )
-                assert task.claimed_by_worker_id != dead_worker_id, (
+                assert task.last_claimed_worker_id != dead_worker_id, (
                     f'Task was not reclaimed: still assigned to {dead_worker_id}'
                 )
 
@@ -1307,15 +1296,15 @@ async def test_softcap_owner_transition_after_worker_crash(
                     )
 
             async with softcap_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
+                assert task.last_claimed_worker_id is not None, (
                     'Completed task should retain final owner id'
                 )
-                assert task.claimed_by_worker_id != first_owner, (
+                assert task.last_claimed_worker_id != first_owner, (
                     f'Expected owner transition after crash, still owned by {first_owner}'
                 )
 
@@ -1456,7 +1445,7 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # Record Worker A's id
             async with requeue_guard_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 worker_a_id = task.claimed_by_worker_id
                 assert worker_a_id is not None, 'Task should be claimed by Worker A'
@@ -1477,15 +1466,15 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # 5. Assert results
             async with requeue_guard_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
                 )
-                assert task.claimed_by_worker_id is not None, (
+                assert task.last_claimed_worker_id is not None, (
                     'Completed task should retain final owner id'
                 )
-                assert task.claimed_by_worker_id != worker_a_id, (
+                assert task.last_claimed_worker_id != worker_a_id, (
                     f'Expected owner transition from Worker A ({worker_a_id}), '
                     f'still owned by same worker'
                 )

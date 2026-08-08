@@ -26,7 +26,22 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # lists are UNAFFECTED. The base moves; the qualified behavior does
 # not. Any future base move re-litigates this guard the same way —
 # explicitly, never by widening it to a range.
-_EXPECTED_BASE_SCHEMA_VERSION = 30
+# v31 adds WorkflowStatus.EXPIRED to the workflow terminal set (with the
+# class-rule DROP+CREATE of the workflows retention index). No prototype
+# models the workflow retention index or the workflow terminal literal
+# set; the frozen fragments and rendered programs the prototypes install
+# are unchanged by v31, so the base advances with the bump.
+# v32 tightens the live cutover columns on a fresh install (NOT NULL and
+# the declared CHECKs, from the same renderer the tighten stage uses). It
+# DOES touch horsies_tasks, so this guard is re-litigated rather than
+# widened: the LIKE clone drops every cutover column by the same
+# structured authority that names them, taking their NOT NULL with them,
+# and LIKE without INCLUDING CONSTRAINTS never inherits a CHECK. The
+# qualified clone shape is therefore unchanged and the base advances.
+# v33 changes the locator foreign key's delete action. It touches
+# horsies_workflow_tasks and the phase-2 outbox, neither of which the
+# prototypes clone or model, so the qualified shape is again unchanged.
+_EXPECTED_BASE_SCHEMA_VERSION = 33
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +149,7 @@ def _archive_candidate_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         *_history_partitions(namespace, 'history_copartitioned'),
         f"""
         CREATE TABLE {namespace}.attempts_copartitioned (
-            task_id varchar(36) NOT NULL,
+            task_id uuid NOT NULL,
             retention_class_key text NOT NULL,
             retention_anchor_at timestamptz NOT NULL,
             attempt_archive_version smallint NOT NULL,
@@ -164,7 +179,7 @@ def _common_history_columns(
     terminalization_kinds: str,
 ) -> str:
     return f"""
-        task_id varchar(36) NOT NULL,
+        task_id uuid NOT NULL,
         task_name varchar(255) NOT NULL,
         queue_name varchar(100) NOT NULL,
         priority integer NOT NULL CHECK (priority BETWEEN 1 AND 100),
@@ -203,8 +218,8 @@ def _common_history_columns(
         error_code text,
         final_failed_reason text,
         prior_result_payload bytea,
-        rerun_of_task_id varchar(36),
-        rerun_root_task_id varchar(36),
+        rerun_of_task_id uuid,
+        rerun_root_task_id uuid,
         input_digest bytea,
         rerun_input_version smallint,
         rerun_input_codec varchar(64),
@@ -213,7 +228,7 @@ def _common_history_columns(
         rerun_input_digest bytea,
         rerun_input_inline bytea,
         rerun_input_reference varchar(2048),
-        workflow_id varchar(36),
+        workflow_id uuid,
         is_workflow_task boolean NOT NULL,
         history_schema_version smallint NOT NULL
             CHECK (history_schema_version > 0),

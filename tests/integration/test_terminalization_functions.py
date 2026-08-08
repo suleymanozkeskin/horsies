@@ -27,6 +27,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.history.archive.attempts import encode_attempt_snapshot
+from tests.integration.history_seeding import read_attempt_history
 
 from horsies.core.lifecycle.commands import (
     AbandonNodesOfPausedWorkflows,
@@ -90,12 +93,16 @@ async def _schema(broker: PostgresBroker) -> None:
 _SEED_SQL = text("""
     INSERT INTO horsies_tasks (
         id, task_name, queue_name, status, args, kwargs, enqueue_sha,
-        is_workflow_task, claimed, claimed_by_worker_id, claimed_at, started_at
+        is_workflow_task, claimed, claimed_by_worker_id, claimed_at, started_at,
+        retention_class_key, command_fingerprint_version, command_fingerprint,
+        retain_rerun_input, prepared_rerun_input_disposition
     )
     VALUES (
-        :id, 'terminalization.test', 'default', :status, '[]', '{}',
+        CAST(:id AS uuid), 'terminalization.test', 'default', :status, '[]', '{}',
         repeat('0', 64), :is_workflow_task, :claimed,
-        :worker_id, :claimed_at, NOW()
+        :worker_id, :claimed_at, NOW(),
+        :retention_class_key, 1, sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+        FALSE, 'DECLINED_BY_POLICY'
     )
 """)
 
@@ -118,6 +125,7 @@ async def _seed(
             'claimed_at': claimed_at,
             'is_workflow_task': is_workflow_task,
             'claimed': worker_id is not None,
+            'retention_class_key': DEFAULT_RETENTION_CLASS_KEY,
         },
     )
     await session.commit()
@@ -164,12 +172,8 @@ async def _requeued_after_failed_attempt(
     await session.commit()
 
 
-_ATTEMPT_HISTORY_SQL = text("""
-    SELECT attempt, outcome, failed_reason
-    FROM horsies_task_attempts
-    WHERE task_id = :id
-    ORDER BY attempt
-""")
+# Attempts purge with the move; `read_attempt_history` follows them
+# into the history row's snapshot.
 
 
 async def _force_terminal(
@@ -179,19 +183,68 @@ async def _force_terminal(
     status: str,
     kind: str | None,
 ) -> None:
-    """Put a row where another operation would have left it."""
+    """Put the task where another operation would have left it.
+
+    Post-split that is a history row carrying the operation's kind,
+    with no live row and no live attempt rows. A terminal row whose
+    family was never recorded carries LEGACY_TERMINAL — the relocated
+    presentation — which the miss classifier treats as foreign, exactly
+    the never-a-replay semantics the kindless live row used to model.
+    """
+    snapshot = encode_attempt_snapshot(())
     await session.execute(
         text("""
-            UPDATE horsies_tasks
-            SET status = :status,
-                terminal_at = NOW(),
-                terminalization_kind = :kind,
-                claimed = FALSE,
-                claimed_by_worker_id = NULL,
-                claimed_at = NULL
-            WHERE id = :id
+            INSERT INTO horsies_task_history (
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint,
+                status, terminalization_kind, terminal_at,
+                retention_anchor_at, retention_class_key,
+                enqueued_at, claimed_at, started_at, created_at,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                result_envelope_version, result_codec, result_content_type,
+                error_code, final_failed_reason,
+                is_workflow_task, history_schema_version,
+                attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot_content_type, attempt_snapshot,
+                attempt_snapshot_digest, rerun_input_disposition
+            )
+            SELECT id, task_name, queue_name, priority,
+                   command_fingerprint_version, command_fingerprint,
+                   :status, :kind, NOW(),
+                   NOW(), retention_class_key,
+                   enqueued_at, claimed_at, started_at, created_at,
+                   retry_count, max_retries,
+                   claimed_by_worker_id, worker_hostname,
+                   1, 'json-utf8', 'application/json',
+                   error_code, failed_reason,
+                   is_workflow_task, 1,
+                   :snapshot_version, :snapshot_codec,
+                   :snapshot_content_type, :snapshot_payload,
+                   :snapshot_digest, 'NEVER_ELIGIBLE'
+            FROM horsies_tasks WHERE id = CAST(:id AS uuid)
         """),
-        {'status': status, 'kind': kind, 'id': task_id},
+        {
+            'status': status,
+            'kind': kind if kind is not None else 'LEGACY_TERMINAL',
+            'id': task_id,
+            'snapshot_version': snapshot.version,
+            'snapshot_codec': snapshot.codec,
+            'snapshot_content_type': snapshot.content_type,
+            'snapshot_payload': snapshot.payload,
+            'snapshot_digest': snapshot.digest,
+        },
+    )
+    await session.execute(
+        text(
+            'DELETE FROM horsies_task_attempts '
+            'WHERE task_id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id},
+    )
+    await session.execute(
+        text('DELETE FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+        {'id': task_id},
     )
     await session.commit()
 
@@ -298,24 +351,20 @@ class TestAppliedTransitions:
         self,
         session: AsyncSession,
     ) -> None:
-        """The fusion exists to do this in one statement; it still does."""
+        """The fusion exists to do this in one statement; it still does.
+
+        The move purges live attempt rows into the history snapshot, so
+        the fused attempt's evidence is read from there.
+        """
         task_id = await _seed(session)
         outcome = await apply_async(await session.connection(), _fused(task_id))
         await session.commit()
 
         assert isinstance(outcome, Applied)
         assert outcome.kind is TerminalizationKind.COMPLETE_FUSED
-        row = (
-            await session.execute(
-                text("""
-                    SELECT outcome, will_retry FROM horsies_task_attempts
-                    WHERE task_id = :id
-                """),
-                {'id': task_id},
-            )
-        ).one()
-        assert row.outcome == 'COMPLETED'
-        assert row.will_retry is False
+        assert await read_attempt_history(session, task_id) == [
+            (1, 'COMPLETED', None),
+        ]
 
     async def test_transition_leaves_the_row_terminal_and_attributed(
         self,
@@ -329,7 +378,7 @@ class TestAppliedTransitions:
             await session.execute(
                 text("""
                     SELECT status, terminal_at, terminalization_kind, result
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -386,7 +435,7 @@ class TestAppliedTransitions:
             await session.execute(
                 text("""
                     SELECT status, error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -395,10 +444,8 @@ class TestAppliedTransitions:
         assert row.error_code is None
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == expected_attempts
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == expected_attempts
 
 
 class TestAlreadyApplied:
@@ -452,14 +499,15 @@ class TestAlreadyApplied:
         assert evidence.committed_kind is TerminalizationKind.CANCEL_ADMIN
         assert evidence.terminal_at is not None
 
-    async def test_a_row_with_no_kind_is_never_a_replay(
+    async def test_a_relocated_row_is_never_a_replay(
         self,
         session: AsyncSession,
     ) -> None:
-        """Rows terminalized before the column existed prove nothing.
+        """Rows terminalized before kinds existed prove nothing.
 
-        Their provenance is unknown, and unknown provenance classifies
-        conservatively rather than being inferred from the status alone.
+        Post-cutover they carry LEGACY_TERMINAL — family unrecorded by
+        design — and the classifier treats that kind as foreign rather
+        than inferring a replay from the status alone.
         """
         task_id = await _seed(session)
         await _force_terminal(session, task_id, status='COMPLETED', kind=None)
@@ -468,7 +516,10 @@ class TestAlreadyApplied:
         await session.commit()
         assert isinstance(outcome, SourceStateConflict)
         assert isinstance(outcome.evidence, ObservedForeignTerminalization)
-        assert outcome.evidence.committed_kind is None
+        assert (
+            outcome.evidence.committed_kind
+            is TerminalizationKind.LEGACY_TERMINAL
+        )
 
 
 class TestRefusals:
@@ -684,7 +735,7 @@ class TestFailLocked:
             await session.execute(
                 text("""
                     SELECT status, failed_at, failed_reason, error_code, result
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -719,16 +770,14 @@ class TestFailLocked:
 
         reason = (
             await session.execute(
-                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
         assert reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -753,7 +802,7 @@ class TestFailLocked:
 
         reason = (
             await session.execute(
-                text('SELECT failed_reason FROM horsies_tasks WHERE id = :id'),
+                text('SELECT failed_reason FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1124,7 +1173,7 @@ class TestExpireOwnedClaim:
             await session.execute(
                 text("""
                     SELECT status, claimed, claim_expires_at, failed_at, error_code
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1160,7 +1209,7 @@ class TestExpireOwnedClaim:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1168,10 +1217,8 @@ class TestExpireOwnedClaim:
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -1363,7 +1410,7 @@ class TestExpireOwnedClaim:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1398,8 +1445,8 @@ class TestExpirePendingTasks:
         rows = (
             await session.execute(
                 text("""
-                    SELECT id, status FROM horsies_tasks
-                    WHERE id = ANY(:ids)
+                    SELECT id, status FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
                 """),
                 {'ids': eligible + [fresh, undated]},
             )
@@ -1437,7 +1484,7 @@ class TestExpirePendingTasks:
             await session.execute(
                 text("""
                     SELECT status, error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1446,10 +1493,8 @@ class TestExpirePendingTasks:
         assert row.error_code == 'TASK_EXPIRED'
         assert row.failed_reason is None
 
-        attempts = (
-            await session.execute(_ATTEMPT_HISTORY_SQL, {'id': task_id})
-        ).all()
-        assert [tuple(attempt) for attempt in attempts] == [
+        attempts = await read_attempt_history(session, task_id)
+        assert attempts == [
             (1, 'FAILED', 'attempt one crashed'),
         ]
 
@@ -1474,7 +1519,7 @@ class TestExpirePendingTasks:
         assert {o.task_id for o in outcomes} == {oldest, middle}
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': newest},
             )
         ).scalar_one()
@@ -1522,7 +1567,7 @@ class TestExpirePendingTasks:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1542,7 +1587,7 @@ class TestExpirePendingTasks:
 
         async with broker.async_engine.connect() as holder:
             await holder.execute(
-                text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+                text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},
             )
             outcomes = await apply_batch_async(
@@ -1648,7 +1693,7 @@ class TestCancelLockedTask:
                            terminal_at, claimed, claimed_by_worker_id,
                            claimed_at, finalizing_at,
                            finalizing_by_worker_id
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1658,9 +1703,11 @@ class TestCancelLockedTask:
         assert row.failed_reason == 'Cancelled via monitoring API'
         assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
+        # No claim state survives the move; the claim's timestamp is
+        # preserved on the history record as provenance.
         assert row.claimed is False
         assert row.claimed_by_worker_id is None
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
         assert row.finalizing_at is None
         assert row.finalizing_by_worker_id is None
 
@@ -1710,7 +1757,7 @@ class TestCancelLockedTask:
         assert isinstance(outcome, SourceStateConflict)
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -1789,7 +1836,7 @@ class TestCancelOwnedOrphan:
                     SELECT status, error_code, failed_reason, failed_at,
                            terminal_at, claimed, claimed_by_worker_id,
                            claimed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
@@ -1799,11 +1846,14 @@ class TestCancelOwnedOrphan:
         assert row.failed_reason == (
             'Workflow task orphaned: no live workflow_task linkage'
         )
-        assert row.failed_at is None
+        # The terminal instant lands in failed_at beside CANCELLED, and
+        # the claim's timestamp survives on the record as provenance
+        # while no claim state does.
+        assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
         assert row.claimed is False
         assert row.claimed_by_worker_id is None
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
 
     async def test_a_terminal_link_still_leaves_the_backing_task_orphaned(
         self,
@@ -1972,7 +2022,7 @@ class TestCancelOrphanedTasks:
 
         rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [claimed, pending, linked, plain, running]},
             )
         ).all()
@@ -2007,8 +2057,8 @@ class TestCancelOrphanedTasks:
         remaining = (
             await session.execute(
                 text("""
-                    SELECT COUNT(*) FROM horsies_tasks
-                    WHERE id = ANY(:ids) AND status = 'CLAIMED'
+                    SELECT COUNT(*) FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'CLAIMED'
                 """),
                 {'ids': ids},
             )
@@ -2059,7 +2109,7 @@ class TestCancelOrphanedTasks:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -2084,7 +2134,7 @@ class TestCancelOrphanedTasks:
 
         async with broker.async_engine.connect() as holder:
             await holder.execute(
-                text('SELECT id FROM horsies_tasks WHERE id = :id FOR UPDATE'),
+                text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},
             )
             outcomes = await apply_batch_async(
@@ -2146,21 +2196,24 @@ class TestAbandonOwnedNode:
                            finalizing_at, finalizing_by_worker_id,
                            error_code, failed_reason, failed_at,
                            terminal_at, terminalization_kind
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
         ).one()
         assert row.status == 'CANCELLED'
+        # No claim state survives the move; the claim's timestamp is
+        # preserved on the history record as provenance, and the
+        # terminal instant lands in failed_at beside CANCELLED.
         assert row.claimed is False
-        assert row.claimed_at is None
+        assert row.claimed_at == GENERATION
         assert row.claimed_by_worker_id is None
         assert row.claim_expires_at is None
         assert row.finalizing_at is None
         assert row.finalizing_by_worker_id is None
         assert row.error_code == 'TASK_CANCELLED'
         assert row.failed_reason == 'Workflow paused before task start'
-        assert row.failed_at is None
+        assert row.failed_at is not None
         assert row.terminal_at == outcome.terminal_at
         assert row.terminalization_kind == 'PAUSE_ABANDON_CLAIM'
 
@@ -2298,22 +2351,30 @@ class TestCancelOwnedNode:
         assert isinstance(outcome, LostClaim)
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
         assert status == 'PENDING'
 
-    async def test_preserves_error_summary_columns_it_does_not_own(
+    async def test_the_terminal_record_carries_its_own_summary(
         self,
         session: AsyncSession,
     ) -> None:
+        """Requeue residue does not travel onto the immutable record.
+
+        The move writes the operation's own error summary; a worker-side
+        node cancellation has none, so stale error_code/failed_reason
+        left by an earlier requeue end with the live row rather than
+        being frozen into history as if they described the cancellation.
+        The terminal instant lands in failed_at beside CANCELLED.
+        """
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
         await session.execute(
             text("""
                 UPDATE horsies_tasks
                 SET error_code = 'OLD_CODE', failed_reason = 'old reason'
-                WHERE id = :id
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
@@ -2328,14 +2389,14 @@ class TestCancelOwnedNode:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_id},
             )
         ).one()
-        assert row.error_code == 'OLD_CODE'
-        assert row.failed_reason == 'old reason'
-        assert row.failed_at is None
+        assert row.error_code is None
+        assert row.failed_reason is None
+        assert row.failed_at is not None
 
     async def test_a_stale_claim_is_lost(self, session: AsyncSession) -> None:
         task_id = await _seed(session, status='CLAIMED', is_workflow_task=True)
@@ -2556,24 +2617,34 @@ class TestIdKeyedWorkflowBatches:
         assert isinstance(outcomes[4].evidence, ObservedForeignTerminalization)
         assert isinstance(outcomes[5], SourceStateConflict)
         assert isinstance(outcomes[5].evidence, ObservedForeignTerminalization)
-        assert outcomes[5].evidence.committed_kind is None
+        # A forced kindless row carries LEGACY_TERMINAL post-cutover:
+        # relocated provenance, family unrecorded, classified foreign.
+        assert (
+            outcomes[5].evidence.committed_kind
+            is TerminalizationKind.LEGACY_TERMINAL
+        )
         assert isinstance(outcomes[6], TaskAbsent)
 
         summary = (
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': applied_id},
             )
         ).one()
+        # The record's error fields are projected from the operation, not
+        # carried over from the live row: the planted OLD_CODE belongs to
+        # a superseded attempt and must not ride into the record as if it
+        # were the terminal cause. Pause-abandon states its cause; a
+        # workflow cancellation has none to state, and its kind says so.
         if command_type is AbandonOwnedNodes:
             assert summary.error_code == 'TASK_CANCELLED'
             assert summary.failed_reason == 'Workflow paused before task start'
         else:
-            assert summary.error_code == 'OLD_CODE'
-            assert summary.failed_reason == 'old reason'
+            assert summary.error_code is None
+            assert summary.failed_reason is None
 
     @pytest.mark.parametrize(
         'function_name',
@@ -2585,12 +2656,12 @@ class TestIdKeyedWorkflowBatches:
             ('NULL', "ARRAY['2026-08-04 09:00:00+00']", 'non-NULL'),
             ("ARRAY['one']", 'NULL', 'non-NULL'),
             (
-                "ARRAY['one', 'two']",
+                "ARRAY['one', '00000000-0000-4000-8000-000000000002']",
                 "ARRAY['2026-08-04 09:00:00+00']",
                 'lengths differ',
             ),
             (
-                'ARRAY[NULL]::varchar[]',
+                'ARRAY[NULL]::uuid[]',
                 "ARRAY['2026-08-04 09:00:00+00']",
                 'non-NULL',
             ),
@@ -2616,7 +2687,7 @@ class TestIdKeyedWorkflowBatches:
             await session.execute(
                 text(f"""
                     SELECT * FROM {function_name}(
-                        CAST({ids} AS VARCHAR[]),
+                        CAST({ids} AS uuid[]),
                         CAST({generations_sql} AS TIMESTAMPTZ[]),
                         :worker_id
                     )
@@ -2627,7 +2698,7 @@ class TestIdKeyedWorkflowBatches:
 
         status = (
             await session.execute(
-                text('SELECT status FROM horsies_tasks WHERE id = :id'),
+                text('SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)'),
                 {'id': task_id},
             )
         ).scalar_one()
@@ -2756,20 +2827,20 @@ class TestWorkflowScopedBatches:
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': eligible},
             )
         ).one()
         assert row.error_code == 'TASK_CANCELLED'
         assert row.failed_reason == 'Workflow paused before task start'
-        assert row.failed_at is None
+        assert row.failed_at is not None
         persisted = (
             await session.execute(
                 text("""
                     SELECT status, terminalization_kind,
                            claimed_by_worker_id, claimed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': eligible},
             )
@@ -2777,10 +2848,11 @@ class TestWorkflowScopedBatches:
         assert persisted.status == 'CANCELLED'
         assert persisted.terminalization_kind == 'PAUSE_ABANDON_WORKFLOW'
         assert persisted.claimed_by_worker_id is None
-        assert persisted.claimed_at is None
+        # The claim's timestamp is preserved on the record as provenance.
+        assert persisted.claimed_at == GENERATION
         refused_rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [wrong_workflow, wrong_link, wrong_task_source]},
             )
         ).all()
@@ -2841,18 +2913,22 @@ class TestWorkflowScopedBatches:
             if isinstance(outcome, Applied)
         )
         assert all(outcome.ordinality is None for outcome in outcomes)
+        # The workflow-cancel sweep carries no error summary of its own;
+        # requeue residue ends with the live row rather than being
+        # frozen into the record, and the terminal instant lands in
+        # failed_at beside CANCELLED.
         summary = (
             await session.execute(
                 text("""
                     SELECT error_code, failed_reason, failed_at
-                    FROM horsies_tasks WHERE id = :id
+                    FROM itest_task_rows WHERE id = CAST(:id AS uuid)
                 """),
                 {'id': task_ids[0]},
             )
         ).one()
-        assert summary.error_code == 'OLD_CODE'
-        assert summary.failed_reason == 'old reason'
-        assert summary.failed_at is None
+        assert summary.error_code is None
+        assert summary.failed_reason is None
+        assert summary.failed_at is not None
 
     async def test_cancel_refuses_a_live_workflow_or_non_enqueued_link(
         self,
@@ -2893,7 +2969,7 @@ class TestWorkflowScopedBatches:
         assert outcomes == []
         rows = (
             await session.execute(
-                text('SELECT id, status FROM horsies_tasks WHERE id = ANY(:ids)'),
+                text('SELECT id, status FROM itest_task_rows WHERE id = ANY(CAST(:ids AS uuid[]))'),
                 {'ids': [live_workflow_task, ready_link_task]},
             )
         ).all()

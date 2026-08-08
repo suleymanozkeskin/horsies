@@ -50,7 +50,7 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         """,
         f"""
         CREATE TABLE {namespace}.phase2_workflows (
-            workflow_id varchar(36) PRIMARY KEY,
+            workflow_id uuid PRIMARY KEY,
             status text NOT NULL CHECK (
                 status IN ('RUNNING', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED')
             )
@@ -59,9 +59,9 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         f"""
         CREATE TABLE {namespace}.phase2_nodes (
             id bigserial NOT NULL UNIQUE,
-            workflow_id varchar(36) NOT NULL,
+            workflow_id uuid NOT NULL,
             node_id text NOT NULL,
-            task_id varchar(36) UNIQUE,
+            task_id uuid UNIQUE,
             status text NOT NULL CHECK (
                 status IN (
                     'ENQUEUED', 'READY', 'PENDING', 'RUNNING',
@@ -70,7 +70,7 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             ),
             result_payload bytea,
             result_digest bytea,
-            phase2_generation varchar(36),
+            phase2_generation uuid,
             requires_parent_propagation boolean NOT NULL,
             PRIMARY KEY (workflow_id, node_id),
             UNIQUE (id, workflow_id),
@@ -81,17 +81,17 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         """,
         f"""
         CREATE TABLE {namespace}.phase2_parent_responsibilities (
-            workflow_id varchar(36) NOT NULL,
+            workflow_id uuid NOT NULL,
             node_id text NOT NULL,
-            phase2_generation varchar(36) NOT NULL,
+            phase2_generation uuid NOT NULL,
             created_at timestamptz NOT NULL,
             PRIMARY KEY (workflow_id, node_id, phase2_generation)
         )
         """,
         f"""
         CREATE TABLE {namespace}.workflow_phase2_quarantine (
-            task_id varchar(36) PRIMARY KEY,
-            workflow_id varchar(36) NOT NULL,
+            task_id uuid PRIMARY KEY,
+            workflow_id uuid NOT NULL,
             node_id text NOT NULL,
             task_name text NOT NULL,
             terminal_status text NOT NULL CHECK (
@@ -113,8 +113,8 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
         """,
         f"""
         CREATE TABLE {namespace}.workflow_phase2_pending (
-            task_id varchar(36) PRIMARY KEY,
-            workflow_id varchar(36) NOT NULL,
+            task_id uuid PRIMARY KEY,
+            workflow_id uuid NOT NULL,
             workflow_node_row_id bigint NOT NULL,
             terminal_status text NOT NULL CHECK (
                 terminal_status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
@@ -128,10 +128,9 @@ def _workflow_recovery_manifest(schema: PrototypeSchema) -> tuple[str, ...]:
             history_anchor timestamptz,
             history_schema_version smallint NOT NULL,
             result_digest bytea NOT NULL,
-            quarantine_task_id varchar(36)
+            quarantine_task_id uuid
                 REFERENCES {namespace}.workflow_phase2_quarantine(task_id),
-            phase2_generation varchar(36) NOT NULL
-                CHECK (octet_length(phase2_generation) = 36),
+            phase2_generation uuid NOT NULL,
             created_at timestamptz NOT NULL,
             attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
             last_attempt_at timestamptz,
@@ -211,7 +210,7 @@ def _archive_value_is_valid_function(namespace: str) -> str:
 def _quarantine_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.quarantine_phase2_pending(
-        p_task_id varchar(36),
+        p_task_id uuid,
         p_leaf_lower timestamptz,
         p_leaf_upper timestamptz,
         p_detach_horizon interval,
@@ -340,8 +339,8 @@ def _quarantine_function(namespace: str) -> str:
 def _phase2_function(namespace: str) -> str:
     return f"""
     CREATE FUNCTION {namespace}.apply_phase2(
-        p_task_id varchar(36),
-        p_phase2_generation varchar(36)
+        p_task_id uuid,
+        p_phase2_generation uuid
     ) RETURNS {namespace}.phase2_disposition
     LANGUAGE plpgsql
     AS $function$
@@ -355,7 +354,7 @@ def _phase2_function(namespace: str) -> str:
         v_result_codec text;
         v_history_schema_version smallint;
         v_terminal_status text;
-        v_quarantine_task_id varchar(36);
+        v_quarantine_task_id uuid;
     BEGIN
         SELECT * INTO v_pending
         FROM {namespace}.workflow_phase2_pending

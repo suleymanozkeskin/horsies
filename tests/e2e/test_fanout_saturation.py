@@ -110,15 +110,11 @@ class TestTaskDoneFanout:
         )).unwrap()
 
         # Complete it via direct SQL (fires NOTIFY task_done, <task_id>)
+        # Post-split, completion moves the row to history; what these
+        # tests exercise is the task_done fan-out, so fire the exact
+        # signal the terminalization emits.
         await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED',
-                    result = '{"ok": 0}',
-                    terminal_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = :tid
-            """),
+            text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
             {'tid': task_id},
         )
         await session.commit()
@@ -188,15 +184,11 @@ class TestTaskDoneFanout:
             q.put_nowait = _make_counter(q.put_nowait)  # type: ignore[assignment]
 
         # Fire 1 completion
+        # Post-split, completion moves the row to history; what these
+        # tests exercise is the task_done fan-out, so fire the exact
+        # signal the terminalization emits.
         await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED',
-                    result = '{"ok": 0}',
-                    terminal_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = :tid
-            """),
+            text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
             {'tid': task_id},
         )
         await session.commit()
@@ -260,14 +252,7 @@ class TestTaskDoneFanout:
         # Complete all M tasks (each fires NOTIFY to all N queues)
         for tid in task_ids:
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 1}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': tid},
             )
             await session.commit()
@@ -356,14 +341,7 @@ class TestTaskDoneFanout:
             t0 = time.monotonic()
             for tid in task_ids:
                 await session.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status = 'COMPLETED',
-                            result = '{"ok": 1}',
-                            terminal_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = :tid
-                    """),
+                    text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                     {'tid': tid},
                 )
                 await session.commit()
@@ -434,15 +412,11 @@ class TestFanoutBoundary:
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
         )).unwrap()
+        # Post-split, completion moves the row to history; what these
+        # tests exercise is the task_done fan-out, so fire the exact
+        # signal the terminalization emits.
         await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED',
-                    result = '{"ok": 0}',
-                    terminal_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = :tid
-            """),
+            text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
             {'tid': task_id},
         )
         await session.commit()
@@ -458,14 +432,7 @@ class TestFanoutBoundary:
                 enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 1}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': task_id_2},
             )
             await session.commit()
@@ -491,14 +458,7 @@ class TestFanoutBoundary:
                 enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 0}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': task_id},
             )
             await session.commit()
@@ -556,14 +516,7 @@ class TestFanoutBoundary:
         async def _complete_inflight(ids: list[str]) -> None:
             for tid in ids:
                 await session.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status = 'COMPLETED',
-                            result = '{"ok": 0}',
-                            terminal_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = :tid
-                    """),
+                    text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                     {'tid': tid},
                 )
                 await session.commit()
@@ -588,14 +541,7 @@ class TestFanoutBoundary:
 
             # Fire one more completion after unsubscribe and verify only remaining queues grow.
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 0}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': post_id},
             )
             await session.commit()
@@ -720,14 +666,7 @@ class TestFanoutErrorPaths:
 
             for tid in task_ids:
                 await session.execute(
-                    text("""
-                        UPDATE horsies_tasks
-                        SET status = 'COMPLETED',
-                            result = '{"ok": 1}',
-                            terminal_at = NOW(),
-                            updated_at = NOW()
-                        WHERE id = :tid
-                    """),
+                    text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                     {'tid': tid},
                 )
                 await session.commit()
@@ -771,14 +710,7 @@ class TestFanoutContracts:
                 enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 0}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': task_id},
             )
             await session.commit()
@@ -822,14 +754,7 @@ class TestFanoutContracts:
 
             # Complete the task — fires NOTIFY on task_done only
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 0}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': task_id},
             )
             await session.commit()
@@ -871,14 +796,7 @@ class TestFanoutContracts:
                 enqueue_sha='test-sha',
             )).unwrap()
             await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED',
-                        result = '{"ok": 0}',
-                        terminal_at = NOW(),
-                        updated_at = NOW()
-                    WHERE id = :tid
-                """),
+                text("SELECT pg_notify('task_done', CAST(:tid AS text))"),
                 {'tid': task_id},
             )
             await session.commit()

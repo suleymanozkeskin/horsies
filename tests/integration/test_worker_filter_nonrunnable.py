@@ -51,11 +51,17 @@ async def _insert_claimed_task(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha)
+                 max_retries, claimed_at, claimed_by_worker_id, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'filter_test', 'default', 100, '[]', '{}',
                  'CLAIMED', :sent_at, NOW(), NOW(), TRUE, 0,
-                 0, NOW(), :claimed_by_worker_id, :enqueue_sha)
+                 0, NOW(), :claimed_by_worker_id, :enqueue_sha,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -112,7 +118,10 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read horsies_tasks.status for a given task_id."""
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).fetchone()
@@ -127,8 +136,8 @@ async def _get_terminalization_kind(
     return (
         await session.execute(
             text(
-                'SELECT terminalization_kind FROM horsies_tasks '
-                'WHERE id = :id'
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
@@ -141,8 +150,8 @@ async def _get_task_claim_row(session: AsyncSession, task_id: str) -> tuple[str,
         await session.execute(
             text("""
                 SELECT status, claimed, claimed_by_worker_id
-                FROM horsies_tasks
-                WHERE id = :id
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

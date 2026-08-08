@@ -19,6 +19,7 @@ deliberately spaced; each open dashboard multiplies the load.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any, Literal, NamedTuple
@@ -50,6 +51,30 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
     RetrievalCode,
+)
+from horsies.core.history.archive.attempts import (
+    AttemptRecord as ArchiveAttemptRecord,
+)
+from horsies.core.history.reads.aggregates import (
+    HistoryScope,
+    history_breakdown_statement,
+    history_count_statement,
+    history_scoped_status_counts_statement,
+)
+from horsies.core.history.reads.detail import (
+    HistoryTaskDetail,
+    TaskDetailAbsent,
+    read_task_detail,
+    staged_detail_published,
+)
+from horsies.core.history.reads.pages import (
+    HistoryFacet,
+    HistoryFacetQuery,
+    HistoryPageQuery,
+    history_facet_statement,
+    HistoryWindow,
+    history_page_statement,
+    history_sort_expression,
 )
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok
@@ -258,6 +283,20 @@ def _category_value(code: str | None) -> str | None:
     return category.value if category is not None else None
 
 
+def _is_uuid_text(value: str) -> bool:
+    """Whether ``value`` parses as a uuid.
+
+    Identity columns are uuid; text that does not parse as one names
+    nothing and must answer as an absence, not reach a CAST or a typed
+    bind that would error.
+    """
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
     """Wrap a session-boundary failure, classifying transient errors."""
     return Err(
@@ -339,6 +378,57 @@ def _task_summary(task: TaskModel) -> TaskSummary:
     )
 
 
+def _history_summary(row: Any) -> TaskSummary:
+    """Map one history page row to the list-view shape."""
+    status = str(row.status)
+    completed_at = row.terminal_at if status == 'COMPLETED' else None
+    failed_at = row.terminal_at if status != 'COMPLETED' else None
+    return TaskSummary(
+        id=str(row.task_id),
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        status=status,
+        priority=row.priority,
+        retry_count=row.retry_count,
+        max_retries=row.max_retries,
+        is_workflow_task=row.is_workflow_task,
+        error_code=nz(row.error_code),
+        error_category=_category_value(row.error_code),
+        worker_hostname=row.last_worker_hostname,
+        worker_id=row.last_claimed_worker_id,
+        enqueued_at=row.enqueued_at,
+        started_at=row.started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        queue_s=span_s(
+            row.enqueued_at, row.started_at or row.terminal_at, live=False
+        ),
+        exec_s=span_s(row.started_at, row.terminal_at, live=False),
+    )
+
+
+def _summary_sort_value(summary: TaskSummary, field: str) -> Any:
+    """The merge key for one allowlisted sort field.
+
+    ``queue_s``/``exec_s`` mirror the pure-SQL sort expressions
+    (start - enqueue, terminal end - start), not the displayed spans: a
+    live row's displayed duration counts up while its sort key stays
+    NULL, exactly as the SQL side orders.
+    """
+    match field:
+        case 'queue_s':
+            if summary.started_at is None or summary.enqueued_at is None:
+                return None
+            return summary.started_at - summary.enqueued_at
+        case 'exec_s':
+            end = summary.completed_at or summary.failed_at
+            if end is None or summary.started_at is None:
+                return None
+            return end - summary.started_at
+        case _:
+            return getattr(summary, field)
+
+
 def _leaf_task(task: TaskModel) -> LeafTaskInfo:
     """Map a task row to the detail shape shared by tasks and workflow nodes."""
     queue_s, exec_s = _task_spans(task)
@@ -372,6 +462,58 @@ def _attempt(row: TaskAttemptModel) -> TaskAttemptInfo:
         worker_hostname=row.worker_hostname,
         started_at=row.started_at,
         finished_at=row.finished_at,
+    )
+
+
+def _history_attempt(record: 'ArchiveAttemptRecord') -> TaskAttemptInfo:
+    """Map one snapshot-preserved attempt to the same response shape."""
+    return TaskAttemptInfo(
+        attempt=record.attempt,
+        outcome=record.outcome,
+        will_retry=record.will_retry,
+        error_code=nz(record.error_code),
+        error_message=nz(record.error_message),
+        failed_reason=nz(record.failed_reason),
+        worker_hostname=record.worker_hostname,
+        started_at=record.started_at,
+        finished_at=record.finished_at,
+    )
+
+
+def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
+    """Map a history detail to the leaf shape the routes already serve.
+
+    The terminal instant is authoritative: it lands in ``completed_at``
+    for COMPLETED and in ``failed_at`` for every other terminal status,
+    which is strictly more end-stamp information than the pre-history
+    live rows carried for cancelled and expired tasks.
+    """
+    completed_at = (
+        detail.terminal_at if detail.status == 'COMPLETED' else None
+    )
+    failed_at = (
+        detail.terminal_at if detail.status != 'COMPLETED' else None
+    )
+    end = detail.terminal_at
+    queue_s = span_s(
+        detail.enqueued_at, detail.started_at or end, live=False
+    )
+    exec_s = span_s(detail.started_at, end, live=False)
+    return LeafTaskInfo(
+        task_id=detail.task_id,
+        status=detail.status,
+        error_code=nz(detail.error_code),
+        failed_reason=nz(detail.final_failed_reason),
+        retry_count=detail.retry_count,
+        max_retries=detail.max_retries,
+        enqueued_at=detail.enqueued_at,
+        started_at=detail.started_at,
+        completed_at=completed_at,
+        failed_at=failed_at,
+        queue_s=queue_s,
+        exec_s=exec_s,
+        worker_hostname=detail.last_worker_hostname,
+        good_until=detail.good_until,
     )
 
 
@@ -436,6 +578,42 @@ def _category_predicate(category: ErrorCategory) -> ColumnElement[bool]:
             | ErrorCategory.OUTCOME
         ):
             return TaskModel.error_code.in_(_CATEGORY_TO_CODES[category])
+
+
+def _history_scope(
+    *,
+    statuses: list[TaskStatus],
+    task_names: list[str],
+    queues: list[str],
+    workers: list[str],
+    error_codes: list[str],
+    error_categories: list[ErrorCategory],
+    retried_only: bool,
+) -> HistoryScope:
+    """The live filter set expressed in history-primitive terms.
+
+    Taxonomy families resolve to their code lists here — the primitive
+    carries codes, never the taxonomy — and DOMAIN becomes the
+    complement of every built-in code, exactly the live predicate's
+    semantics.
+    """
+    families: list[tuple[str, ...]] = []
+    domain_complement: tuple[str, ...] | None = None
+    for category in error_categories:
+        if category is ErrorCategory.DOMAIN:
+            domain_complement = _BUILTIN_CODES
+        else:
+            families.append(_CATEGORY_TO_CODES[category])
+    return HistoryScope(
+        statuses=tuple(status.value for status in statuses),
+        task_names=tuple(task_names),
+        queue_names=tuple(queues),
+        workers=tuple(workers),
+        error_codes=tuple(error_codes),
+        category_families=tuple(families),
+        domain_complement=domain_complement,
+        retried_only=retried_only,
+    )
 
 
 def _scope_conditions(
@@ -513,6 +691,7 @@ def _facet_values(rows: Sequence[tuple[str | None, int]]) -> list[FacetValue]:
 async def task_stats(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     task_names: list[str],
     queues: list[str],
     workers: list[str],
@@ -522,9 +701,12 @@ async def task_stats(
 ) -> MonitoringResult[list[StatusCount]]:
     """Task counts by status, for the overview cards.
 
-    Scoped by every filter except status, because the cards are the status
-    selector. Always returns all seven statuses in a fixed order, including
-    zeros, so cards never appear, disappear, or reorder between polls.
+    Cross-lifecycle: live statuses count from the live table, terminal
+    statuses from the history side over the window (terminalization
+    moves finished rows there). Scoped by every filter except status,
+    because the cards are the status selector. Always returns all
+    seven statuses in a fixed order, including zeros, so cards never
+    appear, disappear, or reorder between polls.
     """
     scope = _scope_conditions(
         statuses=[],
@@ -538,17 +720,36 @@ async def task_stats(
     stmt = (
         select(TaskModel.status, func.count()).where(*scope).group_by(TaskModel.status)
     )
+    history_sql, history_params = history_scoped_status_counts_statement(
+        window,
+        _history_scope(
+            statuses=[],
+            task_names=task_names,
+            queues=queues,
+            workers=workers,
+            error_codes=error_codes,
+            error_categories=error_categories,
+            retried_only=retried_only,
+        ),
+    )
 
     try:
         async with broker.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
+            history_rows = (
+                await session.execute(text(history_sql), history_params)
+            ).all()
     except SQLAlchemyError as exc:
         return _db_err('task stats query', exc)
 
     counts = {status: count for status, count in rows}
+    merged: dict[TaskStatus, int] = dict(counts)
+    for row in history_rows:
+        status = TaskStatus(str(row.status))
+        merged[status] = merged.get(status, 0) + int(row.terminal_count)
     return Ok(
         [
-            StatusCount(status=status.value, count=counts.get(status, 0))
+            StatusCount(status=status.value, count=merged.get(status, 0))
             for status in _STATUS_ORDER
         ]
     )
@@ -557,6 +758,7 @@ async def task_stats(
 async def task_facets(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     statuses: list[TaskStatus],
     error_categories: list[ErrorCategory],
     retried_only: bool,
@@ -600,14 +802,59 @@ async def task_facets(
         .order_by(error_count.desc())
     )
 
+    coarse_statuses = tuple(status.value for status in statuses)
+
+    def _history_facet_sql(
+        facet: HistoryFacet,
+    ) -> tuple[str, dict[str, object]]:
+        return history_facet_statement(
+            HistoryFacetQuery(
+                window=window,
+                facet=facet,
+                limit=200,
+                statuses=coarse_statuses,
+                retried_only=retried_only,
+            )
+        )
+
     try:
         async with broker.session_factory() as session:
             worker_rows = (await session.execute(workers_stmt)).tuples().all()
             name_rows = (await session.execute(names_stmt)).tuples().all()
             queue_rows = (await session.execute(queues_stmt)).tuples().all()
             error_rows = (await session.execute(errors_stmt)).tuples().all()
+            history_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
+            for facet in (
+                HistoryFacet.WORKER,
+                HistoryFacet.TASK_NAME,
+                HistoryFacet.QUEUE_NAME,
+                HistoryFacet.ERROR_CODE,
+            ):
+                sql, params = _history_facet_sql(facet)
+                history_facets[facet] = [
+                    (str(row.facet_value), int(row.facet_count))
+                    for row in (
+                        await session.execute(text(sql), params)
+                    ).all()
+                ]
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
+
+    def _merged(
+        live: Sequence[tuple[str | None, int]],
+        facet: HistoryFacet,
+    ) -> list[tuple[str, int]]:
+        counts: dict[str, int] = {
+            value: count for value, count in live if value is not None
+        }
+        for value, count in history_facets[facet]:
+            counts[value] = counts.get(value, 0) + count
+        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    worker_rows = _merged(worker_rows, HistoryFacet.WORKER)
+    name_rows = _merged(name_rows, HistoryFacet.TASK_NAME)
+    queue_rows = _merged(queue_rows, HistoryFacet.QUEUE_NAME)
+    error_rows = _merged(error_rows, HistoryFacet.ERROR_CODE)
 
     # error_code is non-null and non-empty here, so categorization never
     # returns None; DOMAIN is the fallback for user-defined codes.
@@ -618,7 +865,6 @@ async def task_facets(
             category=(categorize_error_code(value) or ErrorCategory.DOMAIN).value,
         )
         for value, count in error_rows
-        if value is not None
     ]
     category_totals: dict[str, int] = {}
     for facet in error_facets:
@@ -647,6 +893,7 @@ async def task_facets(
 async def task_breakdown(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     group_by: TaskGroupBy,
     statuses: list[TaskStatus],
     task_names: list[str],
@@ -700,9 +947,31 @@ async def task_breakdown(
         .order_by(rollup_flag, group_total.desc())
     )
 
+    history_group_column = {
+        'worker': 'last_claimed_worker_id',
+        'task_name': 'task_name',
+        'queue': 'queue_name',
+    }[group_by]
+    history_sql, history_params = history_breakdown_statement(
+        window,
+        _history_scope(
+            statuses=statuses,
+            task_names=task_names,
+            queues=queues,
+            workers=workers,
+            error_codes=error_codes,
+            error_categories=error_categories,
+            retried_only=retried_only,
+        ),
+        group_column=history_group_column,
+    )
+
     try:
         async with broker.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
+            history_rows = (
+                await session.execute(text(history_sql), history_params)
+            ).all()
     except SQLAlchemyError as exc:
         return _db_err('task breakdown query', exc)
 
@@ -750,12 +1019,47 @@ async def task_breakdown(
         else:
             groups.append(built)
 
+    merged: dict[str, GroupRow] = {row.group: row for row in groups}
+    total_extra = {'total': 0, 'completed': 0, 'failed': 0,
+                   'cancelled': 0, 'expired': 0, 'retried': 0}
+    for row in history_rows:
+        key = str(row.group_value)
+        status = str(row.status).lower()
+        count = int(row.status_count)
+        retried = int(row.retried_count)
+        base = merged.get(key)
+        if base is None:
+            base = GroupRow(
+                group=key, total=0, pending=0, claimed=0, running=0,
+                completed=0, failed=0, cancelled=0, expired=0, retried=0,
+            )
+        update = {
+            'total': base.total + count,
+            'retried': base.retried + retried,
+        }
+        if status in ('completed', 'failed', 'cancelled', 'expired'):
+            update[status] = getattr(base, status) + count
+            total_extra[status] += count
+        total_extra['total'] += count
+        total_extra['retried'] += retried
+        merged[key] = base.model_copy(update=update)
+    total_row = total_row.model_copy(update={
+        'total': total_row.total + total_extra['total'],
+        'completed': total_row.completed + total_extra['completed'],
+        'failed': total_row.failed + total_extra['failed'],
+        'cancelled': total_row.cancelled + total_extra['cancelled'],
+        'expired': total_row.expired + total_extra['expired'],
+        'retried': total_row.retried + total_extra['retried'],
+    })
+    ordered = sorted(
+        merged.values(), key=lambda row: (-row.total, row.group)
+    )
     return Ok(
         Breakdown(
             group_by=group_by,
-            groups=groups[:limit],
+            groups=ordered[:limit],
             total=total_row,
-            group_count=len(groups),
+            group_count=len(ordered),
         )
     )
 
@@ -821,6 +1125,7 @@ async def _estimated_task_total(session: AsyncSession) -> int:
 async def list_tasks(
     broker: PostgresBroker,
     *,
+    window: HistoryWindow,
     statuses: list[TaskStatus],
     task_names: list[str],
     queues: list[str],
@@ -850,29 +1155,79 @@ async def list_tasks(
         error_categories=error_categories,
         retried_only=retried_only,
     )
+    # Each side over-fetches the page's reach (offset + limit) sorted
+    # by the SAME key, and the merge re-sorts and slices — correct for
+    # any page within the capped reach, with cost bounded by the caps.
+    reach = offset + limit
     rows_stmt = list_rows_statement(
         scope=scope,
         sort_by=sort_by,
         sort_dir=sort_dir,
-        offset=offset,
-        limit=limit,
+        offset=0,
+        limit=reach,
+    )
+    history_scope = _history_scope(
+        statuses=statuses,
+        task_names=task_names,
+        queues=queues,
+        workers=workers,
+        error_codes=error_codes,
+        error_categories=error_categories,
+        retried_only=retried_only,
+    )
+    page_sql, page_params = history_page_statement(
+        HistoryPageQuery(
+            window=window,
+            limit=min(max(reach, 1), 500),
+            offset=0,
+            scope=history_scope,
+            order_by=history_sort_expression(
+                sort_by, descending=sort_dir == 'desc'
+            ),
+        )
+    )
+    count_sql, count_params = history_count_statement(
+        window, history_scope
     )
 
     try:
         async with broker.session_factory() as session:
             match scope:
                 case []:
-                    total = await _estimated_task_total(session)
+                    live_total = await _estimated_task_total(session)
                 case _:
                     count_stmt = (
                         select(func.count()).select_from(TaskModel).where(*scope)
                     )
-                    total = (await session.execute(count_stmt)).scalar_one()
+                    live_total = (
+                        await session.execute(count_stmt)
+                    ).scalar_one()
             tasks = (await session.execute(rows_stmt)).scalars().all()
+            history_rows = (
+                await session.execute(text(page_sql), page_params)
+            ).all()
+            history_total = int(
+                (
+                    await session.execute(text(count_sql), count_params)
+                ).scalar_one()
+            )
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
 
-    return Ok(TaskListPage(rows=[_task_summary(task) for task in tasks], total=total))
+    summaries = [_task_summary(task) for task in tasks]
+    summaries.extend(_history_summary(row) for row in history_rows)
+    keyed = [
+        (_summary_sort_value(summary, sort_by), summary)
+        for summary in summaries
+    ]
+    non_null = [pair for pair in keyed if pair[0] is not None]
+    nulls = [summary for value, summary in keyed if value is None]
+    non_null.sort(key=lambda pair: pair[0], reverse=sort_dir == 'desc')
+    # Nulls last in BOTH directions, matching the live SQL's
+    # nulls_last discipline.
+    ordered = [summary for _, summary in non_null] + nulls
+    page = ordered[offset : offset + limit]
+    return Ok(TaskListPage(rows=page, total=live_total + history_total))
 
 
 async def get_task_detail(
@@ -884,6 +1239,8 @@ async def get_task_detail(
     The attempt history is where a task's cause lives: ``error_message``
     carries the unhandled exception per try, including retries.
     """
+    if not _is_uuid_text(task_id):
+        return Ok(None)
     task_stmt = select(TaskModel).where(TaskModel.id == task_id)
     attempts_stmt = (
         select(TaskAttemptModel)
@@ -901,7 +1258,29 @@ async def get_task_detail(
         async with broker.session_factory() as session:
             task = (await session.execute(task_stmt)).scalar_one_or_none()
             if task is None:
-                return Ok(None)
+                history = await _history_detail_or_none(session, task_id)
+                if history is None:
+                    return Ok(None)
+                node = (await session.execute(node_stmt)).tuples().first()
+                workflow_id, workflow_task_index = (
+                    node if node is not None else (None, None)
+                )
+                return Ok(
+                    TaskDetail(
+                        leaf=_history_leaf(history),
+                        task_name=history.task_name,
+                        queue_name=history.queue_name,
+                        priority=history.priority,
+                        is_workflow_task=history.is_workflow_task,
+                        error_category=_category_value(history.error_code),
+                        attempts=[
+                            _history_attempt(record)
+                            for record in history.attempts
+                        ],
+                        workflow_id=workflow_id,
+                        workflow_task_index=workflow_task_index,
+                    )
+                )
             attempt_rows = (await session.execute(attempts_stmt)).scalars().all()
             node = (await session.execute(node_stmt)).tuples().first()
     except SQLAlchemyError as exc:
@@ -921,6 +1300,29 @@ async def get_task_detail(
             workflow_task_index=workflow_task_index,
         )
     )
+
+
+async def _history_detail_or_none(
+    session: AsyncSession, task_id: str
+) -> HistoryTaskDetail | None:
+    """The history side of a detail read, or None when nothing is there.
+
+    Terminalization moves finished rows out of the live table, so an
+    absent live row is the normal terminal case, not an error. A
+    pre-coverage database (no published staged function) has no
+    history to consult; a row the staged read reports live vanished
+    mid-read and is treated as absent — the caller's next poll sees
+    whichever side it landed on.
+    """
+    connection = await session.connection()
+    if not await staged_detail_published(connection):
+        return None
+    detail = await read_task_detail(connection, task_id=task_id)
+    match detail:
+        case HistoryTaskDetail():
+            return detail
+        case TaskDetailAbsent() | _:
+            return None
 
 
 # --------------------------------------------------------------------------- #
@@ -989,6 +1391,8 @@ async def get_workflow_run(
     drilled into by calling this again with that node's ``sub_workflow_id``.
     Edges pointing at an index the run does not have are dropped.
     """
+    if not _is_uuid_text(workflow_id):
+        return Ok(None)
     run_stmt = select(WorkflowModel).where(WorkflowModel.id == workflow_id)
     nodes_stmt = (
         select(WorkflowTaskModel)
@@ -1086,6 +1490,8 @@ async def get_workflow_node(
     None when the backing task row has been removed by retention, while its
     attempt rows are still reported if present.
     """
+    if not _is_uuid_text(workflow_id):
+        return Ok(None)
     node_stmt = select(WorkflowTaskModel).where(
         WorkflowTaskModel.workflow_id == workflow_id,
         WorkflowTaskModel.task_index == task_index,
@@ -1098,6 +1504,7 @@ async def get_workflow_node(
                 return Ok(None)
 
             task: TaskModel | None = None
+            history: HistoryTaskDetail | None = None
             attempt_rows: list[TaskAttemptModel] = []
             if node.task_id is not None:
                 task = (
@@ -1105,6 +1512,10 @@ async def get_workflow_node(
                         select(TaskModel).where(TaskModel.id == node.task_id)
                     )
                 ).scalar_one_or_none()
+                if task is None:
+                    history = await _history_detail_or_none(
+                        session, str(node.task_id)
+                    )
                 attempt_rows = list(
                     (
                         await session.execute(
@@ -1119,6 +1530,12 @@ async def get_workflow_node(
     except SQLAlchemyError as exc:
         return _db_err('workflow node detail query', exc)
 
+    if history is not None:
+        leaf = _history_leaf(history)
+        attempts = [_history_attempt(record) for record in history.attempts]
+    else:
+        leaf = _leaf_task(task) if task is not None else None
+        attempts = [_attempt(row) for row in attempt_rows]
     return Ok(
         WorkflowTaskDetail(
             task_index=node.task_index,
@@ -1127,8 +1544,8 @@ async def get_workflow_node(
             node_status=node.status,
             is_subworkflow=node.is_subworkflow,
             node_error=nz(node.error),
-            leaf=_leaf_task(task) if task is not None else None,
-            attempts=[_attempt(row) for row in attempt_rows],
+            leaf=leaf,
+            attempts=attempts,
         )
     )
 

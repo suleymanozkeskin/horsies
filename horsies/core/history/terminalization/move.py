@@ -31,7 +31,24 @@ from __future__ import annotations
 
 from typing import Final
 
-from ...lifecycle.operations import TerminalizationKind
+from ...lifecycle.operations import TerminalizationKind, equivalence_class_of
+
+
+def _equivalence_class_sql(kind: TerminalizationKind) -> str:
+    """The kind's full equivalence class as a SQL text-array literal.
+
+    Derived at render time from the owning ``EQUIVALENCE_CLASSES`` —
+    the class member list has one owner. A hand-written single-member
+    list here once made the miss classifier report same-class replays
+    as foreign conflicts instead of already-applied.
+    """
+    members = ', '.join(
+        f"'{member.value}'"
+        for member in sorted(
+            equivalence_class_of(kind), key=lambda member: member.value
+        )
+    )
+    return f'ARRAY[{members}]::text[]'
 from ..maintenance.gate import ARCHIVE_AVAILABILITY_FUNCTION
 from ..names import (
     LIVE_TASKS,
@@ -601,7 +618,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -655,7 +672,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -731,7 +748,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, NULL::timestamptz
         );
         RETURN;
@@ -858,7 +875,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-        p_task_id, ARRAY['{kind}']::text[],
+        p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
         NULL::text, NULL::timestamptz
     );
 END
@@ -930,7 +947,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-        p_task_id, ARRAY['{kind}']::text[],
+        p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
         p_worker_id, NULL::timestamptz
     );
 END
@@ -1344,7 +1361,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             NULL::text, NULL::timestamptz
         );
         RETURN;
@@ -1439,7 +1456,7 @@ BEGIN
     END IF;
 
     RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-        p_task_id, ARRAY['{kind}']::text[],
+        p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
         p_worker_id, p_claimed_at
     );
 END
@@ -1559,7 +1576,7 @@ BEGIN
     FROM unnest(p_ids, p_claimed_ats) WITH ORDINALITY
         AS input(task_id, expected_claimed_at, ordinality)
     CROSS JOIN LATERAL {MISS_CLASSIFIER_FUNCTION}(
-        input.task_id, ARRAY['{kind.value}']::text[],
+        input.task_id, {_equivalence_class_sql(kind)},
         p_worker_id, input.expected_claimed_at
     ) m
     WHERE NOT (input.task_id = ANY(v_applied_ids));
@@ -1598,7 +1615,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -1658,7 +1675,7 @@ BEGIN
     FOR UPDATE;
     IF NOT FOUND THEN
         RETURN QUERY SELECT * FROM {MISS_CLASSIFIER_FUNCTION}(
-            p_task_id, ARRAY['{kind}']::text[],
+            p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, p_claimed_at
         );
         RETURN;
@@ -1737,7 +1754,10 @@ def _cancel_cancelled_sweep_ddl() -> str:
               JOIN horsies_workflows w ON w.id = wt.workflow_id
               WHERE wt.task_id = t2.id
                 AND wt.workflow_id = ANY(p_workflow_ids)
-                AND w.status = 'CANCELLED'
+                -- EXPIRED propagates exactly as CANCELLED: one batch
+                -- serves both, and the backing row carries the
+                -- workflow-cancel kind either way.
+                AND w.status IN ('CANCELLED', 'EXPIRED')
                 AND wt.status = 'ENQUEUED'
           )
         FOR UPDATE OF t2 SKIP LOCKED""",

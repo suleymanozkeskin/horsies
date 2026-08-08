@@ -252,7 +252,42 @@ from sqlalchemy import text
 #      registry is bounded pre-cutover; idempotence lives at the
 #      runner's existence check against the imported index name.
 
-SCHEMA_VERSION = 30
+# v31: WorkflowStatus.EXPIRED joins the workflow terminal set (paused
+#      past the deployment's declared age policy). The generated
+#      partial-index predicate of idx_horsies_workflows_retention
+#      changes with the set, and IF NOT EXISTS never rebuilds — the
+#      migration drops and recreates the index explicitly (the class
+#      rule for any changed generated predicate). The retention
+#      DELETEs' IN-lists render from the same literal set and begin
+#      admitting expired workflows, which is the point.
+
+# v32: the fresh-world arm reaches the cutover's end state. v27 adds
+#      the live cutover columns TRANSITIONALLY — nullable, unchecked —
+#      because an upgraded install's old writers would violate the
+#      declared shape before the cutover backfills it, and the offline
+#      tighten stage is what brings those installs to the final shape.
+#      A uuid-born install has no old writers and never runs that
+#      stage, so it wore the transitional shape permanently while the
+#      fresh-world arm claimed it was born at the end state: three of
+#      the end state's four parts (status domain, move-family program,
+#      partitioned heartbeats) were applied and the column tightening
+#      was not. The arm now applies the same rendered statements the
+#      tighten stage applies, guarded on the class column already being
+#      required. Upgraded installs are unchanged — the chain runs at
+#      broker init, before the cutover, where legacy NULLs still exist.
+
+# v33: the locator contract deletes on cascade. Pending is evidence FOR
+#      a node's progression, so a node that is gone leaves nothing to
+#      progress — the consumer's own conclusion for a workflow that
+#      reached terminal is to dispose of the evidence, and the cascade
+#      applies that conclusion transactionally when the delete is the
+#      only remaining actor. Refusing instead would tie workflow
+#      retention to consumption liveness. The fresh-world arm guards on
+#      the DELETE ACTION rather than the constraint's existence: adding
+#      a constraint that already exists never rebuilds it, so a database
+#      born at v32 would keep the refusing form forever.
+
+SCHEMA_VERSION = 33
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -318,6 +353,15 @@ from horsies.core.history.ddl.fragments import (  # noqa: E402
 )
 from horsies.core.history.names import (  # noqa: E402
     TASK_HISTORY_PARENT,
+)
+
+# The two-worlds predicate: the identity column's actual birth shape,
+# read from the catalog. A uuid-born database is the fresh world (born
+# at the cutover's end state); a varchar-born one is the upgraded world
+# that reaches that state only through the offline cutover program.
+FRESH_IDENTITY_PREDICATE_SQL = text(
+    """SELECT atttypid = 'uuid'::regtype FROM pg_attribute
+    WHERE attrelid = 'horsies_tasks'::regclass AND attname = 'id'"""
 )
 
 TASK_HISTORY_PARENT_EXISTS_SQL = text(
@@ -428,7 +472,7 @@ CREATE OR REPLACE FUNCTION horsies_claim(
     p_lock_keys jsonb
 )
 RETURNS TABLE(
-    id varchar,
+    id text,
     task_name varchar,
     args text,
     kwargs text,
@@ -613,7 +657,7 @@ BEGIN
         updated_at = now()
     FROM pick
     WHERE t.id = pick.id
-    RETURNING t.id, t.task_name, t.args, t.kwargs, t.queue_name,
+    RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
               t.is_workflow_task, t.task_options, t.claimed_at;
 END;
 $func$;

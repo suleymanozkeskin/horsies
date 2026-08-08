@@ -416,7 +416,7 @@ async def _measure_registry(
                 SELECT sha256(convert_to('key-' || series::text, 'UTF8')),
                        1, 1,
                        sha256(convert_to('command-' || series::text, 'UTF8')),
-                       md5('task-' || series::text)::uuid::text,
+                       md5('task-' || series::text)::uuid,
                        'TERMINAL', interval '24 hours',
                        statement_timestamp() - interval '1 second'
                 FROM generate_series(1, CAST(:rows AS bigint)) AS series
@@ -843,7 +843,7 @@ async def _measure_forever_freeze(
                     SELECT task_id FROM {schema.sql}.{relation}
                     WHERE task_id = md5(
                         :domain || CAST(:row_number AS text)
-                    )::uuid::text
+                    )::uuid
                     """
                 ),
                 {'domain': 'forever', 'row_number': row_number},
@@ -898,7 +898,7 @@ async def _seed_history_leaf(
                     attempt_snapshot_content_type, attempt_snapshot,
                     attempt_snapshot_digest
                 )
-                SELECT md5(:domain || series::text)::uuid::text,
+                SELECT md5(:domain || series::text)::uuid,
                        'prototype.task', 'default', 100, 1,
                        sha256(convert_to(:domain || series::text, 'UTF8')),
                        'COMPLETED', 'COMPLETE_LOCKED', :terminal_at, :terminal_at,

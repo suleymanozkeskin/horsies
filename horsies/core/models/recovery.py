@@ -1,6 +1,7 @@
 # horsies/core/models/recovery.py
 from __future__ import annotations
-from typing import Annotated, Self
+from typing import Annotated, Self, cast
+from datetime import timedelta
 from pydantic import BaseModel, Field, model_validator
 from horsies.core.errors import (
     ConfigurationError,
@@ -36,10 +37,9 @@ class RecoveryConfig(BaseModel):
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
-    - heartbeat_retention_hours: Keep heartbeat rows for this long (None disables cleanup)
     - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
-    - terminal_record_retention_hours: Keep terminal task/workflow rows for this long (None disables cleanup)
-    - queue_terminal_record_retention_hours: Per-queue overrides of the terminal window for plain tasks
+    - terminal_record_retention_hours: Keep terminal WORKFLOW rows for this long (None disables cleanup);
+      terminal task rows live in the task-history archive and age by retention class
     - retention_sweep_interval_s: Seconds between retention sweep passes
     - retention_delete_batch_size: Rows per retention DELETE batch
     """
@@ -123,13 +123,6 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
-    heartbeat_retention_hours: Annotated[
-        int | None, Field(ge=1, le=24 * 365),
-    ] = Field(
-        default=24,
-        description='How long to keep heartbeat rows in hours; set None to disable pruning',
-    )
-
     worker_state_retention_hours: Annotated[
         int | None, Field(ge=1, le=24 * 365),
     ] = Field(
@@ -142,21 +135,48 @@ class RecoveryConfig(BaseModel):
     ] = Field(
         default=24 * 30,
         description=(
-            'How long to keep terminal rows in tasks/workflows/workflow_tasks in hours; '
-            'set None to disable pruning'
+            'How long to keep terminal WORKFLOW records '
+            '(workflows/workflow_tasks rows) in hours; set None to '
+            'disable pruning. Terminal task rows move to the '
+            'task-history archive at terminalization and age by their '
+            'retention class, not by this window'
         ),
     )
 
-    queue_terminal_record_retention_hours: dict[
-        str, Annotated[int, Field(ge=1, le=24 * 365 * 5)],
-    ] = Field(
-        default_factory=dict,
+    paused_workflow_auto_cancel_after: timedelta | None = Field(
+        default=None,
         description=(
-            'Per-queue overrides of terminal_record_retention_hours for plain '
-            '(non-workflow) tasks; queues not listed use the global window. '
-            'Overrides apply even when the global window is None. '
-            'Workflow-backing task rows always use the global window; once their '
-            'workflow is terminal, they age from their own terminal timestamp'
+            'Age past which a PAUSED workflow is expired by policy '
+            '(WorkflowStatus.EXPIRED); None disables the sweep — no '
+            'deployment changes behavior without declaring the rule'
+        ),
+    )
+
+    history_leaf_horizon_days: Annotated[int, Field(ge=2, le=14)] = Field(
+        default=3,
+        description=(
+            'Complete future daily history leaves the maintenance owner '
+            'keeps created ahead of writes; floor 2 is the coverage '
+            'health red line, ceiling 14 bounds catalog pre-creation'
+        ),
+    )
+
+    heartbeat_leaf_horizon_hours: Annotated[int, Field(ge=2, le=48)] = Field(
+        default=6,
+        description=(
+            'Complete future hourly heartbeat leaves kept created '
+            'ahead of writes'
+        ),
+    )
+
+    partition_maintenance_interval_s: Annotated[
+        int, Field(ge=60, le=3_600),
+    ] = Field(
+        default=900,
+        description=(
+            'Seconds between coverage-ensure passes; any value in '
+            'bounds refreshes coverage well before either horizon '
+            'floor can lapse'
         ),
     )
 
@@ -175,6 +195,50 @@ class RecoveryConfig(BaseModel):
             'duration, row locks, and WAL; each batch commits independently'
         ),
     )
+
+    @model_validator(mode='after')
+    def paused_expiry_age_is_positive(self) -> 'RecoveryConfig':
+        """A zero or negative age would expire every pause instantly."""
+        if (
+            self.paused_workflow_auto_cancel_after is not None
+            and self.paused_workflow_auto_cancel_after <= timedelta(0)
+        ):
+            raise ValueError(
+                'paused_workflow_auto_cancel_after must be a positive '
+                'duration; use None to disable the sweep'
+            )
+        return self
+
+    @model_validator(mode='before')
+    @classmethod
+    def reject_removed_retention_knobs(cls, data: object) -> object:
+        """Fail closed on knobs whose object no longer exists.
+
+        Terminal task rows move to the task-history archive and age by
+        RETENTION CLASS; heartbeat rows live in partitions that drop
+        whole. A configuration naming the removed knobs is corrected,
+        never silently ignored.
+        """
+        if isinstance(data, dict):
+            fields = cast('dict[str, object]', data)
+            removed = {
+                'queue_terminal_record_retention_hours': (
+                    'terminal task rows age by their retention class in '
+                    'the task-history archive; per-queue task retention '
+                    'windows no longer exist'
+                ),
+                'heartbeat_retention_hours': (
+                    'heartbeat rows live in time-partitioned leaves that '
+                    'drop whole; a row-delete window no longer exists'
+                ),
+            }
+            for name, successor in removed.items():
+                if name in fields:
+                    raise ValueError(
+                        f'{name} was removed in 0.5.0: {successor}'
+                    )
+            return fields
+        return data
 
     @model_validator(mode='after')
     def validate_heartbeat_thresholds(self) -> Self:

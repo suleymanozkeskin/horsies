@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import TASK_HISTORY_PARENT
 from ..terminalization.move import LIVE_TASKS
 from ...schemas.migrations import SCHEMA_VERSION
@@ -26,17 +27,34 @@ PLANNING_CEILING_DENOMINATOR = 4
 
 @dataclass(frozen=True, slots=True)
 class RelocationCoefficients:
-    """Fitted from measured runs; first-class, never implied."""
+    """Fitted from measured runs; first-class, never implied.
+
+    Both row-proportional slopes are first-class: the relocation
+    slope alone described a small fraction of the row-proportional
+    cost, and an estimate that hid the preparation slope inside a
+    fudge would be the one-total failure again by another route.
+    """
 
     seconds_per_million_rows: float
     fixed_seconds: float
+    preparation_seconds_per_million_rows: float
 
 
 @dataclass(frozen=True, slots=True)
 class CutoverEstimate:
+    """The adopter-facing TOTAL WINDOW, itemized.
+
+    fixed + (preparation + relocation slopes) x rows + the
+    near-constant itemized stages; the planning ceiling applies to
+    the TOTAL, never to the model term alone.
+    """
+
     coefficients: RelocationCoefficients
     rows: int
-    estimated_seconds: float
+    preparation_seconds: float
+    relocation_seconds: float
+    stage_seconds: tuple[tuple[str, float], ...]
+    total_seconds: float
     ceiling_seconds: float
 
 
@@ -50,10 +68,23 @@ class CutoverPreflight:
     unrecorded_kind_rows: int
     unfingerprinted_rows: int
     unprepared_envelope_rows: int
+    unclassified_rows: int
+    unclassified_live_bytes: int
+    """What the class-less rows occupy on the LIVE table.
+
+    The backfill decision trades deletion risk against storage
+    commitment — rows that never age hold their space forever — so the
+    advisory carries both quantities. This is the live figure and says
+    so: the relocated record also carries its attempt snapshot."""
     class_day_pairs: int
     workflow_rows: int
     heartbeat_rows: int
     estimate: CutoverEstimate
+    advisories: tuple[str, ...]
+    """Inventory findings that change what the operator should do.
+
+    An advisory states the consequence, not the count alone: a number
+    the operator must interpret is not a decision surface."""
 
 
 class PreflightError(Exception):
@@ -61,18 +92,31 @@ class PreflightError(Exception):
 
 
 def estimate_relocation(
-    coefficients: RelocationCoefficients, *, rows: int
+    coefficients: RelocationCoefficients,
+    *,
+    rows: int,
+    stage_seconds: tuple[tuple[str, float], ...] = (),
 ) -> CutoverEstimate:
-    estimated = (
+    millions = rows / 1_000_000
+    preparation = (
+        coefficients.preparation_seconds_per_million_rows * millions
+    )
+    relocation = coefficients.seconds_per_million_rows * millions
+    total = (
         coefficients.fixed_seconds
-        + coefficients.seconds_per_million_rows * rows / 1_000_000
+        + preparation
+        + relocation
+        + sum(seconds for _, seconds in stage_seconds)
     )
     return CutoverEstimate(
         coefficients=coefficients,
         rows=rows,
-        estimated_seconds=estimated,
+        preparation_seconds=preparation,
+        relocation_seconds=relocation,
+        stage_seconds=stage_seconds,
+        total_seconds=total,
         ceiling_seconds=(
-            estimated
+            total
             * PLANNING_CEILING_NUMERATOR
             / PLANNING_CEILING_DENOMINATOR
         ),
@@ -126,6 +170,12 @@ async def run_preflight(
                         WHERE terminal
                           AND prepared_rerun_input_disposition IS NULL
                     ) AS unprepared_rows,
+                    count(*) FILTER (
+                        WHERE terminal AND retention_class_key IS NULL
+                    ) AS unclassified_rows,
+                    COALESCE(sum(row_bytes) FILTER (
+                        WHERE terminal AND retention_class_key IS NULL
+                    ), 0) AS unclassified_bytes,
                     count(DISTINCT CASE WHEN terminal THEN
                         (retention_class_key,
                          date_trunc('day', terminal_at AT TIME ZONE 'UTC'))
@@ -133,7 +183,12 @@ async def run_preflight(
                 FROM (
                     SELECT *,
                            status NOT IN ('PENDING', 'CLAIMED', 'RUNNING')
-                               AS terminal
+                               AS terminal,
+                           -- The LIVE size of the row, which is what
+                           -- this pass can measure honestly; the
+                           -- post-relocation footprint also carries
+                           -- the attempt snapshot and is not this.
+                           pg_column_size({LIVE_TASKS}) AS row_bytes
                     FROM {LIVE_TASKS}
                 ) rows
                 """
@@ -149,6 +204,17 @@ async def run_preflight(
         )
     ).one()
     terminal_rows = int(inventory.terminal_rows)
+    unclassified_rows = int(inventory.unclassified_rows)
+    unclassified_live_bytes = int(inventory.unclassified_bytes)
+    advisories: list[str] = []
+    if unclassified_rows:
+        megabytes = unclassified_live_bytes / (1024 * 1024)
+        advisories.append(
+            f'{unclassified_rows} terminal rows ({megabytes:.1f} MB live) '
+            'carry no retention class; relocation will place them in the '
+            f"'{FOREVER_CLASS_KEY}' class (no automatic aging); backfill a "
+            'class before cutover to age them'
+        )
     return CutoverPreflight(
         stored_schema_version=stored,
         history_parent_present=parent_present,
@@ -156,8 +222,11 @@ async def run_preflight(
         unrecorded_kind_rows=int(inventory.unrecorded_kind_rows),
         unfingerprinted_rows=int(inventory.unfingerprinted_rows),
         unprepared_envelope_rows=int(inventory.unprepared_rows),
+        unclassified_rows=unclassified_rows,
+        unclassified_live_bytes=unclassified_live_bytes,
         class_day_pairs=int(inventory.class_day_pairs),
         workflow_rows=int(counts.wf),
         heartbeat_rows=int(counts.hb),
         estimate=estimate_relocation(coefficients, rows=terminal_rows),
+        advisories=tuple(advisories),
     )

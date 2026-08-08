@@ -36,27 +36,38 @@ pytestmark = [pytest.mark.integration]
 async def _seed(
     session: AsyncSession,
     *,
-    task_id: str,
     queue: str,
     priority: int,
     age_secs: float,
-) -> None:
-    """Insert one PENDING task with explicit priority and enqueue age."""
+) -> str:
+    """Insert one PENDING task with explicit priority and enqueue age.
+
+    Returns the minted id, which identity supplies rather than the caller;
+    ordering assertions compare against the returned value.
+    """
+    task_id = str(uuid.uuid4())
     await session.execute(
         text(
             """
             INSERT INTO horsies_tasks
               (id, task_name, queue_name, priority, status, enqueued_at,
                is_workflow_task, enqueue_sha, created_at, updated_at,
-               retry_count, max_retries)
+               retry_count, max_retries,
+               retention_class_key, command_fingerprint_version,
+               command_fingerprint, retain_rerun_input,
+               prepared_rerun_input_disposition)
             VALUES
               (:id,'bench',:q,:p,'PENDING',
                now() - (:age * interval '1 second'),
-               false, :sha, now(), now(), 0, 0)
+               false, :sha, now(), now(), 0, 0,
+               'standard_30d', 1,
+               sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+               false, 'DECLINED_BY_POLICY')
             """
         ),
         {'id': task_id, 'q': queue, 'p': priority, 'age': age_secs, 'sha': '0' * 64},
     )
+    return task_id
 
 
 async def _seed_n(
@@ -68,9 +79,15 @@ async def _seed_n(
             INSERT INTO horsies_tasks
               (id, task_name, queue_name, priority, status, enqueued_at,
                is_workflow_task, enqueue_sha, created_at, updated_at,
-               retry_count, max_retries)
-            SELECT gen_random_uuid()::text,'bench',:q,:p,'PENDING',now(),
-                   false,:sha,now(),now(),0,0
+               retry_count, max_retries,
+               retention_class_key, command_fingerprint_version,
+               command_fingerprint, retain_rerun_input,
+               prepared_rerun_input_disposition)
+            SELECT gen_random_uuid(),'bench',:q,:p,'PENDING',now(),
+                   false,:sha,now(),now(),0,0,
+                   'standard_30d',1,
+                   sha256(convert_to(gen_random_uuid()::text,'UTF8')),
+                   false,'DECLINED_BY_POLICY'
             FROM generate_series(1,:n)
             """
         ),
@@ -106,8 +123,8 @@ async def test_distinct_queue_priority_wins(
     clean_workflow_tables: None, broker: PostgresBroker, session: AsyncSession
 ) -> None:
     """Budget=1: the higher-priority queue's task is claimed."""
-    await _seed(session, task_id='hi', queue='q_hi', priority=1, age_secs=0)
-    await _seed(session, task_id='lo', queue='q_lo', priority=10, age_secs=10)
+    await _seed(session, queue='q_hi', priority=1, age_secs=0)
+    await _seed(session, queue='q_lo', priority=10, age_secs=10)
     await session.commit()
 
     probe = _probe(
@@ -127,8 +144,8 @@ async def test_equal_queue_priority_fifo(
 ) -> None:
     """Equal queue priority + equal task priority: older enqueued task wins,
     regardless of queue name."""
-    await _seed(session, task_id='older', queue='q2', priority=100, age_secs=30)
-    await _seed(session, task_id='newer', queue='q1', priority=100, age_secs=5)
+    older_id = await _seed(session, queue='q2', priority=100, age_secs=30)
+    await _seed(session, queue='q1', priority=100, age_secs=5)
     await session.commit()
 
     probe = _probe(
@@ -139,7 +156,7 @@ async def test_equal_queue_priority_fifo(
 
     claimed = await _claimed(session)
     assert len(claimed) == 1
-    assert claimed[0][0] == 'older'
+    assert claimed[0][0] == older_id
 
 
 @pytest.mark.asyncio
@@ -148,8 +165,8 @@ async def test_equal_queue_priority_explicit_task_priority_wins(
 ) -> None:
     """Equal queue priority: an explicit lower task priority (e.g. a workflow
     node) preempts an older equal-importance task in the band."""
-    await _seed(session, task_id='old_normal', queue='q1', priority=100, age_secs=30)
-    await _seed(session, task_id='new_urgent', queue='q2', priority=1, age_secs=5)
+    await _seed(session, queue='q1', priority=100, age_secs=30)
+    urgent_id = await _seed(session, queue='q2', priority=1, age_secs=5)
     await session.commit()
 
     probe = _probe(
@@ -160,7 +177,7 @@ async def test_equal_queue_priority_explicit_task_priority_wins(
 
     claimed = await _claimed(session)
     assert len(claimed) == 1
-    assert claimed[0][0] == 'new_urgent'
+    assert claimed[0][0] == urgent_id
 
 
 @pytest.mark.asyncio

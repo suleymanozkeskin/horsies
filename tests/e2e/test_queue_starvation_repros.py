@@ -97,7 +97,7 @@ async def _wait_for_normal_started_before_high_drains(
                         SELECT
                             (
                                 SELECT COUNT(*)
-                                FROM horsies_tasks
+                                FROM itest_task_rows
                                 WHERE id = ANY(:normal_ids)
                                   AND status IN ('RUNNING', 'COMPLETED', 'FAILED')
                             ) AS normal_started,
@@ -206,7 +206,7 @@ async def test_wide_fanin_join_does_not_create_orphaned_join_tasks(
                         COUNT(*) FILTER (
                             WHERE wt.task_id IS NULL AND t.status = 'CLAIMED'
                         ) AS orphan_claimed_rows
-                    FROM horsies_tasks t
+                    FROM itest_task_rows t
                     LEFT JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
                     WHERE t.task_name = 'e2e_wf_join_barrier'
                 """),

@@ -46,6 +46,7 @@ from horsies.core.worker.worker import (
     UNCLAIM_CLAIMED_TASK_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
 
@@ -73,12 +74,18 @@ async def _insert_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 claimed_at)
+                 claimed_at,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'guard_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  3, NOW(), :enqueue_sha, :claimed_by_worker_id,
-                 :claimed_at)
+                 :claimed_at,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -126,11 +133,17 @@ async def _insert_running_task_with_retry(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha)
+                 good_until, task_options, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'guard_test_retry', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha)
+                 :good_until, :task_options, :enqueue_sha,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -149,7 +162,7 @@ async def _insert_running_task_with_retry(
 async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read current status of a task."""
     result = await session.execute(
-        text("SELECT status FROM horsies_tasks WHERE id = :id"),
+        text("SELECT status FROM itest_task_rows WHERE id = CAST(:id AS uuid)"),
         {'id': task_id},
     )
     row = result.fetchone()
@@ -162,20 +175,24 @@ async def _set_task_status(
     task_id: str,
     status: str,
 ) -> None:
-    """Force-set a task's status (simulating reaper intervention)."""
+    """Force-set a task's status (simulating reaper intervention).
+
+    A terminal status is forced the way terminalization delivers it —
+    the row moves to history — while a non-terminal status is a live
+    transition. Production holds the same split, so a fixture that wrote
+    a terminal status into the live table would be simulating a state
+    the database cannot hold.
+    """
+    if status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'):
+        await force_terminal(session, task_id, status=status)
+        await session.flush()
+        return
     await session.execute(
-        # Terminal exactly when dated, in both directions: a forced terminal
-        # status dates the row, and a forced revival clears it. Production
-        # holds the same invariant, so a fixture that broke it would be
-        # simulating a state the database cannot hold.
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                terminal_at = CASE
-                    WHEN CAST(:status AS VARCHAR)
-                         IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                    THEN NOW() ELSE NULL END
-            WHERE id = :id
+                terminal_at = NULL
+            WHERE id = CAST(:id AS uuid)
         """),
         {'status': status, 'id': task_id},
     )
@@ -417,17 +434,12 @@ async def test_reaper_then_complete_race_sequence(
 
     # T=1: Reaper marks FAILED with WORKER_CRASHED result
     reaper_result = '{"err": {"error_code": "WORKER_CRASHED", "message": "stale"}}'
-    await session.execute(
-        text("""
-            UPDATE horsies_tasks
-            SET status = 'FAILED',
-                failed_at = NOW(),
-                result = :result,
-                updated_at = NOW(),
-                    terminal_at = NOW()
-            WHERE id = :id AND status = 'RUNNING'
-        """),
-        {'id': task_id, 'result': reaper_result},
+    await force_terminal(
+        session,
+        task_id,
+        status='FAILED',
+        result_json=reaper_result,
+        error_code='WORKER_CRASHED',
     )
     await session.flush()
 
@@ -443,7 +455,7 @@ async def test_reaper_then_complete_race_sequence(
     # T=3: Verify reaper's result is preserved
     row = (
         await session.execute(
-            text("SELECT status, result FROM horsies_tasks WHERE id = :id"),
+            text("SELECT status, result FROM itest_task_rows WHERE id = CAST(:id AS uuid)"),
             {'id': task_id},
         )
     ).fetchone()
@@ -705,7 +717,7 @@ async def test_stale_finalizer_after_reclaim_race_sequence(
         await session.execute(
             text("""
                 SELECT status, claimed_by_worker_id, result
-                FROM horsies_tasks WHERE id = :id
+                FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )

@@ -26,6 +26,7 @@ from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker, _parse_timeout_ms
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
@@ -83,12 +84,18 @@ async def _insert_task(
                 (id, task_name, queue_name, priority, args, kwargs, status,
                  sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_pid, task_options)
+                 worker_pid, task_options,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'timeout_test', 'default', 100, '[]', '{}', :status,
                  :sent_at, NOW(), NOW(), FALSE, :retry_count,
                  :max_retries, NOW(), :sha, :owner,
-                 :worker_pid, :task_options)
+                 :worker_pid, :task_options,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -112,7 +119,7 @@ async def _get_row(session: AsyncSession, task_id: str) -> Row[Any]:
             text("""
                 SELECT status, error_code, retry_count, claimed_by_worker_id,
                        terminalization_kind
-                FROM horsies_tasks WHERE id = :id
+                FROM itest_task_rows WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
@@ -139,19 +146,13 @@ async def test_timeout_marks_running_task_failed(
     assert row.error_code == OutcomeCode.TASK_TIMEOUT.value
     assert row.terminalization_kind == 'FAIL_RUNNING'
 
-    attempt = (
-        await session.execute(
-            text("""
-                SELECT outcome, will_retry, error_code
-                FROM horsies_task_attempts WHERE task_id = :id
-            """),
-            {'id': task_id},
-        )
-    ).fetchone()
-    assert attempt is not None
-    assert attempt.outcome == 'FAILED'
-    assert attempt.will_retry is False
-    assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
+    # Terminalization purges the live attempt row into the record's
+    # snapshot, which is where the attempt now lives.
+    attempts = await read_attempts(session, task_id)
+    assert len(attempts) == 1
+    assert attempts[0].outcome == 'FAILED'
+    assert attempts[0].will_retry is False
+    assert attempts[0].error_code == OutcomeCode.TASK_TIMEOUT.value
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -175,13 +176,9 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
     persisted_result = worker._finalize_workflow_phase.await_args.args[1]
     assert persisted_result.is_err()
     assert persisted_result.unwrap_err().error_code == OutcomeCode.TASK_TIMEOUT
-    attempt_count = (
-        await session.execute(
-            text('SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = :id'),
-            {'id': task_id},
-        )
-    ).scalar_one()
-    assert attempt_count == 1
+    # The replay adds no attempt to the one the first handler
+    # committed, counted wherever the move left it.
+    assert len(await read_attempts(session, task_id)) == 1
 
 
 @pytest.mark.asyncio(loop_scope='function')

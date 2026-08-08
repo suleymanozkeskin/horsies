@@ -148,6 +148,7 @@ class _ReaperPassState:
     terminate_orphans_permanent_failures: int = 0
     terminate_orphans_disabled: bool = False
     next_retention_cleanup_at: float = 0.0
+    next_partition_maintenance_at: float = 0.0
 
 
 def _parse_timeout_ms(task_options_json: Any, task_id: str) -> int | None:

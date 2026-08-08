@@ -98,7 +98,7 @@ async def test_aggregate_history_projection_is_exact_and_bounded(
         )
     ).all()
     expected = [
-        ('task_id', 'character varying(36)', True),
+        ('task_id', 'uuid', True),
         ('task_name', 'character varying(255)', True),
         ('queue_name', 'character varying(100)', True),
         ('priority', 'integer', True),
@@ -129,8 +129,8 @@ async def test_aggregate_history_projection_is_exact_and_bounded(
         ('error_code', 'text', False),
         ('final_failed_reason', 'text', False),
         ('prior_result_payload', 'bytea', False),
-        ('rerun_of_task_id', 'character varying(36)', False),
-        ('rerun_root_task_id', 'character varying(36)', False),
+        ('rerun_of_task_id', 'uuid', False),
+        ('rerun_root_task_id', 'uuid', False),
         ('input_digest', 'bytea', False),
         ('rerun_input_version', 'smallint', False),
         ('rerun_input_codec', 'character varying(64)', False),
@@ -139,7 +139,7 @@ async def test_aggregate_history_projection_is_exact_and_bounded(
         ('rerun_input_digest', 'bytea', False),
         ('rerun_input_inline', 'bytea', False),
         ('rerun_input_reference', 'character varying(2048)', False),
-        ('workflow_id', 'character varying(36)', False),
+        ('workflow_id', 'uuid', False),
         ('is_workflow_task', 'boolean', True),
         ('history_schema_version', 'smallint', True),
         ('attempt_archive_version', 'smallint', True),

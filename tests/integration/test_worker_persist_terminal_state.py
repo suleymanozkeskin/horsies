@@ -10,7 +10,6 @@ Full pipeline (phase-1 → phase-2) is tested in test_worker_finalize_two_phase.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -30,6 +29,10 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import (
+    force_terminal,
+    read_attempt_history,
+)
 
 pytestmark = [pytest.mark.integration]
 
@@ -110,12 +113,18 @@ async def _insert_running_task(
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 is_workflow_task, claimed_at)
+                 is_workflow_task, claimed_at,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'persist_terminal_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :claimed_by_worker_id,
-                 :is_workflow_task, :claimed_at)
+                 :is_workflow_task, :claimed_at,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -126,6 +135,42 @@ async def _insert_running_task(
             'claimed_at': claimed_at,
         },
     )
+    if is_workflow_task:
+        # A workflow task has a node; the deferring families read it
+        # with INTO STRICT precisely because a live workflow's node row
+        # cannot be gone. A workflow task seeded without one is a state
+        # the engine never produces.
+        workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, root_workflow_id,
+                     sent_at, created_at, started_at, updated_at)
+                VALUES
+                    (:wf_id, 'persist_terminal_wf', 'RUNNING', 'FAIL', 0,
+                     :wf_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {'wf_id': workflow_id},
+        )
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflow_tasks
+                    (id, workflow_id, task_index, node_id, task_name,
+                     task_args, task_kwargs, queue_name, priority,
+                     dependencies, allow_failed_deps, join_type,
+                     is_subworkflow, status, task_id, created_at)
+                VALUES
+                    (:id, :wf_id, 0, 'node-0', 'persist_terminal_test',
+                     '[]', '{}', 'default', 100,
+                     '{}', FALSE, 'all',
+                     FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW())
+            """),
+            {
+                'id': str(uuid.uuid4()),
+                'wf_id': workflow_id,
+                'task_id': task_id,
+            },
+        )
     await session.commit()
     return task_id
 
@@ -169,11 +214,17 @@ async def _insert_running_task_with_retry(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs, status, sent_at,
                  created_at, updated_at, claimed, retry_count, max_retries, started_at,
-                 good_until, task_options, enqueue_sha, claimed_by_worker_id)
+                 good_until, task_options, enqueue_sha, claimed_by_worker_id,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'persist_retry_test', 'default', 100, '[]', '{}', 'RUNNING', :sent_at,
                  NOW(), NOW(), FALSE, :retry_count, :max_retries, NOW(),
-                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id)
+                 :good_until, :task_options, :enqueue_sha, :claimed_by_worker_id,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -199,7 +250,7 @@ async def _get_task_row(
         await session.execute(
             text(
                 'SELECT status, result, failed_reason, retry_count '
-                'FROM horsies_tasks WHERE id = :id'
+                'FROM itest_task_rows WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
@@ -213,18 +264,21 @@ async def _set_task_status(
     task_id: str,
     status: str,
 ) -> None:
-    """Force-set a task's status (simulating reaper intervention)."""
+    """Force-set a task's status (simulating reaper intervention).
+
+    A terminal status moves the row to history, as terminalization does;
+    a non-terminal status is a live transition.
+    """
+    if status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'):
+        await force_terminal(session, task_id, status=status)
+        await session.commit()
+        return
     await session.execute(
-        # Terminal exactly when dated, in both directions: a forced terminal
-        # status dates the row, a forced revival clears it.
         text("""
             UPDATE horsies_tasks
             SET status = :status,
-                terminal_at = CASE
-                    WHEN CAST(:status AS VARCHAR)
-                         IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                    THEN NOW() ELSE NULL END
-            WHERE id = :id
+                terminal_at = NULL
+            WHERE id = CAST(:id AS uuid)
         """),
         {'status': status, 'id': task_id},
     )
@@ -759,103 +813,30 @@ async def test_workflow_phase1_replay_loads_the_persisted_result(
     assert is_ok(first) and first.ok_value is not None
     assert is_ok(replay) and replay.ok_value is not None
     assert replay.ok_value.result.unwrap() == 'persisted'
-    summary = (
+    kind = (
         await session.execute(
-            text("""
-                SELECT terminalization_kind,
-                       (SELECT COUNT(*) FROM horsies_task_attempts a
-                        WHERE a.task_id = t.id) AS attempt_count
-                FROM horsies_tasks t WHERE t.id = :id
-            """),
+            text(
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
-    ).one()
-    assert summary.terminalization_kind == 'COMPLETE_LOCKED'
-    assert summary.attempt_count == 1
+    ).scalar_one()
+    assert kind == 'COMPLETE_LOCKED'
+    # The move archives the attempts and purges the live rows, so the
+    # snapshot is where the one attempt now lives.
+    assert len(await read_attempt_history(session, task_id)) == 1
 
 
-@pytest.mark.asyncio(loop_scope='function')
-async def test_phase1_replay_holds_row_lock_through_persisted_result_read(
-    engine: AsyncEngine,
-    session: AsyncSession,
-    clean_workflow_tables: None,  # noqa: ARG001
-) -> None:
-    """A concurrent in-place revival cannot race the replay result read."""
-    generation = datetime.now(timezone.utc) - timedelta(seconds=1)
-    task_id = await _insert_running_task(
-        session,
-        is_workflow_task=True,
-        claimed_at=generation,
-    )
-    worker = _make_worker(engine)
-    result_json = _serialize_ok('persisted-before-revival')
-    first = await worker._persist_task_terminal_state(
-        task_id=task_id,
-        now=NOW,
-        ok=True,
-        result_json_str=result_json,
-        failed_reason=None,
-        task_name='persist_terminal_test',
-        queue_name='default',
-        is_workflow_task=True,
-        claimed_at=generation,
-    )
-    assert is_ok(first) and first.ok_value is not None
-
-    read_complete = asyncio.Event()
-    release_replay = asyncio.Event()
-    original_reader = worker._read_persisted_task_result
-
-    async def hold_after_read(
-        held_task_id: str,
-        locked_session: AsyncSession,
-    ):
-        loaded = await original_reader(held_task_id, locked_session)
-        read_complete.set()
-        await release_replay.wait()
-        return loaded
-
-    worker._read_persisted_task_result = hold_after_read  # type: ignore[method-assign]
-    replay_task = asyncio.create_task(
-        worker._persist_task_terminal_state(
-            task_id=task_id,
-            now=NOW,
-            ok=True,
-            result_json_str=result_json,
-            failed_reason=None,
-            task_name='persist_terminal_test',
-            queue_name='default',
-            is_workflow_task=True,
-            claimed_at=generation,
-        )
-    )
-    await asyncio.wait_for(read_complete.wait(), timeout=2)
-
-    sf = async_sessionmaker(engine, expire_on_commit=False)
-
-    async def revive() -> None:
-        async with sf() as revival_session:
-            await revival_session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'PENDING', terminal_at = NULL, result = NULL
-                    WHERE id = :id
-                """),
-                {'id': task_id},
-            )
-            await revival_session.commit()
-
-    revival_task = asyncio.create_task(revive())
-    try:
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(revival_task), timeout=0.1)
-    finally:
-        release_replay.set()
-
-    replay = await replay_task
-    await asyncio.wait_for(revival_task, timeout=2)
-    assert is_ok(replay) and replay.ok_value is not None
-    assert replay.ok_value.result.unwrap() == 'persisted-before-revival'
+# RETIRED: test_phase1_replay_holds_row_lock_through_persisted_result_read
+# asserted that a concurrent revival UPDATE BLOCKS on the row lock a
+# phase-1 replay holds. After the move there is no live row to revive:
+# the UPDATE matches zero rows and returns at once, so the race it
+# guarded against cannot occur. The invariant the impossibility rests on
+# — a terminal record is immutable, nothing writes to a history row — is
+# pinned in tests/unit/test_terminal_writer_inventory.py
+# (test_no_runtime_statement_updates_a_history_record), with a presence
+# half proving the scanner detects before its silence means anything.
 
 
 @pytest.mark.asyncio(loop_scope='function')

@@ -22,9 +22,6 @@ from horsies.core.worker.runtime import (
     _ReaperPassState,
 )
 from horsies.core.worker.sql import (
-    DELETE_EXPIRED_HEARTBEATS_SQL,
-    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
-    DELETE_EXPIRED_TASKS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
@@ -53,6 +50,8 @@ class ReaperMixin:
         broker: PostgresBroker | None
         _app: Horsies | None
         _stop: asyncio.Event
+        _partition_coverage_health: dict[str, Any] | None
+        _phase2_recovery_health: dict[str, Any] | None
 
     def _advisory_key_reaper(self) -> int:
         """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
@@ -226,13 +225,7 @@ class ReaperMixin:
             )
 
             async with temp_broker.session_factory() as s:
-                recovered = await recover_stuck_workflows(
-                    s,
-                    temp_broker,
-                    finalizing_grace_ms=(
-                        recovery_cfg.crashed_worker_recovery_grace_ms
-                    ),
-                )
+                recovered = await recover_stuck_workflows(s, temp_broker)
                 if recovered > 0:
                     logger.info(
                         f'Reaper recovered {recovered} stuck workflow task(s)'
@@ -241,30 +234,60 @@ class ReaperMixin:
         except Exception as wf_err:
             logger.error(f'Workflow recovery error: {wf_err}')
 
+        # Phase-2 recovery: the crashed-worker case, driven by the
+        # terminalization outbox rather than by a scan of terminal live
+        # rows, which the split made unreachable. Rides the same
+        # cluster-wide gate as the rest of this pass, so no second
+        # holder is taken; the grace window and the row cap are the ones
+        # the retired scan carried.
+        try:
+            from horsies.core.workflows.phase2_recovery import (
+                drive_phase2_recovery,
+            )
+            from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP
+
+            phase2 = await drive_phase2_recovery(
+                temp_broker.session_factory,
+                temp_broker,
+                grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
+                max_rows=GLOBAL_SCAN_ROW_CAP,
+            )
+            if phase2.applied or phase2.retained or phase2.failed:
+                logger.info(
+                    'Phase-2 recovery: '
+                    f'{phase2.applied} applied, '
+                    f'{phase2.already_applied} already applied, '
+                    f'{phase2.superseded} superseded, '
+                    f'{phase2.retained} retained, '
+                    f'{phase2.failed} failed'
+                )
+            self._phase2_recovery_health = {
+                'considered': phase2.considered,
+                'applied': phase2.applied,
+                'already_applied': phase2.already_applied,
+                'superseded': phase2.superseded,
+                'retained': phase2.retained,
+                'failed': phase2.failed,
+                'retained_details': list(phase2.retained_details),
+            }
+        except Exception as phase2_err:
+            logger.error(f'Phase-2 recovery error: {phase2_err}')
+
         now_monotonic = time.monotonic()
         if now_monotonic >= state.next_retention_cleanup_at:
             try:
-                deleted_heartbeats = 0
                 deleted_worker_states = 0
                 deleted_workflows = 0
-                deleted_tasks = 0
 
-                # Shared wall-clock budget across the five statements. A
+                # Shared wall-clock budget across both statements. A
                 # backlog that outlives the budget resumes next pass.
+                # Terminal TASK rows move to the task-history archive at
+                # terminalization and age by retention class; heartbeat
+                # rows live in partitions that drop whole — neither is
+                # row-deleted here anymore.
                 deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
                 batch_size = recovery_cfg.retention_delete_batch_size
-
-                if recovery_cfg.heartbeat_retention_hours is not None:
-                    deleted_heartbeats = await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_HEARTBEATS_SQL,
-                        {
-                            'retention_hours': recovery_cfg.heartbeat_retention_hours,
-                        },
-                        deadline,
-                        batch_size,
-                    )
 
                 if recovery_cfg.worker_state_retention_hours is not None:
                     deleted_worker_states = await self._delete_expired_in_batches(
@@ -277,75 +300,142 @@ class ReaperMixin:
                         batch_size,
                     )
 
-                queue_overrides = (
-                    recovery_cfg.queue_terminal_record_retention_hours
-                )
-
                 if recovery_cfg.terminal_record_retention_hours is not None:
-                    terminal_params = {
-                        'retention_hours': recovery_cfg.terminal_record_retention_hours,
-                    }
                     # Workflows and their node rows go together in one
                     # workflow-batched statement (node purge is a CTE inside
-                    # it); tasks follow. The all-backing-tasks-terminal guard
-                    # makes partial progress between tables safe. The
-                    # statement's rowcount counts workflows, which the node
-                    # budget keeps below :batch_size while backlog remains —
-                    # hence drained_when='empty_batch'.
+                    # it). The all-backing-tasks-terminal guard makes
+                    # partial progress safe. The statement's rowcount
+                    # counts workflows, which the node budget keeps below
+                    # :batch_size while backlog remains — hence
+                    # drained_when='empty_batch'.
                     deleted_workflows = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
-                        terminal_params,
+                        {
+                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                        },
                         deadline,
                         batch_size,
                         drained_when='empty_batch',
                     )
-                    deleted_tasks = await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_TASKS_SQL,
-                        {
-                            **terminal_params,
-                            'excluded_queues': sorted(queue_overrides),
-                        },
-                        deadline,
-                        batch_size,
-                    )
 
-                # Per-queue override windows govern plain (non-workflow)
-                # tasks on their queues and apply even when the global
-                # terminal window is disabled.
-                for queue_name, override_hours in sorted(
-                    queue_overrides.items(),
-                ):
-                    deleted_tasks += await self._delete_expired_in_batches(
-                        temp_broker,
-                        DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
-                        {
-                            'retention_hours': override_hours,
-                            'queue_name': queue_name,
-                        },
-                        deadline,
-                        batch_size,
-                    )
-
-                if (
-                    deleted_heartbeats > 0
-                    or deleted_worker_states > 0
-                    or deleted_workflows > 0
-                    or deleted_tasks > 0
-                ):
+                if deleted_worker_states > 0 or deleted_workflows > 0:
                     logger.info(
-                        'Reaper retention cleanup: heartbeats=%s worker_states=%s workflows=%s tasks=%s',
-                        deleted_heartbeats,
+                        'Reaper retention cleanup: worker_states=%s workflows=%s',
                         deleted_worker_states,
                         deleted_workflows,
-                        deleted_tasks,
                     )
             except Exception as cleanup_err:
                 logger.error(f'Retention cleanup error: {cleanup_err}')
             finally:
                 state.next_retention_cleanup_at = (
                     now_monotonic + recovery_cfg.retention_sweep_interval_s
+                )
+
+        # Paused-age expiry: the declared policy's sweep. Gated on the
+        # opt-in knob (None = the pass reads nothing) and running under
+        # the same cluster-wide reaper gate; the writer is the cancel
+        # path's locked sequence with EXPIRED as the terminal status,
+        # so an expiring workflow leaves no claimable backing rows and
+        # no ENQUEUED nodes behind.
+        if recovery_cfg.paused_workflow_auto_cancel_after is not None:
+            from horsies.core.workflows.lifecycle import (
+                expire_paused_workflows,
+            )
+
+            try:
+                expired = await expire_paused_workflows(
+                    temp_broker.session_factory,
+                    older_than=(
+                        recovery_cfg.paused_workflow_auto_cancel_after
+                    ),
+                )
+                if expired > 0:
+                    logger.info(
+                        f'Expired {expired} paused workflow(s) past the '
+                        f'declared age policy'
+                    )
+            except Exception as expiry_err:
+                logger.error(
+                    f'Paused-workflow expiry sweep error: {expiry_err}'
+                )
+
+        # Coverage/publication maintenance: keep history and heartbeat
+        # leaves created ahead of writes and the staged readers
+        # published. Rides the reaper's cluster-wide gate, so one
+        # worker per interval runs it; a refusal is reported verbatim
+        # and never retried into silence — existing leaves keep
+        # absorbing writes until the horizon, and the next pass tries
+        # again.
+        if now_monotonic >= state.next_partition_maintenance_at:
+            from horsies.core.history.maintenance.coverage import (
+                CoverageEnsureFailed,
+                CoverageEnsured,
+                ensure_partition_coverage,
+            )
+
+            try:
+                async with temp_broker.async_engine.begin() as coverage_conn:
+                    coverage = await ensure_partition_coverage(
+                        coverage_conn,
+                        history_horizon_days=(
+                            recovery_cfg.history_leaf_horizon_days
+                        ),
+                        heartbeat_horizon_hours=(
+                            recovery_cfg.heartbeat_leaf_horizon_hours
+                        ),
+                    )
+                match coverage:
+                    case CoverageEnsureFailed():
+                        logger.error(
+                            f'Partition coverage ensure failed: {coverage!r}'
+                        )
+                        self._partition_coverage_health = {
+                            'state': 'failed',
+                            'stage': coverage.stage,
+                            'class_key': coverage.class_key,
+                            'refusal': coverage.refusal,
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                        }
+                    case CoverageEnsured(
+                        created_history_leaves=created_history,
+                        created_heartbeat_leaves=created_heartbeats,
+                        republished=republished,
+                    ) if created_history or created_heartbeats or republished:
+                        logger.info(
+                            'Partition coverage: '
+                            f'+{created_history} history leaves, '
+                            f'+{created_heartbeats} heartbeat leaves, '
+                            f'republished={republished}'
+                        )
+                    case _:
+                        pass
+                match coverage:
+                    case CoverageEnsured():
+                        self._partition_coverage_health = {
+                            'state': 'ensured',
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                            'history_covered_through': (
+                                coverage.history_covered_through.isoformat()
+                            ),
+                            'heartbeats_covered_through': (
+                                coverage.heartbeats_covered_through.isoformat()
+                            ),
+                        }
+                    case _:
+                        pass
+            except Exception as coverage_err:
+                logger.error(
+                    f'Partition coverage ensure error: {coverage_err}'
+                )
+            finally:
+                state.next_partition_maintenance_at = (
+                    now_monotonic
+                    + recovery_cfg.partition_maintenance_interval_s
                 )
 
     async def _delete_expired_in_batches(
@@ -457,8 +547,12 @@ class ReaperMixin:
             # its own session from the same pool — peak two connections.
             # A single-connection coordinator pool would deadlock on the
             # second checkout until pool timeout, every interval, so the
-            # gate is skipped there: SKIP LOCKED keeps concurrent passes
-            # safe — the gate only dedupes redundant work across workers.
+            # gate is skipped there. Ungated concurrency is safe for
+            # every step the pass runs: SKIP LOCKED covers the recovery
+            # and retention statements, and the coverage/publication
+            # ensure is idempotent (registration, leaf creation, and
+            # republication all converge under concurrent callers) — the
+            # gate only dedupes redundant work across workers.
             gate_enabled = self._reaper_gate_enabled()
             if not gate_enabled:
                 logger.warning(

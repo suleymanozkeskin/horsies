@@ -20,7 +20,7 @@ export function statusColorVar(status: string): string {
     case 'CLAIMED': // task only
     case 'PAUSED': // workflow only
       return 'var(--warning)';
-    case 'EXPIRED': // task only
+    case 'EXPIRED': // task or workflow: time ran out
       return 'var(--warning-dark)';
     case 'CANCELLED':
       return 'var(--cancelled)';

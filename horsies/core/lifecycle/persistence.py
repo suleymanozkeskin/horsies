@@ -88,15 +88,19 @@ type ExecutableBatchCommand = (
     | CancelNodesOfCancelledWorkflow
 )
 
+# Identity parameters bind uuid-era casts: a running fleet only ever
+# faces post-cutover identity columns, and the varchar-signature
+# in-place program exists solely at drained moments (historical chain
+# positions and the offline cutover), never under running callers.
 _COMPLETE_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_complete_locked_task(
-        CAST(:task_id AS VARCHAR), :worker_id, :result
+        CAST(:task_id AS uuid), :worker_id, :result
     )
 """)
 
 _COMPLETE_TASK_FUSED_SQL = text("""
     SELECT * FROM horsies_complete_task_fused(
-        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ), :result,
         :notify_channel, :notify_payload
     )
@@ -104,14 +108,14 @@ _COMPLETE_TASK_FUSED_SQL = text("""
 
 _FAIL_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_fail_locked_task(
-        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:task_id AS uuid), :worker_id,
         :result, :error_code, :failed_reason
     )
 """)
 
 _FAIL_STALE_TASK_SQL = text("""
     SELECT * FROM horsies_fail_stale_task(
-        CAST(:task_id AS VARCHAR),
+        CAST(:task_id AS uuid),
         CAST(:stale_after_ms AS INTEGER),
         CAST(:finalizing_stale_after_ms AS INTEGER),
         :result, :error_code, :failed_reason
@@ -120,7 +124,7 @@ _FAIL_STALE_TASK_SQL = text("""
 
 _EXPIRE_OWNED_CLAIM_SQL = text("""
     SELECT * FROM horsies_expire_owned_claim(
-        CAST(:task_id AS VARCHAR), :worker_id, :result, :error_code
+        CAST(:task_id AS uuid), :worker_id, :result, :error_code
     )
 """)
 
@@ -132,14 +136,14 @@ _EXPIRE_PENDING_TASKS_SQL = text("""
 
 _CANCEL_LOCKED_TASK_SQL = text("""
     SELECT * FROM horsies_cancel_locked_task(
-        CAST(:task_id AS VARCHAR),
+        CAST(:task_id AS uuid),
         CAST(:permitted_source_statuses AS TEXT[])
     )
 """)
 
 _CANCEL_OWNED_ORPHAN_SQL = text("""
     SELECT * FROM horsies_cancel_owned_orphan(
-        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ)
     )
 """)
@@ -152,27 +156,27 @@ _CANCEL_ORPHANED_TASKS_SQL = text("""
 
 _ABANDON_OWNED_NODE_SQL = text("""
     SELECT * FROM horsies_abandon_owned_node(
-        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ)
     )
 """)
 
 _ABANDON_OWNED_NODES_SQL = text("""
     SELECT * FROM horsies_abandon_owned_nodes(
-        CAST(:ids AS VARCHAR[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
+        CAST(:ids AS uuid[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
         :worker_id
     )
 """)
 
 _ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL = text("""
     SELECT * FROM horsies_abandon_nodes_of_paused_workflows(
-        CAST(:workflow_ids AS VARCHAR[])
+        CAST(:workflow_ids AS uuid[])
     )
 """)
 
 _CANCEL_OWNED_NODE_SQL = text("""
     SELECT * FROM horsies_cancel_owned_node(
-        CAST(:task_id AS VARCHAR), :worker_id,
+        CAST(:task_id AS uuid), :worker_id,
         CAST(:claimed_at AS TIMESTAMPTZ),
         CAST(:accepts_requeued_pending AS BOOLEAN)
     )
@@ -180,20 +184,20 @@ _CANCEL_OWNED_NODE_SQL = text("""
 
 _CANCEL_OWNED_NODES_SQL = text("""
     SELECT * FROM horsies_cancel_owned_nodes(
-        CAST(:ids AS VARCHAR[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
+        CAST(:ids AS uuid[]), CAST(:claimed_ats AS TIMESTAMPTZ[]),
         :worker_id
     )
 """)
 
 _CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL = text("""
     SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow(
-        CAST(:workflow_ids AS VARCHAR[])
+        CAST(:workflow_ids AS uuid[])
     )
 """)
 
 _LOCKED_READ_MISS_SQL = text("""
     SELECT * FROM horsies_terminalization_miss(
-        CAST(:task_id AS VARCHAR), CAST(:equivalent_kinds AS TEXT[]),
+        CAST(:task_id AS uuid), CAST(:equivalent_kinds AS TEXT[]),
         :worker_id, CAST(:claimed_at AS TIMESTAMPTZ)
     )
 """)

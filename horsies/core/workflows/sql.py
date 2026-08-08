@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 from sqlalchemy import text
+
+from ..history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from ..history.identity.fingerprint import EnqueueCommandV1
 
 # -- SQL constants for start_workflow_async --
 
@@ -116,11 +122,58 @@ ENQUEUE_WORKFLOW_TASK_SQL = text("""
 INSERT_TASK_FOR_WORKFLOW_SQL = text("""
     INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
                        sent_at, enqueued_at, created_at, updated_at, claimed, retry_count, max_retries,
-                       task_options, good_until, enqueue_sha, is_workflow_task)
+                       task_options, good_until, enqueue_sha, is_workflow_task,
+                       retention_class_key, command_fingerprint_version, command_fingerprint,
+                       retain_rerun_input, prepared_rerun_input_disposition)
     VALUES (:id, :name, :queue, :priority, :args, :kwargs, 'PENDING',
             :sent_at, NOW(), NOW(), NOW(), FALSE, 0, :max_retries, :task_options, :good_until,
-            :enqueue_sha, TRUE)
+            :enqueue_sha, TRUE,
+            :retention_class_key, :fingerprint_version, :fingerprint,
+            :retain_rerun_input, :rerun_disposition)
 """)
+
+
+def workflow_task_enqueue_stamp(
+    *,
+    task_name: str,
+    queue_name: str,
+    priority: int,
+    args_json: str | None,
+    kwargs_json: str | None,
+    good_until: datetime | None,
+    task_options_json: str | None,
+) -> dict[str, Any]:
+    """Enqueue-time facts for one workflow backing task.
+
+    Mirrors the ordinary enqueue path: the ratified default retention
+    class (immutable 30-day finite — never forever by default), a
+    version-1 command fingerprint over the enqueue facts the engine
+    built, and the rerun-input posture of workflow-bound rows —
+    ``NEVER_ELIGIBLE``, because the rerun surface refuses them and
+    their inputs are rebuilt by the engine, never replayed from a
+    stored envelope.
+    """
+    fingerprint = EnqueueCommandV1(
+        task_name=task_name,
+        queue_name=queue_name,
+        priority=priority,
+        args_json=args_json,
+        kwargs_json=kwargs_json,
+        good_until=good_until,
+        enqueue_delay_seconds=None,
+        task_options_json=task_options_json,
+        retention_class_key=DEFAULT_RETENTION_CLASS_KEY,
+        retain_rerun_input=False,
+        rerun_of_task_id=None,
+        rerun_root_task_id=None,
+    ).fingerprint
+    return {
+        'retention_class_key': DEFAULT_RETENTION_CLASS_KEY,
+        'fingerprint_version': 1,
+        'fingerprint': fingerprint,
+        'retain_rerun_input': False,
+        'rerun_disposition': 'NEVER_ELIGIBLE',
+    }
 LINK_WORKFLOW_TASK_SQL = text("""
     UPDATE horsies_workflow_tasks SET task_id = :tid WHERE workflow_id = :wf_id AND task_index = :idx
 """)

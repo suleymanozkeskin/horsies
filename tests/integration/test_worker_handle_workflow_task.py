@@ -51,11 +51,17 @@ async def _insert_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha)
+                 max_retries, started_at, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'handle_wf_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha)
+                 0, NOW(), :enqueue_sha,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {'id': task_id, 'sent_at': sent_at, 'enqueue_sha': sha},
     )

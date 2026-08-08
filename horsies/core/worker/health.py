@@ -54,6 +54,8 @@ class HealthMixin:
         _stop: asyncio.Event
         _ping_queue: asyncio.Queue[Any] | None
         _started_at: datetime
+        _partition_coverage_health: dict[str, Any] | None
+        _phase2_recovery_health: dict[str, Any] | None
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
@@ -182,7 +184,6 @@ class HealthMixin:
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
-                    'heartbeat_retention_hours': self.cfg.recovery_config.heartbeat_retention_hours,
                     'worker_state_retention_hours': self.cfg.recovery_config.worker_state_retention_hours,
                     'terminal_record_retention_hours': self.cfg.recovery_config.terminal_record_retention_hours,
                 }
@@ -211,7 +212,23 @@ class HealthMixin:
                         'qmc': Jsonb(self.cfg.queue_max_concurrency)
                         if self.cfg.queue_max_concurrency
                         else None,
-                        'recovery': Jsonb(recovery_dict) if recovery_dict else None,
+                        'recovery': Jsonb(
+                            {
+                                **(recovery_dict or {}),
+                                'partition_coverage': (
+                                    self._partition_coverage_health
+                                ),
+                                'phase2_recovery': (
+                                    self._phase2_recovery_health
+                                ),
+                            }
+                        )
+                        if (
+                            recovery_dict
+                            or self._partition_coverage_health
+                            or self._phase2_recovery_health
+                        )
+                        else None,
                         'running': running,
                         'claimed': claimed,
                         'mem_mb': rss_mb,

@@ -44,6 +44,7 @@ from horsies.core.codec.typed import (
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
+from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -102,7 +103,9 @@ from horsies.core.workflows.sql import (
     SKIP_READY_WORKFLOW_TASK_SQL,
     SKIP_WORKFLOW_TASK_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
+    workflow_task_enqueue_stamp,
 )
+from horsies.core.history.identity.uuid7 import mint_task_id
 
 logger = get_logger('workflow.engine')
 
@@ -804,7 +807,7 @@ async def _build_enqueued_task_params(
         )
 
     # Create actual task in tasks table
-    task_id = str(uuid.uuid4())
+    task_id = mint_task_id()
     sent_at = datetime.now(timezone.utc)
     sha = enqueue_fingerprint(
         task_name=task_name,
@@ -832,6 +835,15 @@ async def _build_enqueued_task_params(
         'task_options': task_options_str,
         'good_until': good_until_str,
         'enqueue_sha': sha,
+        **workflow_task_enqueue_stamp(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=task_args,
+            kwargs_json=kwargs_json,
+            good_until=good_until_dt,
+            task_options_json=task_options_str,
+        ),
     })
 
 
@@ -1325,7 +1337,7 @@ async def enqueue_subworkflow_task(
                     # not the parent node.
                     is_fast_root = False
             if is_fast_root and child_task.index is not None:
-                child_task_id = str(uuid.uuid4())
+                child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
                 # enqueue_workflow_task; args_from/ctx injection is
                 # structurally absent on fast roots).
@@ -1370,6 +1382,15 @@ async def enqueue_subworkflow_task(
                     'task_options': child_task_options_json,
                     'good_until': good_until_str,
                     'enqueue_sha': sha,
+                    **workflow_task_enqueue_stamp(
+                        task_name=child_task.name,
+                        queue_name=child_queue,
+                        priority=child_priority,
+                        args_json=child_args_json,
+                        kwargs_json=root_kwargs_json,
+                        good_until=good_until_dt,
+                        task_options_json=child_task_options_json,
+                    ),
                 })
             elif not child_dep_indices:
                 slow_child_roots.append(child_task)
@@ -1590,6 +1611,49 @@ async def _build_workflow_context_data(
 
 
 
+def pause_halts_progression(workflow_status: str | None) -> bool:
+    """Whether a workflow's status stops progression after a node write.
+
+    Read at lock time: pause and cancel are UPDATEs on the locked
+    workflow row, so the status cannot change for the rest of the
+    transaction that observed it. Both progression paths — the
+    in-process completion and the outbox-driven recovery — ask this one
+    question rather than spelling the comparison twice.
+    """
+    return workflow_status == WorkflowStatus.PAUSED.value
+
+
+def node_status_for_terminal_task(task_status: str) -> str:
+    """The workflow-node status a terminal task produces.
+
+    A task that completed makes a completed node; every other terminal
+    outcome — failed, cancelled, expired — makes a failed node, because
+    a node's job is done-or-not and the reason lives on the task.
+
+    This is the status-side expression of the policy the in-process
+    completion path spells over a ``TaskResult`` as
+    ``'COMPLETED' if result.is_ok() else 'FAILED'``. The two callers
+    hold different inputs and neither can honestly be given the
+    other's, so they stay two signatures over one policy, bound by an
+    enumeration pin that walks the canonical terminal set.
+
+    A non-terminal status raises: the caller has handed over a task
+    that has not finished, which is an underspecified caller and not a
+    case to default.
+    """
+    status = TaskStatus(task_status)
+    if status not in TASK_TERMINAL_STATES:
+        raise ValueError(
+            f'node status requested for non-terminal task status '
+            f'{task_status!r}'
+        )
+    return (
+        WorkflowTaskStatus.COMPLETED.value
+        if status is TaskStatus.COMPLETED
+        else WorkflowTaskStatus.FAILED.value
+    )
+
+
 async def on_workflow_task_complete(
     session: AsyncSession,
     task_id: str,
@@ -1696,29 +1760,67 @@ async def on_workflow_task_complete(
         )
         return
 
+    # 3-6. Everything after the node write, shared with the outbox-driven
+    # recovery path so a node that reaches its terminal status by either
+    # route progresses identically.
+    await apply_node_progression(
+        session,
+        broker,
+        workflow_id=workflow_id,
+        task_index=task_index,
+        failure=result if result.is_err() else None,
+        on_error=row.on_error,
+        workflow_status=row.wf_status,
+        depth=row.depth,
+        root_workflow_id=row.root_workflow_id,
+    )
+
+
+async def apply_node_progression(
+    session: AsyncSession,
+    broker: 'PostgresBroker | None',
+    *,
+    workflow_id: str,
+    task_index: int,
+    failure: 'TaskResult[Any, TaskError] | None',
+    on_error: str | None,
+    workflow_status: str | None,
+    depth: int | None,
+    root_workflow_id: str | None,
+) -> None:
+    """Everything a workflow does after one of its nodes goes terminal.
+
+    Failure policy, the paused guard, dependent promotion, and the
+    workflow-completion check — in that order, inside the caller's
+    transaction, which must already hold the workflow row's lock.
+
+    Both progression paths call this: the in-process completion, which
+    has just CAS-written the node itself, and the outbox-driven recovery,
+    where the database-owned consumption function wrote the node and
+    returned this same context. ``failure`` is the task's error when the
+    node went terminal unsuccessfully and ``None`` otherwise — the
+    policy step is the only one that needs it.
+    """
     # 3. Handle failure based on on_error policy. The locked row's
     # on_error is authoritative: the held lock freezes the workflow row.
-    if result.is_err():
+    if failure is not None:
         should_continue = await _handle_workflow_task_failure(
-            session, workflow_id, result,
-            known_on_error=row.on_error,
+            session, workflow_id, failure,
+            known_on_error=on_error,
         )
         if not should_continue:
             # PAUSE mode - stop processing, don't propagate to dependents
             return
 
-    # 4. PAUSED guard. wf_status is the status at lock time; pause/cancel
-    # are UPDATEs on the locked workflow row, so it cannot change for the
-    # rest of this transaction. (The failure handler's pause path returns
-    # False above and never reaches here.)
-    if row.wf_status == 'PAUSED':
+    # 4. PAUSED guard.
+    if pause_halts_progression(workflow_status):
         return  # Don't propagate - workflow is paused
 
     # 5. Find and potentially enqueue dependent tasks
     await _process_dependents(
         session, workflow_id, task_index, broker,
-        depth=row.depth if row.depth is not None else 0,
-        root_workflow_id=row.root_workflow_id or workflow_id,
+        depth=depth if depth is not None else 0,
+        root_workflow_id=root_workflow_id or workflow_id,
     )
 
     # 6. Check if workflow is complete (this transaction already holds the

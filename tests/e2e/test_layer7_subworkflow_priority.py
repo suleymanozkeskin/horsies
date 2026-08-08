@@ -71,7 +71,7 @@ async def _wait_for_task_row(
         async with broker.session_factory() as session:
             row = (
                 await session.execute(
-                    text('SELECT id FROM horsies_tasks WHERE task_name = :n LIMIT 1'),
+                    text('SELECT id FROM itest_task_rows WHERE task_name = :n LIMIT 1'),
                     {'n': task_name},
                 )
             ).fetchone()
@@ -126,7 +126,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             await session.execute(
                 text("""
                     SELECT task_name, priority, queue_name, status, claimed_at
-                    FROM horsies_tasks
+                    FROM itest_task_rows
                     WHERE task_name IN ('pb_scrape', 'pb_direct')
                 """),
             )

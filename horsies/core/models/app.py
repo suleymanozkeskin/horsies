@@ -96,33 +96,7 @@ class AppConfig(BaseModel):
                         )
                     )
 
-        # Retention overrides must name declared queues: a typo'd key would
-        # otherwise be a silent no-op (an inert override plus a phantom
-        # exclusion that matches nothing).
-        override_queues = set(self.recovery.queue_terminal_record_retention_hours)
-        if override_queues:
-            declared = (
-                {'default'}
-                if self.queue_mode == QueueMode.DEFAULT
-                else {q.name for q in (self.custom_queues or [])}
-            )
-            unknown = sorted(override_queues - declared)
-            if unknown:
-                report.add(
-                    ConfigurationError(
-                        message=(
-                            'queue_terminal_record_retention_hours references '
-                            f'unknown queue(s): {unknown}'
-                        ),
-                        code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
-                        notes=[f'declared queues: {sorted(declared)}'],
-                        help_text=(
-                            'override keys must name declared queues '
-                            '(custom_queues in CUSTOM mode, "default" in '
-                            'DEFAULT mode)'
-                        ),
-                    )
-                )
+
 
         # Validate cluster_wide_cap if provided
         if self.cluster_wide_cap is not None and self.cluster_wide_cap <= 0:
@@ -358,9 +332,9 @@ class AppConfig(BaseModel):
             f'    heartbeat_intervals: runner={self.recovery.runner_heartbeat_interval_ms}ms, claimer={self.recovery.claimer_heartbeat_interval_ms}ms'
         )
         lines.append(
-            f'    retention_hours: heartbeats={self.recovery.heartbeat_retention_hours}, '
+            f'    retention_hours: '
             f'worker_states={self.recovery.worker_state_retention_hours}, '
-            f'terminal_records={self.recovery.terminal_record_retention_hours}'
+            f'terminal_workflows={self.recovery.terminal_record_retention_hours}'
         )
 
         # Resilience config

@@ -533,7 +533,7 @@ async def _get_expiry_task_status(
         task_id = wt_row[0]
 
         task_result = await session.execute(
-            text('SELECT status, good_until FROM horsies_tasks WHERE id = :tid'),
+            text('SELECT status, good_until FROM itest_task_rows WHERE id = CAST(:tid AS uuid)'),
             {'tid': task_id},
         )
         task_row = task_result.fetchone()

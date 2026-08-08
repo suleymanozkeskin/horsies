@@ -50,7 +50,14 @@ from horsies.core.models.health import (
     WorkerPingRequest,
     WorkerStateSnapshot,
 )
-from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.history.ddl.classes import (
+    DEFAULT_RETENTION_CLASS_KEY,
+    resolve_retention_class_key,
+)
+from horsies.core.utils.db import (
+    is_retryable_connection_error,
+    register_identity_text_reads,
+)
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
 
@@ -169,6 +176,7 @@ from horsies.core.schemas.migrations import (
     CREATE_RESERVATION_PROGRAM_SQL,
     CREATE_RESERVATION_REGISTRY_INDEXES_SQL,
     DROP_RESERVATION_PROGRAM_SQL,
+    FRESH_IDENTITY_PREDICATE_SQL,
     KEY_RESERVATIONS_TABLE_EXISTS_SQL,
     RESERVATION_REGISTRY_INDEX_EXISTS_SQL,
     TASK_HISTORY_PARENT_EXISTS_SQL,
@@ -516,6 +524,7 @@ class PostgresBroker:
         self.async_engine = create_async_engine(
             self.config.database_url.get_secret_value(), **engine_cfg,
         )
+        register_identity_text_reads(self.async_engine)
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
@@ -849,11 +858,26 @@ class PostgresBroker:
             await conn.execute(ADD_TERMINALIZATION_KIND_COLUMN_SQL)
             await conn.execute(ADD_TERMINALIZATION_KIND_CHECK_SQL)
             await conn.execute(VALIDATE_TERMINALIZATION_KIND_CHECK_SQL)
-            await conn.execute(CREATE_OUTCOME_TYPE_SQL)
-            for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
-                await conn.execute(drop_function)
-            for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
-                await conn.execute(create_function)
+
+            # THE TWO-WORLDS FORK — one CATALOG-READ predicate, read
+            # once here: the identity column's actual birth shape,
+            # never the schema version, because a database at the
+            # current version is legitimately EITHER world. The fork's
+            # two arms are positionally split by dependency order — the
+            # varchar arm keeps the in-place program byte-for-byte at
+            # its historical position, while the fresh-world install
+            # runs AFTER the history-foundation block below, because
+            # the program it installs (transcode job state in
+            # particular) references state that block creates.
+            uuid_born = bool((await conn.execute(
+                FRESH_IDENTITY_PREDICATE_SQL
+            )).scalar_one())
+            if not uuid_born:
+                await conn.execute(CREATE_OUTCOME_TYPE_SQL)
+                for drop_function in DROP_TERMINALIZATION_FUNCTIONS_SQL:
+                    await conn.execute(drop_function)
+                for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
+                    await conn.execute(create_function)
 
             # Migration (v11): retention eligibility indexes.
             await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)
@@ -937,6 +961,117 @@ class PostgresBroker:
             if not registry_index_exists:
                 for statement in CREATE_RESERVATION_REGISTRY_INDEXES_SQL:
                     await conn.execute(statement)
+
+            # Migration (v31): EXPIRED joined the workflow terminal
+            # set, which changes the generated partial-index predicate
+            # of idx_horsies_workflows_retention. IF NOT EXISTS never
+            # rebuilds an existing index, so the migration drops and
+            # recreates explicitly — the class rule for any changed
+            # generated predicate; a fresh database gets the new
+            # predicate either way, only deployed ones are at risk.
+            await conn.execute(
+                text('DROP INDEX IF EXISTS idx_horsies_workflows_retention')
+            )
+            await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
+
+            # The fresh-world arm of the two-worlds fork (predicate
+            # read above): a uuid-born install is BORN AT THE
+            # CUTOVER'S END STATE. It has no old fleet, so its
+            # programs' owner is the 0.5.0 fleet being installed —
+            # the terminalization program is the MOVE family (the
+            # same install list the cutover's program-replacement
+            # stage owns), the status domain is live-only from the
+            # first row, and the heartbeat shape is partitioned from
+            # birth. Positioned after the history foundation because
+            # the installed program references its state.
+            if uuid_born:
+                from horsies.core.history.cutover.program import (
+                    installation_fragments,
+                    teardown_statements,
+                )
+                from horsies.core.history.ddl.fragments import (
+                    cutover_fragments,
+                )
+                from horsies.core.history.heartbeats.partitioning import (
+                    HEARTBEATS_PARTITIONED_DDL,
+                )
+                from horsies.core.history.terminalization.live_cutover import (
+                    LIVE_STATUS_DOMAIN_DDL,
+                    tightening_cutover_ddl,
+                )
+
+                domain_present = (await conn.execute(text(
+                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'horsies_tasks'::regclass
+                    AND conname = 'horsies_tasks_live_status_only')"""
+                ))).scalar_one()
+                if not domain_present:
+                    await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
+                for statement in teardown_statements():
+                    await conn.execute(text(statement))
+                for statement in installation_fragments():
+                    await conn.execute(text(statement))
+                heartbeats_flat = (await conn.execute(text(
+                    """SELECT relkind <> 'p' FROM pg_class
+                    WHERE oid = 'horsies_heartbeats'::regclass"""
+                ))).scalar_one()
+                if heartbeats_flat:
+                    await conn.execute(
+                        text('DROP TABLE horsies_heartbeats')
+                    )
+                    await conn.execute(text(HEARTBEATS_PARTITIONED_DDL))
+
+                # Migration (v32): the fourth part of the end state.
+                # v27 adds the cutover columns TRANSITIONALLY — nullable
+                # and unchecked — because an upgraded install's old
+                # writers would violate the declared shape before the
+                # backfill. A uuid-born install has no old writers and
+                # never runs the offline tighten, so without this it
+                # would wear the transitional shape permanently while
+                # this arm claims it is born at the end state. Same
+                # renderer the tighten stage uses: a fourth shape cannot
+                # drift into existence.
+                columns_tightened = (await conn.execute(text(
+                    """SELECT attnotnull FROM pg_attribute
+                    WHERE attrelid = 'horsies_tasks'::regclass
+                      AND attname = 'retention_class_key'"""
+                ))).scalar_one()
+                if not columns_tightened:
+                    for statement in tightening_cutover_ddl():
+                        await conn.execute(text(statement))
+
+                # The locator contract, which the tighten stage also
+                # applies: the composite key structurally pins a node's
+                # identity to its workflow while a phase-2 pending row
+                # exists. Without it the outbox has no referential tie
+                # to the node, so deleting a workflow leaves pending
+                # rows whose workflow is gone — unresolvable, retried
+                # every pass, and competing with real work for the
+                # bounded discovery.
+                # Migration (v33): guarded on the DELETE ACTION, not on
+                # the constraint's existence. A database born at v32
+                # carries this key without the cascade, and adding a
+                # constraint that is already there never rebuilds it —
+                # the class rule for any changed constraint definition.
+                locator_cascades = (await conn.execute(text(
+                    """SELECT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname =
+                        'horsies_workflow_phase2_pending_node_fkey'
+                      AND confdeltype = 'c')"""
+                ))).scalar_one()
+                if not locator_cascades:
+                    await conn.execute(text(
+                        'ALTER TABLE horsies_workflow_phase2_pending '
+                        'DROP CONSTRAINT IF EXISTS '
+                        'horsies_workflow_phase2_pending_node_fkey'
+                    ))
+                    await conn.execute(text(
+                        'ALTER TABLE horsies_workflow_tasks '
+                        'DROP CONSTRAINT IF EXISTS '
+                        'horsies_workflow_tasks_node_workflow_key'
+                    ))
+                    for statement in cutover_fragments():
+                        await conn.execute(text(statement))
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
@@ -1096,10 +1231,15 @@ class PostgresBroker:
         enqueue_delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
-        retention_class_key: str = 'forever',
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
+        # The ratified retention resolution: absent → the immutable
+        # 30-day default class; forever only by EXPLICIT None.
+        resolved_retention_class_key = resolve_retention_class_key(
+            retention_class_key
+        )
         # The ratified retention posture: an app-level default with a
         # per-task override, resolved here and snapshotted at enqueue.
         # None means inherit the deployment's standing policy.
@@ -1181,7 +1321,7 @@ class PostgresBroker:
                 good_until=good_until,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 task_options=task_options,
-                retention_class_key=retention_class_key,
+                retention_class_key=resolved_retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             )
             if is_err(cutover):
@@ -1410,6 +1550,84 @@ class PostgresBroker:
             raw_result=raw_value,
         ))
 
+    async def _history_result_record(
+        self,
+        session: AsyncSession,
+        task_id: str,
+    ) -> 'BrokerResult[RawResultRecord | None] | object':
+        """Resolve a result from the task-history side.
+
+        Terminalization moves the finished row out of ``horsies_tasks``,
+        so an absent (or vanished-between-statements) live row is the
+        NORMAL terminal signal, not an error. Resolution rides the
+        staged detail function — location then detail, one statement.
+        Returns ``Ok(None)`` when the staged function is not yet
+        published — a pre-coverage database has no history to consult
+        and no way to have moved the row, so absent means absent — and
+        ``_STILL_WAITING`` when the row is reported live (it appeared
+        after the live probe missed it).
+        """
+        from hashlib import sha256
+
+        from horsies.core.history.reads.detail import (
+            HistoryTaskDetail,
+            TaskDetailAbsent,
+            read_task_detail,
+            staged_detail_published,
+        )
+
+        connection = await session.connection()
+        if not await staged_detail_published(connection):
+            return Ok(None)
+        detail = await read_task_detail(connection, task_id=task_id)
+        match detail:
+            case TaskDetailAbsent():
+                return Ok(None)
+            case HistoryTaskDetail():
+                pass
+            case _:
+                # Reported live: it appeared after the live probe
+                # missed it — keep polling.
+                return _STILL_WAITING
+        if detail.result_payload is None:
+            return Ok(RawResultRecord(
+                task_id=task_id,
+                task_name=detail.task_name,
+                status=TaskStatus(detail.status),
+                raw_result=None,
+            ))
+        # Digest over the exact stored bytes BEFORE parsing — the
+        # envelope discipline; a mismatch is corruption, not a payload.
+        if (
+            detail.result_digest is None
+            or sha256(detail.result_payload).digest()
+            != detail.result_digest
+        ):
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'History result digest mismatch for task {task_id}'
+                ),
+                retryable=False,
+            ))
+        try:
+            result_text = detail.result_payload.decode('utf-8')
+        except UnicodeDecodeError as decode_error:
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                message=(
+                    f'History result payload for task {task_id} is not '
+                    f'valid UTF-8: {decode_error}'
+                ),
+                retryable=False,
+            ))
+        return self._build_raw_result_record(
+            task_id,
+            detail.task_name,
+            TaskStatus(detail.status),
+            result_text,
+        )
+
     async def _probe_result_row(
         self,
         session: AsyncSession,
@@ -1421,7 +1639,10 @@ class PostgresBroker:
 
         Polls status+name only; the full row (with potentially TOASTed
         payload columns) is fetched once, when a terminal status is
-        observed.
+        observed. A live row that is absent — or that vanishes between
+        the status probe and the record fetch — falls through to the
+        history side, because terminalization DELETES the live row as
+        it records the terminal fact.
 
         Returns the loop's final ``BrokerResult`` when the wait is over,
         or the ``_STILL_WAITING`` sentinel to keep polling. With
@@ -1433,7 +1654,7 @@ class PostgresBroker:
         )
         probe_row = probe.fetchone()
         if probe_row is None:
-            return Ok(None)
+            return await self._history_result_record(session, task_id)
         status = TaskStatus(str(probe_row.status))
         if status in (
             TaskStatus.COMPLETED,
@@ -1444,7 +1665,11 @@ class PostgresBroker:
                 GET_TASK_RESULT_RECORD_SQL, {'id': task_id},
             )).fetchone()
             if record_row is None:
-                return Ok(None)
+                # The ruled boundary: the row moved between the live
+                # poll and this fetch.
+                return await self._history_result_record(
+                    session, task_id
+                )
             return self._build_raw_result_record(
                 task_id,
                 str(record_row.task_name),
@@ -2492,6 +2717,130 @@ class PostgresBroker:
             )
 
 
+
+    async def _history_task_info(
+        self,
+        session: 'AsyncSession',
+        task_id: str,
+        *,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
+    ) -> BrokerResult[TaskInfo | None]:
+        """The history side of a task-info read, or Ok(None) if absent.
+
+        The terminal instant lands in completed_at for COMPLETED and in
+        failed_at otherwise; claim state is structurally absent on a
+        history record, while the claim's timestamp survives as
+        provenance. Attempts decode from the record's snapshot — their
+        only home after the move.
+        """
+        from horsies.core.history.identity.uuid7 import UUID
+
+        try:
+            UUID(task_id)
+        except ValueError:
+            return Ok(None)
+        from horsies.core.history.reads.detail import (
+            HistoryTaskDetail,
+            read_task_detail,
+            staged_detail_published,
+        )
+
+        connection = await session.connection()
+        if not await staged_detail_published(connection):
+            return Ok(None)
+        detail = await read_task_detail(connection, task_id=task_id)
+        match detail:
+            case HistoryTaskDetail():
+                pass
+            case _:
+                return Ok(None)
+
+        status = TaskStatus(detail.status)
+        completed_at = (
+            detail.terminal_at if status is TaskStatus.COMPLETED else None
+        )
+        failed_at = (
+            detail.terminal_at if status is not TaskStatus.COMPLETED else None
+        )
+        raw_result_value: dict[str, Any] | None = None
+        if include_result and detail.result_payload is not None:
+            _lr = loads_json(detail.result_payload.decode('utf-8'))
+            if is_err(_lr):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=(
+                        f'Result JSON parse failed for task '
+                        f'{task_id}: {_lr.err_value}'
+                    ),
+                    retryable=False,
+                ))
+            loaded = _lr.ok_value
+            if loaded is not None and not isinstance(loaded, dict):
+                return Err(BrokerOperationError(
+                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    message=(
+                        f'Result for task {task_id} is not a JSON '
+                        f'object; got {type(loaded).__name__}'
+                    ),
+                    retryable=False,
+                ))
+            raw_result_value = loaded
+
+        attempts: list[TaskAttemptInfo] | None = None
+        if include_attempts:
+            attempts = [
+                TaskAttemptInfo(
+                    task_id=task_id,
+                    attempt=record.attempt,
+                    outcome=TaskAttemptOutcome(record.outcome),
+                    will_retry=record.will_retry,
+                    started_at=record.started_at,
+                    finished_at=record.finished_at,
+                    error_code=record.error_code,
+                    error_message=record.error_message,
+                    failed_reason=record.failed_reason,
+                    worker_id=record.worker_id,
+                    worker_hostname=record.worker_hostname,
+                    worker_pid=record.worker_pid,
+                    worker_process_name=record.worker_process_name,
+                )
+                for record in detail.attempts
+            ]
+
+        return Ok(
+            TaskInfo(
+                task_id=detail.task_id,
+                task_name=detail.task_name,
+                status=status,
+                queue_name=detail.queue_name,
+                priority=detail.priority,
+                retry_count=detail.retry_count,
+                max_retries=detail.max_retries,
+                next_retry_at=None,
+                sent_at=detail.sent_at,
+                enqueued_at=detail.enqueued_at,
+                claimed_at=detail.claimed_at,
+                started_at=detail.started_at,
+                completed_at=completed_at,
+                failed_at=failed_at,
+                worker_hostname=detail.last_worker_hostname,
+                worker_pid=detail.last_worker_pid,
+                worker_process_name=None,
+                error_code=detail.error_code,
+                raw_result=raw_result_value,
+                decoded_result=None,
+                result_decoded=False,
+                failed_reason=(
+                    detail.final_failed_reason
+                    if include_failed_reason
+                    else None
+                ),
+                attempts=attempts,
+            )
+        )
+
     async def get_task_info_async(
         self,
         task_id: str,
@@ -2544,7 +2893,17 @@ class PostgresBroker:
                 result = await session.execute(query, {'id': task_id})
                 row = result.fetchone()
                 if row is None:
-                    return Ok(None)
+                    # Terminalization moves finished rows to history, so
+                    # a live miss is the normal terminal case: fall
+                    # through to the staged detail read, exactly like
+                    # the result surface. Ok(None) only on true absence.
+                    return await self._history_task_info(
+                        session,
+                        task_id,
+                        include_result=include_result,
+                        include_failed_reason=include_failed_reason,
+                        include_attempts=include_attempts,
+                    )
 
                 raw_result_value: dict[str, Any] | None = None
                 failed_reason = None

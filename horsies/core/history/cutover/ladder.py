@@ -71,6 +71,7 @@ class MeasuredRun:
     rows: int
     seconds: float
     fixed_seconds: float
+    preparation_seconds: float
     commits: tuple[BatchCommit, ...]
 
 
@@ -147,6 +148,9 @@ def fit_run(run: MeasuredRun) -> FittedRun:
         coefficients=RelocationCoefficients(
             seconds_per_million_rows=slope,
             fixed_seconds=run.fixed_seconds,
+            preparation_seconds_per_million_rows=(
+                run.preparation_seconds / (run.rows / 1_000_000)
+            ),
         ),
         regression_intercept_seconds=intercept,
     )
@@ -167,7 +171,7 @@ def evaluate_rung(
             measured_seconds=measured.seconds,
         )
     floor_seconds = (
-        estimate.estimated_seconds
+        estimate.total_seconds
         * RUNG_FLOOR_NUMERATOR
         / RUNG_FLOOR_DENOMINATOR
     )

@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -169,8 +170,16 @@ async def _rewind_to_published(engine: AsyncEngine) -> None:
 
     Not a downgrade path — nothing in the product offers one. It reproduces
     the state a deployment is actually in when it upgrades into this change,
-    which is the only way to assert that upgrading from there works.
+    which is the only way to assert that upgrading from there works. A
+    fresh-born database first demotes to the upgraded world (varchar
+    identities, in-place program) so the rewind's premises hold.
     """
+    from tests.integration.test_task_history_relocation import (
+        demote_to_upgraded_world,
+    )
+
+    async with engine.begin() as demote_connection:
+        await demote_to_upgraded_world(demote_connection)
     async with engine.connect() as connection:
         await connection.execute(
             text('ALTER TABLE horsies_tasks DROP COLUMN IF EXISTS terminalization_kind')
@@ -196,6 +205,50 @@ async def _rewind_to_published(engine: AsyncEngine) -> None:
             {'v': PUBLISHED_VERSION},
         )
         await connection.commit()
+
+
+async def _assert_fresh_end_state(engine: AsyncEngine) -> None:
+    """A uuid-born database is born at the cutover's end state."""
+    async with engine.connect() as connection:
+        assert await _stored_version(engine) == SCHEMA_VERSION
+        uuid_born = (
+            await connection.execute(
+                text(
+                    "SELECT atttypid = 'uuid'::regtype FROM pg_attribute "
+                    "WHERE attrelid = 'horsies_tasks'::regclass "
+                    "AND attname = 'id'"
+                )
+            )
+        ).scalar_one()
+        assert bool(uuid_born)
+        move_present = (
+            await connection.execute(
+                text(
+                    "SELECT to_regproc('horsies_move_task_to_history') "
+                    'IS NOT NULL'
+                )
+            )
+        ).scalar_one()
+        assert bool(move_present), 'the move family is the fresh program'
+        domain_present = (
+            await connection.execute(
+                text(
+                    'SELECT EXISTS (SELECT 1 FROM pg_constraint '
+                    "WHERE conrelid = 'horsies_tasks'::regclass "
+                    "AND conname = 'horsies_tasks_live_status_only')"
+                )
+            )
+        ).scalar_one()
+        assert bool(domain_present), 'live-only domain applies at birth'
+        heartbeats_partitioned = (
+            await connection.execute(
+                text(
+                    "SELECT relkind = 'p' FROM pg_class "
+                    "WHERE oid = 'horsies_heartbeats'::regclass"
+                )
+            )
+        ).scalar_one()
+        assert bool(heartbeats_partitioned)
 
 
 async def _assert_end_state(engine: AsyncEngine) -> None:
@@ -281,15 +334,188 @@ def _pg_spelling(declared: str) -> str:
     }[declared]
 
 
+async def _tasks_constraint_shape(
+    engine: AsyncEngine,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """(required columns, named constraints) on the live task table."""
+    async with engine.connect() as connection:
+        required = frozenset(
+            row.attname
+            for row in (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT attname FROM pg_attribute
+                        WHERE attrelid = 'horsies_tasks'::regclass
+                          AND attnum > 0
+                          AND NOT attisdropped
+                          AND attnotnull
+                        """
+                    )
+                )
+            ).all()
+        )
+        constraints = frozenset(
+            row.conname
+            for row in (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT conname FROM pg_constraint
+                        WHERE conrelid = 'horsies_tasks'::regclass
+                          AND contype = 'c'
+                        """
+                    )
+                )
+            ).all()
+        )
+    return required, constraints
+
+
+class TestFreshWorldParity:
+    """A uuid-born database is born at the cutover's end state.
+
+    The arm's contract is a parity claim, and it held for three of its
+    four parts by inspection alone — the status domain, the move family
+    and the heartbeat shape were each asserted, and the column
+    tightening, which no assertion named, was absent. This compares the
+    fresh catalog against the SAME structured authority the tighten
+    stage renders from, so a column added to that authority enters this
+    test by construction rather than by anyone remembering.
+
+    What it does not cover, stated rather than implied: an end-state
+    part that is neither a cutover column nor one of the two named
+    constraints below would need naming here too. The cutover pipeline
+    suite already builds a tightened database, so a cross-database
+    structural comparison could close that class from there; the
+    tighten cannot be run against a fresh database to the same end,
+    because it adds its constraints unconditionally and would error
+    rather than report a difference.
+    """
+
+    async def test_fresh_database_carries_the_tightened_task_shape(
+        self,
+        scratch_database: str,
+    ) -> None:
+        from horsies.core.history.terminalization.live_cutover import (
+            CUTOVER_COLUMNS,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            required, constraints = await _tasks_constraint_shape(engine)
+        finally:
+            await engine.dispose()
+
+        # Presence half: the authority is non-empty in both halves, so
+        # neither subset assertion below can pass vacuously.
+        declared_required = {
+            column.name for column in CUTOVER_COLUMNS if column.not_null
+        }
+        declared_checks = {
+            f'horsies_tasks_{column.name}_cutover'
+            for column in CUTOVER_COLUMNS
+            if column.check is not None
+        }
+        assert declared_required
+        assert declared_checks
+
+        assert declared_required <= required, (
+            'cutover columns that the tighten stage requires are nullable '
+            f'on a fresh database: {sorted(declared_required - required)}'
+        )
+        assert declared_checks <= constraints, (
+            'cutover column checks the tighten stage adds are absent on a '
+            f'fresh database: {sorted(declared_checks - constraints)}'
+        )
+        assert 'horsies_tasks_rerun_lineage_pair' in constraints
+        assert 'horsies_tasks_live_status_only' in constraints
+
+    async def test_fresh_database_carries_the_locator_contract(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The composite key the phase-2 outbox references.
+
+        Named here because it is an end-state part that is not a cutover
+        column — the class the docstring above says would need naming.
+        Without it a fresh install's outbox has no referential tie to
+        the node, and a deleted workflow leaves pending rows nothing can
+        resolve.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                names = frozenset(
+                    row.conname
+                    for row in (
+                        await connection.execute(
+                            text(
+                                """
+                                SELECT conname FROM pg_constraint
+                                WHERE conname IN (
+                                    'horsies_workflow_tasks'
+                                    '_node_workflow_key',
+                                    'horsies_workflow_phase2_pending'
+                                    '_node_fkey'
+                                )
+                                """
+                            )
+                        )
+                    ).all()
+                )
+        finally:
+            await engine.dispose()
+        assert names == {
+            'horsies_workflow_tasks_node_workflow_key',
+            'horsies_workflow_phase2_pending_node_fkey',
+        }, sorted(names)
+
+    async def test_fresh_locator_key_deletes_on_cascade(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """Deleting a workflow takes its unconsumed evidence with it.
+
+        The delete ACTION is the pin, not the constraint's presence: a
+        constraint that is already there is never rebuilt by adding it,
+        so a database born before the cascade would keep the refusing
+        form and no existence check would notice.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                action = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT confdeltype FROM pg_constraint
+                            WHERE conname =
+                                'horsies_workflow_phase2_pending_node_fkey'
+                            """
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        assert action == 'c', f'expected cascade, catalog says {action!r}'
+
+
 class TestUpgradePaths:
     async def test_fresh_database_reaches_the_current_version(
         self,
         scratch_database: str,
     ) -> None:
+        """The fresh-world characterization: a uuid-born database gets
+        the move family, the live-only domain, and the partitioned
+        heartbeat shape — never the in-place program."""
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
-            await _assert_end_state(engine)
+            await _assert_fresh_end_state(engine)
         finally:
             await engine.dispose()
 
@@ -381,7 +607,7 @@ class TestUpgradePaths:
         engine = _engine(scratch_database)
         try:
             await _migrate(scratch_database)
-            await _assert_end_state(engine)
+            await _assert_fresh_end_state(engine)
         finally:
             await engine.dispose()
 
@@ -397,11 +623,20 @@ class TestUpgradePaths:
         migrates: the canonical behaviour must come back. If it does not, then
         a merged change to a function body would reach fresh databases only,
         which is the failure the one-version-per-change rule exists to
-        prevent.
+        prevent. Characterized in the varchar world, where the in-place
+        program is self-contained; the fresh world's body restoration
+        rides the same chain arm and its program is exercised by the
+        first-terminalization characterization below.
         """
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
+            from tests.integration.test_task_history_relocation import (
+                demote_to_upgraded_world,
+            )
+
+            async with engine.begin() as demote_connection:
+                await demote_to_upgraded_world(demote_connection)
             type_identity_before = await _outcome_type_oid(engine)
             async with engine.connect() as connection:
                 await connection.execute(
@@ -455,6 +690,46 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
+    async def test_fresh_first_terminalization_surfaces_the_wiring_gap(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """THE FINDING the fresh-world characterization exists to force.
+
+        A fresh install carries the move family, but the move consults
+        the staged provenance function and inserts into a covered leaf
+        — and NOTHING on a fresh install publishes the staged readers
+        or ensures leaf coverage: publication and coverage happen only
+        through the partition manager, which no production wiring
+        invokes. The first terminal task on a fresh fleet therefore
+        fails. This test pins the CURRENT truth so the gap is a named
+        fact with a ruling pending, not a surprise; the fix (startup
+        wiring that registers configured retention classes, publishes
+        the staged readers, and maintains create-ahead coverage) is
+        its own finding-scoped work.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            task_id = await _seed_running(engine)
+            # The fresh wire signature is uuid (the varchar harness
+            # helper cannot even name it — itself part of the story).
+            with pytest.raises(
+                ProgrammingError,
+                match='horsies_task_provenance_staged',
+            ):
+                async with engine.connect() as connection:
+                    await connection.execute(
+                        text(
+                            'SELECT outcome FROM '
+                            'horsies_complete_locked_task('
+                            "CAST(:id AS uuid), 'w1', '{}')"
+                        ),
+                        {'id': task_id},
+                    )
+        finally:
+            await engine.dispose()
+
 
 async def _seed_running(engine: AsyncEngine) -> str:
     task_id = str(uuid.uuid4())
@@ -464,11 +739,21 @@ async def _seed_running(engine: AsyncEngine) -> str:
                 INSERT INTO horsies_tasks (
                     id, task_name, queue_name, status, args, kwargs,
                     enqueue_sha, is_workflow_task, claimed,
-                    claimed_by_worker_id, claimed_at, started_at
+                    claimed_by_worker_id, claimed_at, started_at,
+                    retention_class_key, command_fingerprint_version,
+                    command_fingerprint, retain_rerun_input,
+                    prepared_rerun_input_disposition
                 )
                 VALUES (
                     :id, 'upgrade.test', 'default', 'RUNNING', '[]', '{}',
-                    repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW()
+                    repeat('0', 64), FALSE, TRUE, 'w1', NOW(), NOW(),
+                    'standard_30d', 1,
+                    -- A literal, not the id: this helper seeds both the
+                    -- uuid-born and the rewound varchar world, and one
+                    -- parameter used as both types is ambiguous to the
+                    -- planner.
+                    sha256(convert_to('upgrade.test', 'UTF8')),
+                    FALSE, 'DECLINED_BY_POLICY'
                 )
             """),
             {'id': task_id},

@@ -45,6 +45,7 @@ from tests.integration.task_history_harness import prepare_move_storage
 from tests.integration.test_task_history_preparation import run_preparation_to_complete
 from tests.integration.test_task_history_relocation import (
     CLASS_KEY,
+    demote_to_upgraded_world,
     insert_legacy_task,
     relocate_all,
 )
@@ -58,7 +59,9 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 COEFFICIENTS = RelocationCoefficients(
-    seconds_per_million_rows=120.0, fixed_seconds=30.0
+    seconds_per_million_rows=120.0,
+    fixed_seconds=30.0,
+    preparation_seconds_per_million_rows=0.0,
 )
 
 
@@ -76,7 +79,13 @@ async def test_the_offline_program_end_to_end(
     engine = create_async_engine(url)
     try:
         async with engine.begin() as connection:
-            # The legacy population a deployment brings to the cutover.
+            # The legacy population a deployment brings to the cutover
+            # is only reachable in the world that deployment is in: the
+            # fresh chain now installs the cutover's END state, so the
+            # upgraded world is reinstated before anything legacy is
+            # written. Without it the live-only status domain refuses
+            # the very rows the program exists to relocate.
+            await demote_to_upgraded_world(connection)
             await prepare_move_storage(connection, CLASS_KEY)
             await connection.execute(text(RELOCATION_LEDGER_DDL))
             terminal_completed = await insert_legacy_task(
@@ -195,6 +204,16 @@ async def test_the_gate_names_unparseable_identities(
         async with engine.begin() as connection:
             await normalize_attempt_identity(connection)
             await connection.execute(text(RELOCATION_LEDGER_DDL))
+            # The gate exists for UPGRADED databases, whose identity
+            # columns are varchar until the tighten converts them; a
+            # fresh install is uuid from birth and cannot even store a
+            # malformed value. Reproduce the upgraded shape.
+            await connection.execute(
+                text(
+                    'ALTER TABLE horsies_workflows '
+                    'ALTER COLUMN root_workflow_id TYPE varchar(36)'
+                )
+            )
             await connection.execute(
                 text(
                     'INSERT INTO horsies_workflows '

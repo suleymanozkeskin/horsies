@@ -80,11 +80,8 @@ from horsies.core.worker.sql import (  # noqa: F401
     INSERT_CLAIMER_HEARTBEAT_SQL as INSERT_CLAIMER_HEARTBEAT_SQL,
     RENEW_CLAIM_LEASE_SQL as RENEW_CLAIM_LEASE_SQL,
     INSERT_WORKER_STATE_SQL as INSERT_WORKER_STATE_SQL,
-    DELETE_EXPIRED_HEARTBEATS_SQL as DELETE_EXPIRED_HEARTBEATS_SQL,
     DELETE_EXPIRED_WORKER_STATES_SQL as DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL as DELETE_EXPIRED_WORKFLOWS_SQL,
-    DELETE_EXPIRED_TASKS_SQL as DELETE_EXPIRED_TASKS_SQL,
-    DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL as DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
     WORKFLOW_TERMINAL_VALUES as WORKFLOW_TERMINAL_VALUES,
     TASK_TERMINAL_VALUES as TASK_TERMINAL_VALUES,
     _FINALIZER_DRAIN_TIMEOUT_S as _FINALIZER_DRAIN_TIMEOUT_S,
@@ -159,6 +156,10 @@ class Worker(
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
         self._resilience = self.cfg.resilience_config or WorkerResilienceConfig()
+        # Last coverage-ensure outcome, published with worker-state
+        # snapshots so operators see covered_through and typed failures.
+        self._partition_coverage_health: dict[str, Any] | None = None
+        self._phase2_recovery_health: dict[str, Any] | None = None
         # Delay creation of the process pool until after preloading modules so that
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None
@@ -815,6 +816,40 @@ class Worker(
             # listener/coordinator DB sockets. Psycopg connections are not
             # process-safe and must not be inherited by child processes.
             await self._create_warmed_executor()
+
+            # Partitioned writes need their partitions before the first
+            # claim: heartbeat leaves for this worker's liveness rows,
+            # history leaves for terminalizations, staged readers published.
+            # Refusing to start when the present instant has no heartbeat
+            # coverage fails at the moment an operator is attached instead
+            # of on the first RUNNING transition.
+            from horsies.core.history.maintenance.coverage import (
+                StartupCoverageRefused,
+                ensure_startup_coverage,
+            )
+
+            from horsies.core.models.recovery import RecoveryConfig
+
+            recovery_cfg = self.cfg.recovery_config or RecoveryConfig()
+            async with self.sf() as coverage_session:
+                startup_coverage = await ensure_startup_coverage(
+                    await coverage_session.connection(),
+                    history_horizon_days=recovery_cfg.history_leaf_horizon_days,
+                    heartbeat_horizon_hours=(
+                        recovery_cfg.heartbeat_leaf_horizon_hours
+                    ),
+                )
+                await coverage_session.commit()
+            match startup_coverage:
+                case StartupCoverageRefused(outcome=refused_outcome):
+                    raise RuntimeError(
+                        'worker startup refused: no heartbeat leaf covers '
+                        f'the present instant after the ensure attempt — '
+                        f'{refused_outcome!r}'
+                    )
+                case _:
+                    pass
+
 
             start_r = await self.listener.start()
             if is_err(start_r):

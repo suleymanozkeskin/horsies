@@ -93,7 +93,12 @@ class TestConvertedStatement:
             ).one()
         assert row.command_fingerprint_version == 1
         assert len(bytes(row.command_fingerprint)) == 32
-        assert row.retention_class_key == 'forever'
+        # The literal, not DEFAULT_RETENTION_CLASS_KEY: an enqueue that
+        # names no class must land in a FINITE class. Importing the
+        # constant would track a change back to forever instead of
+        # failing on it, and a forever default exempts every
+        # unconfigured task from retention.
+        assert row.retention_class_key == 'standard_30d'
         assert row.retain_rerun_input is False
         expected_payload = encode_input_envelope_v1(
             args=[], kwargs={'x': 1}, options=None
@@ -188,7 +193,7 @@ class TestKeyedEnqueue:
                         't.idempotency_key_digest '
                         'FROM horsies_key_reservations r '
                         'JOIN horsies_tasks t '
-                        'ON t.id = CAST(r.task_id AS varchar) '
+                        'ON t.id = r.task_id '
                         'WHERE r.task_id = CAST(:id AS uuid)'
                     ),
                     {'id': send.task_id},

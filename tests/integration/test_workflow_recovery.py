@@ -14,7 +14,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result, encode_value
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -28,13 +28,42 @@ from horsies.core.workflows.engine import (
     pop_pending_parent_propagations,
 )
 from horsies.core.workflows.recovery import (
+    GLOBAL_SCAN_ROW_CAP,
     recover_stuck_workflows,
     _run_recovery_candidate,  # pyright: ignore[reportPrivateUsage]
 )
+from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+from tests.integration.history_seeding import force_terminal
 from tests.integration.conftest import task_name_for
+
+
+async def _run_phase2_recovery(
+    session: AsyncSession,
+    broker: PostgresBroker,
+    *,
+    grace_ms: int = 0,
+) -> int:
+    """Drive the reaper's phase-2 recovery pass over seeded evidence.
+
+    The crashed-worker case is the outbox consumer's, not the scan's:
+    terminalization records the owed progression as it moves the task,
+    and this is what the reaper does with those records. The driver owns
+    a transaction per record, so the seeded state is committed first and
+    the caller's next read starts a fresh snapshot.
+
+    Returns the count of nodes advanced.
+    """
+    await session.commit()
+    summary = await drive_phase2_recovery(
+        broker.session_factory,
+        broker,
+        grace_ms=grace_ms,
+        max_rows=GLOBAL_SCAN_ROW_CAP,
+    )
+    return summary.applied
 
 
 def _strict_result_json(result: TaskResult[Any, TaskError]) -> str:
@@ -688,17 +717,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Set tasks row to FAILED (as reaper would)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -706,7 +729,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
 
         # Set workflow_tasks to RUNNING (simulating crash before on_workflow_task_complete)
@@ -721,7 +743,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _run_phase2_recovery(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -766,30 +788,22 @@ class TestWorkflowRecovery:
         )
         task_id = wt_result.fetchone()[0]
 
-        async def _set_failed_aged(age_secs: float) -> None:
-            # Task FAILED with failed_at = NOW() - age_secs; workflow_task back
-            # to RUNNING so it is a Case 1.7 candidate.
-            await session.execute(
-                text(
-                    "UPDATE horsies_tasks SET status = 'FAILED', "
-                    'failed_at = NOW() - make_interval(secs => CAST(:age AS double precision)), '
-                    'result = :result, '
-                    'terminal_at = NOW() - make_interval('
-                    'secs => CAST(:age AS double precision)) '
-                    'WHERE id = :tid'
-                ),
-                {
-                    'tid': task_id,
-                    'age': age_secs,
-                    'result': _strict_result_json(
-                        TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.WORKER_CRASHED,
-                                message='Worker died',
-                            ),
+        async def _terminalize_with_node_running() -> None:
+            # The crash shape: the task terminalized, its node left
+            # behind. Terminalization records the owed progression as it
+            # moves the task, so the evidence exists from here on.
+            await force_terminal(
+                session,
+                task_id,
+                status='FAILED',
+                result_json=_strict_result_json(
+                    TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            message='Worker died',
                         ),
                     ),
-                },
+                ),
             )
             await session.execute(
                 text(
@@ -797,6 +811,21 @@ class TestWorkflowRecovery:
                     'WHERE workflow_id = :wf_id AND task_index = 0'
                 ),
                 {'wf_id': handle.workflow_id},
+            )
+            await session.commit()
+
+        async def _age_evidence(age_secs: float) -> None:
+            # Time passing, not a second terminalization: nothing in
+            # production terminalizes an already-terminal task, so the
+            # recorded evidence is what ages.
+            await session.execute(
+                text(
+                    'UPDATE horsies_workflow_phase2_pending '
+                    'SET created_at = NOW() - make_interval('
+                    '    secs => CAST(:age AS double precision)) '
+                    'WHERE task_id = CAST(:tid AS uuid)'
+                ),
+                {'age': age_secs, 'tid': task_id},
             )
             await session.commit()
 
@@ -815,19 +844,20 @@ class TestWorkflowRecovery:
 
         grace_ms = 60_000
 
-        # Just terminal (age 0): within grace -> not recovered, left RUNNING.
-        await _set_failed_aged(0.0)
-        recovered = await recover_stuck_workflows(
-            session, broker, finalizing_grace_ms=grace_ms
+        # Just terminal: within grace -> not recovered, left RUNNING,
+        # because the healthy finalizer is presumed still in flight.
+        await _terminalize_with_node_running()
+        recovered = await _run_phase2_recovery(
+            session, broker, grace_ms=grace_ms
         )
         await session.commit()
         assert recovered == 0
         assert await _wt_status() == 'RUNNING'
 
         # Aged 120s, past the 60s grace -> recovered.
-        await _set_failed_aged(120.0)
-        recovered_aged = await recover_stuck_workflows(
-            session, broker, finalizing_grace_ms=grace_ms
+        await _age_evidence(120.0)
+        recovered_aged = await _run_phase2_recovery(
+            session, broker, grace_ms=grace_ms
         )
         await session.commit()
         assert recovered_aged == 1
@@ -861,17 +891,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate worker crash on task A
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -879,7 +903,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
         await session.execute(
             text("""
@@ -892,7 +915,7 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # Run recovery
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _run_phase2_recovery(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -916,6 +939,16 @@ class TestWorkflowRecovery:
             {'wf_id': handle.workflow_id},
         )
         assert wt_b.fetchone()[0] == 'SKIPPED'
+
+    # RETIRED: three cases recovered a terminal task with NO stored
+    # result. On any path that owes phase-2 progression the move refuses
+    # that state at the source — 'deferred workflow terminalization
+    # requires a result payload' — because the outbox carries the
+    # result's digest as a NOT NULL column. The four deferring families
+    # all produce a payload; the four that do not defer advance their
+    # node inline or have no node. The invariant those cases were
+    # unknowingly probing is now pinned directly, in
+    # test_task_history_terminalization_move.py.
 
     async def test_recover_crashed_worker_idempotent(
         self,
@@ -943,17 +976,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate crash
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -961,7 +988,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
         await session.execute(
             text("""
@@ -974,145 +1000,15 @@ class TestWorkflowRecovery:
         await session.commit()
 
         # First recovery
-        recovered1 = await recover_stuck_workflows(session, broker)
+        recovered1 = await _run_phase2_recovery(session, broker)
         await session.commit()
 
         # Second recovery
-        recovered2 = await recover_stuck_workflows(session, broker)
+        recovered2 = await _run_phase2_recovery(session, broker)
         await session.commit()
 
         assert recovered1 == 1
         assert recovered2 == 0
-
-    async def test_recover_cancelled_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: CANCELLED task with missing result maps to TASK_CANCELLED."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_cancel_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_cancel', tasks=[node_a]
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate cancellation with no stored result
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'CANCELLED',
-                    result = NULL,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await recover_stuck_workflows(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == OutcomeCode.TASK_CANCELLED
-
-    async def test_recover_completed_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: COMPLETED task with missing result maps to RESULT_NOT_AVAILABLE."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_missing_result_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_missing_result', tasks=[node_a]
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate completed task with no stored result
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED',
-                    result = NULL,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await recover_stuck_workflows(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     async def test_recover_crashed_worker_unregistered_task_err_fast_path(
         self,
@@ -1155,18 +1051,11 @@ class TestWorkflowRecovery:
                 message='real failure to preserve through recovery',
             ),
         )
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(real_err_result),
-            },
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(real_err_result),
         )
         await session.execute(
             text("""
@@ -1184,7 +1073,7 @@ class TestWorkflowRecovery:
         app.tasks.unregister('recover_unregistered_err_a')
         assert app.tasks.get('recover_unregistered_err_a') is None
 
-        recovered = await recover_stuck_workflows(session, broker)
+        recovered = await _run_phase2_recovery(session, broker)
         await session.commit()
 
         assert recovered == 1
@@ -1642,71 +1531,6 @@ class TestWorkflowRecovery:
         assert parent_row.fetchone()[0] == 'FAILED'
 
     # ── Case 1.7: FAILED task with missing result ──
-
-    async def test_recover_failed_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: FAILED task with NULL result maps to WORKER_CRASHED."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_failed_missing_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_failed_missing', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate: task FAILED with no result stored (worker crashed before writing result)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED', result = NULL, terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await recover_stuck_workflows(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == OperationalErrorCode.WORKER_CRASHED
-
-    # ── Case 2+3: Success policy failure branch ──
 
     async def test_recover_success_policy_not_satisfied(
         self,

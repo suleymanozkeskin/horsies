@@ -21,6 +21,7 @@ request through the rerun contract, with new identity and lineage.
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import assert_never
@@ -28,7 +29,14 @@ from typing import assert_never
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from sqlalchemy.ext.asyncio import AsyncConnection
+
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.reads.detail import (
+    HistoryTaskDetail,
+    read_task_detail,
+    staged_detail_published,
+)
 from horsies.core.lifecycle.commands import CancelLockedTask
 from horsies.core.lifecycle.fences import CallerHoldsRowLock
 from horsies.core.lifecycle.outcomes import (
@@ -94,7 +102,7 @@ _LOCK_TASK_SQL = text("""
            is_workflow_task,
            (good_until IS NOT NULL AND good_until <= NOW()) AS expiry_passed
     FROM horsies_tasks
-    WHERE id = :id
+    WHERE id = CAST(:id AS uuid)
     FOR UPDATE
 """)
 
@@ -158,6 +166,35 @@ def _db_err(action: str, task_id: str, exc: SQLAlchemyError) -> Err[TaskActionEr
     )
 
 
+async def _diagnose_live_miss(
+    connection: AsyncConnection, task_id: str
+) -> Err[TaskActionError]:
+    """Classify a task absent from the live table.
+
+    Terminalization moves finished rows to history, so a terminal task
+    is a live miss by design: the history read names it, and the answer
+    is the same refusal a terminal live row produced before the split —
+    a state conflict, or the workflow-bound refusal — never "not
+    found" for a task the dashboard is still showing.
+    """
+    if not await staged_detail_published(connection):
+        return _not_found(task_id)
+    detail = await read_task_detail(connection, task_id=task_id)
+    match detail:
+        case HistoryTaskDetail(is_workflow_task=True):
+            return _workflow_bound(task_id)
+        case HistoryTaskDetail(status=status_value):
+            return _state_conflict(
+                TaskActionErrorCode.TASK_NOT_CANCELLABLE,
+                f'Task {task_id} cannot be cancelled from status '
+                f'{status_value}.',
+                task_id,
+                _STATUS_BY_VALUE.get(status_value),
+            )
+        case _:
+            return _not_found(task_id)
+
+
 async def cancel_task(
     broker: PostgresBroker,
     task_id: str,
@@ -180,11 +217,20 @@ async def cancel_task(
     if include_running:
         permitted_statuses += (TaskStatus.RUNNING,)
 
+    # Identity columns are uuid; text that does not parse as one cannot
+    # name any task, and must not reach a CAST that would error instead.
+    try:
+        uuid.UUID(task_id)
+    except ValueError:
+        return _not_found(task_id)
+
     try:
         async with broker.session_factory() as session:
             locked = (await session.execute(_LOCK_TASK_SQL, {'id': task_id})).first()
             if locked is None:
-                return _not_found(task_id)
+                return await _diagnose_live_miss(
+                    await session.connection(), task_id
+                )
             status_value, is_workflow_task, _expiry_passed = locked
             current_status = _STATUS_BY_VALUE.get(status_value)
 

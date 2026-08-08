@@ -319,7 +319,7 @@ async def seed_archive_transcode_workload(
                 attempt_snapshot, attempt_snapshot_digest
             )
             SELECT
-                md5('transcode-' || series::text)::uuid::text,
+                md5('transcode-' || series::text)::uuid,
                 'prototype.transcode', 'default', 100, 1,
                 sha256(convert_to('transcode-' || series::text, 'UTF8')),
                 CASE WHEN mod(series, 2) = 0

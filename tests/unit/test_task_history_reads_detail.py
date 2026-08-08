@@ -34,9 +34,11 @@ from horsies.core.history.reads.pages import (
     HistoryFacet,
     HistoryFacetQuery,
     HistoryPageQuery,
+    HistoryScope,
     HistoryWindow,
     history_facet_statement,
     history_page_statement,
+    history_scope_conditions,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -169,17 +171,47 @@ class TestBuilderValidation:
         with pytest.raises(ValueError, match='non-negative'):
             HistoryPageQuery(window=make_window(), limit=1, offset=-1)
 
+    def test_page_statement_carries_the_taxonomy_dimension(self) -> None:
+        """The page WHERE renders every scope dimension the counts do.
+
+        Regression pin: the page query once took its own five filter
+        fields and silently dropped `category_families` and
+        `domain_complement` — a category-filtered list returned
+        unfiltered history rows while the scoped count disagreed. The
+        page statement must render from the same `HistoryScope`
+        conditions as the aggregates, category arms included.
+        """
+        scope = HistoryScope(
+            category_families=(('TASK_EXCEPTION', 'TASK_TIMEOUT'),),
+            domain_complement=('TASK_EXCEPTION',),
+        )
+        page_sql, page_params = history_page_statement(
+            HistoryPageQuery(window=make_window(), limit=10, scope=scope)
+        )
+        count_conditions, _ = history_scope_conditions(make_window(), scope)
+        for condition in count_conditions:
+            assert condition in page_sql, condition
+        assert page_params['family_0_filter'] == [
+            'TASK_EXCEPTION',
+            'TASK_TIMEOUT',
+        ]
+        assert page_params['builtin_code_filter'] == ['TASK_EXCEPTION']
+
     def test_filters_bind_rather_than_interpolate(self) -> None:
         sql, parameters = history_page_statement(
             HistoryPageQuery(
                 window=make_window(),
                 limit=10,
-                status='COMPLETED',
-                task_name='acme.report',
+                scope=HistoryScope(
+                    statuses=('COMPLETED',),
+                    task_names=('acme.report',),
+                ),
             )
         )
-        assert 'status = :status' in sql
-        assert 'task_name = :task_name' in sql
+        assert 'status = ANY(CAST(:status_filter AS text[]))' in sql
+        assert (
+            'task_name = ANY(CAST(:task_name_filter AS text[]))' in sql
+        )
         assert "'COMPLETED'" not in sql
-        assert parameters['status'] == 'COMPLETED'
-        assert parameters['task_name'] == 'acme.report'
+        assert parameters['status_filter'] == ['COMPLETED']
+        assert parameters['task_name_filter'] == ['acme.report']

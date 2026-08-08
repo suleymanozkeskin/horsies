@@ -10,6 +10,7 @@ export const LEGEND_STATUSES: WorkflowStatus[] = [
   'SKIPPED',
   'PAUSED',
   'CANCELLED',
+  'EXPIRED',
 ];
 
 /** Run-level statuses offered as run-list filters, in display order. */
@@ -19,5 +20,6 @@ export const RUN_STATUS_FILTERS: WorkflowStatus[] = [
   'COMPLETED',
   'FAILED',
   'CANCELLED',
+  'EXPIRED',
   'PAUSED',
 ];

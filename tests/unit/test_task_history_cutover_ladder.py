@@ -62,7 +62,8 @@ class TestFit:
         fitted = fit_run(
             MeasuredRun(
                 rows=1_000_000, seconds=150.0,
-                fixed_seconds=120.0, commits=commits,
+                fixed_seconds=120.0,
+                preparation_seconds=0.0, commits=commits,
             )
         )
         assert fitted.coefficients.seconds_per_million_rows == (
@@ -82,7 +83,8 @@ class TestFit:
         fitted = fit_run(
             MeasuredRun(
                 rows=1_000_000, seconds=157.5,
-                fixed_seconds=120.0, commits=commits,
+                fixed_seconds=120.0,
+                preparation_seconds=0.0, commits=commits,
             )
         )
         assert fitted.regression_intercept_seconds == pytest.approx(7.5)
@@ -96,7 +98,8 @@ class TestFit:
             fit_run(
                 MeasuredRun(
                     rows=100_000, seconds=3.0,
-                    fixed_seconds=0.0, commits=single,
+                    fixed_seconds=0.0,
+                    preparation_seconds=0.0, commits=single,
                 )
             )
         repeated = (
@@ -107,7 +110,8 @@ class TestFit:
             fit_run(
                 MeasuredRun(
                     rows=100_000, seconds=3.5,
-                    fixed_seconds=0.0, commits=repeated,
+                    fixed_seconds=0.0,
+                    preparation_seconds=0.0, commits=repeated,
                 )
             )
 
@@ -115,7 +119,9 @@ class TestFit:
 class TestBothBoundsStopTheLadder:
     def test_ceiling_bust_stops(self) -> None:
         coefficients = RelocationCoefficients(
-            seconds_per_million_rows=120.0, fixed_seconds=30.0
+            seconds_per_million_rows=120.0,
+            fixed_seconds=30.0,
+            preparation_seconds_per_million_rows=0.0,
         )
         rung = LadderRung(
             name='one-million', rows=1_000_000, contingent=False
@@ -126,7 +132,8 @@ class TestBothBoundsStopTheLadder:
             coefficients=coefficients,
             measured=MeasuredRun(
                 rows=1_000_000, seconds=200.0,
-                fixed_seconds=30.0, commits=(),
+                fixed_seconds=30.0,
+                preparation_seconds=0.0, commits=(),
             ),
         )
         assert isinstance(busted, RungBusted)
@@ -138,7 +145,9 @@ class TestBothBoundsStopTheLadder:
         the true time is 420 s — ratio 0.28, sailing under the ceiling
         forever. The floor names it disproven."""
         inflated = RelocationCoefficients(
-            seconds_per_million_rows=150.0, fixed_seconds=0.0
+            seconds_per_million_rows=150.0,
+            fixed_seconds=0.0,
+            preparation_seconds_per_million_rows=0.0,
         )
         rung = LadderRung(
             name='ten-million', rows=10_000_000, contingent=False
@@ -148,14 +157,17 @@ class TestBothBoundsStopTheLadder:
             coefficients=inflated,
             measured=MeasuredRun(
                 rows=10_000_000, seconds=420.0,
-                fixed_seconds=120.0, commits=(),
+                fixed_seconds=120.0,
+                preparation_seconds=0.0, commits=(),
             ),
         )
         assert isinstance(outcome, RungOverpredicted)
 
     def test_in_bounds_passes_and_refits_from_the_trajectory(self) -> None:
         coefficients = RelocationCoefficients(
-            seconds_per_million_rows=30.0, fixed_seconds=120.0
+            seconds_per_million_rows=30.0,
+            fixed_seconds=120.0,
+            preparation_seconds_per_million_rows=0.0,
         )
         rung = LadderRung(
             name='one-million', rows=1_000_000, contingent=False
@@ -169,7 +181,8 @@ class TestBothBoundsStopTheLadder:
             coefficients=coefficients,
             measured=MeasuredRun(
                 rows=1_000_000, seconds=153.0,
-                fixed_seconds=119.0, commits=commits,
+                fixed_seconds=119.0,
+                preparation_seconds=0.0, commits=commits,
             ),
         )
         assert isinstance(passed, RungPassed)
@@ -208,16 +221,19 @@ class TestBoundsAreInclusive:
     exclusive."""
 
     COEFFICIENTS = RelocationCoefficients(
-        seconds_per_million_rows=120.0, fixed_seconds=30.0
+        seconds_per_million_rows=120.0,
+        fixed_seconds=30.0,
+        preparation_seconds_per_million_rows=0.0,
     )
     RUNG = LadderRung(name='one-million', rows=1_000_000, contingent=False)
-    # Estimate 150 s exactly: ceiling 187.5 s, floor 105 s.
+    # Total 150 s exactly: ceiling 187.5 s, floor 105 s.
 
     def _measured(self, seconds: float) -> MeasuredRun:
         return MeasuredRun(
             rows=1_000_000,
             seconds=seconds,
             fixed_seconds=30.0,
+            preparation_seconds=0.0,
             commits=linear_commits(
                 batches=4, batch_rows=250_000,
                 slope_per_million=120.0, intercept=0.0,

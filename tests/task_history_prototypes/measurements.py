@@ -217,7 +217,7 @@ async def measure_rerun_storage_candidate(
                 rerun_input_reference
             )
             SELECT
-                md5('rerun-' || series::text)::uuid::text,
+                md5('rerun-' || series::text)::uuid,
                 'prototype.task', 'default', 100, 1,
                 sha256(convert_to('rerun-' || series::text, 'UTF8')), 'FAILED',
                 'FAIL_RUNNING', '2026-08-05T12:00:00Z'::timestamptz,
@@ -303,7 +303,7 @@ async def measure_administrative_result_candidate(
                 attempt_snapshot_digest
             )
             SELECT
-                md5('admin-' || series::text)::uuid::text,
+                md5('admin-' || series::text)::uuid,
                 'prototype.task', 'default', 100, 1,
                 sha256(convert_to('admin-' || series::text, 'UTF8')), 'CANCELLED',
                 'CANCEL_ADMIN', '2026-08-05T12:00:00Z'::timestamptz,
@@ -374,7 +374,7 @@ async def _measure_aggregate(
                 attempt_snapshot_digest
             )
             SELECT
-                md5(series::text)::uuid::text,
+                md5(series::text)::uuid,
                 'prototype.task', 'default', 100, 1,
                 sha256(convert_to(series::text, 'UTF8')), 'COMPLETED',
                 'COMPLETE_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
@@ -468,7 +468,7 @@ async def _measure_copartitioned(
                 history_schema_version, attempt_archive_version
             )
             SELECT
-                md5(series::text)::uuid::text,
+                md5(series::text)::uuid,
                 'prototype.task', 'default', 100, 1,
                 sha256(convert_to(series::text, 'UTF8')), 'COMPLETED',
                 'COMPLETE_LOCKED', '2026-08-05T12:00:00Z'::timestamptz,
@@ -503,7 +503,7 @@ async def _measure_copartitioned(
                 worker_process_name
             )
             SELECT
-                md5(task_number::text)::uuid::text,
+                md5(task_number::text)::uuid,
                 'finite_30d_v1', '2026-08-05T12:00:00Z'::timestamptz,
                 :attempt_version, attempt_number,
                 CASE WHEN attempt_number = :attempt_count

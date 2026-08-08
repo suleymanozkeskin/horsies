@@ -31,6 +31,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.cutover.identity import (
     normalize_attempt_identity,
 )
+from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
 from horsies.core.history.cutover.relocation import (
     RELOCATION_LEDGER_DDL,
     RelocationBatch,
@@ -61,7 +62,93 @@ async def _prepare(url: str) -> None:
         await broker.close_async()
 
 
+async def demote_to_upgraded_world(connection: AsyncConnection) -> None:
+    """Reproduce the UPGRADED world on a fresh-born database.
+
+    The chain now installs fresh databases at the cutover's end state
+    (uuid identities, live-only domain, move program, partitioned
+    heartbeats); the cutover battery tests the OTHER world — the one a
+    real 0.4.7 deployment brings — so it demotes explicitly: in-place
+    program reinstated, domain lifted, cutover columns back to their
+    transitional shape, identities back to varchar with their keys
+    re-added on the varchar shape, heartbeats flat. Not a production
+    path; the mirror of the emission suite's rewind."""
+    from horsies.core.history.cutover.program import uninstall_programs
+
+    from tests.integration.history_seeding import relax_cutover_columns
+
+    await uninstall_programs(connection)
+    await relax_cutover_columns(connection)
+    await connection.execute(
+        text(
+            'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
+            'horsies_tasks_live_status_only'
+        )
+    )
+    foreign_keys = (
+        await connection.execute(
+            text(
+                """SELECT con.conrelid::regclass::text AS table_name,
+                       con.conname,
+                       pg_get_constraintdef(con.oid) AS definition
+                FROM pg_constraint con
+                WHERE con.contype = 'f'
+                  AND con.confrelid IN (
+                      'horsies_tasks'::regclass,
+                      'horsies_workflows'::regclass
+                  )"""
+            )
+        )
+    ).all()
+    for key in foreign_keys:
+        await connection.execute(
+            text(
+                f'ALTER TABLE {key.table_name} '
+                f'DROP CONSTRAINT "{key.conname}"'
+            )
+        )
+    for table, column in (
+        ('horsies_tasks', 'id'),
+        ('horsies_task_attempts', 'task_id'),
+        ('horsies_workflows', 'id'),
+        ('horsies_workflows', 'parent_workflow_id'),
+        ('horsies_workflows', 'root_workflow_id'),
+        ('horsies_workflow_tasks', 'id'),
+        ('horsies_workflow_tasks', 'workflow_id'),
+        ('horsies_workflow_tasks', 'task_id'),
+        ('horsies_workflow_tasks', 'sub_workflow_id'),
+    ):
+        await connection.execute(
+            text(
+                f'ALTER TABLE {table} ALTER COLUMN {column} '
+                f'TYPE varchar(36) USING {column}::text'
+            )
+        )
+    for key in foreign_keys:
+        await connection.execute(
+            text(
+                f'ALTER TABLE {key.table_name} '
+                f'ADD CONSTRAINT "{key.conname}" {key.definition}'
+            )
+        )
+    await connection.execute(text('DROP TABLE horsies_heartbeats'))
+    # The flat pre-cutover heartbeat shape, test-local: the demotion
+    # reproduces what a 0.4.7 deployment brings, indexes not needed.
+    await connection.execute(
+        text(
+            'CREATE TABLE horsies_heartbeats ('
+            'id BIGSERIAL PRIMARY KEY, '
+            'task_id varchar(36) NOT NULL, '
+            'sender_id varchar(255) NOT NULL, '
+            'role varchar(20) NOT NULL, '
+            'sent_at timestamptz NOT NULL, '
+            'hostname varchar(255), pid integer)'
+        )
+    )
+
+
 async def install_program_state(connection: AsyncConnection) -> None:
+    await demote_to_upgraded_world(connection)
     await prepare_move_storage(connection, CLASS_KEY)
     await connection.execute(text(RELOCATION_LEDGER_DDL))
     await normalize_attempt_identity(connection)
@@ -83,9 +170,13 @@ async def insert_legacy_task(
     kwargs_json: str | None = None,
     task_options: str | None = None,
     retain: bool | None = False,
+    class_key: str | None = CLASS_KEY,
 ) -> str:
     """One row as 0.4.x left it, with the transitional columns in their
-    post-backfill state."""
+    post-backfill state.
+
+    ``class_key=None`` is the row a deployment that predates retention
+    classes left behind: terminal, retained, and carrying no class."""
     task_id = str(uuid.uuid4())
     now = datetime.now(UTC)
     terminal = status not in ('PENDING', 'CLAIMED', 'RUNNING')
@@ -131,7 +222,7 @@ async def insert_legacy_task(
             'is_workflow_task': is_workflow_task,
             'enqueue_sha': 'a' * 64,
             'fingerprint': uuid.uuid4().bytes + uuid.uuid4().bytes,
-            'class_key': CLASS_KEY,
+            'class_key': class_key,
             'retain': retain,
             'disposition': disposition,
             'args_json': args_json,
@@ -298,6 +389,62 @@ class TestRelocation:
                 ).all()
                 assert [(r.rows_relocated) for r in ledger] == [2, 2]
                 assert sum(r.legacy_kind_rows for r in ledger) == 2
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_classless_legacy_row_relocates_into_forever(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """A row whose deployment never chose a class lands in forever.
+
+        The class key is the history table's partition key, so a NULL
+        does not degrade — it aborts the batch with 'no partition of
+        relation found for row'. Forever rather than the finite default
+        is the ruled target: no recorded policy means no deletion
+        policy applied, and the finite default would put every legacy
+        row past its duration on the drop path at the first retention
+        pass.
+        """
+        url = await make_database()
+        await _prepare(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                classless = await insert_legacy_task(
+                    connection,
+                    status='COMPLETED',
+                    kind='COMPLETE_LOCKED',
+                    class_key=None,
+                )
+                outcome = await relocate_all(connection)
+                assert outcome.rows_relocated == 1
+                landed = (
+                    await connection.execute(
+                        text(
+                            'SELECT retention_class_key '
+                            'FROM horsies_task_history '
+                            'WHERE task_id = CAST(:t AS uuid)'
+                        ),
+                        {'t': classless},
+                    )
+                ).scalar_one()
+                assert landed == FOREVER_CLASS_KEY
+                # No live row survives: the relocation completed rather
+                # than aborting on the partition route. The identity is
+                # compared as varchar because this battery runs the
+                # upgraded world, where the live id has not converted.
+                remaining = (
+                    await connection.execute(
+                        text(
+                            'SELECT count(*) FROM horsies_tasks '
+                            'WHERE id = CAST(:t AS varchar)'
+                        ),
+                        {'t': classless},
+                    )
+                ).scalar_one()
+                assert int(remaining) == 0
         finally:
             await engine.dispose()
 

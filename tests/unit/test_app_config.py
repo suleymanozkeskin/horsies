@@ -1139,9 +1139,9 @@ class TestFormatForLoggingExtended:
         config = AppConfig(broker=BROKER)
         formatted = config._format_for_logging()
         assert 'retention_hours:' in formatted
-        assert 'heartbeats=24' in formatted
+        assert 'heartbeats' not in formatted.split('retention_hours:')[1].split('\n')[0]
         assert 'worker_states=168' in formatted
-        assert 'terminal_records=720' in formatted
+        assert 'terminal_workflows=720' in formatted
 
     def test_schedule_displayed(self) -> None:
         """Schedule config should appear when set."""
@@ -1368,29 +1368,24 @@ class TestRetentionDeleteBatchSize:
 
 
 @pytest.mark.unit
-class TestQueueTerminalRecordRetentionOverrides:
-    """RecoveryConfig.queue_terminal_record_retention_hours bounds and default."""
+class TestRemovedRetentionKnobsRejected:
+    """The removed knobs fail closed with their successors named."""
 
-    def test_default_is_empty(self) -> None:
-        assert RecoveryConfig().queue_terminal_record_retention_hours == {}
-
-    def test_accepts_valid_edge_windows(self) -> None:
-        overrides = {'metrics': 1, 'archive': 24 * 365 * 5}
-        cfg = RecoveryConfig(queue_terminal_record_retention_hours=overrides)
-        assert cfg.queue_terminal_record_retention_hours == overrides
-
-    def test_below_minimum_value_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            RecoveryConfig(queue_terminal_record_retention_hours={'q': 0})
-
-    def test_above_maximum_value_rejected(self) -> None:
-        with pytest.raises(ValidationError):
+    def test_queue_override_names_retention_classes(self) -> None:
+        with pytest.raises(Exception, match='retention class'):
             RecoveryConfig(
-                queue_terminal_record_retention_hours={'q': 24 * 365 * 5 + 1},
+                queue_terminal_record_retention_hours={'default': 24},
             )
 
+    def test_heartbeat_window_names_partition_drops(self) -> None:
+        with pytest.raises(Exception, match='drop whole'):
+            RecoveryConfig(heartbeat_retention_hours=24)
 
-@pytest.mark.unit
+    def test_surviving_knob_governs_workflow_records(self) -> None:
+        cfg = RecoveryConfig(terminal_record_retention_hours=48)
+        assert cfg.terminal_record_retention_hours == 48
+
+
 class TestPayloadPolicyWiring:
     """AppConfig carries a PayloadPolicy with warn-only defaults."""
 
@@ -1398,58 +1393,3 @@ class TestPayloadPolicyWiring:
         config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
         assert config.payload.warn_bytes == 1_048_576
         assert config.payload.reject_bytes is None
-
-
-@pytest.mark.unit
-class TestQueueRetentionOverridesNameDeclaredQueues:
-    """AppConfig rejects override keys that name no declared queue: a
-    typo'd key would otherwise be a silent no-op (inert override plus a
-    phantom exclusion that matches nothing)."""
-
-    def test_custom_mode_accepts_declared_queue(self) -> None:
-        config = AppConfig(
-            queue_mode=QueueMode.CUSTOM,
-            custom_queues=[CustomQueueConfig(name='metrics')],
-            broker=BROKER,
-            recovery=RecoveryConfig(
-                queue_terminal_record_retention_hours={'metrics': 24},
-            ),
-        )
-        assert config.recovery.queue_terminal_record_retention_hours == {
-            'metrics': 24,
-        }
-
-    def test_custom_mode_rejects_unknown_queue(self) -> None:
-        with pytest.raises(
-            ConfigurationError,
-            match="unknown queue",
-        ) as exc_info:
-            AppConfig(
-                queue_mode=QueueMode.CUSTOM,
-                custom_queues=[CustomQueueConfig(name='metrics')],
-                broker=BROKER,
-                recovery=RecoveryConfig(
-                    queue_terminal_record_retention_hours={'metrcs': 24},
-                ),
-            )
-        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
-
-    def test_default_mode_accepts_default_key_only(self) -> None:
-        config = AppConfig(
-            queue_mode=QueueMode.DEFAULT,
-            broker=BROKER,
-            recovery=RecoveryConfig(
-                queue_terminal_record_retention_hours={'default': 24},
-            ),
-        )
-        assert config.recovery.queue_terminal_record_retention_hours == {
-            'default': 24,
-        }
-        with pytest.raises(ConfigurationError, match='unknown queue'):
-            AppConfig(
-                queue_mode=QueueMode.DEFAULT,
-                broker=BROKER,
-                recovery=RecoveryConfig(
-                    queue_terminal_record_retention_hours={'bulk': 24},
-                ),
-            )

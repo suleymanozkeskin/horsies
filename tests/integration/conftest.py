@@ -16,6 +16,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed for AppConfig.model_rebuild()
+from horsies.core.utils.db import register_identity_text_reads
 
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
@@ -58,6 +59,7 @@ def db_url() -> str:
 async def engine(db_url: str) -> AsyncGenerator[AsyncEngine, None]:
     """SQLAlchemy async engine (session-scoped)."""
     eng = create_async_engine(db_url, echo=False)
+    register_identity_text_reads(eng)
     yield eng
     await eng.dispose()
 
@@ -71,10 +73,20 @@ async def session(engine: AsyncEngine) -> AsyncGenerator[AsyncSession, None]:
 
 @pytest_asyncio.fixture
 async def broker() -> AsyncGenerator[PostgresBroker, None]:
-    """PostgresBroker instance with schema initialized."""
+    """PostgresBroker instance with schema initialized.
+
+    Also runs the idempotent coverage/publication sequence (default
+    retention class, history leaves, heartbeat leaves, staged readers)
+    — the test-side stand-in for the production maintenance owner, so
+    workers and terminalizations have partitions to land in.
+    """
     config = PostgresConfig(database_url=DB_URL)
     brk = PostgresBroker(config)
     await brk.ensure_schema_initialized()
+    from tests.integration.history_seeding import ensure_history_seedable
+
+    async with brk.async_engine.begin() as connection:
+        await ensure_history_seedable(connection)
     yield brk
     await brk.close_async()
 

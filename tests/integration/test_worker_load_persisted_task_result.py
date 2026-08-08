@@ -29,6 +29,7 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import _FINALIZE_STAGE_PHASE2, Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import force_terminal
 
 pytestmark = [pytest.mark.integration]
 
@@ -83,32 +84,47 @@ async def _insert_task(
     status: str = 'RUNNING',
     result: str | None = None,
 ) -> str:
-    """Insert a horsies_tasks row with given status and result column."""
+    """Seed a task in the given status, holding the given stored result.
+
+    A terminal status is reached the way a worker reaches it: the row is
+    born running and then terminalized, which moves it to history with
+    the result as its payload. A non-terminal status stays live.
+    """
     task_id = str(uuid.uuid4())
     sent_at, sha = compute_test_enqueue_sha(task_name='load_result_test')
+    is_terminal = status in ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
     await session.execute(
         text("""
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result, enqueue_sha, terminal_at)
+                 max_retries, started_at, result, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'load_result_test', 'default', 100, '[]', '{}',
                  :status, :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :result, :enqueue_sha,
-                 -- Terminal exactly when dated, as the database requires.
-                 CASE WHEN CAST(:status AS VARCHAR)
-                          IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-                      THEN NOW() ELSE NULL END)
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
-            'status': status,
-            'result': result,
+            'status': 'RUNNING' if is_terminal else status,
+            'result': None if is_terminal else result,
             'sent_at': sent_at,
             'enqueue_sha': sha,
         },
     )
+    if is_terminal:
+        await force_terminal(
+            session,
+            task_id,
+            status=status,
+            result_json=result,
+        )
     await session.commit()
     return task_id
 
@@ -365,18 +381,29 @@ async def test_unknown_task_err_result_uses_fast_path(
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, result, enqueue_sha, terminal_at)
+                 max_retries, started_at, enqueue_sha,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'unknown_task_xyz', 'default', 100, '[]', '{}',
-                 'FAILED', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :result, :enqueue_sha, NOW())
+                 'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
+                 0, NOW(), :enqueue_sha,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
             'sent_at': sent_at,
-            'result': err_result_json,
             'enqueue_sha': sha,
         },
+    )
+    await force_terminal(
+        session,
+        task_id,
+        status='FAILED',
+        result_json=err_result_json,
     )
     await session.commit()
 

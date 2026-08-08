@@ -45,6 +45,7 @@ from tests.e2e.helpers.workflow import get_workflow_status, wait_for_workflow_co
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks.instance import app
+from tests.integration.history_seeding import force_terminal
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -210,12 +211,30 @@ async def _wait_for_subworkflow_id(
 
 
 async def _run_workflow_recovery(broker: PostgresBroker) -> int:
-    from horsies.core.workflows.recovery import recover_stuck_workflows
+    """One recovery pass, in the order the reaper runs it.
 
+    The deferring terminalization families hand a node's progression to
+    the phase-2 outbox, so a workflow whose backing task terminalized
+    that way is only advanced once the outbox is consumed. Draining it
+    first is what the reaper does; without it a stuck-workflow scan sees
+    a node nothing has moved yet.
+    """
+    from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
+    from horsies.core.workflows.recovery import (
+        GLOBAL_SCAN_ROW_CAP,
+        recover_stuck_workflows,
+    )
+
+    phase2 = await drive_phase2_recovery(
+        broker.session_factory,
+        broker,
+        grace_ms=0,
+        max_rows=GLOBAL_SCAN_ROW_CAP,
+    )
     async with broker.session_factory() as session:
         recovered = await recover_stuck_workflows(session, broker)
         await session.commit()
-    return recovered
+    return recovered + phase2.applied
 
 
 async def _wait_for_workflow_status(
@@ -258,14 +277,11 @@ async def _mark_workflow_task_completed(
         assert row is not None, f'workflow task {node_id} not found'
         task_id = row.task_id
         if isinstance(task_id, str):
-            await session.execute(
-                text("""
-                    UPDATE horsies_tasks
-                    SET status = 'COMPLETED', result = :result,
-                        terminal_at = NOW(), updated_at = NOW()
-                    WHERE id = :task_id
-                """),
-                {'task_id': task_id, 'result': result_json},
+            await force_terminal(
+                session,
+                task_id,
+                status='COMPLETED',
+                result_json=result_json,
             )
         await session.execute(
             text("""

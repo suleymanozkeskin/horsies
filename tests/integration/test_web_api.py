@@ -45,6 +45,7 @@ from horsies.web.routes import events as events_route_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.integration.history_seeding import route_rows
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -64,7 +65,7 @@ async def clean_tables(
     await session.execute(
         text(
             'TRUNCATE horsies_workflow_tasks, horsies_workflows, horsies_tasks, '
-            'horsies_schedule_state CASCADE'
+            'horsies_schedule_state, horsies_task_history CASCADE'
         )
     )
     await session.commit()
@@ -257,9 +258,12 @@ def make_workflow(*, name: str = 'api_flow', status: str = 'RUNNING') -> Workflo
 
 
 async def persist(session: AsyncSession, *rows: Any) -> None:
-    """Persist rows and commit."""
-    session.add_all(list(rows))
-    await session.commit()
+    """Persist rows on their lifecycle side and commit.
+
+    Terminal-status tasks are seeded as history rows — the live table's
+    status domain admits only live rows post-cutover.
+    """
+    await route_rows(session, rows)
 
 
 async def read_status(session: AsyncSession, workflow_id: str) -> str:

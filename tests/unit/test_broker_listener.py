@@ -8,6 +8,7 @@ subscribe/unsubscribe flows, and graceful shutdown.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import concurrent.futures
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
@@ -1387,6 +1388,39 @@ class TestListenerResultSurface:
 
 
 @pytest.mark.unit
+
+def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give a hand-built Worker the startup-coverage collaborators.
+
+    The coverage ensure is the maintenance owner's concern with its own
+    suites; these tests exercise the listener unwrap contract, so the
+    ensure is stubbed to a covered outcome and the session factory to a
+    bare async context manager.
+    """
+    from horsies.core.history.maintenance import coverage as coverage_module
+
+    ensured = coverage_module.CoverageEnsured(
+        created_history_leaves=0,
+        created_heartbeat_leaves=0,
+        republished=False,
+        heartbeat_covered_now=True,
+        history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        heartbeats_covered_through=datetime(
+                2026, 1, 1, 1, tzinfo=timezone.utc
+        ),
+    )
+    monkeypatch.setattr(
+        coverage_module,
+        'ensure_startup_coverage',
+        AsyncMock(return_value=ensured),
+    )
+    session = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+    worker.sf = factory
+
+
 class TestCallerUnwrapContract:
     """Verify that higher-level callers fail-fast and preserve error semantics
     when the listener returns Err.
@@ -1443,7 +1477,9 @@ class TestCallerUnwrapContract:
         mock_listener.start.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_worker_start_raises_on_listener_start_err(self) -> None:
+    async def test_worker_start_raises_on_listener_start_err(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Worker.start() should raise the original exception when listener.start()
         returns Err, preserving retryability for _start_with_resilience_config."""
         from horsies.core.brokers.result_types import BrokerOperationError
@@ -1471,6 +1507,7 @@ class TestCallerUnwrapContract:
 
         worker = Worker.__new__(Worker)
         worker.cfg = cfg
+        _stub_startup_coverage(worker, monkeypatch)
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
         worker._executor = None
@@ -1487,7 +1524,9 @@ class TestCallerUnwrapContract:
         mock_listener.close.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_worker_start_raises_on_listener_listen_many_err(self) -> None:
+    async def test_worker_start_raises_on_listener_listen_many_err(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Worker.start() should raise when listener.listen_many() returns Err."""
         from horsies.core.brokers.result_types import BrokerOperationError
         from horsies.core.types.result import Err as Err_, Ok as Ok_
@@ -1515,6 +1554,7 @@ class TestCallerUnwrapContract:
 
         worker = Worker.__new__(Worker)
         worker.cfg = cfg
+        _stub_startup_coverage(worker, monkeypatch)
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
         worker._executor = None

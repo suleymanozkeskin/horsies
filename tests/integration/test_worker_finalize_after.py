@@ -120,11 +120,17 @@ async def _insert_running_task(session: AsyncSession) -> str:
             INSERT INTO horsies_tasks
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
-                 max_retries, started_at, enqueue_sha, claimed_by_worker_id)
+                 max_retries, started_at, enqueue_sha, claimed_by_worker_id,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'finalize_after_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
-                 0, NOW(), :enqueue_sha, :claimed_by_worker_id)
+                 0, NOW(), :enqueue_sha, :claimed_by_worker_id,
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -147,12 +153,18 @@ async def _insert_owned_running_task(session: AsyncSession, worker_id: str) -> s
                 (id, task_name, queue_name, priority, args, kwargs,
                  status, sent_at, created_at, updated_at, claimed, retry_count,
                  max_retries, started_at, enqueue_sha, claimed_by_worker_id,
-                 worker_hostname, worker_pid, worker_process_name)
+                 worker_hostname, worker_pid, worker_process_name,
+                 retention_class_key, command_fingerprint_version,
+                 command_fingerprint, retain_rerun_input,
+                 prepared_rerun_input_disposition)
             VALUES
                 (:id, 'finalize_after_owned_test', 'default', 100, '[]', '{}',
                  'RUNNING', :sent_at, NOW(), NOW(), FALSE, 0,
                  0, NOW(), :enqueue_sha, :worker_id,
-                 'stale-host', 1234, 'stale-process')
+                 'stale-host', 1234, 'stale-process',
+                 'standard_30d', 1,
+                 sha256(convert_to(CAST(CAST(:id AS uuid) AS text), 'UTF8')),
+                 FALSE, 'DECLINED_BY_POLICY')
         """),
         {
             'id': task_id,
@@ -169,7 +181,10 @@ async def _get_task_status(session: AsyncSession, task_id: str) -> str:
     """Read current status of a task."""
     row = (
         await session.execute(
-            text('SELECT status FROM horsies_tasks WHERE id = :id'),
+            text(
+                'SELECT status FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
+            ),
             {'id': task_id},
         )
     ).fetchone()
@@ -411,10 +426,11 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     row = (
         await session.execute(
             text("""
-                SELECT status, claimed, claimed_by_worker_id, started_at,
+                SELECT status, claimed, claimed_by_worker_id,
+                       last_claimed_worker_id, started_at,
                        worker_hostname, worker_pid, worker_process_name, error_code
-                FROM horsies_tasks
-                WHERE id = :id
+                FROM itest_task_rows
+                WHERE id = CAST(:id AS uuid)
             """),
             {'id': task_id},
         )
@@ -423,7 +439,10 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     assert row is not None
     assert row.status == 'FAILED'
     assert row.claimed is False
-    assert row.claimed_by_worker_id == worker.worker_instance_id
+    # Two questions, two columns: the lease is released by the move and
+    # the claimant that ran the task survives as provenance.
+    assert row.claimed_by_worker_id is None
+    assert row.last_claimed_worker_id == worker.worker_instance_id
     assert row.started_at is not None
     assert row.worker_hostname == 'stale-host'
     assert row.worker_pid == 1234

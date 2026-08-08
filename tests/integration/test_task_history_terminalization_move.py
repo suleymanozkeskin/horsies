@@ -28,6 +28,7 @@ from horsies.core.history.archive.versions import DecodedArchiveValue
 from tests.integration.task_history_harness import (
     HistorySchema,
     insert_live_task as insert_live_task_for,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
@@ -84,6 +85,43 @@ async def complete_fused(
                 "'task_done', CAST(:task_id AS text))"
             ),
             {'task_id': task_id, 'worker': worker, 'result': result},
+        )
+    ).one()
+
+
+async def complete_locked(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    worker: str = WORKER,
+    result: str = '{"ok":true}',
+) -> Any:
+    """The other member of the completion class."""
+    return (
+        await connection.execute(
+            text(
+                'SELECT * FROM horsies_complete_locked_task('
+                'CAST(:task_id AS uuid), :worker, :result)'
+            ),
+            {'task_id': task_id, 'worker': worker, 'result': result},
+        )
+    ).one()
+
+
+async def cancel_admin(
+    connection: AsyncConnection,
+    task_id: str,
+    *,
+    permitted: tuple[str, ...] = ('PENDING', 'CLAIMED', 'RUNNING'),
+) -> Any:
+    """A member of a different class — CANCEL_ADMIN stands alone."""
+    return (
+        await connection.execute(
+            text(
+                'SELECT * FROM horsies_cancel_locked_task('
+                'CAST(:task_id AS uuid), :permitted)'
+            ),
+            {'task_id': task_id, 'permitted': list(permitted)},
         )
     ).one()
 
@@ -248,29 +286,46 @@ class TestMissClassification:
             assert replay.observed_status == 'COMPLETED'
 
     @pytest.mark.asyncio
+    async def test_a_different_kind_of_the_same_class_is_already_applied(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """Class membership decides replay, not kind equality.
+
+        COMPLETE_LOCKED and COMPLETE_FUSED commit the same effect, so a
+        locked completion arriving after a fused one learns that nothing
+        new happened. The classifier is told the whole class; a
+        single-member array here would report the sibling as foreign.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_storage(connection)
+            task_id = await insert_live_task(connection)
+            first = await complete_fused(connection, task_id)
+            sibling = await complete_locked(connection, task_id)
+            assert sibling.outcome == 'ALREADY_APPLIED'
+            assert sibling.terminalization_kind == 'COMPLETE_FUSED'
+            assert sibling.terminal_at == first.terminal_at
+            assert sibling.observed_status == 'COMPLETED'
+            assert sibling.guard_kind is None
+
+    @pytest.mark.asyncio
     async def test_foreign_kind_is_a_source_state_conflict(
         self, terminalization_schema: HistorySchema
     ) -> None:
+        """A kind from another class means a different event won.
+
+        An administrative cancellation stands in its own class, so
+        finding a committed completion is not its own replay: the caller
+        is told it was overtaken, and by what.
+        """
         async with terminalization_schema.engine.begin() as connection:
             await prepare_storage(connection)
             task_id = await insert_live_task(connection)
             await complete_fused(connection, task_id)
-            foreign = (
-                await connection.execute(
-                    text(
-                        'SELECT * FROM horsies_complete_locked_task('
-                        'CAST(:task_id AS uuid), :worker, :result)'
-                    ),
-                    {
-                        'task_id': task_id,
-                        'worker': WORKER,
-                        'result': '{"ok":true}',
-                    },
-                )
-            ).one()
+            foreign = await cancel_admin(connection, task_id)
             assert foreign.outcome == 'SOURCE_STATE_CONFLICT'
             assert foreign.guard_kind == 'FOREIGN_TERMINALIZATION'
             assert foreign.terminalization_kind == 'COMPLETE_FUSED'
+            assert foreign.observed_status == 'COMPLETED'
 
     @pytest.mark.asyncio
     async def test_never_seen_task_is_absent(
@@ -294,6 +349,57 @@ class TestMissClassification:
 
 
 class TestMoveInvariants:
+    @pytest.mark.asyncio
+    async def test_deferred_terminalization_requires_a_result_payload(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A workflow task cannot defer phase 2 with nothing to defer.
+
+        The families that defer — completion-locked, running failure,
+        stale failure, claimed expiry — hand the node's progression to
+        the outbox, and the outbox carries the result's digest as a NOT
+        NULL column. A deferred terminalization without a payload would
+        therefore owe progression it could record no evidence for, so
+        the move refuses it at the source rather than writing evidence
+        that cannot be verified.
+
+        This is the invariant that makes "a terminal workflow task with
+        no result" unreachable on any deferring path: such a task either
+        belongs to a family that advances its node inline, or has no
+        node to advance.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_storage(connection)
+            task_id = await insert_live_task_for(
+                connection,
+                class_key=CLASS_KEY,
+                worker=WORKER,
+                is_workflow_task=True,
+            )
+            await link_workflow_node(
+                connection,
+                task_id,
+                workflow_id=str(uuid4()),
+                node_status='RUNNING',
+            )
+            with pytest.raises(DBAPIError) as raised:
+                await connection.execute(
+                    text(
+                        'SELECT * FROM horsies_complete_locked_task('
+                        'CAST(:task_id AS uuid), :worker, NULL)'
+                    ),
+                    {'task_id': task_id, 'worker': WORKER},
+                )
+            # The MESSAGE, not merely a failure. With the refusal
+            # removed the operation still fails — on
+            # result_digest NOT NULL, from the outbox insert — so a bare
+            # `pytest.raises(DBAPIError)` would pass with the defect
+            # present and report a guard that is not guarding. The
+            # deliberate refusal sits ahead of that incidental
+            # constraint so the operator reads a sentence naming the
+            # problem instead of a column name implying it.
+            assert 'requires a result payload' in str(raised.value)
+
     @pytest.mark.asyncio
     async def test_duplicate_identity_fails_closed(
         self, terminalization_schema: HistorySchema

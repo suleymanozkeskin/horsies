@@ -1223,12 +1223,14 @@ class TestWorkflowHandleCancel:
         assert statuses
         assert not statuses.intersection({'PENDING', 'READY', 'ENQUEUED'})
 
+        # The cancelled backing task moved to history; the live table
+        # holds no terminal rows.
         root_row = (
             await session.execute(
                 text("""
-                    SELECT wt.status, t.status, t.claimed
+                    SELECT wt.status, h.status
                     FROM horsies_workflow_tasks wt
-                    JOIN horsies_tasks t ON t.id = wt.task_id
+                    JOIN horsies_task_history h ON h.task_id = CAST(wt.task_id AS uuid)
                     WHERE wt.workflow_id = :wf_id AND wt.task_index = 0
                 """),
                 {'wf_id': handle.workflow_id},
@@ -1237,7 +1239,6 @@ class TestWorkflowHandleCancel:
         assert root_row is not None
         assert root_row[0] == 'SKIPPED'
         assert root_row[1] == 'CANCELLED'
-        assert root_row[2] is False
 
     async def test_cancel_marks_claimed_not_started_task_not_claimable(
         self,
@@ -1284,24 +1285,31 @@ class TestWorkflowHandleCancel:
         cancel_r = await handle.cancel_async()
         assert is_ok(cancel_r)
 
-        task_row = (
+        # The cancel moved the row to history: nothing claimable remains
+        # in the live table, and the history row records the operation.
+        live_row = (
             await session.execute(
                 text("""
-                    SELECT status, claimed, claimed_at, claimed_by_worker_id,
-                           claim_expires_at, terminalization_kind
-                    FROM horsies_tasks
-                    WHERE id = :task_id
+                    SELECT 1 FROM horsies_tasks
+                    WHERE id = CAST(:task_id AS uuid)
                 """),
                 {'task_id': task_id},
             )
         ).fetchone()
-        assert task_row is not None
-        assert task_row[0] == 'CANCELLED'
-        assert task_row[1] is False
-        assert task_row[2] is None
-        assert task_row[3] is None
-        assert task_row[4] is None
-        assert task_row[5] == 'WORKFLOW_CANCEL_WORKFLOW'
+        assert live_row is None
+        history_row = (
+            await session.execute(
+                text("""
+                    SELECT status, terminalization_kind
+                    FROM horsies_task_history
+                    WHERE task_id = CAST(:task_id AS uuid)
+                """),
+                {'task_id': task_id},
+            )
+        ).fetchone()
+        assert history_row is not None
+        assert history_row[0] == 'CANCELLED'
+        assert history_row[1] == 'WORKFLOW_CANCEL_WORKFLOW'
 
         wf_task_row = (
             await session.execute(
@@ -1480,20 +1488,29 @@ class TestWorkflowHandleCancel:
         )
         assert filtered == []
 
-        task_row = (
+        # The filter's cancellation moved the row to history — nothing
+        # claimable remains live, and the history row is CANCELLED.
+        live_row = (
             await session.execute(
                 text("""
-                    SELECT status, claimed, claim_expires_at
-                    FROM horsies_tasks
-                    WHERE id = :task_id
+                    SELECT 1 FROM horsies_tasks
+                    WHERE id = CAST(:task_id AS uuid)
                 """),
                 {'task_id': task_id},
             )
         ).fetchone()
-        assert task_row is not None
-        assert task_row[0] == 'CANCELLED'
-        assert task_row[1] is False
-        assert task_row[2] is None
+        assert live_row is None
+        history_row = (
+            await session.execute(
+                text("""
+                    SELECT status FROM horsies_task_history
+                    WHERE task_id = CAST(:task_id AS uuid)
+                """),
+                {'task_id': task_id},
+            )
+        ).fetchone()
+        assert history_row is not None
+        assert history_row[0] == 'CANCELLED'
 
         wf_task_row = (
             await session.execute(

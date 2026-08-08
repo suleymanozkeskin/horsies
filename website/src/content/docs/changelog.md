@@ -12,6 +12,101 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+Task-history live/history split. Schema v33. **This release requires an
+offline cutover for existing deployments**: stop all units, upgrade the
+package, run migrations, run the cutover program, start units. Fresh
+installs are born at the cutover's end state; the history subsystem is
+dormant until invoked and adds no cost to deployments before cutover.
+
+### Changed
+
+- **Workflow retention removes unconsumed phase-2 evidence with the
+  workflow.** A terminal task hands its workflow node's progression to
+  an outbox, and deleting the workflow deletes any evidence still
+  waiting there — the same disposition the consumer would have reached
+  for a workflow that is already terminal. Retention is not held up by
+  a stalled consumer.
+- **Enqueue-time facts are required columns on a fresh install.** The
+  retention class, command fingerprint, rerun-input flag and prepared
+  disposition are added nullable so that an upgraded deployment's
+  running fleet cannot violate them before the cutover backfills; the
+  cutover's tighten stage makes them required. A database created by
+  this release has no such fleet and never runs that stage, so it
+  applies the same tightening at creation: the columns are required and
+  their declared checks present from the first row. Upgraded
+  deployments are unchanged — the columns tighten at the cutover, where
+  they always did. The cutover now refuses to tighten while any live row
+  carries no retention class, naming the count.
+- **Terminal task records move to a partitioned history archive at
+  terminalization.** The live table holds only live rows (`PENDING`,
+  `CLAIMED`, `RUNNING`); completed, failed, cancelled, and expired
+  tasks live in `horsies_task_history`, partitioned by retention class
+  and day. Task and workflow identity columns are `uuid`; task ids are
+  UUIDv7. Retention works by dropping whole partitions instead of
+  deleting rows. The default retention class keeps terminal records
+  30 days; passing `retention_class_key=None` at enqueue keeps a
+  record forever.
+- **Crashed-worker workflow recovery flows through the terminalization
+  outbox.** A worker that dies between recording a task's terminal state
+  and advancing its workflow node used to be found by scanning the live
+  table for terminal tasks; terminalization now records the owed
+  progression as it moves the task, and the reaper consumes those
+  records. Same outcome, different mechanism, and the same grace window
+  and per-pass bound as before.
+- **Manual retry of a terminal task is removed.** A terminal record is
+  immutable; re-execution is a new request through the rerun API, with
+  a new task id and recorded lineage. The dashboard's retry action is
+  replaced by rerun.
+- **Tasks cancelled by a workflow-level cancellation carry no error
+  summary of their own.** The terminal record's `error_code` and
+  `failed_reason` describe the terminalization itself; requeue residue
+  from earlier attempts stays in the attempt history instead of being
+  frozen beside a status it does not describe.
+- **Attempt rows purge with their task's history record.** At
+  terminalization the attempts are archived into the history record's
+  snapshot and the live attempt rows are deleted; the snapshot is the
+  attempt history's only home from then on, and it ages with the
+  record's retention class.
+- **The dashboard's task totals are live rows plus a bounded terminal
+  window.** Monitoring reads default to the last 24 hours of terminal
+  history (`since`/`until` accepted, 30-day maximum); a request over
+  the maximum is refused with the bound named, never silently clamped.
+
+### Added
+
+- **`WorkflowStatus.EXPIRED` and `paused_workflow_auto_cancel_after`.**
+  A workflow paused longer than the configured age is expired by
+  policy: `CANCELLED` continues to mean someone decided, `EXPIRED`
+  means time ran out. The policy is opt-in (default `None`); the
+  workflow's `error` column records the policy name and configured
+  age. An expired child propagates to its parent exactly as a
+  cancelled one. Exhaustive matches over `WorkflowStatus` gain a
+  member.
+- Rerun and idempotency API: re-execute a terminal task by reference
+  with recorded lineage; scoped idempotency keys with a reservation
+  window.
+- Workers own partition coverage: heartbeat and history partitions are
+  created ahead of writes at worker startup and by a periodic
+  maintenance pass. The worker role needs `CREATE` on the partition
+  parents; a deployment that withholds it must run an external
+  coverage cron. `run_schema_migrations` continues to govern versioned
+  migrations only.
+
+### Removed
+
+- `queue_terminal_record_retention_hours` and
+  `heartbeat_retention_hours`: terminal task records age by retention
+  class and heartbeats drop with their partitions. Setting either now
+  fails validation naming the successor.
+  `terminal_record_retention_hours` narrows to workflow records only.
+
+### Known incompatibilities
+
+- `syce` is not compatible with this release; compatibility returns in
+  a post-0.5.0 release.
+
+
+
 ## 0.4.7 — 2026-08-05
 
 Terminal failure-summary cleanup. Schema v26.

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from typing import Final
 
@@ -72,7 +73,9 @@ from horsies.core.workflows.sql import (
     GET_READY_WORKFLOW_TASKS_SQL,
     GET_PAUSED_CHILD_WORKFLOWS_SQL,
     RESUME_CHILD_WORKFLOW_SQL,
+    workflow_task_enqueue_stamp,
 )
+from horsies.core.history.identity.uuid7 import mint_task_id
 
 logger = get_logger('workflow.engine')
 
@@ -251,6 +254,21 @@ async def start_workflow_async(
 
     # ── Zone 1: Prevalidation (never retried) ────────────────────────
     try:
+        if workflow_id is not None:
+            try:
+                uuid.UUID(workflow_id)
+            except ValueError as exc:
+                raise WorkflowValidationError(
+                    message='workflow_id is not a UUID',
+                    code=ErrorCode.WORKFLOW_INVALID_ID,
+                    notes=[f'received {workflow_id!r}'],
+                    help_text=(
+                        'workflow identity is a UUID; supply one (for '
+                        'example uuid.uuid4()) or omit workflow_id to have '
+                        'one minted'
+                    ),
+                ) from exc
+
         spec._require_definition_key()
 
         # Validate output type matches declared generic (HRS-025)
@@ -539,7 +557,7 @@ async def start_workflow_async(
                     )
                     task_id: str | None = None
                     if is_fast_root:
-                        task_id = str(uuid.uuid4())
+                        task_id = mint_task_id()
                         max_retries, good_until_str, good_until_dt = (
                             root_retry_and_deadline(task_options_json, task.name)
                         )
@@ -581,6 +599,15 @@ async def start_workflow_async(
                             'task_options': task_options_json,
                             'good_until': good_until_str,
                             'enqueue_sha': sha,
+                            **workflow_task_enqueue_stamp(
+                                task_name=task.name,
+                                queue_name=resolved_queue,
+                                priority=resolved_priority,
+                                args_json=args_json,
+                                kwargs_json=task_kwargs_json,
+                                good_until=good_until_dt,
+                                task_options_json=task_options_json,
+                            ),
                         })
                     elif is_root:
                         slow_root_nodes.append(task)
@@ -1317,3 +1344,123 @@ def resume_workflow_sync(
             workflow_id=workflow_id,
             exception=exc,
         ))
+
+
+async def expire_paused_workflows(
+    session_factory: 'async_sessionmaker[AsyncSession]',
+    *,
+    older_than: timedelta,
+    batch_size: int = 50,
+) -> int:
+    """Expire PAUSED workflows older than the declared age policy.
+
+    The writer is the cancel path's locked sequence with EXPIRED as the
+    terminal status: workflow row locked first (the cancel lock-order
+    invariant), backing tasks and node rows locked, the status CAS
+    applied (PAUSED only — a concurrent resume wins), the shared batch
+    terminalization moving still-live backing rows to history under the
+    workflow-cancel kind, and the node skips driven by the batch's
+    reported ids. No parent-to-child cascade: pause already cascaded,
+    so every paused child carries its own age and expires on it.
+
+    Returns the number of workflows expired. One transaction per
+    workflow keeps the pass bounded; a failure on one workflow leaves
+    the remainder for the next tick.
+    """
+    from horsies.core.models.workflow.handle import (
+        LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL,
+        LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL,
+        LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL,
+        SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
+        SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL,
+        WF_TASK_TERMINAL_VALUES,
+    )
+    from horsies.core.lifecycle.commands import (
+        CancelNodesOfCancelledWorkflow,
+    )
+
+    from horsies.core.types.status import TASK_TERMINAL_STATES
+
+    task_terminal_values = [
+        status.value for status in TASK_TERMINAL_STATES
+    ]
+    error_text = f'paused_workflow_auto_cancel_after: {older_than}'
+    expired_count = 0
+    async with session_factory() as candidate_session:
+        candidate_rows = (
+            await candidate_session.execute(
+                text("""
+                    SELECT id FROM horsies_workflows
+                    WHERE status = 'PAUSED'
+                      AND updated_at < NOW() - CAST(:age AS interval)
+                    ORDER BY updated_at
+                    LIMIT :batch_size
+                """),
+                {'age': older_than, 'batch_size': batch_size},
+            )
+        ).all()
+    candidate_ids = [row.id for row in candidate_rows]
+
+    for workflow_id in candidate_ids:
+        async with session_factory() as session:
+            lock_params = {
+                'wf_id': workflow_id,
+                'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
+                'task_terminal_states': task_terminal_values,
+            }
+            await session.execute(
+                LOCK_WORKFLOW_ROW_FOR_CANCEL_SQL, {'wf_id': workflow_id}
+            )
+            await session.execute(
+                LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL, lock_params
+            )
+            await session.execute(
+                LOCK_WORKFLOW_TASKS_FOR_CANCEL_SQL, lock_params
+            )
+            await session.execute(
+                LOCK_WORKFLOW_BACKING_TASKS_FOR_CANCEL_SQL, lock_params
+            )
+            expired_row = (
+                await session.execute(
+                    text("""
+                        UPDATE horsies_workflows
+                        SET status = 'EXPIRED',
+                            error = :error,
+                            completed_at = NOW(),
+                            updated_at = NOW()
+                        WHERE id = :wf_id
+                          AND status = 'PAUSED'
+                          AND updated_at < NOW() - CAST(:age AS interval)
+                        RETURNING id
+                    """),
+                    {
+                        'wf_id': workflow_id,
+                        'error': error_text,
+                        'age': older_than,
+                    },
+                )
+            ).first()
+            if expired_row is None:
+                await session.rollback()
+                continue
+            outcomes = await apply_batch_async(
+                await session.connection(),
+                CancelNodesOfCancelledWorkflow(
+                    workflow_ids=(workflow_id,),
+                ),
+            )
+            await session.execute(
+                SKIP_WORKFLOW_TASKS_ON_CANCEL_SQL, {'wf_id': workflow_id}
+            )
+            await session.execute(
+                SKIP_CANCELLED_ENQUEUED_WORKFLOW_TASKS_SQL,
+                {
+                    'wf_id': workflow_id,
+                    'cancelled_task_ids': [
+                        outcome.task_id for outcome in outcomes
+                    ],
+                },
+            )
+            await session.commit()
+            expired_count += 1
+    return expired_count

@@ -158,10 +158,10 @@ async def _seed_pending_locator(connection: AsyncConnection) -> str:
                 history_class, history_anchor, history_schema_version,
                 result_digest, phase2_generation, created_at
             ) VALUES (
-                CAST(:task_id AS varchar(36)),
+                CAST(:task_id AS uuid),
                 :workflow_id,
                 (SELECT id FROM {schema.sql}.phase2_nodes
-                 WHERE task_id = CAST(:task_id AS varchar(36))),
+                 WHERE task_id = CAST(:task_id AS uuid)),
                 'COMPLETED', :terminal_at,
                 'COMPLETE_LOCKED', 'HISTORY', :class_key, :terminal_at,
                 :version, :result_digest, :generation,
@@ -249,7 +249,7 @@ async def test_pending_locator_blocks_detach_until_verified_quarantine_repoint(
             text(
                 f"""
                 SELECT {schema.sql}.quarantine_phase2_pending(
-                    CAST(:task_id AS varchar(36)), :lower, :upper,
+                    CAST(:task_id AS uuid), :lower, :upper,
                     interval '1 day', 'detach horizon exceeded'
                 )::text
                 """

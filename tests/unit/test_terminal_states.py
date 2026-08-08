@@ -82,6 +82,7 @@ class TestWorkflowStatusTerminal:
             WorkflowStatus.COMPLETED,
             WorkflowStatus.FAILED,
             WorkflowStatus.CANCELLED,
+            WorkflowStatus.EXPIRED,
         })
 
     def test_exhaustiveness(self) -> None:
