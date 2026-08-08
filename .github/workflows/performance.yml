@@ -1129,6 +1129,7 @@ jobs:
             --batch-size 10000 \
             --next-rung-rows 10000000 \
             --data-path / \
+            --partial-evidence-path "$output_dir/rung1.partial.json" \
             --demo-quiesced > "$candidate" 2> "$error_log"
           collector_status=$?
           set -e
@@ -1160,6 +1161,10 @@ jobs:
           # Rung 1 yields coefficients and a footprint, never a verdict.
           jq -e '.measurement.fitted.coefficients.seconds_per_million_rows' "$output"
           jq -e '.footprint.fits_same_lane != null' "$output"
+          # Flat or explained. A stage whose per-batch cost drifts is not a
+          # per-row cost, and extrapolating it is how the next rung is lost.
+          jq -r '.measurement.trends[] | "trend \(.stage): \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -e '[.measurement.trends[] | select(.within_gate == false)] | length == 0' "$output"
 
       - name: Preserve rung-1 evidence
         if: always()
@@ -1239,6 +1244,7 @@ jobs:
             --batch-size 10000 \
             --next-rung-rows 100000000 \
             --data-path / \
+            --partial-evidence-path "$output_dir/rung2.partial.json" \
             --demo-quiesced > "$candidate" 2> "$error_log"
           collector_status=$?
           set -e
@@ -1281,6 +1287,9 @@ jobs:
           jq -e '.measurement.preparation_seconds_per_million_rows' "$output"
           jq -e '.measurement.fitted.regression_intercept_seconds != null' "$output"
           jq -e '.footprint.fits_same_lane != null' "$output"
+          # Flat or explained, on this rung too: rung 3 would extrapolate it.
+          jq -r '.measurement.trends[] | "trend \(.stage): \(.drift_fraction_of_mean * 100 | round)% of mean batch (gate \(.gate_fraction * 100)%)"' "$output"
+          jq -e '[.measurement.trends[] | select(.within_gate == false)] | length == 0' "$output"
 
       - name: Preserve rung-2 evidence
         if: always()

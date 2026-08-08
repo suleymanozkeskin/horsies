@@ -21,8 +21,10 @@ this is where the estimate comes from.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -44,6 +46,27 @@ from horsies.core.history.cutover.relocation import (
 
 
 _CLASS_KEY = 'finite_30d_v1'
+
+# Evidence is rewritten this often inside a batch loop so that a run killed at
+# the lane's hard cap still yields the trajectory up to the kill. A ten-million
+# row rung died at the cap having written nothing, and the trajectory it
+# destroyed was the diagnosis. The write is atomic and fsynced, so it costs
+# single-digit milliseconds against multi-second batches: at one flush per 50
+# batches over 1,000 batches that is on the order of 200ms inside a window of
+# hours. It is not free, and this comment states the bound rather than claiming
+# the measured path is untouched.
+FLUSH_EVERY_BATCHES: Final = 50
+
+# A stage whose per-batch duration drifts more than this fraction of its own
+# mean batch, across the whole run, is not extrapolated. Sandwiched from
+# measurement: a linear copy stage drifted 1% and 3% of its mean batch on the
+# two majors, while a stage whose selection rescanned already-finished rows
+# drifted +22%. Five percent sits 1.7x above the largest passing measurement
+# and 4.4x below the failing one.
+PER_BATCH_TREND_GATE_FRACTION: Final = 0.05
+
+# Called with a stage name and the commits recorded so far.
+ProgressSink = Callable[[str, tuple[BatchCommit, ...]], None]
 
 
 class RungMeasurementError(Exception):
@@ -76,6 +99,79 @@ class Trajectory:
 
 
 @dataclass(frozen=True, slots=True)
+class PerBatchTrend:
+    """Whether one stage's per-batch cost holds still across the run.
+
+    A least-squares slope exists for any trajectory; its existence says
+    nothing about whether the relation is linear. When per-batch duration
+    rises with batch index, the fitted slope is an average over the measured
+    range rather than a per-row cost, and extrapolating it under-predicts.
+    """
+
+    stage: str
+    batches: int
+    mean_batch_seconds: float
+    trend_seconds_per_batch: float
+    total_drift_seconds: float
+    drift_fraction_of_mean: float
+    gate_fraction: float
+    within_gate: bool
+
+
+def compute_per_batch_trend(trajectory: Trajectory) -> PerBatchTrend:
+    """Fit per-batch duration against batch index and gate the drift.
+
+    Durations are differences of the cumulative elapsed series, so the first
+    batch carries any stage entry cost. That is the honest reading: it is
+    time the stage spent before its first commit.
+    """
+    commits = trajectory.commits
+    if len(commits) < 2:
+        raise RungMeasurementError(
+            f'{trajectory.stage} needs at least two committed batches to '
+            'show a per-batch trend; one batch cannot exhibit drift'
+        )
+    durations = [commits[0].elapsed_seconds] + [
+        commits[index].elapsed_seconds - commits[index - 1].elapsed_seconds
+        for index in range(1, len(commits))
+    ]
+    count = len(durations)
+    mean_duration = sum(durations) / count
+    if mean_duration <= 0.0:
+        raise RungMeasurementError(
+            f'{trajectory.stage} reported a non-positive mean batch '
+            f'duration ({mean_duration}); the trend gate cannot be applied'
+        )
+    indexes = list(range(count))
+    mean_index = sum(indexes) / count
+    denominator = sum((index - mean_index) ** 2 for index in indexes)
+    if denominator <= 0.0:
+        raise RungMeasurementError(
+            f'{trajectory.stage} batch indexes do not vary; the per-batch '
+            'trend is undefined'
+        )
+    trend = (
+        sum(
+            (index - mean_index) * (duration - mean_duration)
+            for index, duration in zip(indexes, durations)
+        )
+        / denominator
+    )
+    drift = trend * count
+    fraction = drift / mean_duration
+    return PerBatchTrend(
+        stage=trajectory.stage,
+        batches=count,
+        mean_batch_seconds=mean_duration,
+        trend_seconds_per_batch=trend,
+        total_drift_seconds=drift,
+        drift_fraction_of_mean=fraction,
+        gate_fraction=PER_BATCH_TREND_GATE_FRACTION,
+        within_gate=abs(fraction) <= PER_BATCH_TREND_GATE_FRACTION,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class RungMeasurement:
     """Everything rung 1 establishes, with the seams visible."""
 
@@ -87,6 +183,7 @@ class RungMeasurement:
     preparation: Trajectory
     fitted: FittedRun
     preparation_seconds_per_million_rows: float
+    trends: tuple[PerBatchTrend, ...]
     fixed_seconds: float
     total_seconds: float
     itemized_remainder_seconds: float
@@ -207,6 +304,7 @@ async def _drive_preparation(
     *,
     batch_size: int,
     retain_default: bool,
+    on_progress: ProgressSink,
 ) -> Trajectory:
     """Run preparation to completion, recording its own trajectory."""
     commits: list[BatchCommit] = []
@@ -230,6 +328,8 @@ async def _drive_preparation(
                 elapsed_seconds=time.perf_counter() - started,
             )
         )
+        if batches % FLUSH_EVERY_BATCHES == 0:
+            on_progress('preparation', tuple(commits))
     return Trajectory(
         stage='preparation',
         batch_size=batch_size,
@@ -244,6 +344,7 @@ async def _drive_relocation(
     connection: AsyncConnection,
     *,
     batch_size: int,
+    on_progress: ProgressSink,
 ) -> Trajectory:
     """Run relocation to completion, recording the copy-stage trajectory."""
     commits: list[BatchCommit] = []
@@ -266,6 +367,8 @@ async def _drive_relocation(
                 elapsed_seconds=time.perf_counter() - started,
             )
         )
+        if batches % FLUSH_EVERY_BATCHES == 0:
+            on_progress('relocation', tuple(commits))
     return Trajectory(
         stage='relocation',
         batch_size=batch_size,
@@ -302,6 +405,7 @@ async def measure_rung(
     batch_size: int,
     class_key: str,
     backup_label: str,
+    on_progress: ProgressSink,
 ) -> RungMeasurement:
     """Drive one offline cutover, timing every stage at its boundary.
 
@@ -340,6 +444,9 @@ async def measure_rung(
                 term=term,
             )
         )
+        # Every stage boundary is a flush point, so a run killed between
+        # stages still names the stage it completed last.
+        on_progress(name, ())
         return outcome
 
     run_started = time.perf_counter()
@@ -368,7 +475,10 @@ async def measure_rung(
     await connection.commit()
 
     preparation = await _drive_preparation(
-        connection, batch_size=batch_size, retain_default=False
+        connection,
+        batch_size=batch_size,
+        retain_default=False,
+        on_progress=on_progress,
     )
     stages.append(
         StageDuration(
@@ -377,7 +487,9 @@ async def measure_rung(
     )
     peak_bytes = max(peak_bytes, await _relation_bytes(connection))
 
-    relocation = await _drive_relocation(connection, batch_size=batch_size)
+    relocation = await _drive_relocation(
+        connection, batch_size=batch_size, on_progress=on_progress
+    )
     stages.append(
         StageDuration(
             name='relocation', seconds=relocation.seconds, term='per_row'
@@ -420,6 +532,10 @@ async def measure_rung(
         preparation=preparation,
         fitted=fitted,
         preparation_seconds_per_million_rows=_slope_per_million(preparation),
+        trends=(
+            compute_per_batch_trend(preparation),
+            compute_per_batch_trend(relocation),
+        ),
         fixed_seconds=fixed_seconds,
         total_seconds=total_seconds,
         itemized_remainder_seconds=itemized,
@@ -498,6 +614,7 @@ async def collect_migration_ladder_evidence(
     batch_size: int,
     next_rung_rows: int,
     data_path: Any,
+    checkpoint_path: Path | None = None,
 ) -> MigrationLadderEvidence:
     """Seed, cut over, and measure one rung on a disposable database.
 
@@ -516,6 +633,36 @@ async def collect_migration_ladder_evidence(
     from tests.task_history_prototypes.evidence import (
         collect_operational_conditions,
     )
+    from tests.task_history_prototypes.qualification_io import (
+        AtomicEvidenceWriter,
+    )
+
+    writer = AtomicEvidenceWriter(checkpoint_path)
+
+    def flush_progress(
+        stage: str, commits: tuple[BatchCommit, ...]
+    ) -> None:
+        """Write what is known so far, so a killed run still says something.
+
+        The partial document is deliberately shaped unlike the finished one:
+        it carries `status: in_progress`, so a reader cannot mistake a
+        snapshot from a killed run for a completed measurement.
+        """
+        writer.write(
+            {
+                'status': 'in_progress',
+                'scenario': 'migration-ladder',
+                'last_stage': stage,
+                'batches_committed': len(commits),
+                'commits': commits,
+                'workload': {
+                    'rung_rows': rows,
+                    'attempts_per_task': attempts_per_task,
+                    'batch_size': batch_size,
+                    'next_rung_rows': next_rung_rows,
+                },
+            }
+        )
 
     # render_as_string, not str(): SQLAlchemy masks the password in the
     # plain string form, and the disposable database is reached through a
@@ -579,6 +726,7 @@ async def collect_migration_ladder_evidence(
                     batch_size=batch_size,
                     class_key=_CLASS_KEY,
                     backup_label=f'ladder-{name}',
+                    on_progress=flush_progress,
                 )
         finally:
             await rung_engine.dispose()

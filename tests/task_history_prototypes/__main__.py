@@ -157,7 +157,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(
             '--partial-evidence-path and --progress-fd currently require '
             '--scenario identity-lookup, replacement-archive-transcode, '
-            'operational-maintenance, or rerun-input-terminalization'
+            'operational-maintenance, rerun-input-terminalization, or '
+            'migration-ladder'
         )
     if (
         arguments.scenario == 'replacement-archive-transcode'
@@ -334,6 +335,7 @@ async def _run(
                         batch_size=arguments.batch_size,
                         next_rung_rows=arguments.next_rung_rows,
                         data_path=arguments.data_path,
+                        checkpoint_path=arguments.partial_evidence_path,
                     )
                 case 'operational-maintenance':
                     return await collect_operational_maintenance_evidence(
