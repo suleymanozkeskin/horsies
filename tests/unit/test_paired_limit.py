@@ -379,20 +379,61 @@ def test_a_magnitude_whose_sign_is_established_is_quotable() -> None:
     assert judgement.quotable
 
 
-def test_the_shipped_width_gate_records_its_ratio_without_enforcing_it() -> None:
-    """Form without number: the threshold is underived, so width cannot refuse."""
-    assert WIDTH_THRESHOLD_RATIO is None
+def test_the_shipped_width_gate_enforces_its_derived_threshold() -> None:
+    """The threshold is derived and binding, not recorded and inert."""
+    assert WIDTH_THRESHOLD_RATIO == 0.50
     judgement = judge_magnitude(_interval(-126.8, 1692.5), bound=100.0)
     assert judgement.width_ratio == pytest.approx(18.193, abs=0.001)
-    assert judgement.width_threshold is None
+    assert judgement.width_threshold == 0.50
+    assert not judgement.width_within_threshold
+    assert judgement.as_conditions()['width_enforced'] is True
+
+
+def test_the_shipped_threshold_refuses_the_specimen_that_motivated_it() -> None:
+    """p99 at 1,000 per arm: decided WITHIN, sign of its own delta unresolved."""
+    judgement = judge_magnitude(_interval(-35.5, 50.5), bound=100.0)
+    assert judgement.width_ratio == pytest.approx(0.86)
+    assert not judgement.width_within_threshold
+    assert not judgement.quotable
+
+
+# Every width ratio measured while siting the threshold, sorted. The gate must
+# separate them where the empty band is — informative below, refused above —
+# or 0.50 is sited on numbers it does not actually divide.
+SITING_RATIOS_INFORMATIVE = (0.039, 0.096, 0.113, 0.147, 0.235, 0.266, 0.412)
+SITING_RATIOS_REFUSED = (
+    0.860, 0.902, 0.925, 1.186, 1.292, 2.635, 3.178, 12.388, 18.193,
+)
+
+
+@pytest.mark.parametrize('ratio', SITING_RATIOS_INFORMATIVE)
+def test_every_ratio_below_the_empty_band_is_admitted(ratio: float) -> None:
+    judgement = judge_magnitude(_interval(0.0, ratio * 100.0), bound=100.0)
     assert judgement.width_within_threshold
-    assert judgement.as_conditions()['width_enforced'] is False
+
+
+@pytest.mark.parametrize('ratio', SITING_RATIOS_REFUSED)
+def test_every_ratio_above_the_empty_band_is_refused(ratio: float) -> None:
+    judgement = judge_magnitude(_interval(0.0, ratio * 100.0), bound=100.0)
+    assert not judgement.width_within_threshold
+
+
+def test_the_threshold_sits_in_an_empty_band() -> None:
+    """No observation lies near it, so re-measurement will not move the split."""
+    below = max(SITING_RATIOS_INFORMATIVE)
+    above = min(SITING_RATIOS_REFUSED)
+    assert below < WIDTH_THRESHOLD_RATIO < above
+    assert WIDTH_THRESHOLD_RATIO / below > 1.19
+    assert above / WIDTH_THRESHOLD_RATIO > 1.19
 
 
 def test_supplying_a_width_threshold_refuses_a_too_wide_magnitude() -> None:
-    """The width predicate fires the moment a number exists to fire on."""
+    """The comparison answers to its threshold, not to a fixed width."""
     interval = _interval(-35.5, 50.5)
-    assert judge_magnitude(interval, bound=100.0).width_within_threshold
+    # The same interval, admitted by a threshold wide enough to hold it.
+    assert judge_magnitude(
+        interval, bound=100.0, width_threshold=1.0
+    ).width_within_threshold
     judgement = judge_magnitude(interval, bound=100.0, width_threshold=0.5)
     assert judgement.width_ratio == pytest.approx(0.86)
     assert not judgement.width_within_threshold
@@ -426,4 +467,34 @@ def test_an_established_sign_does_not_by_itself_make_a_magnitude_quotable() -> N
     )
     assert judgement.sign_resolved
     assert not judgement.width_within_threshold
+    assert not judgement.quotable
+
+
+def test_an_explicitly_unenforced_width_records_without_refusing() -> None:
+    """Passing None opts out of the width gate; the ratio is still recorded.
+
+    The shipped threshold makes this branch unreachable by default, which is
+    exactly why it needs a test of its own — an unreachable branch nobody
+    exercises is where a defect waits.
+    """
+    judgement = judge_magnitude(
+        _interval(-126.8, 1692.5), bound=100.0, width_threshold=None
+    )
+    assert judgement.width_ratio == pytest.approx(18.193, abs=0.001)
+    assert judgement.width_within_threshold
+    assert judgement.as_conditions()['width_enforced'] is False
+
+
+def test_an_unresolved_sign_refuses_a_magnitude_the_width_gate_admits() -> None:
+    """Sign binds on its own, where width has nothing to say.
+
+    The interval is narrow enough for the width gate and still spans zero, so
+    only the sign condition can refuse it. Without a case like this the sign
+    half of the conjunction is untested whenever the width half already
+    refuses.
+    """
+    judgement = judge_magnitude(_interval(-10.0, 20.0), bound=100.0)
+    assert judgement.width_ratio == pytest.approx(0.30)
+    assert judgement.width_within_threshold
+    assert not judgement.sign_resolved
     assert not judgement.quotable

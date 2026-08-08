@@ -411,16 +411,27 @@ def judge_containment(
             return IntervalVerdict.UNDECIDED
 
 
-# The width gate ships as form without number. Deriving a threshold needs
-# measured noise below it and a demonstrated failure above it; the only
-# refusal on record — p99 over 100 observations per arm, 18.19x its bound —
-# was refused by CONTAINMENT, not by width, so it pins nothing about where a
-# width limit belongs. That leaves the span from 0.86x to 18.19x holding no
-# observation, and a number chosen inside it would be preference wearing a
-# derivation. The deriving instance is a row whose verdict is DECIDED while
-# its magnitude stays unquotable; until one is measured twice, this stays None
-# and the ratio is recorded rather than enforced.
-WIDTH_THRESHOLD_RATIO: Final[float | None] = None
+# An interval wider than half its bound cannot fix a magnitude at the
+# resolution the question is asked at.
+#
+# Sited on sixteen measured ratios rather than chosen. Sorted, they run
+# 0.039 0.096 0.113 0.147 0.235 0.266 0.412 | 0.860 0.902 0.925 1.186 1.292
+# 2.635 3.178 12.388 18.193. The widest empty band in the region that matters
+# is (0.412, 0.860) — a factor of 2.1 holding no observation — and 0.50 sits
+# inside it with nothing within 19% either side, so the threshold is stable
+# against re-measurement.
+#
+# 0.25 was the intended number and the distribution refused it: the gap from
+# 0.235 to 0.266 is thirteen per cent, so a threshold there sits inside a
+# cluster and flips on noise. It would refuse two more rows — but those two
+# are thin-population rows whose defect is COUNT, not width, and refusing them
+# here would be the right refusal for the wrong reason, leaving the coverage
+# gap open while the width gate appeared to cover it. Each guard refuses for
+# its own reason; the count floor is separate and still to be derived.
+#
+# 0.50 refuses the specimen that motivated the gate: a p99 at 0.86x that
+# decided WITHIN while unable to resolve its own delta's sign.
+WIDTH_THRESHOLD_RATIO: Final[float] = 0.50
 
 
 @dataclass(frozen=True, slots=True)
