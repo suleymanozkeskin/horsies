@@ -84,8 +84,8 @@ async def _wait_for_claimed_owner(
                 text(
                     """
                     SELECT status, claimed_by_worker_id
-                    FROM horsies_tasks
-                    WHERE id = :id
+                    FROM itest_task_rows
+                    WHERE id = CAST(:id AS uuid)
                     """
                 ),
                 {'id': task_id},
@@ -168,8 +168,8 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
             result = await session.execute(
                 text("""
                     SELECT DISTINCT claimed_by_worker_id
-                    FROM horsies_tasks
-                    WHERE id = ANY(:ids)
+                    FROM itest_task_rows
+                    WHERE id = ANY(CAST(:ids AS uuid[]))
                     AND claimed_by_worker_id IS NOT NULL
                 """),
                 {'ids': task_ids},
@@ -902,8 +902,8 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
         result = await session.execute(
             text("""
                 SELECT id, queue_name, completed_at
-                FROM horsies_tasks
-                WHERE id = ANY(:ids)
+                FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
                 ORDER BY completed_at ASC
             """),
             {'ids': all_ids},
@@ -979,8 +979,8 @@ async def test_single_worker_crash_remaining_continue(
     async with broker.session_factory() as session:
         result = await session.execute(
             text("""
-                SELECT COUNT(*) FROM horsies_tasks
-                WHERE id = ANY(:ids) AND status = 'COMPLETED'
+                SELECT COUNT(*) FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[])) AND status = 'COMPLETED'
             """),
             {'ids': task_ids},
         )
@@ -988,8 +988,8 @@ async def test_single_worker_crash_remaining_continue(
 
         result = await session.execute(
             text("""
-                SELECT DISTINCT claimed_by_worker_id FROM horsies_tasks
-                WHERE id = ANY(:ids)
+                SELECT DISTINCT claimed_by_worker_id FROM itest_task_rows
+                WHERE id = ANY(CAST(:ids AS uuid[]))
                 AND status = 'COMPLETED'
                 AND claimed_by_worker_id IS NOT NULL
             """),

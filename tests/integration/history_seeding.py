@@ -132,7 +132,9 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
            NULL::timestamptz AS next_retry_at,
            convert_from(result_payload, 'UTF8') AS result,
            FALSE AS claimed, claimed_at,
-           NULL AS claimed_by_worker_id,
+           -- The lease is gone but the claimant is recorded: the move
+           -- keeps who ran the task even though nothing holds it now.
+           last_claimed_worker_id AS claimed_by_worker_id,
            NULL::timestamptz AS claim_expires_at,
            NULL::timestamptz AS finalizing_at,
            NULL AS finalizing_by_worker_id,
@@ -146,8 +148,9 @@ ITEST_TASK_ROWS_VIEW_DDL = text(
 )
 """Test-only readback surface: one task per row regardless of which
 lifecycle side holds it, presented with the live column names. The
-terminal instant lands in completed_at/failed_at by status; claim and
-finalize state is structurally absent on a history row."""
+terminal instant lands in completed_at/failed_at by status; the claim
+LEASE is structurally absent on a history row, while the claimant that
+ran the task survives as recorded provenance."""
 
 
 def _attempt_record(row: TaskAttemptModel) -> AttemptRecord:

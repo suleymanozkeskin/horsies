@@ -28,6 +28,7 @@ from horsies.core.history.archive.versions import DecodedArchiveValue
 from tests.integration.task_history_harness import (
     HistorySchema,
     insert_live_task as insert_live_task_for,
+    link_workflow_node,
     prepare_move_storage,
     terminalization_schema_fixture,
 )
@@ -294,6 +295,49 @@ class TestMissClassification:
 
 
 class TestMoveInvariants:
+    @pytest.mark.asyncio
+    async def test_deferred_terminalization_requires_a_result_payload(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A workflow task cannot defer phase 2 with nothing to defer.
+
+        The families that defer — completion-locked, running failure,
+        stale failure, claimed expiry — hand the node's progression to
+        the outbox, and the outbox carries the result's digest as a NOT
+        NULL column. A deferred terminalization without a payload would
+        therefore owe progression it could record no evidence for, so
+        the move refuses it at the source rather than writing evidence
+        that cannot be verified.
+
+        This is the invariant that makes "a terminal workflow task with
+        no result" unreachable on any deferring path: such a task either
+        belongs to a family that advances its node inline, or has no
+        node to advance.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_storage(connection)
+            task_id = await insert_live_task_for(
+                connection,
+                class_key=CLASS_KEY,
+                worker=WORKER,
+                is_workflow_task=True,
+            )
+            await link_workflow_node(
+                connection,
+                task_id,
+                workflow_id=str(uuid4()),
+                node_status='RUNNING',
+            )
+            with pytest.raises(DBAPIError) as raised:
+                await connection.execute(
+                    text(
+                        'SELECT * FROM horsies_complete_locked_task('
+                        'CAST(:task_id AS uuid), :worker, NULL)'
+                    ),
+                    {'task_id': task_id, 'worker': WORKER},
+                )
+            assert 'requires a result payload' in str(raised.value)
+
     @pytest.mark.asyncio
     async def test_duplicate_identity_fails_closed(
         self, terminalization_schema: HistorySchema

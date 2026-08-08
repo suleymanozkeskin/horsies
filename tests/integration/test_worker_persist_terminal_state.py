@@ -133,6 +133,42 @@ async def _insert_running_task(
             'claimed_at': claimed_at,
         },
     )
+    if is_workflow_task:
+        # A workflow task has a node; the deferring families read it
+        # with INTO STRICT precisely because a live workflow's node row
+        # cannot be gone. A workflow task seeded without one is a state
+        # the engine never produces.
+        workflow_id = str(uuid.uuid4())
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflows
+                    (id, name, status, on_error, depth, root_workflow_id,
+                     sent_at, created_at, started_at, updated_at)
+                VALUES
+                    (:wf_id, 'persist_terminal_wf', 'RUNNING', 'FAIL', 0,
+                     :wf_id, NOW(), NOW(), NOW(), NOW())
+            """),
+            {'wf_id': workflow_id},
+        )
+        await session.execute(
+            text("""
+                INSERT INTO horsies_workflow_tasks
+                    (id, workflow_id, task_index, node_id, task_name,
+                     task_args, task_kwargs, queue_name, priority,
+                     dependencies, allow_failed_deps, join_type,
+                     is_subworkflow, status, task_id, created_at)
+                VALUES
+                    (:id, :wf_id, 0, 'node-0', 'persist_terminal_test',
+                     '[]', '{}', 'default', 100,
+                     '{}', FALSE, 'all',
+                     FALSE, 'RUNNING', CAST(:task_id AS uuid), NOW())
+            """),
+            {
+                'id': str(uuid.uuid4()),
+                'wf_id': workflow_id,
+                'task_id': task_id,
+            },
+        )
     await session.commit()
     return task_id
 

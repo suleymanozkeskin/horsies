@@ -14,7 +14,7 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result, encode_task_result, encode_value
-from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode, RetrievalCode, OutcomeCode
+from horsies.core.models.tasks import TaskResult, TaskError, OperationalErrorCode
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -940,6 +940,16 @@ class TestWorkflowRecovery:
         )
         assert wt_b.fetchone()[0] == 'SKIPPED'
 
+    # RETIRED: three cases recovered a terminal task with NO stored
+    # result. On any path that owes phase-2 progression the move refuses
+    # that state at the source — 'deferred workflow terminalization
+    # requires a result payload' — because the outbox carries the
+    # result's digest as a NOT NULL column. The four deferring families
+    # all produce a payload; the four that do not defer advance their
+    # node inline or have no node. The invariant those cases were
+    # unknowingly probing is now pinned directly, in
+    # test_task_history_terminalization_move.py.
+
     async def test_recover_crashed_worker_idempotent(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
@@ -999,118 +1009,6 @@ class TestWorkflowRecovery:
 
         assert recovered1 == 1
         assert recovered2 == 0
-
-    async def test_recover_cancelled_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: CANCELLED task with missing result maps to TASK_CANCELLED."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_cancel_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_cancel', tasks=[node_a]
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate cancellation with no stored result
-        await force_terminal(session, task_id, status='CANCELLED')
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await _run_phase2_recovery(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == OutcomeCode.TASK_CANCELLED
-
-    async def test_recover_completed_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: COMPLETED task with missing result maps to RESULT_NOT_AVAILABLE."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_missing_result_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_missing_result', tasks=[node_a]
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate completed task with no stored result
-        await force_terminal(session, task_id, status='COMPLETED')
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await _run_phase2_recovery(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == RetrievalCode.RESULT_NOT_AVAILABLE
 
     async def test_recover_crashed_worker_unregistered_task_err_fast_path(
         self,
@@ -1633,64 +1531,6 @@ class TestWorkflowRecovery:
         assert parent_row.fetchone()[0] == 'FAILED'
 
     # ── Case 1.7: FAILED task with missing result ──
-
-    async def test_recover_failed_task_missing_result(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-    ) -> None:
-        """Case 1.7: FAILED task with NULL result maps to WORKER_CRASHED."""
-        session, broker, app = setup
-        task_a = make_simple_task(app, 'recover_failed_missing_a')
-
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        spec = make_workflow_spec(
-            broker=broker, name='recover_failed_missing', tasks=[node_a],
-        )
-
-        handle = await start_ok(spec, broker)
-
-        wt_result = await session.execute(
-            text("""
-                SELECT task_id FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        task_id = wt_result.fetchone()[0]
-
-        # Simulate: task FAILED with no result stored (worker crashed before writing result)
-        await force_terminal(session, task_id, status='FAILED')
-        await session.execute(
-            text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'RUNNING'
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        await session.commit()
-
-        recovered = await _run_phase2_recovery(session, broker)
-        await session.commit()
-
-        assert recovered == 1
-
-        wt_result = await session.execute(
-            text("""
-                SELECT status, result FROM horsies_workflow_tasks
-                WHERE workflow_id = :wf_id AND task_index = 0
-            """),
-            {'wf_id': handle.workflow_id},
-        )
-        status, result_json = wt_result.fetchone()
-        assert status == 'FAILED'
-
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.err is not None
-        assert task_result.err.error_code == OperationalErrorCode.WORKER_CRASHED
-
-    # ── Case 2+3: Success policy failure branch ──
 
     async def test_recover_success_policy_not_satisfied(
         self,
