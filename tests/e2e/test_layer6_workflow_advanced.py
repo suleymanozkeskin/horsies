@@ -890,7 +890,7 @@ async def test_workflow_recovers_after_worker_crash(
             sa_text("""
                 SELECT wt.task_index, t.queue_name
                 FROM horsies_workflow_tasks wt
-                JOIN horsies_tasks t ON t.id = wt.task_id
+                JOIN itest_task_rows t ON t.id = wt.task_id
                 WHERE wt.workflow_id = :wf_id AND wt.task_index IN (4, 5)
                 ORDER BY wt.task_index
             """),

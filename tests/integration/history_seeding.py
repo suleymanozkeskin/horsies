@@ -553,7 +553,7 @@ async def force_terminal(
 
 
 async def relax_cutover_columns(connection: AsyncConnection) -> None:
-    """Return the live cutover columns to their transitional shape.
+    """Return the cutover statements' effects to their pre-cutover shape.
 
     A fresh database is now born with these columns required and
     checked. The cutover battery tests the OTHER world — the one a real
@@ -585,5 +585,23 @@ async def relax_cutover_columns(connection: AsyncConnection) -> None:
         text(
             'ALTER TABLE horsies_tasks DROP CONSTRAINT IF EXISTS '
             'horsies_tasks_rerun_lineage_pair'
+        )
+    )
+    # The locator contract goes with them. It is a cutover statement
+    # too, and it cannot survive the identity demotion: the node key it
+    # references converts back to varchar while the outbox's columns
+    # stay uuid, so a surviving constraint is one the tighten can no
+    # longer re-implement.
+    await connection.execute(
+        text(
+            'ALTER TABLE horsies_workflow_phase2_pending '
+            'DROP CONSTRAINT IF EXISTS '
+            'horsies_workflow_phase2_pending_node_fkey'
+        )
+    )
+    await connection.execute(
+        text(
+            'ALTER TABLE horsies_workflow_tasks DROP CONSTRAINT IF EXISTS '
+            'horsies_workflow_tasks_node_workflow_key'
         )
     )
