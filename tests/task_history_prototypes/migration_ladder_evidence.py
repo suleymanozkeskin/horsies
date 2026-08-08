@@ -37,6 +37,7 @@ from horsies.core.history.cutover.ladder import (
 )
 from horsies.core.history.cutover.preparation import (
     PreparationComplete,
+    PreparationCursor,
     prepare_legacy_batch,
 )
 from horsies.core.history.cutover.relocation import (
@@ -310,16 +311,22 @@ async def _drive_preparation(
     commits: list[BatchCommit] = []
     cumulative = 0
     batches = 0
+    # The cursor carries the keyset watermark. Advancing it from each
+    # outcome is what keeps this stage linear: a driver that restarts from
+    # start() every batch is still correct, and quadratic.
+    cursor = PreparationCursor.start()
     started = time.perf_counter()
     while True:
         outcome = await prepare_legacy_batch(
             connection,
+            cursor=cursor,
             retain_default=retain_default,
             batch_size=batch_size,
         )
         await connection.commit()
         if isinstance(outcome, PreparationComplete):
             break
+        cursor = outcome.cursor
         cumulative += outcome.rows_prepared
         batches += 1
         commits.append(
