@@ -100,6 +100,25 @@ class Trajectory:
 
 
 @dataclass(frozen=True, slots=True)
+class LadderProgressSnapshot:
+    """What is known mid-run, written at every flush point.
+
+    A dataclass rather than a dict because the evidence writer serializes
+    through ``asdict``, which rejects anything else. The shape is
+    deliberately unlike the finished document — it leads with
+    ``status: in_progress`` — so a snapshot from a killed run cannot be
+    read as a completed measurement.
+    """
+
+    status: str
+    scenario: str
+    last_stage: str
+    batches_committed: int
+    commits: tuple[BatchCommit, ...]
+    workload: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class PerBatchTrend:
     """Whether one stage's per-batch cost holds still across the run.
 
@@ -656,19 +675,19 @@ async def collect_migration_ladder_evidence(
         snapshot from a killed run for a completed measurement.
         """
         writer.write(
-            {
-                'status': 'in_progress',
-                'scenario': 'migration-ladder',
-                'last_stage': stage,
-                'batches_committed': len(commits),
-                'commits': commits,
-                'workload': {
+            LadderProgressSnapshot(
+                status='in_progress',
+                scenario='migration-ladder',
+                last_stage=stage,
+                batches_committed=len(commits),
+                commits=commits,
+                workload={
                     'rung_rows': rows,
                     'attempts_per_task': attempts_per_task,
                     'batch_size': batch_size,
                     'next_rung_rows': next_rung_rows,
                 },
-            }
+            )
         )
 
     # render_as_string, not str(): SQLAlchemy masks the password in the
