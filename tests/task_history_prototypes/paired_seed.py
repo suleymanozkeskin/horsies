@@ -278,6 +278,19 @@ def _walk_defaults(_model, _prefix, _out):
         if _field.is_required():
             _out['.'.join(_path)] = __REQUIRED_SENTINEL__
             continue
+        if _field.default_factory is not None:
+            # A field built by a factory reports `default` as pydantic's
+            # undefined marker, so reading `.default` alone records the marker
+            # as though it were the shipped value and every such field looks
+            # non-default. The factory IS the default; call it.
+            try:
+                _out['.'.join(_path)] = _leaf(_field.default_factory())
+            except TypeError:
+                # A factory taking validated data cannot be evaluated here.
+                # Leaving the key absent makes the comparison refuse rather
+                # than compare against a value this harness invented.
+                pass
+            continue
         _out['.'.join(_path)] = _leaf(_field.default)
 
 
