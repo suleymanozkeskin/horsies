@@ -12,6 +12,7 @@ export type WorkflowStatus =
   | 'FAILED'
   | 'SKIPPED'
   | 'CANCELLED'
+  | 'EXPIRED'
   | 'PAUSED'
   | (string & {});
 

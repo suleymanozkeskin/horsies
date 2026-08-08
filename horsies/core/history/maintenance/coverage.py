@@ -23,7 +23,7 @@ predicate when a later ensure fails.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -58,12 +58,16 @@ from ..reads.publisher import StagedLoaderPublisher
 
 @dataclass(frozen=True, slots=True)
 class CoverageEnsured:
-    """One completed ensure pass and what it changed."""
+    """One completed ensure pass, what it changed, and how far
+    coverage now reaches — the operator's answer to "how long do
+    existing leaves absorb writes if maintenance starts failing"."""
 
     created_history_leaves: int
     created_heartbeat_leaves: int
     republished: bool
     heartbeat_covered_now: bool
+    history_covered_through: datetime
+    heartbeats_covered_through: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,11 +220,20 @@ async def ensure_partition_coverage(
         await publisher.republish(connection)
         republished = True
 
+    now = await database_now(connection)
+    day_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    hour_lower = now.replace(minute=0, second=0, microsecond=0)
     return CoverageEnsured(
         created_history_leaves=created_history,
         created_heartbeat_leaves=created_heartbeats,
         republished=republished,
         heartbeat_covered_now=await heartbeat_coverage_present(connection),
+        history_covered_through=(
+            day_lower + timedelta(days=history_horizon_days + 1)
+        ),
+        heartbeats_covered_through=(
+            hour_lower + timedelta(hours=heartbeat_horizon_hours + 1)
+        ),
     )
 
 

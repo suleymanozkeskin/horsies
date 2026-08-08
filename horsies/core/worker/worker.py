@@ -156,6 +156,9 @@ class Worker(
         self._started_at = datetime.now(timezone.utc)
         self._app: Horsies | None = None
         self._resilience = self.cfg.resilience_config or WorkerResilienceConfig()
+        # Last coverage-ensure outcome, published with worker-state
+        # snapshots so operators see covered_through and typed failures.
+        self._partition_coverage_health: dict[str, Any] | None = None
         # Delay creation of the process pool until after preloading modules so that
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None

@@ -54,6 +54,7 @@ class HealthMixin:
         _stop: asyncio.Event
         _ping_queue: asyncio.Queue[Any] | None
         _started_at: datetime
+        _partition_coverage_health: dict[str, Any] | None
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
@@ -210,7 +211,16 @@ class HealthMixin:
                         'qmc': Jsonb(self.cfg.queue_max_concurrency)
                         if self.cfg.queue_max_concurrency
                         else None,
-                        'recovery': Jsonb(recovery_dict) if recovery_dict else None,
+                        'recovery': Jsonb(
+                            {
+                                **(recovery_dict or {}),
+                                'partition_coverage': (
+                                    self._partition_coverage_health
+                                ),
+                            }
+                        )
+                        if (recovery_dict or self._partition_coverage_health)
+                        else None,
                         'running': running,
                         'claimed': claimed,
                         'mem_mb': rss_mb,

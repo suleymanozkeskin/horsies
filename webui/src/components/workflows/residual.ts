@@ -22,7 +22,7 @@ export function residualState(
   if (nodeStatus !== 'RUNNING') {
     return null;
   }
-  if (runStatus === 'CANCELLED') {
+  if (runStatus === 'CANCELLED' || runStatus === 'EXPIRED') {
     return 'draining';
   }
   if (

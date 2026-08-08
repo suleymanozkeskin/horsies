@@ -8,6 +8,7 @@ subscribe/unsubscribe flows, and graceful shutdown.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import concurrent.futures
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
@@ -1403,6 +1404,10 @@ def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None
         created_heartbeat_leaves=0,
         republished=False,
         heartbeat_covered_now=True,
+        history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        heartbeats_covered_through=datetime(
+                2026, 1, 1, 1, tzinfo=timezone.utc
+        ),
     )
     monkeypatch.setattr(
         coverage_module,

@@ -3131,6 +3131,12 @@ class TestWorkerStartConnectionOrdering:
                 created_heartbeat_leaves=0,
                 republished=False,
                 heartbeat_covered_now=True,
+                history_covered_through=datetime(
+                    2026, 1, 2, tzinfo=timezone.utc
+                ),
+                heartbeats_covered_through=datetime(
+                    2026, 1, 1, 1, tzinfo=timezone.utc
+                ),
             )
 
         monkeypatch.setattr(

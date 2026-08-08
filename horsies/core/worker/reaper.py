@@ -50,6 +50,7 @@ class ReaperMixin:
         broker: PostgresBroker | None
         _app: Horsies | None
         _stop: asyncio.Event
+        _partition_coverage_health: dict[str, Any] | None
 
     def _advisory_key_reaper(self) -> int:
         """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
@@ -355,6 +356,15 @@ class ReaperMixin:
                         logger.error(
                             f'Partition coverage ensure failed: {coverage!r}'
                         )
+                        self._partition_coverage_health = {
+                            'state': 'failed',
+                            'stage': coverage.stage,
+                            'class_key': coverage.class_key,
+                            'refusal': coverage.refusal,
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                        }
                     case CoverageEnsured(
                         created_history_leaves=created_history,
                         created_heartbeat_leaves=created_heartbeats,
@@ -366,6 +376,22 @@ class ReaperMixin:
                             f'+{created_heartbeats} heartbeat leaves, '
                             f'republished={republished}'
                         )
+                    case _:
+                        pass
+                match coverage:
+                    case CoverageEnsured():
+                        self._partition_coverage_health = {
+                            'state': 'ensured',
+                            'heartbeat_covered_now': (
+                                coverage.heartbeat_covered_now
+                            ),
+                            'history_covered_through': (
+                                coverage.history_covered_through.isoformat()
+                            ),
+                            'heartbeats_covered_through': (
+                                coverage.heartbeats_covered_through.isoformat()
+                            ),
+                        }
                     case _:
                         pass
             except Exception as coverage_err:
