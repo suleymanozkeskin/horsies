@@ -4,10 +4,85 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from horsies.core.types.status import TaskStatus
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRow:
+    """One task as the tests read it, from either lifecycle side.
+
+    A terminal task is no longer a live row, so an ORM load of the live
+    entity answers None for exactly the tasks these assertions are about.
+    This carries the fields the e2e suites assert on, typed the way the
+    entity typed them, and the claim and retry columns keep their live
+    meaning: a history record has no claimant, and its retry_count is the
+    count it terminalized with.
+    """
+
+    id: str
+    task_name: str
+    queue_name: str
+    status: TaskStatus
+    result: str | None
+    retry_count: int
+    max_retries: int
+    claimed_by_worker_id: str | None
+    claimed_at: datetime | None
+    next_retry_at: datetime | None
+    sent_at: datetime | None
+    enqueued_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    failed_at: datetime | None
+    error_code: str | None
+
+
+_READ_TASK_SQL = text("""
+    SELECT id, task_name, queue_name, status, result, retry_count,
+           max_retries, claimed_by_worker_id, claimed_at, next_retry_at,
+           sent_at, enqueued_at, started_at, completed_at, failed_at,
+           error_code
+    FROM itest_task_rows
+    WHERE id = CAST(:id AS uuid)
+""")
+
+
+async def read_task(session: AsyncSession, task_id: str) -> TaskRow | None:
+    """Read one task from whichever lifecycle side holds it.
+
+    ``None`` means the task is on neither side — genuinely absent, not
+    merely terminal.
+    """
+    row = (
+        await session.execute(_READ_TASK_SQL, {'id': task_id})
+    ).fetchone()
+    if row is None:
+        return None
+    return TaskRow(
+        id=str(row.id),
+        task_name=row.task_name,
+        queue_name=row.queue_name,
+        status=TaskStatus(row.status),
+        result=row.result,
+        retry_count=row.retry_count,
+        max_retries=row.max_retries,
+        claimed_by_worker_id=row.claimed_by_worker_id,
+        claimed_at=row.claimed_at,
+        next_retry_at=row.next_retry_at,
+        sent_at=row.sent_at,
+        enqueued_at=row.enqueued_at,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+        failed_at=row.failed_at,
+        error_code=row.error_code,
+    )
 
 
 async def cleanup_tables(session: AsyncSession) -> None:

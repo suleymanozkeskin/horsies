@@ -14,7 +14,6 @@ from uuid import uuid4
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
@@ -23,6 +22,7 @@ from sqlalchemy import text
 
 from tests.e2e.helpers.db import (
     poll_max_during,
+    read_task,
     wait_for_all_terminal,
     wait_for_any_status,
     wait_for_status,
@@ -184,7 +184,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully
         async with broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -248,7 +248,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully
         async with cluster_cap_broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED
 
@@ -312,7 +312,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
         # Verify all tasks completed successfully (prevents silent failures)
         async with custom_broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert (
                     task.status == TaskStatus.COMPLETED
@@ -433,7 +433,7 @@ async def test_softcap_db_ledger_race_single_execution(
             )
 
     async with softcap_broker.session_factory() as session:
-        ledger_task = await session.get(TaskModel, ledger_task_id)
+        ledger_task = await read_task(session, ledger_task_id)
         assert ledger_task is not None
         assert ledger_task.status == TaskStatus.COMPLETED, (
             f'Expected COMPLETED, got {ledger_task.status}'
@@ -529,7 +529,7 @@ async def test_stale_running_marked_failed_on_crash(
 
     # Verify status and error code
     async with recovery_broker.session_factory() as session:
-        task = await session.get(TaskModel, task_id)
+        task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.FAILED, (
             f'Expected FAILED, got {task.status}'
@@ -593,7 +593,7 @@ async def test_stale_claimed_requeued_and_completed(
 
     # Verify the task completed and was re-claimed by a live worker
     async with recovery_broker.session_factory() as session:
-        task = await session.get(TaskModel, task_id)
+        task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.COMPLETED, (
             f'Expected COMPLETED, got {task.status}'
@@ -644,7 +644,7 @@ async def test_cluster_cap_not_leaked_on_failure(
         # Verify all failed
         async with cluster_cap_broker.session_factory() as session:
             for task_id in fail_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.FAILED, (
                     f'Task {task_id} has status {task.status}, expected FAILED'
@@ -670,7 +670,7 @@ async def test_cluster_cap_not_leaked_on_failure(
         # Verify all slow tasks completed
         async with cluster_cap_broker.session_factory() as session:
             for task_id in slow_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -707,7 +707,7 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
         # Verify all tasks failed with correct retry count
         async with broker.session_factory() as session:
             for task_id in task_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.FAILED, (
                     f'Task {task_id} has status {task.status}, expected FAILED'
@@ -842,7 +842,7 @@ async def test_per_queue_caps_independent_across_queues(
         # All tasks completed
         async with custom_broker.session_factory() as session:
             for task_id in all_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -1072,7 +1072,7 @@ async def test_concurrent_enqueue_during_processing(
         # Verify all completed
         async with broker.session_factory() as session:
             for task_id in all_ids:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Task {task_id} has status {task.status}, expected COMPLETED'
@@ -1200,7 +1200,7 @@ async def test_softcap_expired_claim_requeued(
 
             # Verify task completed successfully and was reclaimed
             async with softcap_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
@@ -1307,7 +1307,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     )
 
             async with softcap_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'
@@ -1456,7 +1456,7 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # Record Worker A's id
             async with requeue_guard_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 worker_a_id = task.claimed_by_worker_id
                 assert worker_a_id is not None, 'Task should be claimed by Worker A'
@@ -1477,7 +1477,7 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # 5. Assert results
             async with requeue_guard_broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
                     f'Expected COMPLETED, got {task.status}'

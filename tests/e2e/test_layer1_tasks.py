@@ -16,7 +16,6 @@ import pytest
 from typing import Protocol
 
 from horsies.core.app import Horsies
-from horsies.core.models.task_pg import TaskModel
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.tasks import OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskResult, TaskError
 from horsies.core.task_decorator import TaskHandle
@@ -34,7 +33,7 @@ from tests.e2e.helpers.assertions import (
     unwrap_get_result,
     unwrap_send,
 )
-from tests.e2e.helpers.db import poll_max_during
+from tests.e2e.helpers.db import poll_max_during, read_task
 from tests.integration.history_seeding import force_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -91,7 +90,7 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
         assert_ok(result)
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
             assert task.started_at is not None
@@ -222,7 +221,7 @@ async def test_retry_exhausted(broker: PostgresBroker) -> None:
         assert_err(result, expected_code='TRANSIENT')
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 3
             assert task.status == TaskStatus.FAILED
@@ -261,7 +260,7 @@ async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
         deadline = time.time() + 5.0
         while time.time() < deadline:
             async with broker.session_factory() as session:
-                task = await session.get(TaskModel, handle.task_id)
+                task = await read_task(session, handle.task_id)
                 if task and task.retry_count >= 1 and task.next_retry_at is not None:
                     break
             await asyncio.sleep(0.2)
@@ -280,7 +279,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
 
         # Capture original enqueued_at before worker processes the task
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None and task.enqueued_at is not None
             original_sent_at = task.sent_at
             enqueued_at_snapshots: dict[int, datetime] = {0: task.enqueued_at}
@@ -289,7 +288,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
         deadline = time.time() + 15.0
         while time.time() < deadline:
             async with broker.session_factory() as session:
-                task = await session.get(TaskModel, handle.task_id)
+                task = await read_task(session, handle.task_id)
                 if task is not None and task.enqueued_at is not None:
                     rc = task.retry_count
                     if rc not in enqueued_at_snapshots:
@@ -330,7 +329,7 @@ async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
         assert result.is_err()
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
 
@@ -346,7 +345,7 @@ async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
         assert result.is_err()
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
 
@@ -362,7 +361,7 @@ async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
         assert_err(result, expected_code='PERMANENT')
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
 
@@ -383,7 +382,7 @@ async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
         assert result.err.error_code == 'TASK_VALUE_ERROR'
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
             assert task.status == TaskStatus.FAILED
@@ -405,7 +404,7 @@ async def test_retry_precedence_task_mapper_wins_and_retries(
         assert result.err.error_code == 'TASK_VALUE_ERROR'
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
             assert task.status == TaskStatus.FAILED
@@ -427,7 +426,7 @@ async def test_retry_precedence_global_mapper_triggers_retry(
         assert result.err.error_code == 'GLOBAL_VALUE_ERROR'
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
             assert task.status == TaskStatus.FAILED
@@ -449,7 +448,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
         assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
             assert task.status == TaskStatus.FAILED
@@ -490,7 +489,7 @@ async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> 
         assert_ok(result, 'high')
 
         async with custom_broker.session_factory() as session:
-            task = await session.get(TaskModel, handle.task_id)
+            task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.queue_name == 'high'
 
@@ -539,8 +538,8 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
         # Verify high started before low (started_at is set when task runs, more deterministic
         # than claimed_at which can be identical if both claimed in same transaction)
         async with custom_broker.session_factory() as session:
-            t_high = await session.get(TaskModel, task_id_high)
-            t_low = await session.get(TaskModel, task_id_low)
+            t_high = await read_task(session, task_id_high)
+            t_low = await read_task(session, task_id_low)
             assert t_high is not None
             assert t_low is not None
             assert t_high.started_at is not None
@@ -594,7 +593,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         deadline = time.time() + 2.0
         while time.time() < deadline:
             async with broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
             await asyncio.sleep(0.1)
@@ -623,7 +622,7 @@ async def test_task_completes_before_expiry(
         assert_ok(result, expected_value=10)
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, task_id)
+            task = await read_task(session, task_id)
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
 
@@ -648,7 +647,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
         await asyncio.sleep(2.0)  # Give worker time to potentially claim
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, task_id)
+            task = await read_task(session, task_id)
             assert task is not None
             # Dead on arrival — never claimed; reaper may have transitioned to EXPIRED
             assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
@@ -687,7 +686,7 @@ async def test_retry_blocked_by_good_until_expiry(
         assert_err(result, expected_code='TRANSIENT')
 
         async with broker.session_factory() as session:
-            task = await session.get(TaskModel, task_id)
+            task = await read_task(session, task_id)
             assert task is not None
             assert task.status == TaskStatus.FAILED
             assert task.retry_count == 0
@@ -732,7 +731,7 @@ async def test_retry_succeeds_within_good_until(
             assert_ok(result, expected_value='succeeded_on_attempt_3')
 
             async with broker.session_factory() as session:
-                task = await session.get(TaskModel, task_id)
+                task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED
                 assert task.retry_count == 2
