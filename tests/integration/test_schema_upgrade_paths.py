@@ -473,6 +473,36 @@ class TestFreshWorldParity:
             'horsies_workflow_phase2_pending_node_fkey',
         }, sorted(names)
 
+    async def test_fresh_locator_key_deletes_on_cascade(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """Deleting a workflow takes its unconsumed evidence with it.
+
+        The delete ACTION is the pin, not the constraint's presence: a
+        constraint that is already there is never rebuilt by adding it,
+        so a database born before the cascade would keep the refusing
+        form and no existence check would notice.
+        """
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.connect() as connection:
+                action = (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT confdeltype FROM pg_constraint
+                            WHERE conname =
+                                'horsies_workflow_phase2_pending_node_fkey'
+                            """
+                        )
+                    )
+                ).scalar_one()
+        finally:
+            await engine.dispose()
+        assert action == 'c', f'expected cascade, catalog says {action!r}'
+
 
 class TestUpgradePaths:
     async def test_fresh_database_reaches_the_current_version(

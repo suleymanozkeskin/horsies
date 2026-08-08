@@ -12,7 +12,7 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
-Task-history live/history split. Schema v32. **This release requires an
+Task-history live/history split. Schema v33. **This release requires an
 offline cutover for existing deployments**: stop all units, upgrade the
 package, run migrations, run the cutover program, start units. Fresh
 installs are born at the cutover's end state; the history subsystem is
@@ -20,6 +20,12 @@ dormant until invoked and adds no cost to deployments before cutover.
 
 ### Changed
 
+- **Workflow retention removes unconsumed phase-2 evidence with the
+  workflow.** A terminal task hands its workflow node's progression to
+  an outbox, and deleting the workflow deletes any evidence still
+  waiting there — the same disposition the consumer would have reached
+  for a workflow that is already terminal. Retention is not held up by
+  a stalled consumer.
 - **Enqueue-time facts are required columns on a fresh install.** The
   retention class, command fingerprint, rerun-input flag and prepared
   disposition are added nullable so that an upgraded deployment's

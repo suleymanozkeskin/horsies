@@ -38,7 +38,10 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # structured authority that names them, taking their NOT NULL with them,
 # and LIKE without INCLUDING CONSTRAINTS never inherits a CHECK. The
 # qualified clone shape is therefore unchanged and the base advances.
-_EXPECTED_BASE_SCHEMA_VERSION = 32
+# v33 changes the locator foreign key's delete action. It touches
+# horsies_workflow_tasks and the phase-2 outbox, neither of which the
+# prototypes clone or model, so the qualified shape is again unchanged.
+_EXPECTED_BASE_SCHEMA_VERSION = 33
 
 
 @dataclass(frozen=True, slots=True)

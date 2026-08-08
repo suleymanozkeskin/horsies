@@ -90,6 +90,15 @@ def cutover_fragments() -> tuple[str, ...]:
     while pending exists — the ratified locator contract — but it can only
     exist once `horsies_workflow_tasks` carries native-uuid identifiers
     and a unique constraint over (id, workflow_id).
+
+    It deletes on cascade. Pending is evidence FOR a node's progression,
+    so a node that is gone leaves nothing to progress: the consumer's own
+    conclusion for a workflow that reached terminal is to dispose of the
+    evidence, and cascading applies that conclusion transactionally when
+    the delete is the only remaining actor. Refusing instead would tie
+    retention to consumption liveness — a retention batch held hostage by
+    a stalled consumer — and live work is already protected where that
+    belongs, in the deletion paths' own guards.
     """
     return (
         """
@@ -102,5 +111,6 @@ def cutover_fragments() -> tuple[str, ...]:
             ADD CONSTRAINT {WORKFLOW_PHASE2_PENDING}_node_fkey
             FOREIGN KEY (workflow_node_row_id, workflow_id)
             REFERENCES horsies_workflow_tasks (id, workflow_id)
+            ON DELETE CASCADE
         """,
     )

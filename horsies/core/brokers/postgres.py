@@ -1048,12 +1048,28 @@ class PostgresBroker:
                 # rows whose workflow is gone — unresolvable, retried
                 # every pass, and competing with real work for the
                 # bounded discovery.
-                locator_present = (await conn.execute(text(
+                # Migration (v33): guarded on the DELETE ACTION, not on
+                # the constraint's existence. A database born at v32
+                # carries this key without the cascade, and adding a
+                # constraint that is already there never rebuilds it —
+                # the class rule for any changed constraint definition.
+                locator_cascades = (await conn.execute(text(
                     """SELECT EXISTS (SELECT 1 FROM pg_constraint
                     WHERE conname =
-                        'horsies_workflow_tasks_node_workflow_key')"""
+                        'horsies_workflow_phase2_pending_node_fkey'
+                      AND confdeltype = 'c')"""
                 ))).scalar_one()
-                if not locator_present:
+                if not locator_cascades:
+                    await conn.execute(text(
+                        'ALTER TABLE horsies_workflow_phase2_pending '
+                        'DROP CONSTRAINT IF EXISTS '
+                        'horsies_workflow_phase2_pending_node_fkey'
+                    ))
+                    await conn.execute(text(
+                        'ALTER TABLE horsies_workflow_tasks '
+                        'DROP CONSTRAINT IF EXISTS '
+                        'horsies_workflow_tasks_node_workflow_key'
+                    ))
                     for statement in cutover_fragments():
                         await conn.execute(text(statement))
 

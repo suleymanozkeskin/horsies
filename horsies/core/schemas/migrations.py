@@ -276,7 +276,18 @@ from sqlalchemy import text
 #      required. Upgraded installs are unchanged — the chain runs at
 #      broker init, before the cutover, where legacy NULLs still exist.
 
-SCHEMA_VERSION = 32
+# v33: the locator contract deletes on cascade. Pending is evidence FOR
+#      a node's progression, so a node that is gone leaves nothing to
+#      progress — the consumer's own conclusion for a workflow that
+#      reached terminal is to dispose of the evidence, and the cascade
+#      applies that conclusion transactionally when the delete is the
+#      only remaining actor. Refusing instead would tie workflow
+#      retention to consumption liveness. The fresh-world arm guards on
+#      the DELETE ACTION rather than the constraint's existence: adding
+#      a constraint that already exists never rebuilds it, so a database
+#      born at v32 would keep the refusing form forever.
+
+SCHEMA_VERSION = 33
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
