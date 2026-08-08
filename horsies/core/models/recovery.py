@@ -142,6 +142,34 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
+    history_leaf_horizon_days: Annotated[int, Field(ge=2, le=14)] = Field(
+        default=3,
+        description=(
+            'Complete future daily history leaves the maintenance owner '
+            'keeps created ahead of writes; floor 2 is the coverage '
+            'health red line, ceiling 14 bounds catalog pre-creation'
+        ),
+    )
+
+    heartbeat_leaf_horizon_hours: Annotated[int, Field(ge=2, le=48)] = Field(
+        default=6,
+        description=(
+            'Complete future hourly heartbeat leaves kept created '
+            'ahead of writes'
+        ),
+    )
+
+    partition_maintenance_interval_s: Annotated[
+        int, Field(ge=60, le=3_600),
+    ] = Field(
+        default=900,
+        description=(
+            'Seconds between coverage-ensure passes; any value in '
+            'bounds refreshes coverage well before either horizon '
+            'floor can lapse'
+        ),
+    )
+
     retention_sweep_interval_s: Annotated[int, Field(ge=30, le=86_400)] = Field(
         default=300,
         description=(

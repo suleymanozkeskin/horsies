@@ -297,6 +297,59 @@ class ReaperMixin:
                     now_monotonic + recovery_cfg.retention_sweep_interval_s
                 )
 
+        # Coverage/publication maintenance: keep history and heartbeat
+        # leaves created ahead of writes and the staged readers
+        # published. Rides the reaper's cluster-wide gate, so one
+        # worker per interval runs it; a refusal is reported verbatim
+        # and never retried into silence — existing leaves keep
+        # absorbing writes until the horizon, and the next pass tries
+        # again.
+        if now_monotonic >= state.next_partition_maintenance_at:
+            from horsies.core.history.maintenance.coverage import (
+                CoverageEnsureFailed,
+                CoverageEnsured,
+                ensure_partition_coverage,
+            )
+
+            try:
+                async with temp_broker.async_engine.begin() as coverage_conn:
+                    coverage = await ensure_partition_coverage(
+                        coverage_conn,
+                        history_horizon_days=(
+                            recovery_cfg.history_leaf_horizon_days
+                        ),
+                        heartbeat_horizon_hours=(
+                            recovery_cfg.heartbeat_leaf_horizon_hours
+                        ),
+                    )
+                match coverage:
+                    case CoverageEnsureFailed():
+                        logger.error(
+                            f'Partition coverage ensure failed: {coverage!r}'
+                        )
+                    case CoverageEnsured(
+                        created_history_leaves=created_history,
+                        created_heartbeat_leaves=created_heartbeats,
+                        republished=republished,
+                    ) if created_history or created_heartbeats or republished:
+                        logger.info(
+                            'Partition coverage: '
+                            f'+{created_history} history leaves, '
+                            f'+{created_heartbeats} heartbeat leaves, '
+                            f'republished={republished}'
+                        )
+                    case _:
+                        pass
+            except Exception as coverage_err:
+                logger.error(
+                    f'Partition coverage ensure error: {coverage_err}'
+                )
+            finally:
+                state.next_partition_maintenance_at = (
+                    now_monotonic
+                    + recovery_cfg.partition_maintenance_interval_s
+                )
+
     async def _delete_expired_in_batches(
         self,
         temp_broker: 'PostgresBroker',

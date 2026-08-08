@@ -807,6 +807,37 @@ class Worker(
         # Preload the app and task modules in the main process to fail fast
         self._preload_modules_main()
 
+        # Partitioned writes need their partitions before the first
+        # claim: heartbeat leaves for this worker's liveness rows,
+        # history leaves for terminalizations, staged readers published.
+        # Refusing to start when the present instant has no heartbeat
+        # coverage fails at the moment an operator is attached instead
+        # of on the first RUNNING transition.
+        from horsies.core.history.maintenance.coverage import (
+            StartupCoverageRefused,
+            ensure_startup_coverage,
+        )
+
+        recovery_cfg = self.cfg.recovery_config
+        async with self.sf() as coverage_session:
+            startup_coverage = await ensure_startup_coverage(
+                await coverage_session.connection(),
+                history_horizon_days=recovery_cfg.history_leaf_horizon_days,
+                heartbeat_horizon_hours=(
+                    recovery_cfg.heartbeat_leaf_horizon_hours
+                ),
+            )
+            await coverage_session.commit()
+        match startup_coverage:
+            case StartupCoverageRefused(outcome=refused_outcome):
+                raise RuntimeError(
+                    'worker startup refused: no heartbeat leaf covers '
+                    f'the present instant after the ensure attempt — '
+                    f'{refused_outcome!r}'
+                )
+            case _:
+                pass
+
         try:
             # Fork and initialize children before the parent opens
             # listener/coordinator DB sockets. Psycopg connections are not
