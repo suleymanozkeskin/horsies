@@ -62,6 +62,7 @@ async def _run_phase2_recovery(
         broker,
         grace_ms=grace_ms,
         max_rows=GLOBAL_SCAN_ROW_CAP,
+        quarantine_after_attempts=25,
     )
     return summary.applied
 
@@ -1607,3 +1608,119 @@ class TestWorkflowRecovery:
         assert row[1] is not None
         # Error should be from the first failed required task (TASK_FAIL)
         assert 'TASK_FAIL' in row[1]
+
+
+class TestQuarantineAfterAttempts:
+    """The attempt bound on unresolvable retained evidence.
+
+    A retaining disposition increments the pending row's attempt count;
+    at the bound the row's evidence moves to the quarantine table and
+    discovery stops retrying it. Quarantine preserves the evidence —
+    an impossible state that occurs is evidence, so terminal-and-drop
+    was rejected — and the population stays countable on the health
+    surface. Disabling the quarantine transition turns the repointed
+    assertions below red for the stated reason: the row would retain
+    forever with nothing relocated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_unresolvable_row_quarantines_at_the_bound(
+        self, broker: PostgresBroker, session: AsyncSession, app: Horsies
+    ) -> None:
+        task_a = make_simple_task(app, 'quarantine_bound_a')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        spec = make_workflow_spec(
+            broker=broker, name='quarantine_bound', tasks=[node_a]
+        )
+        handle = await start_ok(spec, broker)
+
+        wt_result = await session.execute(
+            text("""
+                SELECT task_id FROM horsies_workflow_tasks
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        task_id = wt_result.fetchone()[0]
+
+        await force_terminal(
+            session,
+            task_id,
+            status='COMPLETED',
+            result_json=_strict_result_json(TaskResult(ok=5)),
+        )
+        # The node already terminal with a DIFFERENT status than the
+        # evidence records: a state conflict consumption retains on,
+        # every pass, forever — the shape the bound exists for.
+        await session.execute(
+            text("""
+                UPDATE horsies_workflow_tasks
+                SET status = 'FAILED'
+                WHERE workflow_id = :wf_id AND task_index = 0
+            """),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        bound = 3
+        summary = None
+        for expected_attempts in (1, 2, 3):
+            summary = await drive_phase2_recovery(
+                broker.session_factory,
+                broker,
+                grace_ms=0,
+                max_rows=GLOBAL_SCAN_ROW_CAP,
+                quarantine_after_attempts=bound,
+            )
+            assert summary.retained == 1
+            attempts = (
+                await session.execute(
+                    text(
+                        'SELECT attempt_count, last_failure_class '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:t AS uuid)'
+                    ),
+                    {'t': task_id},
+                )
+            ).one()
+            assert attempts.attempt_count == expected_attempts
+            assert attempts.last_failure_class is not None
+
+        # The bound pass quarantined: evidence repointed, reason named.
+        assert summary is not None
+        assert summary.quarantined == 1
+        pending = (
+            await session.execute(
+                text(
+                    'SELECT recovery_source, quarantine_task_id '
+                    'FROM horsies_workflow_phase2_pending '
+                    'WHERE task_id = CAST(:t AS uuid)'
+                ),
+                {'t': task_id},
+            )
+        ).one()
+        assert pending.recovery_source == 'QUARANTINE'
+        assert pending.quarantine_task_id is not None
+        quarantine_row = (
+            await session.execute(
+                text(
+                    'SELECT quarantine_reason '
+                    'FROM horsies_workflow_phase2_quarantine '
+                    'WHERE task_id = CAST(:t AS uuid)'
+                ),
+                {'t': task_id},
+            )
+        ).one()
+        assert 'attempt bound' in quarantine_row.quarantine_reason
+
+        # Discovery no longer selects the row; the standing population
+        # is a count, not silence.
+        after = await drive_phase2_recovery(
+            broker.session_factory,
+            broker,
+            grace_ms=0,
+            max_rows=GLOBAL_SCAN_ROW_CAP,
+            quarantine_after_attempts=bound,
+        )
+        assert after.considered == 0
+        assert after.over_attempt_bound == 1

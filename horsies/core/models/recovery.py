@@ -96,6 +96,24 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
+    phase2_quarantine_after_attempts: Annotated[
+        int, Field(ge=3, le=1_000),
+    ] = Field(
+        default=25,
+        description=(
+            'Recovery passes an unresolvable phase-2 pending row may retain '
+            'before it is quarantined. Retaining dispositions are either '
+            'transient races, which resolve within one or two passes, or '
+            'structural conflicts, which never resolve: 25 gives a transient '
+            'an order of magnitude more passes than it needs while bounding '
+            'a structural row to 25 logged errors before its evidence moves '
+            'to the quarantine table and discovery stops retrying it. Floor '
+            '3 keeps a burst of transient failures from quarantining healthy '
+            'recovery; both directions stay recoverable because quarantine '
+            'preserves the evidence (3-1000).'
+        ),
+    )
+
     check_interval_ms: Annotated[int, Field(ge=1_000, le=600_000)] = Field(
         default=30_000,  # 30 seconds
         description='How often the reaper checks for stale tasks in milliseconds (1s-10min)',

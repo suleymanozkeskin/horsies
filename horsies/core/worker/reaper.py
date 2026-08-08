@@ -251,6 +251,9 @@ class ReaperMixin:
                 temp_broker,
                 grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
                 max_rows=GLOBAL_SCAN_ROW_CAP,
+                quarantine_after_attempts=(
+                    recovery_cfg.phase2_quarantine_after_attempts
+                ),
             )
             if phase2.applied or phase2.retained or phase2.failed:
                 logger.info(
@@ -259,7 +262,8 @@ class ReaperMixin:
                     f'{phase2.already_applied} already applied, '
                     f'{phase2.superseded} superseded, '
                     f'{phase2.retained} retained, '
-                    f'{phase2.failed} failed'
+                    f'{phase2.failed} failed, '
+                    f'{phase2.quarantined} quarantined'
                 )
             self._phase2_recovery_health = {
                 'considered': phase2.considered,
@@ -268,7 +272,10 @@ class ReaperMixin:
                 'superseded': phase2.superseded,
                 'retained': phase2.retained,
                 'failed': phase2.failed,
+                'quarantined': phase2.quarantined,
+                'over_attempt_bound': phase2.over_attempt_bound,
                 'retained_details': list(phase2.retained_details),
+                'quarantine_refusals': list(phase2.quarantine_refusals),
             }
         except Exception as phase2_err:
             logger.error(f'Phase-2 recovery error: {phase2_err}')

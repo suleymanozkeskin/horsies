@@ -42,6 +42,11 @@ from horsies.core.history.phase2.consumption import (
     Phase2Disposition,
     consume_phase2,
 )
+from horsies.core.history.phase2.quarantine import (
+    DRAINED_VERDICTS,
+    PHASE2_QUARANTINE_FUNCTION,
+    REPOINTED,
+)
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -83,19 +88,58 @@ DISCOVER_PENDING_SQL = text(f"""
     WHERE created_at < NOW()
           - (CAST(:grace_ms AS double precision) / 1000.0)
             * INTERVAL '1 second'
+      AND attempt_count < CAST(:attempt_bound AS integer)
     ORDER BY created_at, task_id
     LIMIT CAST(:max_rows AS bigint)
 """)
-"""Oldest first, past the grace window, capped.
+"""Oldest first, past the grace window, under the attempt bound, capped.
 
 The ordering and the cap ride the outbox's (created_at, task_id) index.
 The grace window is why a healthy finalizer's in-flight phase 2 is not
-raced: a row younger than the window is left alone."""
+raced: a row younger than the window is left alone. The attempt bound is
+why an unresolvable row cannot retry forever: once a row has retained
+through that many passes it is quarantined and discovery stops selecting
+it — the exclusion holds even if the quarantine transition itself
+refused, so a stuck row costs a bounded number of passes either way."""
+
+
+RECORD_RETAINING_ATTEMPT_SQL = text(f"""
+    UPDATE {WORKFLOW_PHASE2_PENDING}
+    SET attempt_count = attempt_count + 1,
+        last_attempt_at = statement_timestamp(),
+        last_failure_class = :failure_class
+    WHERE task_id = CAST(:task_id AS uuid)
+    RETURNING attempt_count
+""")
+"""One retaining disposition, recorded on the row it retained.
+
+The count rides the pending row as a column, never process memory: a
+worker restart, a different holder next pass, or a crashed pass all see
+the same count. Written in the same transaction as the consumption call
+that produced the disposition."""
+
+
+COUNT_OVER_ATTEMPT_BOUND_SQL = text(f"""
+    SELECT count(*) FROM {WORKFLOW_PHASE2_PENDING}
+    WHERE attempt_count >= CAST(:attempt_bound AS integer)
+""")
+"""The standing population discovery no longer retries.
+
+Published on the health surface every pass so a quarantined population
+is visible rather than merely absent from the log."""
 
 
 @dataclass(frozen=True, slots=True)
 class Phase2RecoverySummary:
-    """What one pass did, in the shape the health surface publishes."""
+    """What one pass did, in the shape the health surface publishes.
+
+    Quarantine preserves evidence rather than dropping it: an
+    unresolvable retained row is an impossible state that occurred, and
+    an impossible state that occurs is evidence — terminal-and-drop was
+    rejected on that principle. The bounded outcome is that the row's
+    recovery material moves to the quarantine table, discovery stops
+    retrying it, and the population stays countable here.
+    """
 
     considered: int = 0
     applied: int = 0
@@ -103,10 +147,20 @@ class Phase2RecoverySummary:
     superseded: int = 0
     retained: int = 0
     failed: int = 0
+    quarantined: int = 0
+    """Rows whose attempt count reached the bound this pass and whose
+    evidence was repointed at the quarantine table (or already was)."""
+    over_attempt_bound: int = 0
+    """Standing population at or over the bound — the rows discovery no
+    longer retries, visible as a count rather than as silence."""
     retained_details: tuple[str, ...] = field(default_factory=tuple)
     """One entry per retaining disposition, carrying the function's own
     detail verbatim. A population that never disposes is visible here
     rather than only in the log."""
+    quarantine_refusals: tuple[str, ...] = field(default_factory=tuple)
+    """Transitions the quarantine function refused, verbatim. The row is
+    still excluded from discovery by the attempt bound; the refusal
+    names why its evidence could not be relocated."""
 
 
 def _recovered_failure_result(
@@ -220,6 +274,7 @@ async def drive_phase2_recovery(
     *,
     grace_ms: int,
     max_rows: int,
+    quarantine_after_attempts: int,
 ) -> Phase2RecoverySummary:
     """One bounded pass over the phase-2 outbox.
 
@@ -227,6 +282,13 @@ async def drive_phase2_recovery(
     function is one transaction from pending to durable disposition, and
     batching them would let a single bad row poison every good row
     behind it while holding workflow locks across the whole set.
+
+    A retaining disposition increments the row's attempt count in the
+    same transaction; at the bound the row's evidence is quarantined —
+    copied, verified, and repointed by the database-owned quarantine
+    function — and the discovery predicate stops selecting it either
+    way. Exception failures do NOT count toward the bound: a database
+    outage must not march healthy rows toward quarantine.
 
     Caller owns the one-holder guarantee. The reaper runs this inside a
     pass already gated by the cluster-wide advisory lock, so no second
@@ -236,9 +298,19 @@ async def drive_phase2_recovery(
         candidates = (
             await discovery_session.execute(
                 DISCOVER_PENDING_SQL,
-                {'grace_ms': grace_ms, 'max_rows': max_rows},
+                {
+                    'grace_ms': grace_ms,
+                    'max_rows': max_rows,
+                    'attempt_bound': quarantine_after_attempts,
+                },
             )
         ).fetchall()
+        over_bound = (
+            await discovery_session.execute(
+                COUNT_OVER_ATTEMPT_BOUND_SQL,
+                {'attempt_bound': quarantine_after_attempts},
+            )
+        ).scalar_one()
 
     considered = 0
     applied = 0
@@ -246,7 +318,9 @@ async def drive_phase2_recovery(
     superseded = 0
     retained = 0
     failed = 0
+    quarantined = 0
     details: list[str] = []
+    quarantine_refusals: list[str] = []
 
     for candidate in candidates:
         considered += 1
@@ -261,6 +335,8 @@ async def drive_phase2_recovery(
             )
             continue
 
+        quarantined_this_row = False
+        quarantine_refusal: str | None = None
         try:
             async with session_factory() as session:
                 connection = await session.connection()
@@ -271,10 +347,32 @@ async def drive_phase2_recovery(
                 )
                 if disposition.disposition == 'APPLIED_TO_NODE':
                     await _apply_progression(session, disposition, broker)
+                elif disposition.disposition not in DURABLE_DISPOSITIONS:
+                    attempt_count = (
+                        await session.execute(
+                            RECORD_RETAINING_ATTEMPT_SQL,
+                            {
+                                'task_id': task_id,
+                                'failure_class': disposition.disposition,
+                            },
+                        )
+                    ).scalar_one()
+                    if int(attempt_count) >= quarantine_after_attempts:
+                        (
+                            quarantined_this_row,
+                            quarantine_refusal,
+                        ) = await _quarantine_exhausted_row(
+                            session,
+                            task_id=task_id,
+                            attempt_count=int(attempt_count),
+                            disposition=disposition.disposition,
+                        )
                 await session.commit()
         except Exception as exc:
             # This row keeps its evidence and is seen again next pass;
-            # the rows behind it still run.
+            # the rows behind it still run. Deliberately uncounted
+            # toward the attempt bound: an outage is not the row's
+            # fault.
             failed += 1
             logger.error(
                 'Phase-2 recovery failed for task %s: %s: %s',
@@ -302,6 +400,10 @@ async def drive_phase2_recovery(
                 # what an operator needs to act on, and a count alone
                 # hides a population that never disposes.
                 logger.error('Phase-2 recovery retained evidence — %s', detail)
+                if quarantined_this_row:
+                    quarantined += 1
+                if quarantine_refusal is not None:
+                    quarantine_refusals.append(quarantine_refusal)
 
     return Phase2RecoverySummary(
         considered=considered,
@@ -310,5 +412,53 @@ async def drive_phase2_recovery(
         superseded=superseded,
         retained=retained,
         failed=failed,
+        quarantined=quarantined,
+        over_attempt_bound=int(over_bound),
         retained_details=tuple(details),
+        quarantine_refusals=tuple(quarantine_refusals),
     )
+
+
+async def _quarantine_exhausted_row(
+    session: 'AsyncSession',
+    *,
+    task_id: str,
+    attempt_count: int,
+    disposition: str,
+) -> tuple[bool, str | None]:
+    """Move one exhausted row's evidence to the quarantine table.
+
+    Runs in the same transaction as the consumption call that produced
+    the final retaining disposition; the quarantine function locks only
+    the pending row, which this transaction already holds, so no new
+    lock tier is introduced. Returns (quarantined, refusal_detail): a
+    REPOINTED or already-drained verdict counts as quarantined, and a
+    refusal is reported verbatim — the row is excluded from discovery by
+    the attempt bound regardless, so a refusal costs visibility of the
+    relocation, never an unbounded retry.
+    """
+    reason = (
+        f'attempt bound {attempt_count} reached; '
+        f'last disposition {disposition}'
+    )
+    row = (
+        await session.execute(
+            text(
+                f'SELECT * FROM {PHASE2_QUARANTINE_FUNCTION}('
+                'CAST(:task_id AS uuid), :reason)'
+            ),
+            {'task_id': task_id, 'reason': reason},
+        )
+    ).one()
+    verdict = str(row.verdict)
+    if verdict == REPOINTED or verdict in DRAINED_VERDICTS:
+        logger.error(
+            'Phase-2 recovery quarantined task %s: %s', task_id, reason,
+        )
+        return True, None
+    refusal = (
+        f'{task_id}: quarantine refused with {verdict}'
+        f'{f": {row.detail}" if row.detail else ""}'
+    )
+    logger.error('Phase-2 recovery %s', refusal)
+    return False, refusal
