@@ -187,11 +187,35 @@ class SideConfig:
 
 @dataclass(frozen=True, slots=True)
 class SeedOutcome:
-    """Everything one seeded side reported about itself."""
+    """Everything one seeded side reported about itself.
+
+    The three parts must agree on which side they describe. They are produced
+    together from one run, so disagreement means they were assembled by hand
+    from different runs — and a bundle whose identity says one build while its
+    facts describe the other would pass every downstream check that reads only
+    one of them.
+    """
 
     identity: SideIdentity
     config: SideConfig
     facts: EquivalenceFacts
+
+    def __post_init__(self) -> None:
+        sides = {
+            'identity': self.identity.side,
+            'configuration': self.config.side,
+            'facts': self.facts.side,
+        }
+        if len(set(sides.values())) != 1:
+            raise SeedError(
+                f'one side outcome describes more than one side: {sides}. Its '
+                'parts came from different runs, so no downstream check can '
+                'say which build it is evidence about'
+            )
+
+    @property
+    def side(self) -> PairedSide:
+        return self.identity.side
 
 
 # Executed by each side's own interpreter. Written as text, and injected into
@@ -630,33 +654,64 @@ def run_seed_side(
     )
 
 
-def seed_conditions(
-    baseline: SeedOutcome,
-    candidate: SeedOutcome,
-    *,
-    spec: SeedSpec,
-    config_spec: SeedConfigSpec,
-) -> dict[str, Any]:
-    """The full declaration of how the two sides were filled."""
-    return {
-        'spec': spec.as_payload(),
-        'config_spec': config_spec.as_payload(),
-        'configuration': config_conditions(baseline.config, candidate.config),
-    }
+@dataclass(frozen=True, slots=True)
+class SeededPair:
+    """Two seeded sides that have passed every cross-side check.
 
-
-def seeded_pair(
-    baseline: SeedOutcome,
-    candidate: SeedOutcome,
-    *,
-    baseline_database_url: str,
-    candidate_database_url: str,
-) -> tuple[SeedOutcome, SeedOutcome]:
-    """Both sides seeded, with every cross-side check discharged.
-
-    Returned as a pair so a caller cannot reach the outcomes without passing
-    through the checks: there is no route to a seeded pair that skips them.
+    A function that validates and hands back a plain tuple is discipline
+    wearing a type's clothes: a caller already holding both outcomes can simply
+    not call it, and nothing downstream re-checks — ``PairedCell`` verifies
+    identities and equivalence facts, not configurations. So the checks live in
+    ``__post_init__`` and the pair is the only thing a cell is built from. The
+    database URLs are required fields because they are what
+    ``assert_databases_differ`` needs and what the conditions must record;
+    keeping them here stops a second copy from drifting out of step.
     """
-    assert_databases_differ(baseline_database_url, candidate_database_url)
-    assert_config_equivalence(baseline.config, candidate.config)
-    return baseline, candidate
+
+    baseline: SeedOutcome
+    candidate: SeedOutcome
+    baseline_database_url: str
+    candidate_database_url: str
+
+    def __post_init__(self) -> None:
+        if self.baseline.side is not PairedSide.BASELINE:
+            raise ConfigEquivalenceError(
+                f'the baseline slot holds a {self.baseline.side} outcome; the '
+                'pair would compare a build against itself while every '
+                'per-side check passed'
+            )
+        if self.candidate.side is not PairedSide.CANDIDATE:
+            raise ConfigEquivalenceError(
+                f'the candidate slot holds a {self.candidate.side} outcome; '
+                'the pair would compare a build against itself while every '
+                'per-side check passed'
+            )
+        assert_databases_differ(
+            self.baseline_database_url, self.candidate_database_url
+        )
+        assert_config_equivalence(self.baseline.config, self.candidate.config)
+
+    def conditions(
+        self, *, spec: SeedSpec, config_spec: SeedConfigSpec
+    ) -> dict[str, Any]:
+        """The full declaration of how the two sides were filled."""
+        return {
+            'spec': spec.as_payload(),
+            'config_spec': config_spec.as_payload(),
+            'databases': {
+                'baseline': _database_name(self.baseline_database_url),
+                'candidate': _database_name(self.candidate_database_url),
+            },
+            'configuration': config_conditions(
+                self.baseline.config, self.candidate.config
+            ),
+        }
+
+
+def _database_name(database_url: str) -> str:
+    """The database a URL points at, without its credentials.
+
+    Conditions name the database so a reader can tell the two sides apart. The
+    rest of the URL carries a password and never reaches an artifact.
+    """
+    return database_url.rsplit('/', 1)[-1].split('?')[0]

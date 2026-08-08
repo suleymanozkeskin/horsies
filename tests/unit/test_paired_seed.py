@@ -18,6 +18,8 @@ from tests.task_history_prototypes.paired_seed import (
     SeedError,
     SeedSpec,
     SideConfig,
+    SeedOutcome,
+    SeededPair,
     assert_config_equivalence,
     assert_databases_differ,
     assert_facts_match_spec,
@@ -27,7 +29,12 @@ from tests.task_history_prototypes.paired_seed import (
     seed_source,
     substitute_seed_tokens,
 )
-from tests.task_history_prototypes.paired_sides import PairedSide
+from tests.task_history_prototypes.paired_sides import (
+    BASELINE_SCHEMA_VERSION,
+    CANDIDATE_SCHEMA_VERSION,
+    PairedSide,
+    SideIdentity,
+)
 
 SPEC = SeedSpec(
     task_name='paired_seed_probe',
@@ -329,3 +336,114 @@ def test_a_bucket_that_cannot_be_sent_is_refused(
 def test_a_spec_with_no_buckets_is_refused() -> None:
     with pytest.raises(SeedError, match='at least one bucket'):
         SeedSpec(task_name='x', buckets=(), payload_seed=1)
+
+
+def _outcome(side: PairedSide) -> SeedOutcome:
+    return SeedOutcome(
+        identity=SideIdentity(
+            side=side,
+            interpreter=f'/{side.value}/bin/python',
+            module_path=f'/{side.value}/horsies/__init__.py',
+            schema_version=(
+                BASELINE_SCHEMA_VERSION
+                if side is PairedSide.BASELINE
+                else CANDIDATE_SCHEMA_VERSION
+            ),
+            expected_root=f'/{side.value}',
+            expected_schema_version=(
+                BASELINE_SCHEMA_VERSION
+                if side is PairedSide.BASELINE
+                else CANDIDATE_SCHEMA_VERSION
+            ),
+        ),
+        config=_config(side),
+        facts=_facts(side),
+    )
+
+
+def test_a_seeded_pair_runs_its_checks_on_construction() -> None:
+    """The guarantee is the type's, not the caller's.
+
+    A validating function that returns a plain tuple can be skipped by a
+    caller who already holds both outcomes, and nothing downstream re-checks
+    configurations.
+    """
+    pair = SeededPair(
+        baseline=_outcome(PairedSide.BASELINE),
+        candidate=_outcome(PairedSide.CANDIDATE),
+        baseline_database_url='postgresql://h/base',
+        candidate_database_url='postgresql://h/cand',
+    )
+    assert pair.baseline.identity.schema_version == BASELINE_SCHEMA_VERSION
+
+
+def test_a_pair_sharing_one_database_cannot_be_constructed() -> None:
+    with pytest.raises(ConfigEquivalenceError, match='same database'):
+        SeededPair(
+            baseline=_outcome(PairedSide.BASELINE),
+            candidate=_outcome(PairedSide.CANDIDATE),
+            baseline_database_url='postgresql://h/one',
+            candidate_database_url='postgresql://h/one',
+        )
+
+
+def test_a_pair_with_divergent_configurations_cannot_be_constructed() -> None:
+    baseline = _outcome(PairedSide.BASELINE)
+    candidate = SeedOutcome(
+        identity=_outcome(PairedSide.CANDIDATE).identity,
+        config=_config(PairedSide.CANDIDATE, effective={'broker.pool_size': 25}),
+        facts=_facts(PairedSide.CANDIDATE),
+    )
+    with pytest.raises(ConfigEquivalenceError, match='broker.pool_size'):
+        SeededPair(
+            baseline=baseline,
+            candidate=candidate,
+            baseline_database_url='postgresql://h/base',
+            candidate_database_url='postgresql://h/cand',
+        )
+
+
+def test_a_candidate_outcome_in_the_baseline_slot_is_refused() -> None:
+    """Every per-side check passes; only the positional check catches it."""
+    with pytest.raises(ConfigEquivalenceError, match='baseline slot holds'):
+        SeededPair(
+            baseline=_outcome(PairedSide.CANDIDATE),
+            candidate=_outcome(PairedSide.CANDIDATE),
+            baseline_database_url='postgresql://h/base',
+            candidate_database_url='postgresql://h/cand',
+        )
+
+
+def test_a_baseline_outcome_in_the_candidate_slot_is_refused() -> None:
+    with pytest.raises(ConfigEquivalenceError, match='candidate slot holds'):
+        SeededPair(
+            baseline=_outcome(PairedSide.BASELINE),
+            candidate=_outcome(PairedSide.BASELINE),
+            baseline_database_url='postgresql://h/base',
+            candidate_database_url='postgresql://h/cand',
+        )
+
+
+def test_an_outcome_assembled_from_two_runs_is_refused() -> None:
+    """Identity, configuration and facts must agree on which build they describe."""
+    with pytest.raises(SeedError, match='more than one side'):
+        SeedOutcome(
+            identity=_outcome(PairedSide.BASELINE).identity,
+            config=_config(PairedSide.CANDIDATE),
+            facts=_facts(PairedSide.BASELINE),
+        )
+
+
+def test_conditions_name_the_databases_without_their_credentials() -> None:
+    pair = SeededPair(
+        baseline=_outcome(PairedSide.BASELINE),
+        candidate=_outcome(PairedSide.CANDIDATE),
+        baseline_database_url='postgresql+psycopg://user:secret@h:5432/base_db',
+        candidate_database_url='postgresql+psycopg://user:secret@h:5432/cand_db',
+    )
+    conditions = pair.conditions(spec=SPEC, config_spec=SeedConfigSpec())
+    assert conditions['databases'] == {
+        'baseline': 'base_db',
+        'candidate': 'cand_db',
+    }
+    assert 'secret' not in json.dumps(conditions)
