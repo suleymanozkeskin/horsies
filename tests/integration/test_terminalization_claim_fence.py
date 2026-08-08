@@ -172,8 +172,8 @@ async def _terminalization_kind_of(
     return (
         await session.execute(
             text(
-                'SELECT terminalization_kind FROM horsies_tasks '
-                'WHERE id = :id'
+                'SELECT terminalization_kind FROM itest_task_rows '
+                'WHERE id = CAST(:id AS uuid)'
             ),
             {'id': task_id},
         )
