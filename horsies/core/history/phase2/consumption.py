@@ -146,7 +146,7 @@ BEGIN
     WHERE task_id = p_task_id
     FOR UPDATE;
 
-    IF v_wf.status IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+    IF v_wf.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') THEN
         DELETE FROM {WORKFLOW_PHASE2_PENDING} WHERE task_id = p_task_id;
         IF v_pending.recovery_source = 'QUARANTINE' THEN
             DELETE FROM {WORKFLOW_PHASE2_QUARANTINE}

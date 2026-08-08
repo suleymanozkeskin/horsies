@@ -297,6 +297,34 @@ class ReaperMixin:
                     now_monotonic + recovery_cfg.retention_sweep_interval_s
                 )
 
+        # Paused-age expiry: the declared policy's sweep. Gated on the
+        # opt-in knob (None = the pass reads nothing) and running under
+        # the same cluster-wide reaper gate; the writer is the cancel
+        # path's locked sequence with EXPIRED as the terminal status,
+        # so an expiring workflow leaves no claimable backing rows and
+        # no ENQUEUED nodes behind.
+        if recovery_cfg.paused_workflow_auto_cancel_after is not None:
+            from horsies.core.workflows.lifecycle import (
+                expire_paused_workflows,
+            )
+
+            try:
+                expired = await expire_paused_workflows(
+                    temp_broker.session_factory,
+                    older_than=(
+                        recovery_cfg.paused_workflow_auto_cancel_after
+                    ),
+                )
+                if expired > 0:
+                    logger.info(
+                        f'Expired {expired} paused workflow(s) past the '
+                        f'declared age policy'
+                    )
+            except Exception as expiry_err:
+                logger.error(
+                    f'Paused-workflow expiry sweep error: {expiry_err}'
+                )
+
         # Coverage/publication maintenance: keep history and heartbeat
         # leaves created ahead of writes and the staged readers
         # published. Rides the reaper's cluster-wide gate, so one

@@ -241,7 +241,7 @@ GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL = text("""
     FROM horsies_workflows child
     JOIN horsies_workflows parent ON parent.id = child.parent_workflow_id
     JOIN horsies_workflow_tasks wt ON wt.workflow_id = parent.id AND wt.task_index = child.parent_task_index
-    WHERE child.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+    WHERE child.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND wt.status = 'RUNNING'
       AND parent.status = 'RUNNING'
       AND (CAST(:scope_ids AS uuid[]) IS NULL OR child.id = ANY(CAST(:scope_ids AS uuid[])))

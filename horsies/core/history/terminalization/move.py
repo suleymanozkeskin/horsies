@@ -1754,7 +1754,10 @@ def _cancel_cancelled_sweep_ddl() -> str:
               JOIN horsies_workflows w ON w.id = wt.workflow_id
               WHERE wt.task_id = t2.id
                 AND wt.workflow_id = ANY(p_workflow_ids)
-                AND w.status = 'CANCELLED'
+                -- EXPIRED propagates exactly as CANCELLED: one batch
+                -- serves both, and the backing row carries the
+                -- workflow-cancel kind either way.
+                AND w.status IN ('CANCELLED', 'EXPIRED')
                 AND wt.status = 'ENQUEUED'
           )
         FOR UPDATE OF t2 SKIP LOCKED""",

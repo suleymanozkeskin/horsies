@@ -495,7 +495,8 @@ class TestWorkflowNodeFamily:
         assert "w.status = 'PAUSED'" in paused
         assert "wt.status IN ('ENQUEUED', 'RUNNING')" in paused
         assert "t2.status = 'CLAIMED'" in paused
-        assert "w.status = 'CANCELLED'" in cancelled
+        # EXPIRED propagates exactly as CANCELLED: one sweep serves both.
+        assert "w.status IN ('CANCELLED', 'EXPIRED')" in cancelled
         assert "wt.status = 'ENQUEUED'" in cancelled
         assert "t2.status IN ('PENDING', 'CLAIMED', 'RUNNING')" in cancelled
 
