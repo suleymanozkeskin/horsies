@@ -32,6 +32,11 @@ from pathlib import Path
 from typing import Any, Final
 
 from .paired_cell import SampleUnit
+from .paired_mode import (
+    ServerMode,
+    assert_mode_conformance,
+    assert_structure_conformance,
+)
 from .paired_interleave import (
     InterleaveSpec,
     ScheduledObservation,
@@ -128,13 +133,21 @@ class MeasurementPlan:
     payload_bytes: int
     payload_seed: int
     key_prefix: str = 'paired-key-'
-    # Eight, because that is where the effect measured out. Unprimed, every
-    # block's maximum sat at position 0 at 28-38 ms against a 1.5-2.0 ms
-    # steady state. One priming send left first observations at 2.2-2.8 ms,
-    # still consistently above their own block's median. At eight, first
-    # observations fall inside the spread of the rest and block maxima scatter
-    # across positions instead of concentrating at the first.
-    priming_sends: int = 8
+    # Sixteen, re-derived under section 2.1 at the mandated block size of 100
+    # by the same method as the original: run several priming counts and watch
+    # where each block's first observation sits relative to its own block's
+    # median-of-the-rest, and where each block's maximum lands.
+    #
+    #   priming  1: ratio 1.58, maxima at position 0 in 9 of 12 blocks
+    #   priming  4: ratio 1.29, 1 of 12
+    #   priming  8: ratio 1.10, 0 of 12
+    #   priming 16: ratio 1.01, 0 of 12
+    #
+    # Eight was enough on the previous instrument. Under section 2.1 it leaves
+    # a systematic 10% elevation on the first observation of every block, and
+    # sixteen removes it. The extra sends cost about 13 ms against a block that
+    # takes roughly half a second.
+    priming_sends: int = 16
 
     def __post_init__(self) -> None:
         if self.payload_bytes < 1:
@@ -341,7 +354,7 @@ class ClaimPlan:
     max_claim_per_worker: int = 1
     max_claim_batch: int = 1
     lease_ms: int = 30_000
-    priming_sends: int = 8
+    priming_sends: int = 16
     operation: Operation = Operation.CLAIM
 
     def as_payload(self) -> dict[str, Any]:
@@ -624,7 +637,7 @@ class TerminalizePlan:
     payload_seed: int
     queues: tuple[str, ...] = ('default',)
     lease_ms: int = 30_000
-    priming_sends: int = 8
+    priming_sends: int = 16
     worker_pid: int = 424242
     worker_hostname: str = 'qual-harness'
     worker_process_name: str = 'qual-terminalize'
@@ -950,41 +963,103 @@ STEADY_STATE_CONSEQUENCE: Final = (
     'the delta between two sides given identical pre-block state'
 )
 
-# Derived from the control run rather than chosen. In steady state the per-block
-# medians spanned 0.617-0.709 ms, a relative spread of 0.149. Without the step
-# the same six blocks ran 0.598-2.144 ms, a spread of 2.586. The bound sits
-# about 2.7x above the measured noise and about 6.5x below the defect, so it
-# separates them without sitting on either.
-BLOCK_MEDIAN_SPREAD_BOUND: Final = 0.40
+# The gate measures TREND, not range. Max-minus-min is an extreme-value
+# statistic: it grows with the number of blocks even when nothing is moving,
+# so a bound derived at six blocks refuses good runs at two hundred. Measured
+# on identical steady-state runs at the mandated block size, the spread came
+# out 0.380, 0.192, 0.104 and 0.092 -- a fourfold range from an unchanged
+# instrument -- while the trend statistic gave 0.046, 0.045 and 0.058.
+#
+# The statistic is the fitted slope over per-block medians, expressed as the
+# total change it predicts across the measured run relative to the mean level:
+# it answers "how far did the operation move from start to finish", which is
+# the failure, and it does not grow with block count.
+#
+# Derived under section 2.1 conditions at blocks of 100, by the same method as
+# the original: steady state 0.058 at worst, the draining defect 0.888. The
+# bound leans toward the tighter side of the sandwich because the harms are
+# asymmetric -- a bound too loose admits a moving measurand and produces
+# numbers nobody can see are wrong, while a bound too tight only costs a re-run.
+BLOCK_MEDIAN_DRIFT_BOUND: Final = 0.20
+
+# What a passing trend does NOT establish, carried into the conditions for the
+# same reason DriftAttributionBound carries its own exclusion: an unqualified
+# "flat" reads as a claim the window held still in every respect.
+DRIFT_GATE_EXCLUDES: Final = (
+    'a symmetric mid-run excursion, which nets a slope near zero and passes; '
+    'dispersion of that shape is answered by the recorded spread, the '
+    'bootstrap interval width, and confirm-on-repeat'
+)
 
 
-def block_median_spread(
+def measured_block_medians(
+    spec: InterleaveSpec, blocks: Sequence[BlockResult]
+) -> tuple[float, ...]:
+    """Per-block medians over the measured half, in block order."""
+    medians = tuple(
+        _median(result.samples)
+        for result in blocks
+        if result.block >= spec.warmup_blocks
+    )
+    if len(medians) < 2:
+        raise MeasurementError(
+            'fewer than two measured blocks, so the run has no trend to check'
+        )
+    return medians
+
+
+def block_median_drift(
     spec: InterleaveSpec, blocks: Sequence[BlockResult]
 ) -> float:
-    """Relative spread of per-block medians over the measured half.
+    """How far the operation moved from the start of the run to its end.
 
     The failure this detects is the measurand moving during the run: an
     operation that mutates the rows it reads gets slower as the versions it
     must skip accumulate. Counterbalancing cannot help — it holds the mean
     position gap at zero, which cancels the effect on a location statistic
     while leaving it in the tail.
+
+    Reported as the fitted slope's total predicted change across the measured
+    blocks, relative to their mean. A range statistic would grow with the
+    number of blocks on an instrument that never moved.
+
+    **What it does not police.** A symmetric mid-run excursion — the machine
+    slowing and recovering — nets a slope near zero and passes, because it did
+    not move the run from start to finish. That shape lands instead in the
+    recorded spread, in the bootstrap interval's width, and in confirm-on-repeat,
+    each of which sees dispersion this statistic is blind to by construction. A
+    zero trend says the operation ended where it began, never that the window
+    held still throughout.
     """
-    medians = [
-        _median(result.samples)
-        for result in blocks
-        if result.block >= spec.warmup_blocks
-    ]
-    if not medians:
+    medians = measured_block_medians(spec, blocks)
+    count = len(medians)
+    mean_index = (count - 1) / 2.0
+    mean_median = sum(medians) / count
+    if mean_median <= 0.0:
         raise MeasurementError(
-            'no measured blocks, so the run has no steady state to check'
+            f'the measured blocks average a non-positive median '
+            f'({mean_median}); a relative drift against it is undefined'
         )
-    lowest = min(medians)
-    if lowest <= 0.0:
-        raise MeasurementError(
-            f'a block reported a non-positive median ({lowest}); a spread '
-            'against it is undefined'
-        )
-    return (max(medians) - lowest) / lowest
+    covariance = sum(
+        (index - mean_index) * (value - mean_median)
+        for index, value in enumerate(medians)
+    )
+    variance = sum((index - mean_index) ** 2 for index in range(count))
+    slope = covariance / variance
+    return abs(slope) * (count - 1) / mean_median
+
+
+def block_median_spread(
+    spec: InterleaveSpec, blocks: Sequence[BlockResult]
+) -> float:
+    """Range of per-block medians, recorded but never gated on.
+
+    Kept because it describes the run for a reader, and excluded from the gate
+    because it is an extreme-value statistic: it grows with the number of
+    blocks on an instrument that never moved.
+    """
+    medians = measured_block_medians(spec, blocks)
+    return (max(medians) - min(medians)) / min(medians)
 
 
 def _median(values: Sequence[float]) -> float:
@@ -999,22 +1074,22 @@ def assert_block_medians_are_flat(
     spec: InterleaveSpec,
     blocks: Sequence[BlockResult],
     *,
-    bound: float = BLOCK_MEDIAN_SPREAD_BOUND,
+    bound: float = BLOCK_MEDIAN_DRIFT_BOUND,
 ) -> None:
     """The row must prove its own steady state, not assert it.
 
     Having a steady-state step is a claim about the harness. Refusing a run
     whose blocks did not hold still is a property of the row.
     """
-    spread = block_median_spread(spec, blocks)
-    if spread > bound:
+    drift = block_median_drift(spec, blocks)
+    if drift > bound:
         raise MeasurementError(
-            f'per-block medians span {spread:.3f} relative, over the {bound} '
-            'this row allows: the operation changed while it was being '
-            'measured, so the row reports an average over a moving measurand. '
-            'A zero mean-position gap cancels this in a location statistic and '
-            'leaves it in the tail, which is why such a run can look stable at '
-            'p50 and disagree with itself at p99'
+            f'per-block medians drift {drift:.3f} relative across the measured '
+            f'run, over the {bound} this row allows: the operation changed '
+            'while it was being measured, so the row reports an average over a '
+            'moving measurand. A zero mean-position gap cancels this in a '
+            'location statistic and leaves it in the tail, which is why such a '
+            'run can look stable at p50 and disagree with itself at p99'
         )
 
 
@@ -1078,9 +1153,24 @@ def samples_in_schedule_order(
 
 
 def assert_run_is_measurable(
-    spec: InterleaveSpec, blocks: Sequence[BlockResult]
+    spec: InterleaveSpec,
+    blocks: Sequence[BlockResult],
+    *,
+    server: ServerMode,
 ) -> tuple[tuple[ScheduledObservation, ...], tuple[float, ...]]:
-    """Every check that must hold before a cell may be built from this run."""
+    """Every check that must hold before a cell may be built from this run.
+
+    The server mode is a required argument rather than an optional one. A run
+    that could be validated without naming the instrument it ran on is a run
+    whose limits belong to a mode nobody checked, which is how five rows came
+    to be measured on default durability settings.
+    """
+    assert_mode_conformance(server)
+    assert_structure_conformance(
+        server.mode,
+        observations_per_side=spec.measured_observations_per_side(),
+        block_size=spec.block_size,
+    )
     assert_blocks_ran_in_schedule_order(spec, blocks)
     assert_configurations_held(blocks)
     assert_block_medians_are_flat(spec, blocks)
@@ -1095,11 +1185,20 @@ def run_conditions(
     blocks: Sequence[BlockResult],
     *,
     unit: SampleUnit,
+    server: ServerMode,
+    spec: InterleaveSpec,
 ) -> dict[str, Any]:
     """What the artifact records about how the observations were taken."""
     return {
         'plan': plan.as_payload(),
         'unit': unit.value,
+        'instrument': server.as_conditions(),
+        'steady_state_trend': {
+            'drift': block_median_drift(spec, blocks),
+            'bound': BLOCK_MEDIAN_DRIFT_BOUND,
+            'spread_recorded_not_gated': block_median_spread(spec, blocks),
+            'excludes': DRIFT_GATE_EXCLUDES,
+        },
         'blocks': [
             {
                 'block': result.block,

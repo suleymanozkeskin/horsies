@@ -13,10 +13,11 @@ from tests.task_history_prototypes.paired_interleave import (
     InterleaveSpec,
 )
 from tests.task_history_prototypes.paired_measure import (
-    BLOCK_MEDIAN_SPREAD_BOUND,
+    BLOCK_MEDIAN_DRIFT_BOUND,
     SIDE_SAMPLES_MARKER,
     STEADY_STATE_STATEMENTS,
     assert_block_medians_are_flat,
+    block_median_drift,
     block_median_spread,
     BlockResult,
     MeasurementError,
@@ -36,6 +37,11 @@ from tests.task_history_prototypes.paired_seed import (
     SeedConfigSpec,
     SideConfig,
 )
+from tests.task_history_prototypes.paired_mode import (
+    REQUIRED_SETTINGS,
+    BenchMode,
+    ServerMode,
+)
 from tests.task_history_prototypes.paired_sides import (
     BASELINE_SCHEMA_VERSION,
     CANDIDATE_SCHEMA_VERSION,
@@ -44,6 +50,13 @@ from tests.task_history_prototypes.paired_sides import (
 )
 
 SPEC = InterleaveSpec(blocks=8, block_size=5, warmup_blocks=4)
+# Mode-conforming for the checks that are not about the mode itself.
+MODE_SPEC = InterleaveSpec(blocks=208, block_size=100, warmup_blocks=8)
+SERVER = ServerMode(
+    mode=BenchMode.PAIRED_MICRO,
+    settings=dict(REQUIRED_SETTINGS[BenchMode.PAIRED_MICRO]),
+    active_client_backends=0,
+)
 PLAN = MeasurementPlan(
     task_name='probe',
     operation=Operation.ORDINARY_ENQUEUE,
@@ -393,9 +406,33 @@ def test_the_realised_schedule_marks_warmup_by_block() -> None:
 
 
 def test_a_complete_run_passes_every_check() -> None:
-    schedule, samples = assert_run_is_measurable(SPEC, _blocks())
+    blocks = _mode_blocks()
+    schedule, samples = assert_run_is_measurable(
+        MODE_SPEC, blocks, server=SERVER
+    )
     assert len(schedule) == len(samples)
-    assert samples == samples_in_schedule_order(_blocks())
+    assert samples == samples_in_schedule_order(blocks)
+
+
+def test_a_run_shaped_outside_the_mode_is_refused() -> None:
+    """Block size is what the ordering alternates over, so it is not free."""
+    from tests.task_history_prototypes.paired_mode import ModeConformanceError
+
+    with pytest.raises(ModeConformanceError, match='requires at least'):
+        assert_run_is_measurable(SPEC, _blocks(), server=SERVER)
+
+
+def test_a_run_on_the_wrong_instrument_is_refused() -> None:
+    """The limits belong to a mode; a cell on another instrument is not it."""
+    from tests.task_history_prototypes.paired_mode import ModeConformanceError
+
+    wrong = ServerMode(
+        mode=BenchMode.PAIRED_MICRO,
+        settings={**REQUIRED_SETTINGS[BenchMode.PAIRED_MICRO], 'fsync': 'on'},
+        active_client_backends=0,
+    )
+    with pytest.raises(ModeConformanceError, match='not in paired-micro mode'):
+        assert_run_is_measurable(MODE_SPEC, _mode_blocks(), server=wrong)
 
 
 def _resized(
@@ -425,10 +462,10 @@ def test_a_run_giving_one_side_more_observations_is_refused() -> None:
     put it. Only the realised schedule shows it.
     """
     blocks = _resized(
-        _blocks(), {PairedSide.BASELINE: 5, PairedSide.CANDIDATE: 3}
+        _mode_blocks(), {PairedSide.BASELINE: 100, PairedSide.CANDIDATE: 60}
     )
     with pytest.raises(InterleaveError, match='observations'):
-        assert_run_is_measurable(SPEC, blocks)
+        assert_run_is_measurable(MODE_SPEC, blocks, server=SERVER)
 
 
 def test_a_run_with_an_overlong_warmup_stretch_is_refused() -> None:
@@ -436,15 +473,18 @@ def test_a_run_with_an_overlong_warmup_stretch_is_refused() -> None:
 
     The counts and the gap are computed over the measured half, so a warm-up
     stretch that grew is invisible to both. The two adjacent candidate warm-up
-    blocks here hold sixteen consecutive observations against the ten this
-    ordering permits, and only the run-length check sees it.
+    blocks here hold 320 consecutive observations against the 200 this ordering
+    permits, and only the run-length check sees it.
     """
-    sizes = [5, 8, 8, 5, 5, 5, 5, 5]
+    base = _mode_blocks()
+    sizes = [MODE_SPEC.block_size] * len(base)
+    sizes[1] = 160
+    sizes[2] = 160
     blocks = [
         BlockResult(
             block=result.block,
             side=result.side,
-            arm=result.side,
+            arm=result.arm,
             identity=result.identity,
             config=result.config,
             samples=tuple(
@@ -453,24 +493,24 @@ def test_a_run_with_an_overlong_warmup_stretch_is_refused() -> None:
             ),
             wall_clock_seconds=result.wall_clock_seconds,
         )
-        for result in _blocks()
+        for result in base
     ]
-    schedule = observations_in_schedule_order(SPEC, blocks)
+    schedule = observations_in_schedule_order(MODE_SPEC, blocks)
     measured_per_side = {
         side: sum(
             1 for entry in schedule if not entry.warmup and entry.side is side
         )
         for side in (PairedSide.BASELINE, PairedSide.CANDIDATE)
     }
-    assert set(measured_per_side.values()) == {10}
+    assert set(measured_per_side.values()) == {10_000}
     with pytest.raises(InterleaveError, match='consecutive observations'):
-        assert_run_is_measurable(SPEC, blocks)
+        assert_run_is_measurable(MODE_SPEC, blocks, server=SERVER)
 
 
 def test_conditions_record_the_cost_of_every_block() -> None:
-    conditions = run_conditions(PLAN, _blocks(), unit=SampleUnit.MILLISECONDS)
+    conditions = run_conditions(PLAN, _blocks(), unit=SampleUnit.MILLISECONDS, server=SERVER, spec=SPEC)
     assert conditions['unit'] == 'ms'
-    assert conditions['plan']['priming_sends'] == 8
+    assert conditions['plan']['priming_sends'] == 16
     assert len(conditions['blocks']) == SPEC.blocks
     assert conditions['wall_clock_seconds_total'] == pytest.approx(
         0.5 * SPEC.blocks
@@ -540,28 +580,48 @@ def test_an_operation_paired_row_interleaves_on_one_build() -> None:
     two operations would be measured in separate windows and the drift between
     those windows would be attributed to the key.
     """
-    from tests.task_history_prototypes.paired_interleave import block_sides
-
     blocks = [
         BlockResult(
-            block=index,
+            block=result.block,
             side=PairedSide.CANDIDATE,
-            arm=arm,
+            arm=result.arm,
             identity=_identity(PairedSide.CANDIDATE),
             config=_config(PairedSide.CANDIDATE),
-            samples=tuple(
-                1.0 + position * 0.001 for position in range(SPEC.block_size)
-            ),
-            wall_clock_seconds=0.5,
+            samples=result.samples,
+            wall_clock_seconds=result.wall_clock_seconds,
         )
-        for index, arm in enumerate(block_sides(SPEC))
+        for result in _mode_blocks()
     ]
-    schedule, samples = assert_run_is_measurable(SPEC, blocks)
+    schedule, samples = assert_run_is_measurable(
+        MODE_SPEC, blocks, server=SERVER
+    )
     assert len(schedule) == len(samples)
     assert {entry.side for entry in schedule} == {
         PairedSide.BASELINE, PairedSide.CANDIDATE
     }
     assert {result.side for result in blocks} == {PairedSide.CANDIDATE}
+
+
+def _mode_blocks(
+    *, medians: list[float] | None = None, spec: InterleaveSpec = MODE_SPEC
+) -> list[BlockResult]:
+    """Blocks shaped the way section 2.1 mandates, for the whole-run checks."""
+    from tests.task_history_prototypes.paired_interleave import block_sides
+
+    sides = block_sides(spec)
+    values = medians or [1.0 + (index % 5) * 0.002 for index in range(len(sides))]
+    return [
+        BlockResult(
+            block=index,
+            side=arm,
+            arm=arm,
+            identity=_identity(arm),
+            config=_config(arm),
+            samples=(values[index],) * spec.block_size,
+            wall_clock_seconds=0.5,
+        )
+        for index, arm in enumerate(sides)
+    ]
 
 
 def _blocks_with_medians(medians: list[float]) -> list[BlockResult]:
@@ -583,11 +643,11 @@ def _blocks_with_medians(medians: list[float]) -> list[BlockResult]:
 
 
 def test_a_steady_run_passes_the_flatness_gate() -> None:
-    """The control run's own shape: per-block medians 0.617-0.709 ms."""
+    """A run that wanders without going anywhere."""
     blocks = _blocks_with_medians(
-        [0.6, 0.6, 0.6, 0.6, 0.617, 0.647, 0.709, 0.639]
+        [0.6, 0.6, 0.6, 0.6, 0.75, 0.79, 0.76, 0.78]
     )
-    assert block_median_spread(SPEC, blocks) == pytest.approx(0.149, abs=0.001)
+    assert block_median_drift(SPEC, blocks) < BLOCK_MEDIAN_DRIFT_BOUND
     assert_block_medians_are_flat(SPEC, blocks)
 
 
@@ -601,7 +661,7 @@ def test_a_run_whose_measurand_moved_is_refused() -> None:
     blocks = _blocks_with_medians(
         [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
     )
-    assert block_median_spread(SPEC, blocks) > BLOCK_MEDIAN_SPREAD_BOUND
+    assert block_median_drift(SPEC, blocks) > BLOCK_MEDIAN_DRIFT_BOUND
     with pytest.raises(MeasurementError, match='changed while it was being measured'):
         assert_block_medians_are_flat(SPEC, blocks)
 
@@ -615,22 +675,53 @@ def test_the_gate_reads_only_the_measured_half() -> None:
 
 
 def test_the_bound_separates_the_measured_noise_from_the_defect() -> None:
-    """Derived, not chosen: above the control run, far below the defect."""
-    steady = _blocks_with_medians(
-        [0.6, 0.6, 0.6, 0.6, 0.617, 0.647, 0.709, 0.639]
-    )
-    moving = _blocks_with_medians(
-        [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
-    )
-    assert block_median_spread(SPEC, steady) < BLOCK_MEDIAN_SPREAD_BOUND
-    assert block_median_spread(SPEC, moving) > BLOCK_MEDIAN_SPREAD_BOUND
-    assert BLOCK_MEDIAN_SPREAD_BOUND / block_median_spread(SPEC, steady) > 2.5
-    assert block_median_spread(SPEC, moving) / BLOCK_MEDIAN_SPREAD_BOUND > 6.0
+    """Derived under the mode's own conditions, and shown to sandwich.
+
+    Steady state measured 0.058 at worst over three runs; the draining defect
+    measured 0.888. The bound must sit clear of both.
+    """
+    assert BLOCK_MEDIAN_DRIFT_BOUND / 0.058 > 3.0
+    assert 0.888 / BLOCK_MEDIAN_DRIFT_BOUND > 4.0
 
 
-def test_a_run_with_no_measured_blocks_has_no_steady_state_to_check() -> None:
-    with pytest.raises(MeasurementError, match='no measured blocks'):
-        block_median_spread(SPEC, [])
+def test_the_gate_statistic_does_not_grow_with_block_count() -> None:
+    """A range statistic would, which is why the gate does not use one.
+
+    The same wandering-but-going-nowhere instrument, measured over more
+    blocks: its range widens because the extremes have more chances to appear,
+    while its trend does not.
+    """
+    few = _blocks_with_medians([0.6, 0.6, 0.6, 0.6, 0.75, 0.79, 0.76, 0.78])
+    wide = InterleaveSpec(blocks=16, block_size=5, warmup_blocks=4)
+    many = [
+        BlockResult(
+            block=index,
+            side=arm,
+            arm=arm,
+            identity=_identity(arm),
+            config=_config(arm),
+            samples=(value,) * wide.block_size,
+            wall_clock_seconds=0.5,
+        )
+        for index, (arm, value) in enumerate(
+            zip(
+                __import__(
+                    'tests.task_history_prototypes.paired_interleave',
+                    fromlist=['block_sides'],
+                ).block_sides(wide),
+                [0.6] * 4 + [0.75, 0.79, 0.76, 0.78, 0.74, 0.80, 0.75, 0.77,
+                             0.79, 0.74, 0.78, 0.76],
+                strict=True,
+            )
+        )
+    ]
+    assert block_median_spread(wide, many) > block_median_spread(SPEC, few)
+    assert block_median_drift(wide, many) < BLOCK_MEDIAN_DRIFT_BOUND
+
+
+def test_a_run_with_too_few_measured_blocks_has_no_trend_to_check() -> None:
+    with pytest.raises(MeasurementError, match='no trend to check'):
+        block_median_drift(SPEC, [])
 
 
 def test_the_steady_state_step_returns_rows_before_it_vacuums() -> None:
@@ -662,11 +753,13 @@ def test_the_steady_state_step_returns_a_row_whole() -> None:
 
 def test_a_complete_run_is_gated_on_flatness_too() -> None:
     """The gate is part of what a run must discharge, not an optional check."""
-    blocks = _blocks_with_medians(
-        [0.5, 0.5, 0.5, 0.5, 0.598, 1.250, 1.958, 2.144]
-    )
+    rising = [0.5] * 8 + [
+        0.6 + index * 0.008 for index in range(MODE_SPEC.blocks - 8)
+    ]
     with pytest.raises(MeasurementError, match='changed while it was being measured'):
-        assert_run_is_measurable(SPEC, blocks)
+        assert_run_is_measurable(
+            MODE_SPEC, _mode_blocks(medians=rising), server=SERVER
+        )
 
 
 def test_the_claim_body_refuses_an_empty_claim() -> None:
@@ -833,3 +926,36 @@ def test_the_setup_declares_itself_as_harness_authored() -> None:
     assert payload['running_setup_provenance'] == RUNNING_SETUP_PROVENANCE
     assert 'harness-authored' in RUNNING_SETUP_PROVENANCE
     assert 'child_runner.py' in RUNNING_SETUP_PROVENANCE
+
+
+def test_the_priming_count_is_the_one_the_mode_derived() -> None:
+    """Re-derived under section 2.1; eight was enough on the old instrument."""
+    assert PLAN.priming_sends == 16
+
+
+def test_the_trend_gate_records_what_it_does_not_police() -> None:
+    """An unqualified pass reads as a claim the window held still throughout.
+
+    It is not one: a symmetric mid-run excursion nets a slope near zero. The
+    exclusion is carried in the conditions for the same reason
+    DriftAttributionBound carries its own.
+    """
+    from tests.task_history_prototypes.paired_measure import DRIFT_GATE_EXCLUDES
+
+    conditions = run_conditions(
+        PLAN, _blocks(), unit=SampleUnit.MILLISECONDS, server=SERVER, spec=SPEC
+    )
+    trend = conditions['steady_state_trend']
+    assert trend['excludes'] == DRIFT_GATE_EXCLUDES
+    assert 'symmetric mid-run excursion' in trend['excludes']
+    assert trend['bound'] == BLOCK_MEDIAN_DRIFT_BOUND
+    assert 'spread_recorded_not_gated' in trend
+
+
+def test_a_symmetric_excursion_passes_the_trend_gate() -> None:
+    """Named because it is the shape the gate is blind to by construction."""
+    up_and_back = [0.5] * 4 + [0.60, 0.95, 0.95, 0.60]
+    blocks = _blocks_with_medians(up_and_back)
+    assert block_median_drift(SPEC, blocks) < BLOCK_MEDIAN_DRIFT_BOUND
+    assert block_median_spread(SPEC, blocks) > BLOCK_MEDIAN_DRIFT_BOUND
+    assert_block_medians_are_flat(SPEC, blocks)
