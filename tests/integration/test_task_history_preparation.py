@@ -25,6 +25,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.cutover.preparation import (
     PreparationBatch,
     PreparationComplete,
+    PreparationCursor,
     prepare_legacy_batch,
 )
 from horsies.core.history.cutover.relocation import RelocationComplete
@@ -61,26 +62,26 @@ async def run_preparation_to_complete(
     retain_default: bool,
     batch_size: int = 2,
 ) -> tuple[list[PreparationBatch], PreparationComplete]:
-    """Drive batches to completion, threading the keyset watermark.
+    """Drive batches to completion, threading the cursor.
 
-    Each batch's ``last_id`` feeds the next call's ``after_id`` — the
-    driver contract that keeps preparation linear: without it every
-    batch re-walks all previously prepared rows and the stage goes
-    quadratic in rows.
+    Each batch's ``cursor`` feeds the next call — the loop contract
+    that keeps preparation linear: a driver that never advances the
+    cursor re-walks all previously prepared rows every batch and the
+    stage goes quadratic in rows.
     """
     batches: list[PreparationBatch] = []
-    after_id: str | None = None
+    cursor = PreparationCursor.start()
     while True:
         outcome = await prepare_legacy_batch(
             connection,
             retain_default=retain_default,
             batch_size=batch_size,
-            after_id=after_id,
+            cursor=cursor,
         )
         if isinstance(outcome, PreparationComplete):
             return batches, outcome
         batches.append(outcome)
-        after_id = outcome.last_id
+        cursor = outcome.cursor
 
 
 class TestPreparation:
@@ -177,7 +178,10 @@ class TestPreparation:
                 # The marker is the idempotence instrument: a resumed
                 # run has nothing to prepare.
                 resumed = await prepare_legacy_batch(
-                    connection, retain_default=True, batch_size=10
+                    connection,
+                    retain_default=True,
+                    batch_size=10,
+                    cursor=PreparationCursor.start(),
                 )
                 assert isinstance(resumed, PreparationComplete)
         finally:
@@ -293,32 +297,35 @@ class TestKeysetWatermark:
                     connection,
                     retain_default=True,
                     batch_size=2,
-                    after_id=ordered[-1],
+                    cursor=PreparationCursor(after_id=ordered[-1]),
                 )
                 assert isinstance(beyond, PreparationComplete)
 
                 first = await prepare_legacy_batch(
-                    connection, retain_default=True, batch_size=2
+                    connection,
+                    retain_default=True,
+                    batch_size=2,
+                    cursor=PreparationCursor.start(),
                 )
                 assert isinstance(first, PreparationBatch)
                 assert first.rows_prepared == 2
-                assert first.last_id == ordered[1]
+                assert first.cursor.after_id == ordered[1]
 
                 second = await prepare_legacy_batch(
                     connection,
                     retain_default=True,
                     batch_size=2,
-                    after_id=first.last_id,
+                    cursor=first.cursor,
                 )
                 assert isinstance(second, PreparationBatch)
                 assert second.rows_prepared == 2
-                assert second.last_id == ordered[-1]
+                assert second.cursor.after_id == ordered[-1]
 
                 done = await prepare_legacy_batch(
                     connection,
                     retain_default=True,
                     batch_size=2,
-                    after_id=second.last_id,
+                    cursor=second.cursor,
                 )
                 assert isinstance(done, PreparationComplete)
         finally:
