@@ -35,6 +35,7 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.workflows.lifecycle import pause_workflow
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.integration.history_seeding import read_attempts
 
 pytestmark = [pytest.mark.integration]
 
@@ -246,17 +247,13 @@ async def test_future_failure_on_non_retryable_running_task_is_terminal_failed(
     assert row['error_code'] == OperationalErrorCode.WORKER_CRASHED.value
     assert row['result'] is not None
     assert row['terminalization_kind'] == 'FAIL_RUNNING'
-    attempts = (
-        await session.execute(
-            text("""
-                SELECT outcome, will_retry, error_code
-                FROM horsies_task_attempts
-                WHERE task_id = :id
-            """),
-            {'id': task_id},
-        )
-    ).fetchall()
-    assert attempts == [('FAILED', False, OperationalErrorCode.WORKER_CRASHED.value)]
+    # The move purges the live attempt rows into the record's snapshot,
+    # so the attempt is read wherever it now lives.
+    attempts = await read_attempts(session, task_id)
+    assert [
+        (attempt.outcome, attempt.will_retry, attempt.error_code)
+        for attempt in attempts
+    ] == [('FAILED', False, OperationalErrorCode.WORKER_CRASHED.value)]
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -285,13 +282,9 @@ async def test_future_failure_retry_replays_committed_terminal_phase(
     assert (
         persisted_result.unwrap_err().error_code == OperationalErrorCode.WORKER_CRASHED
     )
-    attempt_count = (
-        await session.execute(
-            text('SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = :id'),
-            {'id': task_id},
-        )
-    ).scalar_one()
-    assert attempt_count == 1
+    # The replay must add no attempt to the one the first call committed,
+    # counted wherever the move left it.
+    assert len(await read_attempts(session, task_id)) == 1
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -507,7 +500,7 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
                        t.terminalization_kind
                 FROM horsies_workflows w
                 JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
-                JOIN horsies_tasks t ON t.id = :task_id
+                JOIN itest_task_rows t ON t.id = CAST(:task_id AS uuid)
                 WHERE w.id = :workflow_id
                   AND wt.id = :workflow_task_id
             """),

@@ -270,19 +270,24 @@ def history_row_params(
     }
 
 
-async def read_attempt_history(
+async def read_attempts(
     session: AsyncSession, task_id: str
-) -> list[tuple[int, str, str | None]]:
-    """(attempt, outcome, failed_reason) tuples, wherever they live.
+) -> tuple[AttemptRecord, ...]:
+    """Every recorded attempt, wherever it lives, attempt ascending.
 
     Live attempt rows while the task is live; after terminalization the
     move purges them and the history row's snapshot is their only home.
+    One reader, because the two homes are one question and a caller
+    asking it twice can only get them out of step.
     """
     live = (
         await session.execute(
             text(
                 """
-                SELECT attempt, outcome, failed_reason
+                SELECT attempt, outcome, will_retry, started_at,
+                       finished_at, error_code, error_message,
+                       failed_reason, worker_id, worker_hostname,
+                       worker_pid, worker_process_name
                 FROM horsies_task_attempts
                 WHERE task_id = CAST(:id AS uuid)
                 ORDER BY attempt
@@ -292,7 +297,23 @@ async def read_attempt_history(
         )
     ).all()
     if live:
-        return [tuple(row) for row in live]
+        return tuple(
+            AttemptRecord(
+                attempt=row.attempt,
+                outcome=row.outcome,
+                will_retry=row.will_retry,
+                started_at=row.started_at,
+                finished_at=row.finished_at,
+                error_code=row.error_code,
+                error_message=row.error_message,
+                failed_reason=row.failed_reason,
+                worker_id=row.worker_id,
+                worker_hostname=row.worker_hostname,
+                worker_pid=row.worker_pid,
+                worker_process_name=row.worker_process_name,
+            )
+            for row in live
+        )
     snapshot = (
         await session.execute(
             text(
@@ -308,7 +329,7 @@ async def read_attempt_history(
         )
     ).first()
     if snapshot is None:
-        return []
+        return ()
     decoded = decode_attempt_snapshot(
         version=snapshot.attempt_archive_version,
         codec=snapshot.attempt_snapshot_codec,
@@ -318,69 +339,30 @@ async def read_attempt_history(
     )
     match decoded:
         case DecodedArchiveValue(value=records):
-            return [
-                (record.attempt, record.outcome, record.failed_reason)
-                for record in records
-            ]
+            return records
         case _:
             raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
+
+
+async def read_attempt_history(
+    session: AsyncSession, task_id: str
+) -> list[tuple[int, str, str | None]]:
+    """(attempt, outcome, failed_reason) tuples, wherever they live."""
+    return [
+        (record.attempt, record.outcome, record.failed_reason)
+        for record in await read_attempts(session, task_id)
+    ]
 
 
 async def read_attempt_workers(
     session: AsyncSession, task_id: str
 ) -> set[str]:
-    """The distinct workers that attempted a task, wherever they live.
-
-    The same two homes as the attempt history itself: live rows before
-    terminalization, the record's snapshot after the move purges them.
-    """
-    live = (
-        await session.execute(
-            text(
-                """
-                SELECT DISTINCT worker_id
-                FROM horsies_task_attempts
-                WHERE task_id = CAST(:id AS uuid)
-                  AND worker_id IS NOT NULL
-                """
-            ),
-            {'id': task_id},
-        )
-    ).all()
-    if live:
-        return {str(row[0]) for row in live}
-    snapshot = (
-        await session.execute(
-            text(
-                """
-                SELECT attempt_archive_version, attempt_snapshot_codec,
-                       attempt_snapshot_content_type, attempt_snapshot,
-                       attempt_snapshot_digest
-                FROM horsies_task_history
-                WHERE task_id = CAST(:id AS uuid)
-                """
-            ),
-            {'id': task_id},
-        )
-    ).first()
-    if snapshot is None:
-        return set()
-    decoded = decode_attempt_snapshot(
-        version=snapshot.attempt_archive_version,
-        codec=snapshot.attempt_snapshot_codec,
-        content_type=snapshot.attempt_snapshot_content_type,
-        payload=bytes(snapshot.attempt_snapshot),
-        digest=bytes(snapshot.attempt_snapshot_digest),
-    )
-    match decoded:
-        case DecodedArchiveValue(value=records):
-            return {
-                record.worker_id
-                for record in records
-                if record.worker_id is not None
-            }
-        case _:
-            raise AssertionError(f'corrupt attempt snapshot: {decoded!r}')
+    """The distinct workers that attempted a task, wherever they live."""
+    return {
+        record.worker_id
+        for record in await read_attempts(session, task_id)
+        if record.worker_id is not None
+    }
 
 
 async def route_rows(session: AsyncSession, rows: tuple[Any, ...]) -> None:
