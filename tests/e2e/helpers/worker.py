@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -17,6 +18,48 @@ ReadyCheck = Callable[[], bool]
 # Prevents stale-worker cleanup from killing intentionally running workers in
 # nested contexts (e.g., tests that start worker A then worker B).
 _ACTIVE_WORKER_CONTEXTS = 0
+
+
+# Worker output goes to a FILE, never a pipe. Nothing reads a worker's
+# pipes between readiness and teardown, so a worker that logs enough to
+# fill the pipe buffer blocks on write — the process under test wedged
+# by the harness observing it, and the explanation trapped in the buffer
+# nobody drains. A file has no such bound, and the tail is printed when
+# a worker exits badly so pytest surfaces it on the failing test.
+_WORKER_LOGS: dict[int, str] = {}
+_LOG_TAIL_BYTES = 8_192
+
+
+def _worker_log() -> tuple[int, str]:
+    handle, path = tempfile.mkstemp(prefix='horsies-e2e-worker-', suffix='.log')
+    return handle, path
+
+
+def worker_log_tail(proc: subprocess.Popen[str]) -> str:
+    """The tail of one worker's log, or '' if it has none."""
+    path = _WORKER_LOGS.get(proc.pid)
+    if path is None:
+        return ''
+    try:
+        with open(path, 'rb') as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - _LOG_TAIL_BYTES))
+            return log.read().decode('utf-8', 'replace')
+    except OSError:
+        return ''
+
+
+def _report_worker_log(proc: subprocess.Popen[str]) -> None:
+    """Print the tail so a failing test shows why its worker misbehaved."""
+    tail = worker_log_tail(proc)
+    if tail.strip():
+        print(f'--- worker {proc.pid} log tail ---\n{tail}')
+    path = _WORKER_LOGS.pop(proc.pid, None)
+    if path is not None:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def kill_stale_workers() -> None:
@@ -90,21 +133,17 @@ def _wait_for_ready(
 
 
 def _drain_output(proc: subprocess.Popen[str]) -> tuple[str, str]:
-    """Kill the process group and collect its output.
+    """Kill the process group and read what the worker logged.
 
-    Reading a live process's pipe to EOF blocks forever — the worker's
-    executor children inherit the descriptors, so EOF may never come even
-    after the worker itself exits. Kill the whole group first, then drain
-    with a bounded communicate().
+    The log is a file, so this never waits on a descriptor the worker's
+    executor children still hold open. The group dies first so the tail
+    is final.
     """
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    try:
-        return proc.communicate(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        return '', ''
+    return worker_log_tail(proc), ''
 
 
 def _poll_ready(
@@ -198,14 +237,17 @@ def run_worker(
     )
     env['PYTHONPATH'] = repo_root
 
+    log_handle, log_path = _worker_log()
     proc: subprocess.Popen[str] = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
         env=env,
     )
+    os.close(log_handle)
+    _WORKER_LOGS[proc.pid] = log_path
 
     try:
         _wait_for_ready(proc, timeout=timeout, ready_check=ready_check)
@@ -214,6 +256,7 @@ def run_worker(
         try:
             _kill_worker(proc)
         finally:
+            _report_worker_log(proc)
             _exit_worker_context()
 
 
@@ -253,14 +296,17 @@ def run_workers(
     try:
         # Start all workers
         for _ in range(count):
+            log_handle, log_path = _worker_log()
             proc: subprocess.Popen[str] = subprocess.Popen(
                 cmd_base,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
                 text=True,
                 start_new_session=True,
                 env=env,
             )
+            os.close(log_handle)
+            _WORKER_LOGS[proc.pid] = log_path
             workers.append(proc)
 
         # Wait for ALL workers to be ready before yielding.
@@ -276,6 +322,7 @@ def run_workers(
         try:
             for proc in workers:
                 _kill_worker(proc)
+                _report_worker_log(proc)
         finally:
             _exit_worker_context()
 
@@ -303,17 +350,21 @@ def run_scheduler(
     )
     env['PYTHONPATH'] = repo_root
 
+    log_handle, log_path = _worker_log()
     proc: subprocess.Popen[str] = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
         text=True,
         start_new_session=True,
         env=env,
     )
+    os.close(log_handle)
+    _WORKER_LOGS[proc.pid] = log_path
 
     try:
         _wait_for_ready(proc, timeout=timeout, ready_check=ready_check)
         yield proc
     finally:
         _kill_worker(proc)
+        _report_worker_log(proc)
