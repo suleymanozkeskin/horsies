@@ -252,7 +252,16 @@ from sqlalchemy import text
 #      registry is bounded pre-cutover; idempotence lives at the
 #      runner's existence check against the imported index name.
 
-SCHEMA_VERSION = 30
+# v31: WorkflowStatus.EXPIRED joins the workflow terminal set (paused
+#      past the deployment's declared age policy). The generated
+#      partial-index predicate of idx_horsies_workflows_retention
+#      changes with the set, and IF NOT EXISTS never rebuilds — the
+#      migration drops and recreates the index explicitly (the class
+#      rule for any changed generated predicate). The retention
+#      DELETEs' IN-lists render from the same literal set and begin
+#      admitting expired workflows, which is the point.
+
+SCHEMA_VERSION = 31
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

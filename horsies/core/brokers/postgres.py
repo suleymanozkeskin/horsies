@@ -962,6 +962,18 @@ class PostgresBroker:
                 for statement in CREATE_RESERVATION_REGISTRY_INDEXES_SQL:
                     await conn.execute(statement)
 
+            # Migration (v31): EXPIRED joined the workflow terminal
+            # set, which changes the generated partial-index predicate
+            # of idx_horsies_workflows_retention. IF NOT EXISTS never
+            # rebuilds an existing index, so the migration drops and
+            # recreates explicitly — the class rule for any changed
+            # generated predicate; a fresh database gets the new
+            # predicate either way, only deployed ones are at risk.
+            await conn.execute(
+                text('DROP INDEX IF EXISTS idx_horsies_workflows_retention')
+            )
+            await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
+
             # The fresh-world arm of the two-worlds fork (predicate
             # read above): a uuid-born install is BORN AT THE
             # CUTOVER'S END STATE. It has no old fleet, so its

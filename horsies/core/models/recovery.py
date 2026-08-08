@@ -1,6 +1,7 @@
 # horsies/core/models/recovery.py
 from __future__ import annotations
 from typing import Annotated, Self, cast
+from datetime import timedelta
 from pydantic import BaseModel, Field, model_validator
 from horsies.core.errors import (
     ConfigurationError,
@@ -142,6 +143,15 @@ class RecoveryConfig(BaseModel):
         ),
     )
 
+    paused_workflow_auto_cancel_after: timedelta | None = Field(
+        default=None,
+        description=(
+            'Age past which a PAUSED workflow is expired by policy '
+            '(WorkflowStatus.EXPIRED); None disables the sweep — no '
+            'deployment changes behavior without declaring the rule'
+        ),
+    )
+
     history_leaf_horizon_days: Annotated[int, Field(ge=2, le=14)] = Field(
         default=3,
         description=(
@@ -185,6 +195,19 @@ class RecoveryConfig(BaseModel):
             'duration, row locks, and WAL; each batch commits independently'
         ),
     )
+
+    @model_validator(mode='after')
+    def paused_expiry_age_is_positive(self) -> 'RecoveryConfig':
+        """A zero or negative age would expire every pause instantly."""
+        if (
+            self.paused_workflow_auto_cancel_after is not None
+            and self.paused_workflow_auto_cancel_after <= timedelta(0)
+        ):
+            raise ValueError(
+                'paused_workflow_auto_cancel_after must be a positive '
+                'duration; use None to disable the sweep'
+            )
+        return self
 
     @model_validator(mode='before')
     @classmethod

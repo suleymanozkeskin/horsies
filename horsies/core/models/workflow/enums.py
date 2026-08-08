@@ -25,6 +25,7 @@ class WorkflowStatus(str, Enum):
                          → FAILED (on task failure with on_error=FAIL)
                          → PAUSED (on task failure with on_error=PAUSE)
                          → CANCELLED (user requested)
+        PAUSED → EXPIRED (paused past the declared age policy)
     """
 
     PENDING = 'PENDING'
@@ -45,6 +46,13 @@ class WorkflowStatus(str, Enum):
     CANCELLED = 'CANCELLED'
     """User cancelled via WorkflowHandle.cancel()"""
 
+    EXPIRED = 'EXPIRED'
+    """Paused past the deployment's declared age policy; time ran out.
+
+    CANCELLED stays purely someone-decided. The error column carries
+    the policy name and configured age — status carries the class,
+    text carries the parameters."""
+
     @property
     def is_terminal(self) -> bool:
         """Whether this status represents a final state (no further transitions)."""
@@ -56,6 +64,7 @@ WORKFLOW_TERMINAL_STATES: frozenset[WorkflowStatus] = frozenset(
         WorkflowStatus.COMPLETED,
         WorkflowStatus.FAILED,
         WorkflowStatus.CANCELLED,
+        WorkflowStatus.EXPIRED,
     }
 )
 
