@@ -32,7 +32,11 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
@@ -171,6 +175,48 @@ async def _insert_running_task(
     )
     await session.commit()
     return task_id
+
+
+async def _insert_retried_attempts(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    through: int,
+    worker_id: str = 'w-test-1',
+    worker_hostname: str = 'host-test',
+    worker_pid: int = 9999,
+    worker_process_name: str = 'proc-test',
+) -> None:
+    """Record attempts 1..through as failures that were retried.
+
+    Attempt numbers are `retry_count + 1` at every writing path, so a
+    task seeded at retry_count=N carries these already.
+    """
+    for attempt in range(1, through + 1):
+        await session.execute(
+            text("""
+                INSERT INTO horsies_task_attempts
+                    (task_id, attempt, outcome, will_retry,
+                     started_at, finished_at, error_code,
+                     worker_id, worker_hostname, worker_pid,
+                     worker_process_name)
+                VALUES
+                    (CAST(:task_id AS uuid), :attempt, 'FAILED', TRUE,
+                     NOW(), NOW(), :error_code,
+                     :worker_id, :worker_hostname, :worker_pid,
+                     :worker_process_name)
+            """),
+            {
+                'task_id': task_id,
+                'attempt': attempt,
+                'error_code': OperationalErrorCode.TASK_EXCEPTION.value,
+                'worker_id': worker_id,
+                'worker_hostname': worker_hostname,
+                'worker_pid': worker_pid,
+                'worker_process_name': worker_process_name,
+            },
+        )
+    await session.commit()
 
 
 async def _insert_running_task_with_retry(
@@ -851,6 +897,12 @@ async def test_attempt_number_reflects_retry_count(
 ) -> None:
     """A task with retry_count=2 writes attempt=3."""
     task_id = await _insert_running_task(session, retry_count=2)
+    # The attempts the two retries already recorded. Every path that
+    # raises retry_count writes its own attempt row first, so a live row
+    # at retry_count=2 without attempts 1 and 2 is a shape the engine
+    # never produces — and the archive rejects it, because the snapshot
+    # is decoded as a contiguous sequence from 1.
+    await _insert_retried_attempts(session, task_id, through=2)
     worker = _make_worker(engine)
     result_json = _serialize_ok('after retries')
 
@@ -867,9 +919,13 @@ async def test_attempt_number_reflects_retry_count(
 
     assert is_ok(result)
     attempts = await _get_attempts(session, task_id)
-    assert len(attempts) == 1
-    assert attempts[0]['attempt'] == 3
-    assert attempts[0]['outcome'] == 'COMPLETED'
+    assert [attempt['attempt'] for attempt in attempts] == [1, 2, 3]
+    assert attempts[-1]['outcome'] == 'COMPLETED'
+    assert [attempt['will_retry'] for attempt in attempts] == [
+        True,
+        True,
+        False,
+    ]
 
 
 # ---------------------------------------------------------------------------
