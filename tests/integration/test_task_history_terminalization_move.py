@@ -336,6 +336,14 @@ class TestMoveInvariants:
                     ),
                     {'task_id': task_id, 'worker': WORKER},
                 )
+            # The MESSAGE, not merely a failure. With the refusal
+            # removed the operation still fails — on
+            # result_digest NOT NULL, from the outbox insert — so a bare
+            # `pytest.raises(DBAPIError)` would pass with the defect
+            # present and report a guard that is not guarding. The
+            # deliberate refusal sits ahead of that incidental
+            # constraint so the operator reads a sentence naming the
+            # problem instead of a column name implying it.
             assert 'requires a result payload' in str(raised.value)
 
     @pytest.mark.asyncio
