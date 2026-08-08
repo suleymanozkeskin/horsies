@@ -426,7 +426,8 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     row = (
         await session.execute(
             text("""
-                SELECT status, claimed, claimed_by_worker_id, started_at,
+                SELECT status, claimed, claimed_by_worker_id,
+                       last_claimed_worker_id, started_at,
                        worker_hostname, worker_pid, worker_process_name, error_code
                 FROM itest_task_rows
                 WHERE id = CAST(:id AS uuid)
@@ -438,7 +439,10 @@ async def test_broken_process_pool_marks_non_retryable_running_task_failed(
     assert row is not None
     assert row.status == 'FAILED'
     assert row.claimed is False
-    assert row.claimed_by_worker_id == worker.worker_instance_id
+    # Two questions, two columns: the lease is released by the move and
+    # the claimant that ran the task survives as provenance.
+    assert row.claimed_by_worker_id is None
+    assert row.last_claimed_worker_id == worker.worker_instance_id
     assert row.started_at is not None
     assert row.worker_hostname == 'stale-host'
     assert row.worker_pid == 1234
