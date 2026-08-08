@@ -7,6 +7,10 @@ This module handles recovery of stuck workflows:
 - Child workflows completed but parent node not updated
 - RUNNING workflows with no active tasks (all tasks done but workflow not updated)
 - Stale RUNNING workflows (no progress for threshold period)
+
+The crashed-worker case — a task terminal, its node not advanced — is
+NOT here: terminalization records that progression as it moves the task
+off the live table, and `phase2_recovery` consumes those records.
 """
 
 from __future__ import annotations
@@ -180,6 +184,7 @@ async def recover_stuck_workflows(
             scans all workflows globally. Resume passes the resumed
             workflow's tree so the pause-resume race is closed without a
             full-DB sweep.
+
     Returns:
         Count of recovered workflow tasks.
     """
