@@ -356,8 +356,9 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
         'batch_size': _BATCH_SIZE,
         'excluded_queues': [],
     }
+    # Only the workflow sweep runs: live tasks are never terminal, and
+    # terminal records leave by partition drop rather than by a delete.
     await session.execute(DELETE_EXPIRED_WORKFLOWS_SQL, params)
-    await session.execute(DELETE_EXPIRED_TASKS_SQL, params)
     await session.commit()
 
     row = (
