@@ -370,3 +370,98 @@ async def route_rows(session: AsyncSession, rows: tuple[Any, ...]) -> None:
             )
     session.add_all(live_rows)
     await session.commit()
+
+
+async def force_terminal(
+    session: AsyncSession,
+    task_id: str,
+    *,
+    status: str,
+    result_json: str | None = None,
+    error_code: str | None = None,
+    failed_reason: str | None = None,
+    kind: str | None = None,
+    aged_seconds: float | None = None,
+) -> None:
+    """Put a live task where a real terminalization would have left it.
+
+    Post-split that is a history row (LEGACY_TERMINAL when the forcing
+    test names no operation), no live row, and no live attempt rows —
+    the simulate-a-worker-finished shape the suites previously wrote as
+    an in-place UPDATE. The stored result rides as the record's payload.
+    """
+    snapshot = encode_attempt_snapshot(())
+    payload = result_json.encode() if result_json is not None else None
+    await session.execute(
+        text("""
+            INSERT INTO horsies_task_history (
+                task_id, task_name, queue_name, priority,
+                command_fingerprint_version, command_fingerprint,
+                status, terminalization_kind, terminal_at,
+                retention_anchor_at, retention_class_key,
+                sent_at, enqueued_at, claimed_at, started_at, created_at,
+                retry_count, max_retries,
+                last_claimed_worker_id, last_worker_hostname,
+                result_envelope_version, result_codec, result_content_type,
+                result_payload, result_digest,
+                error_code, final_failed_reason,
+                is_workflow_task, history_schema_version,
+                attempt_archive_version, attempt_snapshot_codec,
+                attempt_snapshot_content_type, attempt_snapshot,
+                attempt_snapshot_digest, rerun_input_disposition
+            )
+            SELECT id, task_name, queue_name, priority,
+                   COALESCE(command_fingerprint_version, 1),
+                   COALESCE(
+                       command_fingerprint,
+                       sha256(convert_to(CAST(id AS text), 'UTF8'))
+                   ),
+                   :status, :kind,
+                   NOW() - make_interval(
+                       secs => CAST(COALESCE(:aged_seconds, 0)
+                                    AS double precision)),
+                   NOW() - make_interval(
+                       secs => CAST(COALESCE(:aged_seconds, 0)
+                                    AS double precision)),
+                   COALESCE(retention_class_key, :default_class),
+                   sent_at, enqueued_at, claimed_at, started_at, created_at,
+                   retry_count, max_retries,
+                   claimed_by_worker_id, worker_hostname,
+                   1, 'json-utf8', 'application/json',
+                   :payload,
+                   CASE WHEN CAST(:payload AS bytea) IS NOT NULL
+                        THEN sha256(CAST(:payload AS bytea)) END,
+                   :error_code, :failed_reason,
+                   is_workflow_task, 1,
+                   :snapshot_version, :snapshot_codec,
+                   :snapshot_content_type, :snapshot_payload,
+                   :snapshot_digest, 'NEVER_ELIGIBLE'
+            FROM horsies_tasks WHERE id = CAST(:id AS uuid)
+        """),
+        {
+            'status': status,
+            'kind': kind if kind is not None else 'LEGACY_TERMINAL',
+            'id': task_id,
+            'payload': payload,
+            'error_code': error_code,
+            'failed_reason': failed_reason,
+            'aged_seconds': aged_seconds,
+            'default_class': HISTORY_SEED_CLASS_KEY,
+            'snapshot_version': snapshot.version,
+            'snapshot_codec': snapshot.codec,
+            'snapshot_content_type': snapshot.content_type,
+            'snapshot_payload': snapshot.payload,
+            'snapshot_digest': snapshot.digest,
+        },
+    )
+    await session.execute(
+        text(
+            'DELETE FROM horsies_task_attempts '
+            'WHERE task_id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id},
+    )
+    await session.execute(
+        text('DELETE FROM horsies_tasks WHERE id = CAST(:id AS uuid)'),
+        {'id': task_id},
+    )

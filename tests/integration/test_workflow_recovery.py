@@ -34,6 +34,7 @@ from horsies.core.workflows.recovery import (
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
+from tests.integration.history_seeding import force_terminal
 from tests.integration.conftest import task_name_for
 
 
@@ -688,17 +689,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Set tasks row to FAILED (as reaper would)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -706,7 +701,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
 
         # Set workflow_tasks to RUNNING (simulating crash before on_workflow_task_complete)
@@ -769,27 +763,19 @@ class TestWorkflowRecovery:
         async def _set_failed_aged(age_secs: float) -> None:
             # Task FAILED with failed_at = NOW() - age_secs; workflow_task back
             # to RUNNING so it is a Case 1.7 candidate.
-            await session.execute(
-                text(
-                    "UPDATE horsies_tasks SET status = 'FAILED', "
-                    'failed_at = NOW() - make_interval(secs => CAST(:age AS double precision)), '
-                    'result = :result, '
-                    'terminal_at = NOW() - make_interval('
-                    'secs => CAST(:age AS double precision)) '
-                    'WHERE id = :tid'
-                ),
-                {
-                    'tid': task_id,
-                    'age': age_secs,
-                    'result': _strict_result_json(
-                        TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.WORKER_CRASHED,
-                                message='Worker died',
-                            ),
+            await force_terminal(
+                session,
+                task_id,
+                status='FAILED',
+                result_json=_strict_result_json(
+                    TaskResult(
+                        err=TaskError(
+                            error_code=OperationalErrorCode.WORKER_CRASHED,
+                            message='Worker died',
                         ),
                     ),
-                },
+                ),
+                aged_seconds=age_secs,
             )
             await session.execute(
                 text(
@@ -861,17 +847,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate worker crash on task A
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -879,7 +859,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
         await session.execute(
             text("""
@@ -943,17 +922,11 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate crash
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(
                     TaskResult(
                         err=TaskError(
                             error_code=OperationalErrorCode.WORKER_CRASHED,
@@ -961,7 +934,6 @@ class TestWorkflowRecovery:
                         ),
                     ),
                 ),
-            },
         )
         await session.execute(
             text("""
@@ -1009,16 +981,7 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate cancellation with no stored result
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'CANCELLED',
-                    result = NULL,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
+        await force_terminal(session, task_id, status='CANCELLED')
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
@@ -1074,16 +1037,7 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate completed task with no stored result
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'COMPLETED',
-                    result = NULL,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
+        await force_terminal(session, task_id, status='COMPLETED')
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
@@ -1155,18 +1109,11 @@ class TestWorkflowRecovery:
                 message='real failure to preserve through recovery',
             ),
         )
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED',
-                    result = :result,
-                    terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {
-                'tid': task_id,
-                'result': _strict_result_json(real_err_result),
-            },
+        await force_terminal(
+            session,
+            task_id,
+            status='FAILED',
+            result_json=_strict_result_json(real_err_result),
         )
         await session.execute(
             text("""
@@ -1668,14 +1615,7 @@ class TestWorkflowRecovery:
         task_id = wt_result.fetchone()[0]
 
         # Simulate: task FAILED with no result stored (worker crashed before writing result)
-        await session.execute(
-            text("""
-                UPDATE horsies_tasks
-                SET status = 'FAILED', result = NULL, terminal_at = NOW()
-                WHERE id = :tid
-            """),
-            {'tid': task_id},
-        )
+        await force_terminal(session, task_id, status='FAILED')
         await session.execute(
             text("""
                 UPDATE horsies_workflow_tasks
