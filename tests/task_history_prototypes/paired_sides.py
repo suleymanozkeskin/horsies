@@ -41,10 +41,22 @@ from typing import Final
 # it is pinned: a baseline reporting anything else is not the baseline.
 BASELINE_SCHEMA_VERSION: Final = 26
 
-# The checkout's schema when this batch was declared. A product schema bump is
-# expected to fail this pin, which is the point: a candidate whose schema moved
-# mid-batch is not comparable with cells measured before it moved.
-CANDIDATE_SCHEMA_VERSION: Final = 30
+# The checkout's schema for this batch. A product schema bump is expected to
+# fail this pin, which is the point: a candidate whose schema moved mid-batch is
+# not comparable with cells measured before it moved.
+#
+# Advanced 30 -> 33 deliberately, after the completeness unit merged. Advancing
+# it does not carry the cells measured at 30 across with it — each row's own
+# files decide that, by transitive import closure over what the row executes:
+#
+#   ordinary/keyed enqueue   97 files, 24 changed  -> re-run
+#   claim                   100 files, 25 changed  -> re-run
+#   no-blocking leaf creation 11 files,  0 changed  -> carries
+#
+# The closure over-approximates execution, so it proves a row CARRIES when
+# nothing in it moved, and only says 'cannot rule out' when something did. Both
+# readings point the safe way.
+CANDIDATE_SCHEMA_VERSION: Final = 33
 
 SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 
