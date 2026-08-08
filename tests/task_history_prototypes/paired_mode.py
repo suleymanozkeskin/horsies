@@ -24,9 +24,9 @@ run in blocks of a hundred does.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Final
+from typing import Any, Final, cast
 
 
 class ModeConformanceError(Exception):
@@ -34,9 +34,17 @@ class ModeConformanceError(Exception):
 
 
 class BenchMode(StrEnum):
-    """The performance modes the budgets define."""
+    """The performance modes the budgets define.
+
+    They are not variations on one instrument. Paired-micro strips durability
+    so a latency delta is not dominated by disk sync; operational restores it
+    because partition DDL, vacuum and WAL are the subject rather than the
+    noise. A row measured in the wrong one is measured against limits written
+    for the other.
+    """
 
     PAIRED_MICRO = 'paired-micro'
+    OPERATIONAL = 'operational'
 
 
 # §2.1. Every one of these is at its PostgreSQL default in the opposite state,
@@ -49,15 +57,54 @@ REQUIRED_SETTINGS: Final[Mapping[BenchMode, Mapping[str, str]]] = {
         'full_page_writes': 'off',
         'autovacuum': 'off',
     },
+    # Section 2.2, verbatim. Every value is the opposite of paired-micro's,
+    # because the subject is different: partition DDL, long readers, vacuum and
+    # freeze, sustained backlog, migration, transcode, disk, and
+    # production-shaped WAL.
+    BenchMode.OPERATIONAL: {
+        'fsync': 'on',
+        'synchronous_commit': 'on',
+        'full_page_writes': 'on',
+        'autovacuum': 'on',
+    },
+}
+
+# Section 2.2 requires autovacuum on "with recorded thresholds and scale
+# factors". A mode that turns autovacuum on without saying at what settings has
+# declared nothing: the same workload behaves differently at a 0.2 scale factor
+# than at 0.02, and the report would not say which it measured.
+REQUIRED_RECORDED_PARAMETERS: Final[Mapping[BenchMode, tuple[str, ...]]] = {
+    BenchMode.PAIRED_MICRO: (),
+    BenchMode.OPERATIONAL: (
+        'autovacuum_vacuum_threshold',
+        'autovacuum_vacuum_scale_factor',
+        'autovacuum_analyze_threshold',
+        'autovacuum_analyze_scale_factor',
+        'autovacuum_vacuum_insert_threshold',
+        'autovacuum_vacuum_insert_scale_factor',
+        'autovacuum_naptime',
+        'autovacuum_max_workers',
+        'autovacuum_vacuum_cost_delay',
+        'autovacuum_vacuum_cost_limit',
+        'checkpoint_timeout',
+        'max_wal_size',
+    ),
 }
 
 # §2.1 again: warm single-row paths use at least 10,000 observations per side
 # in blocks of 100.
-MIN_OBSERVATIONS_PER_SIDE: Final[Mapping[BenchMode, int]] = {
+# Paired-micro only. Section 2.2 states no observation count or block size,
+# because an operational row is not a pooled percentile over blocks — it is a
+# set of intervals reported separately. A mode with no paired structure is
+# recorded as None rather than as zero, so "no requirement" cannot be mistaken
+# for "a requirement of nothing".
+MIN_OBSERVATIONS_PER_SIDE: Final[Mapping[BenchMode, int | None]] = {
     BenchMode.PAIRED_MICRO: 10_000,
+    BenchMode.OPERATIONAL: None,
 }
-REQUIRED_BLOCK_SIZE: Final[Mapping[BenchMode, int]] = {
+REQUIRED_BLOCK_SIZE: Final[Mapping[BenchMode, int | None]] = {
     BenchMode.PAIRED_MICRO: 100,
+    BenchMode.OPERATIONAL: None,
 }
 
 SETTINGS_QUERY: Final = """
@@ -77,17 +124,36 @@ WHERE pid <> pg_backend_pid()
 
 @dataclass(frozen=True, slots=True)
 class ServerMode:
-    """What the server reported about itself, at the moment a cell ran."""
+    """What the server reported about itself, at the moment a cell ran.
+
+    ``recorded_parameters`` carries the values a mode requires reported but
+    does not constrain — autovacuum's thresholds and scale factors above all.
+    They are conditions, not requirements: the report must say what they were,
+    and any value is permitted as long as it is stated.
+
+    ``declared_competing_processes`` names what is deliberately NOT quiesced.
+    Section 2.2's exception for a named reader, writer or maintenance process
+    is an instrument setting like any other, so it is declared rather than
+    merely permitted, and a run with unexplained activity is still refused.
+    """
 
     mode: BenchMode
     settings: Mapping[str, str]
     active_client_backends: int
+    recorded_parameters: Mapping[str, str] = field(
+        default_factory=lambda: cast(Mapping[str, str], {})
+    )
+    declared_competing_processes: tuple[str, ...] = ()
 
     def as_conditions(self) -> dict[str, Any]:
         return {
             'mode': self.mode.value,
             'server_settings': dict(self.settings),
             'active_client_backends': self.active_client_backends,
+            'recorded_parameters': dict(self.recorded_parameters),
+            'declared_competing_processes': list(
+                self.declared_competing_processes
+            ),
         }
 
 
@@ -133,11 +199,27 @@ def assert_mode_conformance(observed: ServerMode) -> None:
             'limits this row is judged against were authored for that mode, '
             'so a number taken here is measured true and measured elsewhere'
         )
-    if observed.active_client_backends:
+    unrecorded = sorted(
+        set(REQUIRED_RECORDED_PARAMETERS[observed.mode])
+        - set(observed.recorded_parameters)
+    )
+    if unrecorded:
+        raise ModeConformanceError(
+            f'{observed.mode} requires these reported and they are absent: '
+            f'{unrecorded}. The mode does not constrain their values, but a '
+            'report that does not say what they were has not said which '
+            'instrument it measured'
+        )
+    undeclared = observed.active_client_backends - len(
+        observed.declared_competing_processes
+    )
+    if undeclared > 0:
         raise ModeConformanceError(
             f'{observed.active_client_backends} other client backend(s) are '
-            'active; the mode requires the surrounding units quiesced, and '
-            'anything else working on this instance competes for it'
+            f'active and {len(observed.declared_competing_processes)} are '
+            'declared; the mode requires the surrounding units quiesced apart '
+            'from processes named as under test, and undeclared activity '
+            'competes for the instrument without appearing in the conditions'
         )
 
 
@@ -149,14 +231,22 @@ def assert_structure_conformance(
     Block size is not a convenience. It is the unit the ordering alternates
     over, so a coarser block gives a run proportionally fewer alternations and
     a longer stretch in which the machine may move on one side alone.
+
+    A mode with no paired structure imposes none of this: an operational row
+    reports intervals separately rather than pooling observations, so there is
+    no per-side count for a minimum to apply to.
     """
     minimum = MIN_OBSERVATIONS_PER_SIDE[mode]
+    if minimum is None:
+        return
     if observations_per_side < minimum:
         raise ModeConformanceError(
             f'{observations_per_side} observations per side, {mode} requires '
             f'at least {minimum}'
         )
     required_block = REQUIRED_BLOCK_SIZE[mode]
+    if required_block is None:
+        return
     if block_size != required_block:
         raise ModeConformanceError(
             f'blocks of {block_size}, {mode} specifies blocks of '
