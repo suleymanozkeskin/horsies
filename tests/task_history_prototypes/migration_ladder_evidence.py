@@ -350,9 +350,21 @@ async def seed_legacy_install(
     mirrors the correctness helper exactly, including the transitional
     columns in their pre-backfill state — `prepared_rerun_input_disposition`
     stays NULL, which is the marker preparation selects on.
+
+    Identifiers are minted time-ordered, in the shape `mint_task_id`
+    produces: a millisecond timestamp, the version nibble, and a 12-bit
+    counter that advances the millisecond when it is exhausted. Production
+    rejected within-millisecond randomness because it bloats the primary-key
+    btree with non-rightmost page splits, so seeding random identifiers here
+    would measure the write pattern the product deliberately does not
+    generate — and the cost of that divergence lands on whichever stage
+    inserts by identifier.
     """
     if rows <= 0 or attempts_per_task < 0:
         raise RungMeasurementError('rows must be positive, attempts non-negative')
+    # One anchor for every batch, so ordering comes from the row index alone
+    # and the seed is reproducible rather than dependent on statement time.
+    base_milliseconds = int(time.time() * 1000) - 2 * 60 * 60 * 1000
     for start in range(0, rows, seed_batch):
         count = min(seed_batch, rows - start)
         await connection.execute(
@@ -371,7 +383,18 @@ async def seed_legacy_install(
                     prepared_rerun_input_disposition
                 )
                 SELECT
-                    gen_random_uuid(), 'legacy.task', 'default', 50,
+                    (
+                        lpad(to_hex(
+                            CAST(:base_ms AS bigint) + series / 4096
+                        ), 12, '0')
+                        || '7'
+                        || lpad(to_hex(series % 4096), 3, '0')
+                        || (ARRAY['8', '9', 'a', 'b'])[
+                            1 + floor(random() * 4)::int
+                        ]
+                        || substr(md5(random()::text), 1, 15)
+                    )::uuid,
+                    'legacy.task', 'default', 50,
                     'COMPLETED', '{"ok": true}',
                     '[]', '{}', NULL,
                     now() - interval '2 hours', now() - interval '2 hours',
@@ -386,7 +409,12 @@ async def seed_legacy_install(
                 FROM generate_series(CAST(:lo AS bigint), CAST(:hi AS bigint)) AS series
                 """
             ),
-            {'class_key': class_key, 'lo': start + 1, 'hi': start + count},
+            {
+                'class_key': class_key,
+                'lo': start + 1,
+                'hi': start + count,
+                'base_ms': base_milliseconds,
+            },
         )
         await connection.commit()
 
@@ -860,6 +888,10 @@ async def collect_migration_ladder_evidence(
             'class_key': _CLASS_KEY,
             'rung_verdict': measurement.rung_verdict,
             'preflight_estimate': measurement.preflight_estimate,
+            'identifier_shape': (
+                'time-ordered v7: 48-bit millisecond, version nibble, '
+                '12-bit counter advancing the millisecond when exhausted'
+            ),
             'fixed_term_stages': 'preflight + tighten + validation',
             'itemized_stages': 'drain + identity + program + preparation',
         },
