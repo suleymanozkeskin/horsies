@@ -183,7 +183,7 @@ def test_unclassified_observations_are_reported_as_their_own_bucket() -> None:
 def test_a_budget_is_judged_against_a_named_interval() -> None:
     """Two seconds p99 for a health pass is not a promise about a checkpoint."""
     report = _report(
-        [(1.0, OperationalInterval.STEADY_STATE)] * 10
+        [(1.0, OperationalInterval.STEADY_STATE)] * 200
         + [(9000.0, OperationalInterval.CHECKPOINT)] * 2
     )
     verdict = judge_interval(
@@ -194,7 +194,7 @@ def test_a_budget_is_judged_against_a_named_interval() -> None:
     )
     assert verdict['interval'] == 'steady-state'
     assert verdict['within_limit']
-    assert verdict['count'] == 10
+    assert verdict['count'] == 200
 
 
 def test_an_interval_with_no_observations_cannot_be_judged() -> None:
@@ -258,3 +258,29 @@ def test_a_report_with_no_observations_is_refused() -> None:
     """An empty report would answer every interval query with an absence."""
     with pytest.raises(OperationalReportError, match='no observations to report'):
         OperationalReport(row='health-pass', observations=())
+
+
+def test_a_percentile_that_is_the_sample_maximum_cannot_carry_a_verdict() -> None:
+    """An interval with few observations still has a p99: its largest value.
+
+    Reporting it describes the interval; judging a budget against it lets one
+    outlier decide the row.
+    """
+    report = _report([(1.0, OperationalInterval.CHECKPOINT)] * 10)
+    statistics = report.by_interval()[OperationalInterval.CHECKPOINT]
+    assert 'p99' in statistics.rank_limited
+    assert 'p50' not in statistics.rank_limited
+    with pytest.raises(OperationalReportError, match='not a percentile'):
+        judge_interval(
+            report,
+            interval=OperationalInterval.CHECKPOINT,
+            statistic='p99',
+            limit_ms=2000.0,
+        )
+
+
+def test_a_well_populated_interval_is_not_rank_limited() -> None:
+    report = _report([(1.0, OperationalInterval.STEADY_STATE)] * 200)
+    statistics = report.by_interval()[OperationalInterval.STEADY_STATE]
+    assert statistics.rank_limited == frozenset()
+    assert report.as_conditions()['intervals']['steady-state']['rank_limited'] == []
