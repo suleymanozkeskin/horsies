@@ -56,7 +56,38 @@ BASELINE_SCHEMA_VERSION: Final = 26
 # The closure over-approximates execution, so it proves a row CARRIES when
 # nothing in it moved, and only says 'cannot rule out' when something did. Both
 # readings point the safe way.
-CANDIDATE_SCHEMA_VERSION: Final = 33
+#
+# Advanced 33 -> 34 at 50b65b03 (per-leaf enqueued_at index). Closures computed
+# over 7dc8ba3b -> 50b65b03, 11 product files changed:
+#
+#   read_task_detail               6 files, 0 changed -> CODE carries
+#   call_for(CompleteTaskFused)    8 files, 0 changed -> CODE carries
+#
+# AND CODE CARRYING IS NOT THE ROW CARRYING. This advance is the sharpest
+# instance the batch has produced of the closure's own limit:
+#
+#   AN IMPORT CLOSURE IS BLIND TO DDL. It over-approximates what PYTHON
+#   executes. v34 adds a second btree to every history leaf — leaf creation now
+#   emits `CREATE INDEX <leaf>_enqueued_idx ON <leaf> (enqueued_at)` beside the
+#   task_id index (partitions/manager.py) — so a relocation INSERT maintains
+#   TWO index entries per row where it maintained one. The measured operation
+#   does STRICTLY MORE WORK at this head, and ZERO files in its closure moved.
+#
+# So for every relocation row the closure's 'carries' is not merely
+# insufficient, it points the WRONG WAY, and the honest reading is:
+#
+#   relocation WAL / latency rows   re-measure: the work itself grew
+#   read-path code                  carries as code; its SUBSTRATE
+#                                            gained an index per leaf, so the
+#                                            cold cells' census subject and the
+#                                            leaf sizes are no longer the ones
+#                                            the banked conditions describe
+#
+# Advancing this constant also REFUSES every schema-33 substrate outright:
+# `substrate_identity()` raises when the database's version is not this pin.
+# `qual_boundary33` is therefore unusable until rebuilt at 34, which is a
+# deliberate consequence and not an accident of the bump.
+CANDIDATE_SCHEMA_VERSION: Final = 34
 
 SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 
