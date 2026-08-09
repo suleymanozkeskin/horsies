@@ -299,14 +299,37 @@ class TestRestraintAndRefusal:
             task_id, _, _ = await seed_pending(connection)
             await age_pending(connection, task_id)
             leaf = await pending_leaf_ref(connection, task_id)
+            # Break the locator WITHOUT leaving the leaf: a fixed
+            # +6-hour shift exits the leaf's UTC-day bounds whenever the
+            # run executes after 18:00 UTC, and discovery then never
+            # selects the row — the test failed by the clock, not the
+            # code. The shift wraps within the day instead, derived from
+            # the leaf's own bounds at runtime, so it is inside the leaf
+            # and different from the original at any hour.
+            original_anchor = (
+                await connection.execute(
+                    text(
+                        'SELECT history_anchor '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+            leaf_span = leaf.bounds.upper - leaf.bounds.lower
+            broken_anchor = leaf.bounds.lower + (
+                (original_anchor - leaf.bounds.lower)
+                + timedelta(hours=6)
+            ) % leaf_span
+            assert leaf.bounds.lower <= broken_anchor < leaf.bounds.upper
+            assert broken_anchor != original_anchor
             await connection.execute(
                 text(
                     'UPDATE horsies_workflow_phase2_pending '
-                    "SET history_anchor = history_anchor "
-                    "+ interval '6 hours' "
+                    'SET history_anchor = :broken_anchor '
                     'WHERE task_id = CAST(:task_id AS uuid)'
                 ),
-                {'task_id': task_id},
+                {'task_id': task_id, 'broken_anchor': broken_anchor},
             )
             outcome = await quarantine_over_horizon_blockers(
                 connection,
