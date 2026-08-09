@@ -55,11 +55,15 @@ from horsies.core.models.tasks import (
 from horsies.core.history.archive.attempts import (
     AttemptRecord as ArchiveAttemptRecord,
 )
+from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.aggregates import (
+    HISTORY_NONEMPTY_PROBE_SQL,
     HistoryScope,
     history_breakdown_statement,
     history_count_statement,
+    history_estimate_statement,
     history_scoped_status_counts_statement,
+    plan_rows_from_explain,
 )
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
@@ -1122,6 +1126,36 @@ async def _estimated_task_total(session: AsyncSession) -> int:
     return exact
 
 
+async def _estimated_history_total(
+    session: AsyncSession,
+    window: HistoryWindow,
+    scope: HistoryScope,
+) -> int:
+    """Planner row estimate for the windowed history side.
+
+    The history sibling of ``_estimated_task_total``, by a different
+    mechanism: ``reltuples`` is whole-relation and the history side is
+    always window-scoped, so the estimate is the planner's own — EXPLAIN
+    over exactly the predicate the exact count would run. A provably
+    empty parent reports zero before any estimate: the planner clamps
+    every scanned relation to at least one row, so its figure there is
+    clamp noise, not information (the sibling of the live arm's
+    ``reltuples = -1`` rule). A payload the decoder does not recognize
+    raises ``HistoryContractError``; the caller returns it as a typed
+    error, never a silent exact fallback.
+    """
+    nonempty = (
+        await session.execute(text(HISTORY_NONEMPTY_PROBE_SQL))
+    ).scalar_one()
+    if not bool(nonempty):
+        return 0
+    estimate_sql, estimate_params = history_estimate_statement(window, scope)
+    payload = (
+        await session.execute(text(estimate_sql), estimate_params)
+    ).scalar_one()
+    return plan_rows_from_explain(payload)
+
+
 async def list_tasks(
     broker: PostgresBroker,
     *,
@@ -1192,9 +1226,17 @@ async def list_tasks(
 
     try:
         async with broker.session_factory() as session:
+            # Both sides follow the documented total contract together:
+            # filters active means exact on both, the unfiltered view is
+            # a planner estimate on both. The branch is on ``scope`` —
+            # the history statements' terminal-domain predicate is not a
+            # filter.
             match scope:
                 case []:
                     live_total = await _estimated_task_total(session)
+                    history_total = await _estimated_history_total(
+                        session, window, history_scope
+                    )
                 case _:
                     count_stmt = (
                         select(func.count()).select_from(TaskModel).where(*scope)
@@ -1202,17 +1244,28 @@ async def list_tasks(
                     live_total = (
                         await session.execute(count_stmt)
                     ).scalar_one()
+                    history_total = int(
+                        (
+                            await session.execute(
+                                text(count_sql), count_params
+                            )
+                        ).scalar_one()
+                    )
             tasks = (await session.execute(rows_stmt)).scalars().all()
             history_rows = (
                 await session.execute(text(page_sql), page_params)
             ).all()
-            history_total = int(
-                (
-                    await session.execute(text(count_sql), count_params)
-                ).scalar_one()
-            )
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
+    except HistoryContractError as exc:
+        return Err(
+            MonitoringQueryError(
+                code=MonitoringQueryErrorCode.DB_OPERATION_FAILED,
+                message=f'task list estimate decode failed: {exc}',
+                retryable=False,
+                exception=exc,
+            )
+        )
 
     summaries = [_task_summary(task) for task in tasks]
     summaries.extend(_history_summary(row) for row in history_rows)

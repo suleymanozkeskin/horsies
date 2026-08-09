@@ -41,7 +41,17 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # v33 changes the locator foreign key's delete action. It touches
 # horsies_workflow_tasks and the phase-2 outbox, neither of which the
 # prototypes clone or model, so the qualified shape is again unchanged.
-_EXPECTED_BASE_SCHEMA_VERSION = 33
+# v34 adds the per-leaf enqueue-order index on task-history leaves: the
+# forever DDL, manager-created leaves, transcode replacements, and a
+# migration walk over the production parent's partition tree. It does
+# NOT touch horsies_tasks, so the LIKE-clone restore lists are
+# unaffected; the deployed-index replay reads horsies_tasks only; and
+# the walk targets the production parent by name, never the disposable
+# namespaces the prototype manifest installs into. No prototype counts
+# or enumerates per-leaf indexes as an assertion (the discovery-shape
+# lesson was checked, not assumed). The qualified shape is unchanged
+# and the base advances.
+_EXPECTED_BASE_SCHEMA_VERSION = 34
 
 
 @dataclass(frozen=True, slots=True)

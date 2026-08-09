@@ -249,6 +249,14 @@ async def _assert_fresh_end_state(engine: AsyncEngine) -> None:
             )
         ).scalar_one()
         assert bool(heartbeats_partitioned)
+        from horsies.core.history.names import TASK_HISTORY_FOREVER
+        from horsies.core.history.partitions.catalog import (
+            read_leaf_ordering_index_exists,
+        )
+
+        assert await read_leaf_ordering_index_exists(
+            connection, TASK_HISTORY_FOREVER
+        ), 'the forever leaf is born with the enqueue-order index'
 
 
 async def _assert_end_state(engine: AsyncEngine) -> None:
@@ -786,3 +794,182 @@ async def _outcome_type_oid(engine: AsyncEngine) -> int:
                 )
             ).scalar_one()
         )
+
+
+class TestOrderingIndexMigration:
+    """Existing task-history leaves gain the enqueue-order index.
+
+    The walk enumerates the live partition tree and guards on the
+    PROPERTY — a non-partial single-key btree on enqueued_at — so a
+    leaf whose index was created under another name is left alone and
+    a leaf missing the composition gains it, regardless of who created
+    the leaf. Fresh leaves are born with the index; these cases are the
+    already-deployed ones.
+    """
+
+    ORDERING_CLASS = 'upgrade_ordering'
+
+    async def _make_finite_leaf(self, engine: AsyncEngine) -> str:
+        """One finite daily leaf on a migrated database; returns its name."""
+        from datetime import datetime, timedelta, timezone
+
+        from horsies.core.history.commands import (
+            CreateDailyHistoryLeaf,
+            LeafBounds,
+            LeafRef,
+        )
+        from horsies.core.history.ddl.classes import (
+            ClassRegistered,
+            register_finite_retention_class,
+        )
+        from horsies.core.history.outcomes import LeafCreated
+        from horsies.core.history.partitions.catalog import daily_leaf_name
+        from horsies.core.history.partitions.manager import create_daily_leaf
+        from horsies.core.history.partitions.publication import (
+            UnpublishedLoader,
+        )
+
+        lower = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        async with engine.begin() as connection:
+            registered = await register_finite_retention_class(
+                connection,
+                class_key=self.ORDERING_CLASS,
+                duration=timedelta(days=30),
+            )
+            assert isinstance(registered, ClassRegistered)
+            parent_name = registered.finite_parent_name
+            leaf = LeafRef(
+                leaf_name=daily_leaf_name(parent_name, lower),
+                class_key=self.ORDERING_CLASS,
+                bounds=LeafBounds(
+                    lower=lower, upper=lower + timedelta(days=1)
+                ),
+            )
+            outcome = await create_daily_leaf(
+                connection,
+                CreateDailyHistoryLeaf(leaf=leaf),
+                UnpublishedLoader(),
+            )
+            assert isinstance(outcome, LeafCreated)
+        return leaf.leaf_name
+
+    async def _rewind_watermark(
+        self, engine: AsyncEngine, version: int
+    ) -> None:
+        async with engine.connect() as connection:
+            await connection.execute(
+                text('DELETE FROM horsies_schema_version WHERE version > :v'),
+                {'v': version},
+            )
+            await connection.execute(
+                text(
+                    'INSERT INTO horsies_schema_version (version) '
+                    'VALUES (:v) ON CONFLICT DO NOTHING'
+                ),
+                {'v': version},
+            )
+            await connection.commit()
+
+    async def _ordering_index_count(
+        self, engine: AsyncEngine, leaf_name: str
+    ) -> int:
+        """Indexes on the leaf matching the property, by composition."""
+        async with engine.connect() as connection:
+            return int(
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT count(*)
+                            FROM pg_index AS i
+                            JOIN pg_class AS ic ON ic.oid = i.indexrelid
+                            JOIN pg_am AS am ON am.oid = ic.relam
+                            WHERE i.indrelid = CAST(:leaf AS regclass)
+                              AND am.amname = 'btree'
+                              AND i.indpred IS NULL
+                              AND i.indnkeyatts = 1
+                              AND i.indkey[0] = (
+                                  SELECT a.attnum FROM pg_attribute AS a
+                                  WHERE a.attrelid = CAST(:leaf AS regclass)
+                                    AND a.attname = 'enqueued_at'
+                              )
+                            """
+                        ),
+                        {'leaf': leaf_name},
+                    )
+                ).scalar_one()
+            )
+
+    async def test_leaves_without_the_ordering_index_gain_it(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """A database whose leaves predate the index is repaired by the walk.
+
+        Covers BOTH leaf shapes — the forever LIST leaf and a finite
+        daily leaf — because the walk must reach leaves under the
+        finite sub-parents, not only the parent's direct child.
+        """
+        from horsies.core.history.names import TASK_HISTORY_FOREVER
+        from horsies.core.history.partitions.catalog import (
+            leaf_enqueued_index_name,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            finite_leaf = await self._make_finite_leaf(engine)
+            async with engine.connect() as connection:
+                for leaf_name in (TASK_HISTORY_FOREVER, finite_leaf):
+                    await connection.execute(
+                        text(
+                            'DROP INDEX '
+                            f'{leaf_enqueued_index_name(leaf_name)}'
+                        )
+                    )
+                await connection.commit()
+            assert (
+                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                == 0
+            )
+            assert await self._ordering_index_count(engine, finite_leaf) == 0
+
+            await self._rewind_watermark(engine, 33)
+            await _migrate(scratch_database)
+
+            assert (
+                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                == 1
+            )
+            assert await self._ordering_index_count(engine, finite_leaf) == 1
+        finally:
+            await engine.dispose()
+
+    async def test_conformant_leaves_are_not_given_a_second_index(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """Re-running the walk against present indexes creates nothing.
+
+        The guard is the property probe, so this is the idempotence
+        that matters: watermark lowered, statements re-run, exactly one
+        matching index per leaf afterwards.
+        """
+        from horsies.core.history.names import TASK_HISTORY_FOREVER
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            finite_leaf = await self._make_finite_leaf(engine)
+            await self._rewind_watermark(engine, 33)
+            await _migrate(scratch_database)
+
+            assert (
+                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                == 1
+            )
+            assert await self._ordering_index_count(engine, finite_leaf) == 1
+        finally:
+            await engine.dispose()

@@ -210,6 +210,7 @@ from horsies.core.schemas.migrations import (
     SCHEMA_VERSION_TABLE_EXISTS_SQL,
     INSERT_SCHEMA_VERSION_SQL,
     READ_SCHEMA_VERSION_SQL,
+    TASK_HISTORY_LEAVES_MISSING_ORDERING_INDEX_SQL,
     SET_ENQUEUE_SHA_NOT_NULL_SQL,
     SET_ENQUEUED_AT_DEFAULT_SQL,
     SET_ENQUEUED_AT_NOT_NULL_SQL,
@@ -973,6 +974,35 @@ class PostgresBroker:
                 text('DROP INDEX IF EXISTS idx_horsies_workflows_retention')
             )
             await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
+
+            # Migration (v34): the per-leaf enqueue-order index on task
+            # history. New leaves are born with it (foundation DDL,
+            # partition manager, transcode replacements); this walk
+            # covers leaves that already exist, from the live partition
+            # tree, creating the index only where the property — a
+            # non-partial single-key btree on enqueued_at — is absent.
+            from horsies.core.history.commands import is_safe_identifier
+            from horsies.core.history.errors import HistoryContractError
+            from horsies.core.history.partitions.catalog import (
+                leaf_enqueued_index_name,
+            )
+
+            leaves_missing_ordering_index = (
+                await conn.execute(
+                    TASK_HISTORY_LEAVES_MISSING_ORDERING_INDEX_SQL
+                )
+            ).all()
+            for leaf_row in leaves_missing_ordering_index:
+                leaf_name = str(leaf_row.leaf_name)
+                if not is_safe_identifier(leaf_name):
+                    raise HistoryContractError(
+                        'task-history leaf name is not a safe identifier: '
+                        f'{leaf_name!r}'
+                    )
+                await conn.execute(text(
+                    f'CREATE INDEX {leaf_enqueued_index_name(leaf_name)} '
+                    f'ON {leaf_name} (enqueued_at)'
+                ))
 
             # The fresh-world arm of the two-worlds fork (predicate
             # read above): a uuid-born install is BORN AT THE

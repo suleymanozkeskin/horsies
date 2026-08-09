@@ -287,7 +287,23 @@ from sqlalchemy import text
 #      a constraint that already exists never rebuilds it, so a database
 #      born at v32 would keep the refusing form forever.
 
-SCHEMA_VERSION = 33
+# v34: the per-leaf enqueue-order index on task history. Every leaf
+#      carried only the task-ID index, so the monitoring list's default
+#      sort (enqueued_at DESC) planned a sequential scan plus a full
+#      sort over every in-window leaf per call. With a btree on
+#      enqueued_at per leaf the planner merge-appends leaves in index
+#      order and stops at the LIMIT. New leaves are born with the index
+#      (partition manager, forever DDL, transcode replacements); this
+#      migration walks the partition tree itself — pg_partition_tree,
+#      not the leaf catalog, because attached leaves are what the parent
+#      query scans — and creates the index where the PROPERTY (a
+#      non-partial single-key btree on enqueued_at) is absent. Guarding
+#      on the property rather than an index name follows the generated-
+#      predicate class rule: the transcode swap attaches relations whose
+#      index names differ from the canonical derivation, and a name
+#      guard would either miss them or create duplicates.
+
+SCHEMA_VERSION = 34
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -366,6 +382,36 @@ FRESH_IDENTITY_PREDICATE_SQL = text(
 
 TASK_HISTORY_PARENT_EXISTS_SQL = text(
     f"SELECT to_regclass('{TASK_HISTORY_PARENT}') IS NOT NULL"
+)
+
+# Migration (v34): attached task-history leaves missing the enqueue-order
+# index, from the live partition tree (see the v34 note above). The NOT
+# EXISTS probe pins the property — a non-partial single-key btree whose
+# key column is enqueued_at — never an index name.
+TASK_HISTORY_LEAVES_MISSING_ORDERING_INDEX_SQL = text(
+    f"""
+    SELECT c.relname AS leaf_name
+    FROM pg_partition_tree(CAST('{TASK_HISTORY_PARENT}' AS regclass)) AS t
+    JOIN pg_class AS c ON c.oid = t.relid
+    WHERE t.isleaf
+      AND NOT EXISTS (
+          SELECT 1
+          FROM pg_index AS i
+          JOIN pg_class AS ic ON ic.oid = i.indexrelid
+          JOIN pg_am AS am ON am.oid = ic.relam
+          WHERE i.indrelid = t.relid
+            AND am.amname = 'btree'
+            AND i.indpred IS NULL
+            AND i.indnkeyatts = 1
+            AND i.indkey[0] = (
+                SELECT a.attnum
+                FROM pg_attribute AS a
+                WHERE a.attrelid = t.relid
+                  AND a.attname = 'enqueued_at'
+            )
+      )
+    ORDER BY c.relname
+    """
 )
 CREATE_HISTORY_FOUNDATION_SQL = tuple(
     text(statement) for statement in history_foundation_fragments()
