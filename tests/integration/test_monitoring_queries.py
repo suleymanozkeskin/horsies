@@ -2268,3 +2268,200 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         assert result.err_value.retryable is True
+
+
+# --------------------------------------------------------------------------- #
+# list_tasks — the unfiltered-total contract on the history side
+# --------------------------------------------------------------------------- #
+class _StatementCapture:
+    """Every SQL string the engine executes inside the ``with`` block."""
+
+    def __init__(self, broker: PostgresBroker) -> None:
+        self._engine = broker.async_engine.sync_engine
+        self.statements: list[str] = []
+
+    def _collect(
+        self,
+        conn: Any,
+        cursor: Any,
+        statement: str,
+        parameters: Any,
+        context: Any,
+        executemany: bool,
+    ) -> None:
+        self.statements.append(statement)
+
+    def __enter__(self) -> '_StatementCapture':
+        event.listen(self._engine, 'before_cursor_execute', self._collect)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        event.remove(self._engine, 'before_cursor_execute', self._collect)
+
+
+async def _unfiltered_list(broker: PostgresBroker) -> Any:
+    return await list_tasks(
+        broker,
+        window=_test_window(),
+        statuses=[],
+        task_names=[],
+        queues=[],
+        workers=[],
+        error_codes=[],
+        error_categories=[],
+        retried_only=False,
+        sort_by='enqueued_at',
+        sort_dir='desc',
+        offset=0,
+        limit=50,
+    )
+
+
+@pytest.mark.usefixtures('clean_monitoring_tables')
+class TestUnfilteredHistoryTotalContract:
+    """The documented total contract holds on the history side.
+
+    ``TaskListPage`` documents the unfiltered total as a planner
+    estimate; the live side branches on scope and the history side must
+    branch with it — estimate together, exact together. The proof is
+    the statements themselves: which ran, and which provably did not.
+    """
+
+    async def test_unfiltered_total_estimates_and_never_counts_history(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(),
+            make_task(),
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.FAILED),
+        )
+        await session.execute(
+            text('ANALYZE horsies_tasks, horsies_task_history')
+        )
+        await session.commit()
+
+        with _StatementCapture(broker) as capture:
+            result = await _unfiltered_list(broker)
+
+        assert is_ok(result)
+        assert isinstance(result.ok_value.total, int)
+        assert any(
+            statement.startswith('EXPLAIN (FORMAT JSON)')
+            for statement in capture.statements
+        ), capture.statements
+        assert not any(
+            'count(*) FROM horsies_task_history' in statement
+            for statement in capture.statements
+        ), 'the unfiltered view must never run the exact history count'
+
+    async def test_filtered_total_counts_history_exactly(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            make_task(),
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.COMPLETED),
+        )
+
+        with _StatementCapture(broker) as capture:
+            result = await list_tasks(
+                broker,
+                window=_test_window(),
+                statuses=[TaskStatus.COMPLETED],
+                task_names=[],
+                queues=[],
+                workers=[],
+                error_codes=[],
+                error_categories=[],
+                retried_only=False,
+                sort_by='enqueued_at',
+                sort_dir='desc',
+                offset=0,
+                limit=50,
+            )
+
+        assert is_ok(result)
+        assert result.ok_value.total == 3
+        assert any(
+            'count(*) FROM horsies_task_history' in statement
+            for statement in capture.statements
+        ), capture.statements
+        assert not any(
+            statement.startswith('EXPLAIN')
+            for statement in capture.statements
+        ), 'a filtered total is exact; no estimate statement may run'
+
+    async def test_truncated_history_reports_zero_not_stale_estimate(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        """An emptied history contributes zero, not leftover statistics.
+
+        A truncated leaf's ``reltuples`` is version-dependent (PG 18
+        resets it, PG 16 keeps the stale value), and the planner clamps
+        every scanned relation to at least one row — so without the
+        emptiness guard the total would carry phantom history rows,
+        differently per major. Sampled statistics are left in place
+        deliberately; the truncation must beat them.
+        """
+        await insert_rows(
+            session,
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.COMPLETED),
+            make_task(status=TaskStatus.FAILED),
+        )
+        await session.execute(
+            text('ANALYZE horsies_tasks, horsies_task_history')
+        )
+        await session.commit()
+        await session.execute(text('TRUNCATE horsies_task_history'))
+        await session.commit()
+        await insert_rows(session, make_task(), make_task())
+        await session.execute(text('ANALYZE horsies_tasks'))
+        await session.commit()
+
+        result = await _unfiltered_list(broker)
+
+        assert is_ok(result)
+        assert result.ok_value.total == 2
+
+    async def test_estimate_decode_failure_is_a_typed_error(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """An unrecognized EXPLAIN payload surfaces as ``Err``, not a raise.
+
+        The failure is injected at the decode seam because a real
+        payload-shape drift needs a server this suite does not run;
+        what the boundary owes is the same either way: a typed,
+        non-retryable monitoring error and no silent exact fallback.
+        """
+        from horsies.core.history.errors import HistoryContractError
+        from horsies.monitoring import queries as queries_module
+
+        await insert_rows(
+            session, make_task(status=TaskStatus.COMPLETED)
+        )
+
+        def _refuse(payload: object) -> int:
+            raise HistoryContractError('injected decode failure')
+
+        monkeypatch.setattr(
+            queries_module, 'plan_rows_from_explain', _refuse
+        )
+
+        result = await _unfiltered_list(broker)
+
+        assert is_err(result)
+        assert (
+            result.err_value.code
+            is MonitoringQueryErrorCode.DB_OPERATION_FAILED
+        )
+        assert result.err_value.retryable is False
+        assert 'estimate decode failed' in result.err_value.message
