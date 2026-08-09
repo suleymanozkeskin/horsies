@@ -109,6 +109,21 @@ from .core.models.health import (
     WorkerPong,
     WorkerStateSnapshot,
 )
+from .core.history.rerun.operations import (
+    NotEligibleReason,
+    RerunEnqueued,
+    RerunEnqueuePolicy,
+    RerunInputCorrupt,
+    RerunInputUnavailable,
+    RerunKeyConflict,
+    RerunKeyReplay,
+    RerunNotEligible,
+    RerunOutcome,
+    RerunSourceAbsent,
+    RerunSourceLive,
+    RerunTask,
+    rerun_task,
+)
 from .core.types.result import Result, Ok, Err, is_ok, is_err
 from .core.codec import JsonValue, StrictJsonError
 
@@ -223,6 +238,20 @@ __all__ = [
     'DatabasePing',
     'WorkerPong',
     'WorkerStateSnapshot',
+    # Rerun
+    'rerun_task',
+    'RerunTask',
+    'RerunEnqueuePolicy',
+    'RerunOutcome',
+    'RerunEnqueued',
+    'RerunSourceLive',
+    'RerunSourceAbsent',
+    'RerunNotEligible',
+    'RerunInputUnavailable',
+    'RerunInputCorrupt',
+    'RerunKeyConflict',
+    'RerunKeyReplay',
+    'NotEligibleReason',
     # Vendored Result type
     'Result',
     'Ok',
