@@ -63,8 +63,10 @@ from .catalog import (
     capture_partition_bound_utc,
     daily_leaf_name,
     database_now,
+    leaf_enqueued_index_name,
     leaf_id_index_name,
     read_leaf_catalog_row,
+    read_leaf_ordering_index_exists,
     read_leaf_physical_state,
     read_retention_class,
 )
@@ -270,13 +272,25 @@ async def create_daily_leaf(
                 kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
                 detail='attached leaf partition bound differs from catalog',
             )
-        if not physical.id_index_exists:
-            await connection.execute(
-                text(
-                    f'CREATE INDEX {catalog.id_index_name} '
-                    f'ON {leaf.leaf_name} (task_id)'
+        ordering_index_exists = await read_leaf_ordering_index_exists(
+            connection, leaf.leaf_name
+        )
+        if not physical.id_index_exists or not ordering_index_exists:
+            if not physical.id_index_exists:
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {catalog.id_index_name} '
+                        f'ON {leaf.leaf_name} (task_id)'
+                    )
                 )
-            )
+            if not ordering_index_exists:
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX '
+                        f'{leaf_enqueued_index_name(leaf.leaf_name)} '
+                        f'ON {leaf.leaf_name} (enqueued_at)'
+                    )
+                )
             await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
             return LeafIndexRepaired(
                 leaf_name=leaf.leaf_name, id_index_name=catalog.id_index_name
@@ -328,6 +342,12 @@ async def create_daily_leaf(
     )
     await connection.execute(
         text(f'CREATE INDEX {id_index_name} ON {leaf.leaf_name} (task_id)')
+    )
+    await connection.execute(
+        text(
+            f'CREATE INDEX {leaf_enqueued_index_name(leaf.leaf_name)} '
+            f'ON {leaf.leaf_name} (enqueued_at)'
+        )
     )
     await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
     await publisher.republish(connection)

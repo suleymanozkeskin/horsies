@@ -86,6 +86,7 @@ from .transforms import (
     quoted_identifier,
     replacement_bound_name,
     replacement_index_name,
+    replacement_ordering_index_name,
     replacement_relation_name,
     transformed_select,
 )
@@ -492,6 +493,12 @@ async def run_copy_batch(
             text(
                 f'CREATE INDEX {quoted_identifier(replacement_index_name(job_id, relation.relation_ordinal))} '
                 f'ON {replacement} (task_id)'
+            )
+        )
+        await connection.execute(
+            text(
+                f'CREATE INDEX {quoted_identifier(replacement_ordering_index_name(job_id, relation.relation_ordinal))} '
+                f'ON {replacement} (enqueued_at)'
             )
         )
     batch_number = (

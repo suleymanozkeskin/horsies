@@ -277,6 +277,11 @@ def replacement_index_name(job_id: str, relation_ordinal: int) -> str:
     return f'archive_replacement_id_{suffix}_{relation_ordinal}'
 
 
+def replacement_ordering_index_name(job_id: str, relation_ordinal: int) -> str:
+    suffix = job_id.replace('-', '')[:12]
+    return f'archive_replacement_enq_{suffix}_{relation_ordinal}'
+
+
 def replacement_relation_name(job_id: str, relation_ordinal: int) -> str:
     suffix = job_id.replace('-', '')[:12]
     return f'archive_replacement_{suffix}_{relation_ordinal}'

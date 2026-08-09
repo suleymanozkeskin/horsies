@@ -232,6 +232,33 @@ class TestFullLifecycle:
             assert isinstance(swapped, TranscodeSwap)
             assert swapped.relations_swapped == plan.relation_count
 
+            # The swapped-in replacement carries the enqueue-order
+            # index, asserted by column composition: the replacement's
+            # index NAMES differ from the canonical derivation, which is
+            # exactly why the property is the contract.
+            from horsies.core.history.partitions.catalog import (
+                read_leaf_ordering_index_exists,
+            )
+
+            swapped_leaves = [
+                str(row.source_relation_name)
+                for row in (
+                    await connection.execute(
+                        text(
+                            'SELECT source_relation_name '
+                            'FROM horsies_archive_replacement_relations '
+                            'WHERE job_id = CAST(:job_id AS uuid)'
+                        ),
+                        {'job_id': job_id},
+                    )
+                ).all()
+            ]
+            assert swapped_leaves
+            for leaf_name in swapped_leaves:
+                assert await read_leaf_ordering_index_exists(
+                    connection, leaf_name
+                ), leaf_name
+
             finalized = await finalize_transcode(
                 connection, job_id=job_id
             )

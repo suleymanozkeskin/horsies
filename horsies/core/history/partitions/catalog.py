@@ -136,6 +136,65 @@ def leaf_id_index_name(leaf_name: str) -> str:
     return f'{leaf_name}_task_idx'
 
 
+def leaf_enqueued_index_name(leaf_name: str) -> str:
+    """The canonical per-leaf enqueue-order index name.
+
+    The index serves the monitoring list's default sort: with a btree on
+    `enqueued_at` per leaf the planner merge-appends leaves in index
+    order and stops at the LIMIT instead of sorting every matched row.
+    """
+    return f'{leaf_name}_enqueued_idx'
+
+
+ORDERING_INDEX_COLUMN = 'enqueued_at'
+"""The single key column every leaf's ordering index carries."""
+
+# The probe pins the PROPERTY — a non-partial single-key btree whose key
+# column is `enqueued_at` — never an index name. The transcode swap
+# attaches replacement relations whose index names differ from the
+# cataloged ones, so a name probe would report a conformant leaf absent.
+_ORDERING_INDEX_EXISTS_SQL = """
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_index AS i
+    JOIN pg_class AS ic ON ic.oid = i.indexrelid
+    JOIN pg_am AS am ON am.oid = ic.relam
+    WHERE i.indrelid = to_regclass(:leaf)
+      AND am.amname = 'btree'
+      AND i.indpred IS NULL
+      AND i.indnkeyatts = 1
+      AND i.indkey[0] = (
+          SELECT a.attnum
+          FROM pg_attribute AS a
+          WHERE a.attrelid = to_regclass(:leaf)
+            AND a.attname = :column
+      )
+)
+"""
+
+
+async def read_leaf_ordering_index_exists(
+    connection: AsyncConnection,
+    leaf_name: str,
+) -> bool:
+    """Whether the leaf carries the enqueue-order index, by composition.
+
+    False for an absent relation: `to_regclass` resolves NULL and the
+    probe matches nothing, which is the correct answer for both.
+    """
+    if not is_safe_identifier(leaf_name):
+        raise HistoryContractError(
+            f'relation name is not a safe identifier: {leaf_name!r}'
+        )
+    value = (
+        await connection.execute(
+            text(_ORDERING_INDEX_EXISTS_SQL),
+            {'leaf': leaf_name, 'column': ORDERING_INDEX_COLUMN},
+        )
+    ).scalar_one()
+    return _required_bool(value, 'ordering_index_exists')
+
+
 async def read_retention_class(
     connection: AsyncConnection,
     class_key: str,
