@@ -30,6 +30,7 @@ from horsies.core.history.cutover.program import (
 )
 from horsies.core.models.broker import PostgresConfig
 from tests.integration.test_task_history_relocation import (
+    demote_to_upgraded_world,
     insert_legacy_task,
 )
 from tests.integration.test_task_history_schema_emission import (
@@ -60,6 +61,13 @@ class TestProgramInstallation:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
+                # The refusal exists for the UPGRADED world, whose
+                # attempts identity is varchar until normalization runs;
+                # a fresh chain install is born uuid, so the world is
+                # demoted first — the same reinstatement the pipeline
+                # test performs before anything legacy.
+                await demote_to_upgraded_world(connection)
+
                 # Before normalization the installer refuses, typed — the
                 # same invariant the tighten enforces, at this door: a
                 # varchar attempts identity would otherwise surface later

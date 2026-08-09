@@ -1614,17 +1614,21 @@ class TestQuarantineAfterAttempts:
     """The attempt bound on unresolvable retained evidence.
 
     A retaining disposition increments the pending row's attempt count;
-    at the bound the row's evidence moves to the quarantine table and
-    discovery stops retrying it. Quarantine preserves the evidence —
-    an impossible state that occurs is evidence, so terminal-and-drop
-    was rejected — and the population stays countable on the health
-    surface. Disabling the quarantine transition turns the repointed
-    assertions below red for the stated reason: the row would retain
-    forever with nothing relocated.
+    at the bound the transition runs and discovery stops retrying the
+    row either way. An integrity-retained row — the constructible
+    unresolvable shape — also refuses the quarantine copy, because the
+    copy verifies against the same pending fields consumption verified
+    against: the refusal is reported verbatim, the evidence stays where
+    it is, and the population stays countable on the health surface.
+    The repoint half of the transition is proven by the detach-horizon
+    quarantine suite; this proves the bound, the exclusion, and the
+    refusal reporting. Disabling the transition turns the refusal
+    assertions red for the stated reason: nothing would attempt the
+    relocation at all.
     """
 
     @pytest.mark.asyncio
-    async def test_an_unresolvable_row_quarantines_at_the_bound(
+    async def test_an_unresolvable_row_stops_retrying_at_the_bound(
         self, broker: PostgresBroker, session: AsyncSession, app: Horsies
     ) -> None:
         task_a = make_simple_task(app, 'quarantine_bound_a')
@@ -1649,16 +1653,16 @@ class TestQuarantineAfterAttempts:
             status='COMPLETED',
             result_json=_strict_result_json(TaskResult(ok=5)),
         )
-        # The node already terminal with a DIFFERENT status than the
-        # evidence records: a state conflict consumption retains on,
-        # every pass, forever — the shape the bound exists for.
+        # A tampered evidence digest: consumption's integrity check
+        # retains the row every pass, forever — the constructible
+        # unresolvable shape the bound exists for.
         await session.execute(
             text("""
-                UPDATE horsies_workflow_tasks
-                SET status = 'FAILED'
-                WHERE workflow_id = :wf_id AND task_index = 0
+                UPDATE horsies_workflow_phase2_pending
+                SET result_digest = decode(repeat('ab', 32), 'hex')
+                WHERE task_id = CAST(:t AS uuid)
             """),
-            {'wf_id': handle.workflow_id},
+            {'t': task_id},
         )
         await session.commit()
 
@@ -1686,32 +1690,25 @@ class TestQuarantineAfterAttempts:
             assert attempts.attempt_count == expected_attempts
             assert attempts.last_failure_class is not None
 
-        # The bound pass quarantined: evidence repointed, reason named.
+        # The bound pass attempted the transition; the copy verification
+        # re-failed on the same tampered digest and refused, verbatim —
+        # the evidence stays where it is, named rather than relocated.
         assert summary is not None
-        assert summary.quarantined == 1
+        assert summary.quarantined == 0
+        assert len(summary.quarantine_refusals) == 1
+        assert 'COPY_VERIFICATION_FAILED' in summary.quarantine_refusals[0]
         pending = (
             await session.execute(
                 text(
-                    'SELECT recovery_source, quarantine_task_id '
+                    'SELECT recovery_source, attempt_count '
                     'FROM horsies_workflow_phase2_pending '
                     'WHERE task_id = CAST(:t AS uuid)'
                 ),
                 {'t': task_id},
             )
         ).one()
-        assert pending.recovery_source == 'QUARANTINE'
-        assert pending.quarantine_task_id is not None
-        quarantine_row = (
-            await session.execute(
-                text(
-                    'SELECT quarantine_reason '
-                    'FROM horsies_workflow_phase2_quarantine '
-                    'WHERE task_id = CAST(:t AS uuid)'
-                ),
-                {'t': task_id},
-            )
-        ).one()
-        assert 'attempt bound' in quarantine_row.quarantine_reason
+        assert pending.recovery_source == 'HISTORY'
+        assert pending.attempt_count == bound
 
         # Discovery no longer selects the row; the standing population
         # is a count, not silence.
