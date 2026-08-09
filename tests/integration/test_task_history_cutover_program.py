@@ -24,11 +24,13 @@ from horsies.core.history.cutover.identity import (
     normalize_attempt_identity,
 )
 from horsies.core.history.cutover.program import (
+    ProgramsRefused,
     install_programs,
     uninstall_programs,
 )
 from horsies.core.models.broker import PostgresConfig
 from tests.integration.test_task_history_relocation import (
+    demote_to_upgraded_world,
     insert_legacy_task,
 )
 from tests.integration.test_task_history_schema_emission import (
@@ -59,8 +61,25 @@ class TestProgramInstallation:
         engine = create_async_engine(url)
         try:
             async with engine.begin() as connection:
+                # The refusal exists for the UPGRADED world, whose
+                # attempts identity is varchar until normalization runs;
+                # a fresh chain install is born uuid, so the world is
+                # demoted first — the same reinstatement the pipeline
+                # test performs before anything legacy.
+                await demote_to_upgraded_world(connection)
+
+                # Before normalization the installer refuses, typed — the
+                # same invariant the tighten enforces, at this door: a
+                # varchar attempts identity would otherwise surface later
+                # as a raw operator-mismatch error naming a type instead
+                # of the omission.
+                refused = await install_programs(connection)
+                assert isinstance(refused, ProgramsRefused)
+                assert 'identity' in refused.reasons[0]
+
                 await normalize_attempt_identity(connection)
                 installed = await install_programs(connection)
+                assert isinstance(installed, int)
                 assert installed > 0
                 move_present = (
                     await connection.execute(
@@ -83,7 +102,9 @@ class TestProgramInstallation:
                 ).scalar_one()
                 assert not bool(move_present)
                 # R2 left nothing behind that blocks a second pass.
-                assert await install_programs(connection) == installed
+                second_pass = await install_programs(connection)
+                assert isinstance(second_pass, int)
+                assert second_pass == installed
         finally:
             await engine.dispose()
 

@@ -6,6 +6,24 @@ migration-only parameter, one policy owner read by both paths. Legacy
 rows get exactly what a fresh row enqueued today without an explicit
 override gets.
 
+Preparation covers EVERY unprepared row, terminal and live alike,
+because the tighten's postcondition is table-wide: drain deliberately
+lets PENDING rows survive the cutover — the new fleet claims and runs
+them, and the move projects their enqueue-time facts into history —
+so the stage that establishes those facts must reach them. A
+preparation that stopped at terminal rows advised a tighten it could
+never satisfy.
+
+A row with no recorded retention class resolves to the forever class,
+imported from the same authority the relocation projection coalesces
+with — one owner, so the two stages cannot disagree about the column
+— and the resolved class is stamped back onto the row: the
+fingerprint records the class the row will actually land in, and the
+class column's SET NOT NULL at the tighten finds no live NULLs left
+behind. No recorded policy means no deletion policy applied; resolving
+to a finite class here would put every legacy row past its duration on
+the drop path at the first retention pass.
+
 Always computed, retention aside: the command fingerprint (it covers
 the carried JSON strings as-is, so it exists even for rows whose
 stored JSON fails the strict decode) and, where the strict decode
@@ -28,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ...codec.json_io import loads_json
 from ...types.result import is_err
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..identity.fingerprint import EnqueueCommandV1
 from ..rerun.input_envelope import (
     INPUT_ENVELOPE_CODEC,
@@ -69,10 +88,13 @@ class PreparationBatch:
 
     ``cursor`` is the advanced keyset position; the caller passes it to
     the next call so the selection never re-walks rows this run already
-    prepared.
+    prepared. ``live_rows_prepared`` counts the drain-surviving live
+    rows in this batch — the population the tighten requires prepared
+    and nothing else prepares.
     """
 
     rows_prepared: int
+    live_rows_prepared: int
     inline_rows: int
     over_bound_rows: int
     policy_declined_rows: int
@@ -82,7 +104,12 @@ class PreparationBatch:
 
 @dataclass(frozen=True, slots=True)
 class PreparationComplete:
-    """No terminal row remains without a prepared disposition."""
+    """No row remains without a prepared disposition, terminal or live.
+
+    The count is the table-wide prepared total — the same population
+    the tighten's entry check counts, so completion here is the
+    postcondition the tighten verifies.
+    """
 
     rows_prepared: int
 
@@ -92,6 +119,7 @@ class _PreparedRow:
     task_id: str
     fingerprint: bytes
     input_digest: bytes | None
+    retention_class_key: str
     retain: bool
     disposition: str
     version: int | None
@@ -108,6 +136,15 @@ def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
         if row.retain_rerun_input is not None
         else retain_default
     )
+    # The forever key from the SAME authority the relocation projection
+    # coalesces with: a pre-v27 row recorded no class, and no recorded
+    # policy means no deletion policy applied. The fingerprint then
+    # records the class the row actually lands in.
+    retention_class_key = (
+        row.retention_class_key
+        if row.retention_class_key
+        else FOREVER_CLASS_KEY
+    )
     fingerprint = EnqueueCommandV1(
         task_name=row.task_name,
         queue_name=row.queue_name,
@@ -117,7 +154,7 @@ def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
         good_until=row.good_until,
         enqueue_delay_seconds=None,
         task_options_json=row.task_options,
-        retention_class_key=row.retention_class_key,
+        retention_class_key=retention_class_key,
         retain_rerun_input=retain,
         rerun_of_task_id=None,
         rerun_root_task_id=None,
@@ -140,6 +177,7 @@ def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
             task_id=str(row.id),
             fingerprint=fingerprint,
             input_digest=None,
+            retention_class_key=retention_class_key,
             retain=retain,
             disposition='DECLINED_BY_POLICY',
             version=None,
@@ -165,6 +203,7 @@ def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
         task_id=str(row.id),
         fingerprint=fingerprint,
         input_digest=digest,
+        retention_class_key=retention_class_key,
         retain=retain,
         disposition=disposition,
         version=INPUT_ENVELOPE_VERSION if envelope else None,
@@ -185,15 +224,18 @@ async def prepare_legacy_batch(
 ) -> PreparationBatch | PreparationComplete:
     """Prepare one bounded batch; the caller owns the transaction.
 
-    Selection: terminal rows without a prepared disposition — the
-    unbackfilled marker, which also makes a resumed run idempotent —
-    strictly after the cursor's keyset watermark. The watermark, not an
-    index, removes the re-scan: a partial index on the IS NULL
-    predicate would need maintenance on every backfill UPDATE and bloat
-    during exactly the bulk write it is meant to help, while the
-    watermark also stays immune to dead-tuple accumulation. The loop
-    contract is the cursor itself: pass ``PreparationCursor.start()``
-    first, then each batch's ``cursor``.
+    Selection: ANY row without a prepared disposition — terminal rows
+    bound for relocation and the live rows drain deliberately spares —
+    the unbackfilled marker, which also makes a resumed run idempotent,
+    strictly after the cursor's keyset watermark. The tighten's entry
+    check counts unprepared rows over the whole table, so the selection
+    matches the postcondition this stage exists to establish. The
+    watermark, not an index, removes the re-scan: a partial index on
+    the IS NULL predicate would need maintenance on every backfill
+    UPDATE and bloat during exactly the bulk write it is meant to help,
+    while the watermark also stays immune to dead-tuple accumulation.
+    The loop contract is the cursor itself: pass
+    ``PreparationCursor.start()`` first, then each batch's ``cursor``.
     """
     # The keyset predicate renders only when a watermark exists, so the
     # parameter's type always resolves from the id column itself — the
@@ -208,12 +250,11 @@ async def prepare_legacy_batch(
         await connection.execute(
             text(
                 f"""
-                SELECT id, task_name, queue_name, priority, args, kwargs,
-                       task_options, good_until, retention_class_key,
-                       retain_rerun_input
+                SELECT id, status, task_name, queue_name, priority, args,
+                       kwargs, task_options, good_until,
+                       retention_class_key, retain_rerun_input
                 FROM {LIVE_TASKS}
-                WHERE status NOT IN ('PENDING', 'CLAIMED', 'RUNNING')
-                  AND prepared_rerun_input_disposition IS NULL
+                WHERE prepared_rerun_input_disposition IS NULL
                   {keyset_condition}
                 ORDER BY id
                 LIMIT :batch_size
@@ -227,7 +268,7 @@ async def prepare_legacy_batch(
             await connection.execute(
                 text(
                     f"SELECT count(*) FROM {LIVE_TASKS} "
-                    "WHERE status NOT IN ('PENDING', 'CLAIMED', 'RUNNING')"
+                    "WHERE prepared_rerun_input_disposition IS NOT NULL"
                 )
             )
         ).scalar_one()
@@ -236,8 +277,13 @@ async def prepare_legacy_batch(
     prepared = [
         _prepare_one(row, retain_default=retain_default) for row in rows
     ]
+    live_statuses = {'PENDING', 'CLAIMED', 'RUNNING'}
+    live_rows = sum(row.status in live_statuses for row in rows)
     # One executemany, not one statement per row: the per-row loop cost
     # 5.4x relocation per row purely in round trips (605 vs 112 s/M).
+    # The class stamp writes the resolved value — identity for rows that
+    # carried one, the forever key for rows that recorded none — so the
+    # tighten's SET NOT NULL finds no NULL left on any prepared row.
     await connection.execute(
         text(
             f"""
@@ -245,6 +291,7 @@ async def prepare_legacy_batch(
                 command_fingerprint_version = 1,
                 command_fingerprint = :fingerprint,
                 input_digest = :input_digest,
+                retention_class_key = :retention_class_key,
                 retain_rerun_input = :retain,
                 prepared_rerun_input_disposition = :disposition,
                 prepared_rerun_input_version = :version,
@@ -260,6 +307,7 @@ async def prepare_legacy_batch(
                 'task_id': item.task_id,
                 'fingerprint': item.fingerprint,
                 'input_digest': item.input_digest,
+                'retention_class_key': item.retention_class_key,
                 'retain': item.retain,
                 'disposition': item.disposition,
                 'version': item.version,
@@ -273,6 +321,7 @@ async def prepare_legacy_batch(
     )
     return PreparationBatch(
         rows_prepared=len(prepared),
+        live_rows_prepared=live_rows,
         cursor=PreparationCursor(after_id=prepared[-1].task_id),
         inline_rows=sum(p.disposition == 'INLINE' for p in prepared),
         over_bound_rows=sum(p.disposition == 'OVER_BOUND' for p in prepared),

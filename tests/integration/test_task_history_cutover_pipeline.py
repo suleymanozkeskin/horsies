@@ -106,15 +106,41 @@ async def test_the_offline_program_end_to_end(
                 args_json='[2]',
                 attempts=(('FAILED', 'the recorded reason'),),
             )
+            # The populations a real pre-v27 deployment brings, as old
+            # as reality: no class, no fingerprint, no disposition. The
+            # terminal one exercises preparation's class resolution and
+            # the relocation coalesce MEETING (they never met in any
+            # test before the showcase cutover found them disagreeing);
+            # the pending one is the drain survivor nothing prepared.
+            classless_terminal = await insert_legacy_task(
+                connection,
+                status='COMPLETED',
+                kind='COMPLETE_LOCKED',
+                result='{"ok": 3}',
+                disposition=None,
+                retain=None,
+                args_json='[3]',
+                class_key=None,
+                fingerprinted=False,
+            )
             live_pending = await insert_legacy_task(
-                connection, status='PENDING', kind=None
+                connection,
+                status='PENDING',
+                kind=None,
+                disposition=None,
+                retain=None,
+                class_key=None,
+                fingerprinted=False,
             )
 
-            # Stage 0: preflight sees the work.
+            # Stage 0: preflight sees the work, and the class-less
+            # population fires the advisory rather than a refusal.
             plan = await run_preflight(
                 connection, coefficients=COEFFICIENTS
             )
-            assert plan.terminal_live_rows == 2
+            assert plan.terminal_live_rows == 3
+            assert plan.unclassified_rows == 1
+            assert any('forever' in advisory for advisory in plan.advisories)
 
             # Stage 2: drain verified (nothing claimed or running).
             drained = await verify_drained(connection)
@@ -122,7 +148,10 @@ async def test_the_offline_program_end_to_end(
 
             # Stage 3: program replacement; stage-4 prerequisites.
             await normalize_attempt_identity(connection)
-            await install_programs(connection)
+            installed = await install_programs(connection)
+            assert isinstance(installed, int), (
+                f'installation refused after normalization: {installed}'
+            )
 
             # Stage 5 gate BEFORE stage 4: terminal rows still live and
             # the phrase is wrong — both refusals name themselves.
@@ -140,11 +169,15 @@ async def test_the_offline_program_end_to_end(
                 for reason in refused.reasons
             )
 
-            # Stage 4: preparation, then relocation.
+            # Stage 4: preparation, then relocation. Preparation now
+            # reaches BOTH populations the tighten requires prepared:
+            # the class-less terminal rows (resolved to forever from the
+            # relocation coalesce's own authority) and the surviving
+            # live row drain deliberately spared.
             await run_preparation_to_complete(connection, retain_default=True)
             relocated = await relocate_all(connection)
             assert isinstance(relocated, RelocationComplete)
-            assert relocated.rows_relocated == 2
+            assert relocated.rows_relocated == 3
 
             # Stage 5: the point of no return, correctly confirmed.
             tightened = await tighten_to_frozen(
@@ -159,19 +192,27 @@ async def test_the_offline_program_end_to_end(
             # Stage 6: validation attests the frozen posture.
             validated = await validate_cutover(connection)
             assert isinstance(validated, CutoverValidated), validated
-            assert validated.history_rows == 2
+            assert validated.history_rows == 3
 
-            # The surviving live row rides the frozen shape.
+            # The surviving live row rides the frozen shape PREPARED:
+            # disposition, fingerprint, and the resolved class present,
+            # because the new fleet will claim it and the move will
+            # project exactly these facts.
             survivor = (
                 await connection.execute(
                     text(
-                        'SELECT id, status FROM horsies_tasks '
-                        'WHERE id = CAST(:t AS uuid)'
+                        'SELECT id, status, retention_class_key, '
+                        'command_fingerprint, '
+                        'prepared_rerun_input_disposition '
+                        'FROM horsies_tasks WHERE id = CAST(:t AS uuid)'
                     ),
                     {'t': live_pending},
                 )
             ).one()
             assert survivor.status == 'PENDING'
+            assert survivor.retention_class_key == 'forever'
+            assert survivor.command_fingerprint is not None
+            assert survivor.prepared_rerun_input_disposition is not None
             history_row = (
                 await connection.execute(
                     text(
@@ -182,6 +223,21 @@ async def test_the_offline_program_end_to_end(
                 )
             ).one()
             assert history_row.status == 'COMPLETED'
+            # The class-less terminal row landed where the advisory said
+            # it would: the forever class, no recorded policy meaning no
+            # deletion policy applied — preparation and relocation
+            # agreeing about the column for the first time in any test.
+            classless_landed = (
+                await connection.execute(
+                    text(
+                        'SELECT retention_class_key '
+                        'FROM horsies_task_history '
+                        'WHERE task_id = CAST(:t AS uuid)'
+                    ),
+                    {'t': classless_terminal},
+                )
+            ).one()
+            assert classless_landed.retention_class_key == 'forever'
     finally:
         await engine.dispose()
 

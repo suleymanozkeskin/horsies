@@ -171,12 +171,18 @@ async def insert_legacy_task(
     task_options: str | None = None,
     retain: bool | None = False,
     class_key: str | None = CLASS_KEY,
+    fingerprinted: bool = True,
 ) -> str:
     """One row as 0.4.x left it, with the transitional columns in their
     post-backfill state.
 
     ``class_key=None`` is the row a deployment that predates retention
-    classes left behind: terminal, retained, and carrying no class."""
+    classes left behind: terminal, retained, and carrying no class.
+    ``fingerprinted=False`` leaves the fingerprint columns NULL as well
+    — the genuinely pre-v27 shape, where none of the enqueue-time
+    columns existed. A fixture more modern than reality is the named
+    hazard: rows that always carry what the stage under test must
+    supply cannot exercise that stage."""
     task_id = str(uuid.uuid4())
     now = datetime.now(UTC)
     terminal = status not in ('PENDING', 'CLAIMED', 'RUNNING')
@@ -203,7 +209,7 @@ async def insert_legacy_task(
                 0, 0, :error_code,
                 'legacy-worker', 'legacy-host', 4242, 'legacy-proc',
                 :is_workflow_task, :enqueue_sha,
-                1, :fingerprint,
+                :fingerprint_version, :fingerprint,
                 :class_key, :retain, :disposition
             )
             """
@@ -221,7 +227,12 @@ async def insert_legacy_task(
             'error_code': error_code,
             'is_workflow_task': is_workflow_task,
             'enqueue_sha': 'a' * 64,
-            'fingerprint': uuid.uuid4().bytes + uuid.uuid4().bytes,
+            'fingerprint_version': 1 if fingerprinted else None,
+            'fingerprint': (
+                uuid.uuid4().bytes + uuid.uuid4().bytes
+                if fingerprinted
+                else None
+            ),
             'class_key': class_key,
             'retain': retain,
             'disposition': disposition,

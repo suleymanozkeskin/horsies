@@ -230,6 +230,7 @@ async def _run_workflow_recovery(broker: PostgresBroker) -> int:
         broker,
         grace_ms=0,
         max_rows=GLOBAL_SCAN_ROW_CAP,
+        quarantine_after_attempts=25,
     )
     async with broker.session_factory() as session:
         recovered = await recover_stuck_workflows(session, broker)

@@ -599,7 +599,11 @@ async def measure_rung(
     await timed(
         'identity', 'itemized', normalize_attempt_identity(connection)
     )
-    await timed('program', 'itemized', install_programs(connection))
+    installed = await timed(
+        'program', 'itemized', install_programs(connection)
+    )
+    if not isinstance(installed, int):
+        raise RuntimeError(f'program installation refused: {installed}')
     await connection.commit()
 
     preparation = await _drive_preparation(

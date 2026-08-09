@@ -21,8 +21,12 @@ against the program it was running.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+from ..terminalization.move import LIVE_ATTEMPTS
 
 from ..phase2.consumption import (
     PHASE2_CONSUME_FUNCTION,
@@ -75,14 +79,54 @@ def installation_fragments() -> tuple[str, ...]:
     )
 
 
-async def install_programs(connection: AsyncConnection) -> int:
+@dataclass(frozen=True, slots=True)
+class ProgramsRefused:
+    """Installation did not run; the reasons name the preconditions.
+
+    The move program binds the uuid identity era — its functions take
+    and compare uuid task identities — so installing it against a
+    varchar attempts table would fail later, mid-statement, with a raw
+    operator-mismatch error naming a type instead of the omission. The
+    tighten refuses on the same invariant; both doors now enforce it.
+    """
+
+    reasons: tuple[str, ...]
+
+
+async def install_programs(
+    connection: AsyncConnection,
+) -> int | ProgramsRefused:
     """Replace the in-place program with the move program.
 
     Drop-then-create per the function precedent; idempotent. The drop
     half removes the chain-owned in-place program (or a prior pass of
     this one — same names, same type), which is why this runs only
-    against a drained fleet.
+    against a drained fleet. Refuses, typed, when identity
+    normalization has not run: the ratified order is drain, then
+    normalization, then this.
     """
+    attempts_uuid = bool(
+        (
+            await connection.execute(
+                text(
+                    """
+                    SELECT atttypid = 'uuid'::regtype
+                    FROM pg_attribute
+                    WHERE attrelid = CAST(:relation AS regclass)
+                      AND attname = 'task_id'
+                    """
+                ),
+                {'relation': LIVE_ATTEMPTS},
+            )
+        ).scalar_one()
+    )
+    if not attempts_uuid:
+        return ProgramsRefused(
+            reasons=(
+                'the attempts identity is not uuid '
+                '(identity normalization has not run)',
+            ),
+        )
     for statement in teardown_statements():
         await connection.execute(text(statement))
     fragments = installation_fragments()
