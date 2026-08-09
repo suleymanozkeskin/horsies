@@ -12,7 +12,7 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
-Task-history live/history split. Schema v33. **This release requires an
+Task-history live/history split. Schema v34. **This release requires an
 offline cutover for existing deployments**: stop all units, upgrade the
 package, run migrations, run the cutover program, start units. Fresh
 installs are born at the cutover's end state; the history subsystem is
@@ -71,6 +71,20 @@ dormant until invoked and adds no cost to deployments before cutover.
   window.** Monitoring reads default to the last 24 hours of terminal
   history (`since`/`until` accepted, 30-day maximum); a request over
   the maximum is refused with the bound named, never silently clamped.
+- **Monitoring history reads ride a per-leaf enqueue-order index.**
+  Every task-history leaf carries a btree on `enqueued_at`
+  (schema v34); the dashboard list's default sort merge-appends leaves
+  in index order and stops at its LIMIT instead of sorting every
+  matched row per call. The migration builds the index on each
+  existing leaf at upgrade. The unfiltered total's history side
+  becomes the planner estimate the surface already documents; totals
+  under any active filter stay exact.
+- **Pausing a workflow relocates its claimed tasks' terminal
+  records.** Pause abandons a claimed internal task row, and the
+  abandoned row terminalizes to history as `CANCELLED` with a message
+  naming the pause; resume enqueues fresh rows. A node still pending
+  moves nothing, and the paused workflow itself is unchanged — only
+  its abandoned claimed tasks gain history records.
 
 ### Added
 
@@ -91,6 +105,16 @@ dormant until invoked and adds no cost to deployments before cutover.
   parents; a deployment that withholds it must run an external
   coverage cron. `run_schema_migrations` continues to govern versioned
   migrations only.
+- **Unresolvable crashed-worker recovery evidence quarantines after a
+  bounded attempt count.** A phase-2 pending row whose disposition
+  keeps refusing to resolve is retried for
+  `phase2_quarantine_after_attempts` recovery passes (default 25,
+  bounds 3–1,000), then moved to a quarantine table with its evidence
+  preserved; discovery stops retrying it. Quarantined counts, rows
+  over the attempt bound, and the quarantine function's refusals join
+  the worker health surface beside the phase-2 pass summary.
+- **`rerun_task` is importable from `horsies` directly**, with its
+  command, policy, exhaustive outcome union, and `NotEligibleReason`.
 
 ### Removed
 
