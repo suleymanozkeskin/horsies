@@ -293,6 +293,9 @@ outcome = await rerun_task(
     connection,
     RerunTask(source_task_id=task_id, deadline=None),
     RerunEnqueuePolicy(
+        # 'standard_30d', 'forever', or a class this deployment declares
+        # in RecoveryConfig.retention_classes; the rerun path checks the
+        # key against the registry and refuses an unregistered one.
         retention_class_key='standard_30d',
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),

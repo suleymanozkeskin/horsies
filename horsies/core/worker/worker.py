@@ -841,6 +841,10 @@ class Worker(
                     heartbeat_horizon_hours=(
                         recovery_cfg.heartbeat_leaf_horizon_hours
                     ),
+                    declared_classes=tuple(
+                        (declared.key, declared.duration)
+                        for declared in recovery_cfg.retention_classes
+                    ),
                 )
                 await coverage_session.commit()
             match startup_coverage:

@@ -23,6 +23,7 @@ predicate when a later ensure fails.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
@@ -124,6 +125,7 @@ async def ensure_partition_coverage(
     *,
     history_horizon_days: int,
     heartbeat_horizon_hours: int,
+    declared_classes: Sequence[tuple[str, timedelta]] = (),
 ) -> CoverageOutcome:
     """Register classes, cover leaves, publish readers — one pass.
 
@@ -172,6 +174,28 @@ async def ensure_partition_coverage(
                     connection
                 ),
             )
+
+    for declared_key, declared_duration in declared_classes:
+        declared_registration = await register_finite_retention_class(
+            connection,
+            class_key=declared_key,
+            duration=declared_duration,
+        )
+        match declared_registration:
+            case ClassRegistered() | ClassAlreadyRegistered():
+                pass
+            case _:
+                # ClassConflict lands here: classes are immutable, so a
+                # redeclaration with a different duration is refused and
+                # named rather than silently ignored or applied.
+                return CoverageEnsureFailed(
+                    stage='register_declared_class',
+                    class_key=declared_key,
+                    refusal=repr(declared_registration),
+                    heartbeat_covered_now=await heartbeat_coverage_present(
+                        connection
+                    ),
+                )
 
     publisher = StagedLoaderPublisher()
     created_history = 0
@@ -262,12 +286,14 @@ async def ensure_startup_coverage(
     *,
     history_horizon_days: int,
     heartbeat_horizon_hours: int,
+    declared_classes: Sequence[tuple[str, timedelta]] = (),
 ) -> CoverageOutcome | StartupCoverageRefused:
     """The worker-startup ensure: fatal exactly when now is uncovered."""
     outcome = await ensure_partition_coverage(
         connection,
         history_horizon_days=history_horizon_days,
         heartbeat_horizon_hours=heartbeat_horizon_hours,
+        declared_classes=declared_classes,
     )
     if not outcome.heartbeat_covered_now:
         return StartupCoverageRefused(outcome=outcome)

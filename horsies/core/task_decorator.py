@@ -1741,31 +1741,62 @@ def create_task_wrapper(
     def _validate_retention_class_key(
         retention_class_key: str | None,
     ) -> TaskSendError | None:
-        """Reject a retention class the adopter surface does not register.
+        """Reject a retention class this process does not know about.
 
-        The adopter-facing values are exactly: the parameter omitted (the
-        immutable 30-day default class), explicit ``None`` (forever), or
-        ``'standard_30d'``; custom class registration is not exposed.
-        Failing here keeps a typo at the send call, where the error names
-        it, instead of surfacing later as a partition-routing failure when
-        the task terminalizes into the history archive.
+        Accepted: the parameter omitted (the immutable 30-day default
+        class), explicit ``None`` (forever), the default class named
+        verbatim, or any class this deployment DECLARES in
+        ``RecoveryConfig.retention_classes``.
+
+        The set is process-static because the surface is config-only —
+        adopters declare classes, the maintenance owner registers them —
+        so the check costs no database round trip on the send path.
+
+        The consequence is a per-process contract and it is deliberate: a
+        process whose config omits a class refuses it here even if
+        another deployment registered it in the same database. Failing
+        closed keeps a typo at the send call, where the error names it,
+        instead of surfacing at terminalization as a partition-routing
+        failure.
         """
         match retention_class_key:
             case None:
                 return None
             case key if key == DEFAULT_RETENTION_CLASS_KEY:
                 return None
+            case key if key in _declared_retention_class_keys():
+                return None
             case key:
+                declared = sorted(_declared_retention_class_keys())
                 return TaskSendError(
                     code=TaskSendErrorCode.VALIDATION_FAILED,
                     message=(
                         f'Unknown retention class {key!r} for {task_name}. '
                         f'Valid values: omit the parameter for the default '
-                        f'{DEFAULT_RETENTION_CLASS_KEY!r} (30-day) class, or '
-                        f'pass None to keep the record forever.'
+                        f'{DEFAULT_RETENTION_CLASS_KEY!r} (30-day) class, '
+                        f'pass None to keep the record forever'
+                        + (
+                            f', or name one this deployment declares: '
+                            f'{declared}.'
+                            if declared
+                            else '.'
+                        )
                     ),
                     retryable=False,
                 )
+
+    def _declared_retention_class_keys() -> frozenset[str]:
+        """Class keys this deployment declares, read at send time.
+
+        Read through ``app`` rather than captured at decoration, because
+        a task may be defined before the app's config is finalised.
+        """
+        recovery = getattr(app.config, 'recovery', None)
+        if recovery is None:
+            return frozenset()
+        return frozenset(
+            declared.key for declared in recovery.retention_classes
+        )
 
     def _validate_delay(delay: int) -> TaskSendError | None:
         """Reject non-int and negative schedule delays; None means valid.

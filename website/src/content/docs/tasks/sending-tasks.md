@@ -93,6 +93,29 @@ match await audit_task.with_options(retention_class_key=None).send_async(entry=e
         print(f"Send failed: {err.code}")
 ```
 
+Forever is reached by `None`, not by the word: `retention_class_key='forever'`
+is refused, because the accepted values are the ones this process knows.
+
+### Send Into a Declared Retention Class
+
+Beyond the 30-day default and forever, a deployment can declare its own
+finite classes in
+[`RecoveryConfig.retention_classes`](../../configuration/recovery-config#declaring-your-own-retention-classes)
+and send into them by key:
+
+```python
+match await audit_task.with_options(retention_class_key='audit_1y').send_async(entry=entry):
+    case Ok(handle):
+        print(f"Audit task {handle.task_id}: kept a year")
+    case Err(err):
+        print(f"Send failed: {err.code}")  # VALIDATION_FAILED if undeclared
+```
+
+An unknown class is refused at the send call with `VALIDATION_FAILED`,
+naming the class and listing what this deployment accepts — nothing is
+written. The check reads this process's config, so declare a class in every
+process that sends into it.
+
 The class is fixed at enqueue. An unknown class name fails the send with
 `Err(VALIDATION_FAILED)` naming the class — nothing is written.
 
