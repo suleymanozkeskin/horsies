@@ -79,10 +79,12 @@ terminalization_schema = terminalization_schema_fixture(
 )
 
 
-def _leaf_ref(parent_name: str, lower: datetime) -> LeafRef:
+def _leaf_ref(
+    parent_name: str, lower: datetime, class_key: str = CLASS_KEY
+) -> LeafRef:
     return LeafRef(
         leaf_name=daily_leaf_name(parent_name, lower),
-        class_key=CLASS_KEY,
+        class_key=class_key,
         bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
     )
 
@@ -92,9 +94,10 @@ async def _make_history_leaf(
     parent_name: str,
     *,
     days_ago: int,
+    class_key: str = CLASS_KEY,
 ) -> LeafRef:
     lower, _ = day_bounds(datetime.now(UTC) - timedelta(days=days_ago))
-    ref = _leaf_ref(parent_name, lower)
+    ref = _leaf_ref(parent_name, lower, class_key)
     async with schema.engine.begin() as connection:
         outcome = await create_daily_leaf(
             connection, CreateDailyHistoryLeaf(leaf=ref), UnpublishedLoader()
@@ -221,6 +224,97 @@ class TestHeartbeatPruning:
         assert not await _relation_exists(schema, expired.leaf_name)
         assert await _catalog_dropped(schema, expired.leaf_name)
         assert await _relation_exists(schema, current.leaf_name)
+
+
+class TestDeclaredDurationGovernsTheDrop:
+    """A duration other than 30 days actually governs when a leaf drops.
+
+    Every other suite registers classes at the default 30 days, so
+    "arbitrary durations are supported" rested on the registration
+    function accepting a `timedelta` — an acceptance argument, not a
+    demonstration. The discriminating construction is TWO CLASSES WITH
+    DIFFERENT DURATIONS HOLDING SAME-AGE LEAVES: age is held constant so
+    the only thing that can explain divergent outcomes is the declared
+    duration.
+    """
+
+    async def test_same_age_leaves_diverge_on_declared_duration(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            short_parent = await register_class(
+                connection, 'it_short_7d', duration_days=7
+            )
+            long_parent = await register_class(
+                connection, 'it_long_30d', duration_days=30
+            )
+
+        # SAME age, ten days: past the 7-day horizon, inside the 30-day one.
+        short_leaf = await _make_history_leaf(
+            schema, short_parent, days_ago=10, class_key='it_short_7d'
+        )
+        long_leaf = await _make_history_leaf(
+            schema, long_parent, days_ago=10, class_key='it_long_30d'
+        )
+
+        pruned = await prune_expired_partitions(
+            schema.engine, UnpublishedLoader()
+        )
+
+        assert pruned.errors == ()
+        assert not await _relation_exists(schema, short_leaf.leaf_name), (
+            'a 7-day class kept a 10-day-old leaf — the declared duration '
+            'is not governing the drop'
+        )
+        assert await _catalog_dropped(schema, short_leaf.leaf_name)
+        assert await _relation_exists(schema, long_leaf.leaf_name), (
+            'a 30-day class dropped a 10-day-old leaf — the drop is not '
+            'reading the class duration'
+        )
+        assert not await _catalog_dropped(schema, long_leaf.leaf_name)
+        assert [entry.leaf_name for entry in pruned.history_swept] == [
+            short_leaf.leaf_name
+        ]
+
+    async def test_a_sub_day_duration_still_retains_its_whole_leaf(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """Retention is a MINIMUM: granularity cannot under-retain.
+
+        A leaf spans one day and drops only once its whole day is past
+        the duration, so a 1-hour class keeps yesterday's leaf until an
+        hour after that day ends — never less than the declared hour.
+        """
+        schema = terminalization_schema
+        async with schema.engine.begin() as connection:
+            parent = await register_class(
+                connection, 'it_subday', duration_days=1
+            )
+            await connection.execute(
+                text(
+                    'UPDATE horsies_retention_classes '
+                    "SET duration = interval '1 hour' "
+                    'WHERE class_key = :key'
+                ),
+                {'key': 'it_subday'},
+            )
+        today = await _make_history_leaf(
+            schema, parent, days_ago=0, class_key='it_subday'
+        )
+        yesterday = await _make_history_leaf(
+            schema, parent, days_ago=1, class_key='it_subday'
+        )
+
+        pruned = await prune_expired_partitions(
+            schema.engine, UnpublishedLoader()
+        )
+
+        assert pruned.errors == ()
+        assert await _relation_exists(schema, today.leaf_name), (
+            "today's leaf is not yet a whole day old plus an hour"
+        )
+        assert not await _relation_exists(schema, yesterday.leaf_name)
 
 
 class TestHistoryPruning:

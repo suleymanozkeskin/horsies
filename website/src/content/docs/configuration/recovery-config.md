@@ -192,11 +192,55 @@ RecoveryConfig(
 )
 ```
 
-Per-task retention is decided when the row is created, not by recovery
-config: every task carries a retention class assigned at enqueue — the
-default is the immutable 30-day class, and only an explicit `None` at the
-broker's enqueue keeps a record forever. The class is snapshotted on the
-row; its window cannot be changed afterwards.
+Per-task retention is decided when the row is created: every task carries
+a retention class assigned at enqueue, snapshotted on the row, and its
+window cannot be changed afterwards. Omitting the parameter uses the
+immutable 30-day class; an explicit `None` keeps the record forever.
+
+### Declaring your own retention classes
+
+A deployment can declare additional finite classes. Declaring a class does
+not create it — the maintenance owner registers every declared class at
+startup and on each pass, exactly as it registers the classes the library
+ships, which keeps partition DDL out of application code and registration
+under one owner.
+
+```python
+from datetime import timedelta
+from horsies.core.models.recovery import RecoveryConfig, RetentionClassConfig
+
+RecoveryConfig(
+    retention_classes=(
+        RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
+        RetentionClassConfig(key='transient_2d', duration=timedelta(days=2)),
+    )
+)
+```
+
+Tasks are then sent into a declared class by key:
+
+```python
+my_task.with_options(retention_class_key='audit_1y').send(order_id=42)
+```
+
+**Declarations are checked where you write them.** A key must be a usable
+identifier, must not be one the library owns (`standard_30d`, `forever`,
+`heartbeats`), must not repeat, and its duration must be positive. Every
+problem in a config is reported together, not one per run. Re-declaring an
+existing key with a *different* duration is refused at startup and named:
+classes are immutable, because rows already carry the old window.
+
+**`duration` is a minimum, not an exact age.** History partitions span one
+day and are dropped only once the whole day is past the duration, so a row
+survives between `duration` and `duration + 1 day`. Sub-day durations are
+accepted and never under-retain, but cannot expire faster than daily
+partition granularity allows.
+
+**Validation is per-process.** The set of acceptable class keys comes from
+this process's config, so the check costs no database round trip at send
+time. The consequence is deliberate: a process whose config omits a class
+refuses it even if another deployment registered that class in the same
+database. Declare a class in every process that sends into it.
 
 ## Disabling Recovery
 
