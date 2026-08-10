@@ -1372,6 +1372,102 @@ class TestCreateTaskWrapperSend:
 
 
 @pytest.mark.unit
+class TestSendRetentionClass:
+    """retention_class_key at the send surface: omitted → the immutable
+    30-day default class, explicit ``None`` → forever, unknown → refused
+    before the broker is touched."""
+
+    @staticmethod
+    def _wrapper_and_broker() -> tuple[Any, MagicMock]:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('task-abc')
+        broker.enqueue_async = AsyncMock(return_value=Ok('task-abc'))
+        app.get_broker.return_value = broker
+        return create_task_wrapper(good_fn, app, 'test.good_fn'), broker
+
+    def test_plain_send_carries_the_default_class(self) -> None:
+        """A send that names no class enqueues the 30-day default."""
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = wrapper.send(x=1)
+
+        assert is_ok(result)
+        assert (
+            broker.enqueue.call_args.kwargs['retention_class_key']
+            == 'standard_30d'
+        )
+
+    def test_with_options_none_requests_forever(self) -> None:
+        """Explicit ``None`` reaches the broker as ``None`` — forever —
+        distinct from the omitted-parameter default."""
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = wrapper.with_options(retention_class_key=None).send(x=1)
+
+        assert is_ok(result)
+        assert (
+            broker.enqueue.call_args.kwargs['retention_class_key'] is None
+        )
+
+    def test_with_options_explicit_default_class_carries_it(self) -> None:
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = wrapper.with_options(
+            retention_class_key='standard_30d'
+        ).send(x=1)
+
+        assert is_ok(result)
+        assert (
+            broker.enqueue.call_args.kwargs['retention_class_key']
+            == 'standard_30d'
+        )
+
+    def test_unknown_class_fails_before_the_broker(self) -> None:
+        """A typo is refused at the send call, naming the class — never a
+        partition-routing failure at terminalization."""
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = wrapper.with_options(
+            retention_class_key='no_such_class'
+        ).send(x=1)
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert result.err_value.retryable is False
+        assert 'no_such_class' in result.err_value.message
+        broker.enqueue.assert_not_called()
+
+    def test_async_send_mirrors_the_sync_semantics(self) -> None:
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = asyncio.run(
+            wrapper.with_options(retention_class_key=None).send_async(x=1)
+        )
+
+        assert is_ok(result)
+        assert (
+            broker.enqueue_async.call_args.kwargs['retention_class_key']
+            is None
+        )
+
+    def test_async_unknown_class_fails_before_the_broker(self) -> None:
+        wrapper, broker = self._wrapper_and_broker()
+
+        result = asyncio.run(
+            wrapper.with_options(
+                retention_class_key='no_such_class'
+            ).send_async(x=1)
+        )
+
+        assert is_err(result)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        broker.enqueue_async.assert_not_called()
+
+
 class TestSendPayloadGuardrail:
     """PayloadPolicy enforcement on the send path."""
 

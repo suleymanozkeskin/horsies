@@ -42,6 +42,7 @@ from horsies.core.codec.signature_check import (
     SignatureValidationError,
     check_task_signature,
 )
+from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
@@ -859,6 +860,7 @@ class TaskFunction(Protocol[P, T]):
         *,
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> 'TaskSendOptions[P, T]': ...
 
     @abstractmethod
@@ -1256,6 +1258,7 @@ def create_task_wrapper(
                     sent_at=payload.sent_at,
                     task_options=payload.task_options,
                     idempotency_key=payload.idempotency_key,
+                    retention_class_key=payload.retention_class_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1333,6 +1336,7 @@ def create_task_wrapper(
                     sent_at=payload.sent_at,
                     task_options=payload.task_options,
                     idempotency_key=payload.idempotency_key,
+                    retention_class_key=payload.retention_class_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1423,6 +1427,7 @@ def create_task_wrapper(
                     enqueue_delay_seconds=payload.enqueue_delay_seconds,
                     task_options=payload.task_options,
                     idempotency_key=payload.idempotency_key,
+                    retention_class_key=payload.retention_class_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1500,6 +1505,7 @@ def create_task_wrapper(
                     enqueue_delay_seconds=payload.enqueue_delay_seconds,
                     task_options=payload.task_options,
                     idempotency_key=payload.idempotency_key,
+                    retention_class_key=payload.retention_class_key,
                 )
             except Exception as exc:
                 last_err = TaskSendError(
@@ -1668,6 +1674,7 @@ def create_task_wrapper(
         good_until_override: datetime | None | object,
         *,
         idempotency_key: str | None = None,
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1675,6 +1682,9 @@ def create_task_wrapper(
                 message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
+        retention_error = _validate_retention_class_key(retention_class_key)
+        if retention_error is not None:
+            return Err(retention_error)
 
         prep = _prepare_send(
             args,
@@ -1688,6 +1698,9 @@ def create_task_wrapper(
             payload = dataclasses.replace(
                 payload, idempotency_key=idempotency_key
             )
+        payload = dataclasses.replace(
+            payload, retention_class_key=retention_class_key
+        )
         return _do_send(task_id, payload)
 
     async def _send_async_with_options(
@@ -1696,6 +1709,7 @@ def create_task_wrapper(
         good_until_override: datetime | None | object,
         *,
         idempotency_key: str | None = None,
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1703,6 +1717,9 @@ def create_task_wrapper(
                 message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
+        retention_error = _validate_retention_class_key(retention_class_key)
+        if retention_error is not None:
+            return Err(retention_error)
 
         prep = _prepare_send(
             args,
@@ -1716,7 +1733,39 @@ def create_task_wrapper(
             payload = dataclasses.replace(
                 payload, idempotency_key=idempotency_key
             )
+        payload = dataclasses.replace(
+            payload, retention_class_key=retention_class_key
+        )
         return await _do_send_async(task_id, payload)
+
+    def _validate_retention_class_key(
+        retention_class_key: str | None,
+    ) -> TaskSendError | None:
+        """Reject a retention class the adopter surface does not register.
+
+        The adopter-facing values are exactly: the parameter omitted (the
+        immutable 30-day default class), explicit ``None`` (forever), or
+        ``'standard_30d'``; custom class registration is not exposed.
+        Failing here keeps a typo at the send call, where the error names
+        it, instead of surfacing later as a partition-routing failure when
+        the task terminalizes into the history archive.
+        """
+        match retention_class_key:
+            case None:
+                return None
+            case key if key == DEFAULT_RETENTION_CLASS_KEY:
+                return None
+            case key:
+                return TaskSendError(
+                    code=TaskSendErrorCode.VALIDATION_FAILED,
+                    message=(
+                        f'Unknown retention class {key!r} for {task_name}. '
+                        f'Valid values: omit the parameter for the default '
+                        f'{DEFAULT_RETENTION_CLASS_KEY!r} (30-day) class, or '
+                        f'pass None to keep the record forever.'
+                    ),
+                    retryable=False,
+                )
 
     def _validate_delay(delay: int) -> TaskSendError | None:
         """Reject non-int and negative schedule delays; None means valid.
@@ -1836,9 +1885,11 @@ def create_task_wrapper(
             self,
             good_until: datetime | None,
             idempotency_key: str | None,
+            retention_class_key: str | None,
         ) -> None:
             self.good_until = good_until
             self.idempotency_key = idempotency_key
+            self.retention_class_key = retention_class_key
 
         def send(
             self,
@@ -1848,6 +1899,7 @@ def create_task_wrapper(
             return _send_with_options(
                 args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
+                retention_class_key=self.retention_class_key,
             )
 
         async def send_async(
@@ -1858,6 +1910,7 @@ def create_task_wrapper(
             return await _send_async_with_options(
                 args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
+                retention_class_key=self.retention_class_key,
             )
 
         def schedule(
@@ -1882,9 +1935,16 @@ def create_task_wrapper(
         *,
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
     ) -> TaskSendOptions[P, T]:
-        """Set options for one ad-hoc send without changing the task definition."""
-        return _TaskSendOptionsImpl(good_until, idempotency_key)
+        """Set options for one ad-hoc send without changing the task definition.
+
+        ``retention_class_key``: omit for the immutable 30-day default
+        class; pass ``None`` to keep the terminal record forever. The
+        registered adopter-facing values are exactly those two — custom
+        class registration is not exposed.
+        """
+        return _TaskSendOptionsImpl(good_until, idempotency_key, retention_class_key)
 
     # ---- Retry methods ----
 
@@ -2058,9 +2118,12 @@ def create_task_wrapper(
             *,
             good_until: datetime | None = None,
             idempotency_key: str | None = None,
+            retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         ) -> TaskSendOptions[P, T]:
             return with_options(
-                good_until=good_until, idempotency_key=idempotency_key
+                good_until=good_until,
+                idempotency_key=idempotency_key,
+                retention_class_key=retention_class_key,
             )
 
         def retry_send(
