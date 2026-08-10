@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.types.result import Result
 
 
@@ -73,6 +74,11 @@ class TaskSendPayload:
     # enqueue_sha. Riding the payload keeps the uncertain-commit resend
     # keyed: a replayed send claims with the same key it first sent.
     idempotency_key: str | None = None
+    # The retention class snapshotted at enqueue. ``None`` means forever,
+    # so the field defaults to the immutable 30-day class rather than to
+    # ``None`` — a payload that never had the field set must not read as
+    # a forever request on replay.
+    retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY
 
 
 @dataclass(slots=True, frozen=True)

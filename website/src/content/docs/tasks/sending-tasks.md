@@ -79,6 +79,23 @@ await opts.schedule_async(60, name="alice", count=3)    # delayed, async
 
 For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Builder](../concepts/workflows/typed-node-builder).
 
+### Keep a Terminal Record Forever
+
+Every task's terminal record ages by its retention class — the 30-day
+default unless the send says otherwise. Pass `retention_class_key=None` to
+keep the record forever:
+
+```python
+match await audit_task.with_options(retention_class_key=None).send_async(entry=entry):
+    case Ok(handle):
+        print(f"Audit task {handle.task_id}: terminal record kept forever")
+    case Err(err):
+        print(f"Send failed: {err.code}")
+```
+
+The class is fixed at enqueue. An unknown class name fails the send with
+`Err(VALIDATION_FAILED)` naming the class — nothing is written.
+
 ### Delay Execution
 
 ```python
@@ -266,17 +283,27 @@ Same `delay` validation as `.schedule()`.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.with_options(*, good_until=None) -> TaskSendOptions[P, T]`
+### `.with_options(*, good_until=None, idempotency_key=None, retention_class_key='standard_30d') -> TaskSendOptions[P, T]`
 
 Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with the overridden options applied.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
+| `idempotency_key` | `str \| None` | Caller-supplied enqueue-deduplication key, scoped per task name |
+| `retention_class_key` | `str \| None` | Terminal-record retention: omit for the 30-day default class, `None` for forever |
 
 **Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()`.
 
 Passing `good_until=None` explicitly clears any internally inherited deadline.
+
+`retention_class_key` accepts exactly two values: `'standard_30d'` (the
+immutable 30-day default — the same as omitting the parameter) and `None`
+(keep the terminal record forever). Any other string returns
+`Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
+is written. The class is snapshotted on the row at enqueue and decides which
+history partition the record moves to at terminalization; it cannot be
+changed afterwards.
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 

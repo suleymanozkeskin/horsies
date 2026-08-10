@@ -191,7 +191,7 @@ async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHa
 def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
 # Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule)
-def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None) -> TaskSendOptions[P, T]
+def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention_class_key: str | None = 'standard_30d') -> TaskSendOptions[P, T]
 
 # Replay failed send with stored payload (ENQUEUE_FAILED only)
 def retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
@@ -239,6 +239,18 @@ enqueue reserves the key together with a canonical fingerprint of the request:
 a resend under the same key with the same request is a replay and creates zero
 rows; a resend under the same key with a *different* request is a typed
 conflict. Keys are not a rerun contract — they deduplicate enqueues.
+
+**`retention_class_key`**: how long the terminal record is kept. Omit for the
+immutable 30-day default class; pass `None` to keep the record forever. Those
+two are the only registered values — any other string returns
+`Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
+is written. The class is snapshotted on the row at enqueue and decides which
+history partition the record moves to when the task terminalizes.
+
+```python
+# Keep this task's terminal record forever
+await my_task.with_options(retention_class_key=None).send_async(**kwargs)
+```
 
 **When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
