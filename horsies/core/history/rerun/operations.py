@@ -32,6 +32,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..identity.fingerprint import EnqueueCommandV1
+from ..names import RETENTION_CLASSES
 from ..identity.keys import (
     IDEMPOTENCY_SCOPE_VERSION,
     ScopedIdempotencyKey,
@@ -181,6 +182,26 @@ async def rerun_task(
     policy: RerunEnqueuePolicy,
 ) -> RerunOutcome:
     """Execute one rerun inside the caller-owned transaction."""
+    registered = (
+        await connection.execute(
+            text(
+                f'SELECT EXISTS (SELECT 1 FROM {RETENTION_CLASSES} '
+                'WHERE class_key = :class_key)'
+            ),
+            {'class_key': policy.retention_class_key},
+        )
+    ).scalar_one()
+    if not registered:
+        # The policy's key routes the NEW request's eventual history row
+        # into a LIST partition; an unregistered key has none, so the
+        # failure would otherwise arrive at the rerun's completion as a
+        # partition-routing error. A caller precondition raises before
+        # any read or write.
+        raise ValueError(
+            f'unknown retention class {policy.retention_class_key!r}: '
+            'the new request would have no history partition; register '
+            'the class before rerunning into it'
+        )
     detail = await read_task_detail(
         connection, task_id=command.source_task_id
     )

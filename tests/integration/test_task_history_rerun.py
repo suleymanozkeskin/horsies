@@ -249,6 +249,33 @@ class TestRerunEndToEnd:
             assert row.retention_class_key == SECOND_CLASS
 
     @pytest.mark.asyncio
+    async def test_unregistered_class_raises_before_any_write(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A typo'd class must cost a refused call, not a new task that
+        runs to completion and then has no history partition to land in."""
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            source = await seed_failed_source(connection)
+            before = (
+                await connection.execute(
+                    text('SELECT count(*) FROM horsies_tasks')
+                )
+            ).scalar_one()
+            with pytest.raises(ValueError, match='unknown retention class'):
+                await rerun_task(
+                    connection,
+                    RerunTask(source_task_id=source, deadline=None),
+                    policy(class_key='it_never_registered'),
+                )
+            after = (
+                await connection.execute(
+                    text('SELECT count(*) FROM horsies_tasks')
+                )
+            ).scalar_one()
+            assert after == before, 'a refused rerun must write nothing'
+
+    @pytest.mark.asyncio
     async def test_current_policy_can_decline_retention(
         self, terminalization_schema: HistorySchema
     ) -> None:
