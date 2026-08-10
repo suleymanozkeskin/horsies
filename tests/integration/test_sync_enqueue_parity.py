@@ -30,7 +30,7 @@ async def _row_class(broker: PostgresBroker, task_id: str) -> str | None:
             await connection.execute(
                 text(
                     'SELECT retention_class_key FROM horsies_tasks '
-                    'WHERE task_id = CAST(:task_id AS uuid)'
+                    'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': task_id},
             )
@@ -80,7 +80,7 @@ async def test_sync_enqueue_carries_retain_rerun_input(
             await connection.execute(
                 text(
                     'SELECT retain_rerun_input FROM horsies_tasks '
-                    'WHERE task_id = CAST(:task_id AS uuid)'
+                    'WHERE id = CAST(:task_id AS uuid)'
                 ),
                 {'task_id': task_id},
             )
