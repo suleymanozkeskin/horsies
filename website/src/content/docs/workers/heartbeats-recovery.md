@@ -228,16 +228,24 @@ RecoveryConfig(
 
 Tasks will remain stuck until manually resolved.
 
-## Table Cleanup
+## Partitioned Storage and Cleanup
 
-Heartbeat cleanup is automatic by default. The worker reaper deletes expired heartbeats on every tick based on `RecoveryConfig.heartbeat_retention_hours` (default: `24`, set to `None` to disable).
+`horsies_heartbeats` is partitioned by hour. Workers create partitions ahead
+of writes — at startup and on a periodic maintenance pass every
+`partition_maintenance_interval_s` (default 900s), keeping
+`heartbeat_leaf_horizon_hours` (default 6) complete future partitions
+available. Old partitions are dropped whole; there is no row-delete pass and
+no row-by-row scan.
 
-For manual cleanup:
+`heartbeat_retention_hours` was removed in 0.5.0 — setting it fails
+validation naming the successor, because a row-delete window no longer
+exists.
 
-```sql
--- Delete heartbeats older than 24 hours
-DELETE FROM horsies_heartbeats WHERE sent_at < NOW() - INTERVAL '24 hours';
-```
+Partition coverage requires the worker role to hold `CREATE` on the partition
+parents. A deployment that withholds that privilege must create partitions
+from an external cron instead; coverage health is published on the worker
+health surface and fails **before** fewer than two future partitions remain,
+so the alarm precedes the lapse rather than reporting it.
 
 ## Troubleshooting
 

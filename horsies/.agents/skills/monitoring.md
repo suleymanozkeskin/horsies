@@ -116,6 +116,24 @@ list_schedules(broker)
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`.
 
+### Reads span live and history
+
+A task that reaches a terminal status leaves `horsies_tasks` for the
+`horsies_task_history` archive in the same transaction. Detail, result, and
+attempt-history reads resolve on **both** sides, so a moved task still
+answers.
+
+List and aggregate reads are **window-scoped** and take a `HistoryWindow`
+(`resolve_monitoring_window(since=..., until=...)` builds one): the default
+is the last 24 hours (`MONITORING_WINDOW_DEFAULT`), the maximum span is 30
+days (`MONITORING_WINDOW_MAX`), and a request over the maximum is refused
+with the bound named — never silently clamped. Bounds must be
+timezone-aware and increasing.
+
+`TaskListPage.total` follows a stated contract: **exact when any filter is
+active, a planner estimate on the unfiltered view.** Do not present an
+unfiltered total as an exact count.
+
 ## Task Actions — `cancel_task`
 
 ```python

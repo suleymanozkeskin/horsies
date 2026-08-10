@@ -208,6 +208,34 @@ if result.is_err():
         print("All retries exhausted")
 ```
 
+## Retry vs Rerun
+
+`RetryPolicy` governs **automatic retry of the same request**: the task row
+stays live, `retry_count` advances, and every attempt is recorded against one
+task id. That is unchanged in 0.5.0.
+
+**Rerun is a different operation.** A task that has reached a terminal status
+has left the live table for the immutable history archive — there is no row to
+reset, and manual in-place retry of a terminal task is removed. Re-executing
+that work is a **new request**: `rerun_task` mints a new task with a new id and
+records lineage back to the source.
+
+| | Retry (`RetryPolicy`) | Rerun (`rerun_task`) |
+|---|---|---|
+| Applies to | A live task that failed an attempt | A terminal task record |
+| Task id | Unchanged | New, with recorded lineage |
+| Triggered by | `auto_retry_for` matching the error code | An explicit call or the dashboard action |
+| Attempt history | Appended to the same task | Belongs to the new task |
+| Requires | A retry policy with attempts remaining | The enqueue input to have been retained |
+
+```python
+from horsies import rerun_task, RerunTask, RerunEnqueuePolicy
+```
+
+Whether a task is rerunnable is decided at enqueue by
+`retain_rerun_input_default` (with a per-task override), not at rerun time.
+See [Action Semantics](../monitoring/action-semantics#task-rerun).
+
 ## Validation
 
 The policy validates consistency:

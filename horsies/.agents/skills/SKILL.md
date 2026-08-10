@@ -268,7 +268,51 @@ info = await app.get_task_info_async("task-uuid", include_result=True)
 # broker.get_raw_result_record_async(...)
 ```
 
+Result reads resolve across both sides of the lifecycle: a task that has
+terminalized is answered from the task-history archive, so
+`get_result`/`get_task_info` keep working after the row leaves the live
+table.
+
 See `configs.md` for all broker methods. See website docs `monitoring/broker-methods` for full reference.
+
+### Re-executing a Terminal Task
+
+A terminal record is immutable. Manual in-place retry is removed — re-execution
+is a **new request** with a new id and recorded lineage:
+
+```python
+from datetime import timedelta
+
+from horsies import (
+    rerun_task, RerunTask, RerunEnqueuePolicy,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
+    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
+)
+
+outcome = await rerun_task(
+    connection,
+    RerunTask(source_task_id=task_id, deadline=None),
+    RerunEnqueuePolicy(
+        retention_class_key='standard_30d',
+        retain_rerun_input=True,
+        reservation_window=timedelta(hours=24),
+    ),
+)
+match outcome:
+    case RerunEnqueued(new_task_id=new_id):
+        ...
+    case RerunSourceLive() | RerunSourceAbsent() | RerunNotEligible():
+        ...
+    case RerunInputUnavailable() | RerunInputCorrupt():
+        ...
+    case RerunKeyConflict() | RerunKeyReplay():
+        ...
+```
+
+`RerunOutcome` is an exhaustive union — match it exhaustively rather than
+checking one variant. Eligibility is decided **at enqueue** by
+`retain_rerun_input_default` (per-task override available): a task whose input
+was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 
 ## Result Types
 

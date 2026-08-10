@@ -149,6 +149,7 @@ config = PostgresConfig(
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
+| `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
 | `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
 | `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
@@ -337,18 +338,32 @@ Controls stale task detection, automatic recovery, and data retention.
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
-| `heartbeat_retention_hours` | `int \| None` | `24` | 1–8760; None disables | Prune old heartbeat rows |
+| `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it |
+| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
-| `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal task/workflow rows |
-| `queue_terminal_record_retention_hours` | `dict[str, int]` | `{}` | values 1–43800 | Per-queue overrides of the terminal window for plain (non-workflow) tasks; applies even when the global window is None |
+| `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
+| `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |
+| `heartbeat_leaf_horizon_hours` | `int` | `6` | 2–48 | Complete future hourly heartbeat partitions kept ahead of writes |
+| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between coverage-ensure passes |
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
-| `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per retention DELETE batch; each batch commits independently |
+| `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
 
-Override keys must name declared queues (`custom_queues` in CUSTOM mode,
-`"default"` in DEFAULT mode) — an unknown key fails config construction
-(and therefore `horsies check`) with HRS-200. Workflow-backing task rows
-always use the global window; once their workflow is terminal, they age from
-their own terminal timestamp.
+**Removed in 0.5.0 — setting either fails config construction naming the
+successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions
+that drop whole) and `queue_terminal_record_retention_hours` (terminal task
+records age by the retention class assigned at enqueue).
+
+**Terminal task records are not covered by any of these fields.** They move to
+the `horsies_task_history` archive at terminalization and age by the retention
+class assigned at enqueue — the default is the immutable 30-day class, and
+only an explicit `None` keeps a record forever. Whole partitions are dropped;
+rows are never deleted individually.
+
+Task records and their workflow record age **independently**: each task record
+ages by its own class from its own terminal instant, and the workflow row ages
+by `terminal_record_retention_hours`. Deleting a workflow also removes any
+unconsumed progression evidence still waiting in its outbox — retention is
+never held up by a stalled consumer.
 
 ### Constraints (HRS-204)
 

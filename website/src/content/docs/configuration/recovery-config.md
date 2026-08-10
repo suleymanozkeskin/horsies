@@ -46,14 +46,25 @@ config = AppConfig(
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | RUNNING task heartbeat frequency |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
 | `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
-| `heartbeat_retention_hours` | `int \| None` | 24 | Hours to keep heartbeat rows; `None` disables pruning |
+| `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
+| `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
+| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
 | `worker_state_retention_hours` | `int \| None` | 168 (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
-| `terminal_record_retention_hours` | `int \| None` | 720 (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
-| `queue_terminal_record_retention_hours` | `dict[str, int]` | `{}` | Per-queue overrides of the terminal window for plain (non-workflow) tasks; applies even when the global window is `None` |
+| `terminal_record_retention_hours` | `int \| None` | 720 (30 days) | Hours to keep terminal **workflow** records; `None` disables pruning. Terminal task rows move to the task-history archive and age by retention class, not by this window |
+| `history_leaf_horizon_days` | `int` | 3 | Complete future daily history partitions kept created ahead of writes (2–14; 2 is the coverage-health red line) |
+| `heartbeat_leaf_horizon_hours` | `int` | 6 | Complete future hourly heartbeat partitions kept created ahead of writes (2–48) |
+| `partition_maintenance_interval_s` | `int` | 900 | Seconds between coverage-ensure passes (60–3,600) |
 | `retention_sweep_interval_s` | `int` | 300 (5 min) | Seconds between retention sweep passes (30s–24h) |
-| `retention_delete_batch_size` | `int` | 500 | Rows per retention `DELETE` batch (50–10,000); each batch commits independently |
+| `retention_delete_batch_size` | `int` | 500 | Rows per workflow-retention `DELETE` batch (50–10,000); each batch commits independently |
 
 All time values for thresholds and intervals are in milliseconds. Retention windows are in hours; the sweep interval is in seconds.
+
+**Removed in 0.5.0 (setting either fails validation naming the successor):**
+`heartbeat_retention_hours` — heartbeats live in hourly partitions and old
+partitions drop whole; a row-delete window no longer exists.
+`queue_terminal_record_retention_hours` — terminal task records age by the
+retention class assigned at enqueue; per-queue row-delete windows no longer
+exist.
 
 ## Recovery Behaviors
 
@@ -79,7 +90,19 @@ After user code returns, the child marks the task as finalizing before the
 parent writes the terminal result. The reaper will not recover that task until
 `finalizing_stale_threshold_ms` has also elapsed.
 
-For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. Task finalization is two transactions — the task is marked terminal first, then the workflow DAG is advanced — so a task can be terminal for a brief moment while its workflow progression is still in flight. The reaper waits `crashed_worker_recovery_grace_ms` (default 10s) before recovering such a task, so it does not race a healthy finalizer; only a genuine crash in that gap is recovered (after the grace plus one reaper sweep). This grace is independent of the heartbeat-coupled thresholds. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
+For **workflow** tasks, terminalization records the owed workflow progression in a transactional outbox as it moves the task to history, and the reaper consumes those records. Task finalization is two transactions — the task is terminalized first, then the workflow DAG is advanced — so a progression can be owed for a brief moment while its finalizer is still in flight. The reaper waits `crashed_worker_recovery_grace_ms` (default 10s) before consuming such a record, so it does not race a healthy finalizer; only a genuine crash in that gap is recovered (after the grace plus one reaper sweep). This grace is independent of the heartbeat-coupled thresholds. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
+
+### Unresolvable progression evidence quarantines
+
+A progression record whose disposition keeps refusing to resolve is retried for
+`phase2_quarantine_after_attempts` recovery passes (default 25, bounds 3–1,000),
+then moved to a quarantine table with its evidence preserved; discovery stops
+retrying it. Retaining dispositions are either transient races, which resolve
+within a pass or two, or structural conflicts, which never do — the bound gives
+a transient an order of magnitude more passes than it needs while capping a
+structural row's error-log noise. Quarantined counts, rows over the attempt
+bound, and the quarantine function's refusals are published on the worker
+health surface beside the phase-2 pass summary.
 
 ## Heartbeat System
 
@@ -139,52 +162,32 @@ RecoveryConfig(
 
 ## Retention Cleanup
 
-The reaper loop automatically prunes old rows every `retention_sweep_interval_s` seconds (default 5 minutes). Each pass deletes in batches of `retention_delete_batch_size` rows (default 500) with a commit per batch, bounding statement duration and lock hold time; a backlog that outlives one pass's time budget resumes on the next pass. Deleting a task also removes its `horsies_task_attempts` history in the same statement. Three categories are cleaned independently:
+Three categories age by three different mechanisms:
 
-| Category | Config field | Default | What gets deleted |
-|----------|-------------|---------|-------------------|
-| Heartbeats | `heartbeat_retention_hours` | 24h | `horsies_heartbeats` rows older than threshold |
-| Worker states | `worker_state_retention_hours` | 7 days | `horsies_worker_states` snapshots older than threshold |
-| Terminal records | `terminal_record_retention_hours` | 30 days | `horsies_tasks`, `horsies_workflows`, and `horsies_workflow_tasks` rows in COMPLETED/FAILED/CANCELLED status older than threshold |
+| Category | Mechanism | Config | Default |
+|----------|-----------|--------|---------|
+| Terminal task records | **Partition drop.** Records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | Retention class per task (assigned at enqueue; default 30-day class, explicit `None` = forever) | 30 days |
+| Heartbeats | **Partition drop.** Hourly partitions; old partitions drop whole | none (fixed by partition lifecycle) | — |
+| Terminal workflow records | **Row delete.** The reaper prunes `horsies_workflows` / `horsies_workflow_tasks` rows every `retention_sweep_interval_s` in batches of `retention_delete_batch_size`, a commit per batch | `terminal_record_retention_hours` (`None` disables) | 30 days |
+| Worker states | **Row delete**, same sweep | `worker_state_retention_hours` (`None` disables) | 7 days |
 
-Set any field to `None` to disable pruning for that category.
+Deleting a workflow also removes any unconsumed crashed-worker progression
+evidence still waiting in the outbox — the same disposition its consumer
+would reach for a workflow that is already terminal. Retention is never held
+up by a stalled consumer.
 
 ```python
 RecoveryConfig(
-    heartbeat_retention_hours=48,              # Keep heartbeats for 2 days
     worker_state_retention_hours=24 * 14,      # Keep worker snapshots for 2 weeks
-    terminal_record_retention_hours=24 * 90,   # Keep terminal records for 90 days
+    terminal_record_retention_hours=24 * 90,   # Keep workflow records for 90 days
 )
 ```
 
-High-volume queues can carry their own terminal window via
-`queue_terminal_record_retention_hours`. Overrides govern **plain
-(non-workflow) tasks** on the listed queues — workflow-backing task rows
-always use the global window. While a workflow is non-terminal, its backing
-task rows are protected from retention; after the workflow terminates, each
-task row ages from its own terminal timestamp and may expire before the
-workflow record. Queues not listed use the global window; overrides apply even
-when the global window is `None`.
-
-```python
-RecoveryConfig(
-    terminal_record_retention_hours=24 * 30,   # Global: 30 days
-    queue_terminal_record_retention_hours={
-        'metrics': 24,                          # Metric-style spam: 1 day
-        'audit': 24 * 365,                      # Audit trail: 1 year
-    },
-)
-```
-
-To disable all automatic cleanup:
-
-```python
-RecoveryConfig(
-    heartbeat_retention_hours=None,
-    worker_state_retention_hours=None,
-    terminal_record_retention_hours=None,
-)
-```
+Per-task retention is decided when the row is created, not by recovery
+config: every task carries a retention class assigned at enqueue — the
+default is the immutable 30-day class, and only an explicit `None` at the
+broker's enqueue keeps a record forever. The class is snapshotted on the
+row; its window cannot be changed afterwards.
 
 ## Disabling Recovery
 

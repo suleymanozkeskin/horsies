@@ -191,7 +191,7 @@ async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHa
 def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
 # Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule)
-def with_options(*, good_until: datetime | None = None) -> TaskSendOptions[P, T]
+def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None) -> TaskSendOptions[P, T]
 
 # Replay failed send with stored payload (ENQUEUE_FAILED only)
 def retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
@@ -233,6 +233,12 @@ opts.schedule(60, **kwargs)      # delayed
 ```
 
 **`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
+
+**`idempotency_key`**: optional caller-supplied key, scoped per task name. The
+enqueue reserves the key together with a canonical fingerprint of the request:
+a resend under the same key with the same request is a replay and creates zero
+rows; a resend under the same key with a *different* request is a typed
+conflict. Keys are not a rerun contract — they deduplicate enqueues.
 
 **When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
@@ -647,7 +653,29 @@ from horsies import (
     BrokerResult, BrokerOperationError, BrokerErrorCode,
     # Node data flow helper
     from_node,
+    # Rerun (re-execute a terminal task as a new request)
+    rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
+    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
+    NotEligibleReason,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )
 ```
+
+## Terminal Records Are Immutable
+
+A task that reaches a terminal status leaves `horsies_tasks` for the
+`horsies_task_history` archive in the same transaction. Consequences for task
+code and callers:
+
+- **Manual in-place retry is removed.** `RetryPolicy` still governs automatic
+  retry of a live task; re-executing a *terminal* task is a new request via
+  `rerun_task`, with a new task id and recorded lineage.
+- Result and info reads still work after the move — they resolve across live
+  and history.
+- Rerun eligibility is decided **at enqueue**: `retain_rerun_input_default`
+  (per-task override available) decides whether the enqueue input is preserved
+  with the record. A `COMPLETED` source is not eligible for rerun.
+- Every task carries a retention class assigned at enqueue (default: the
+  immutable 30-day class); records age by dropping whole partitions.

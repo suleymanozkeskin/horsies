@@ -279,6 +279,14 @@ def resume(self) -> HandleResult[bool]   # Ok(True)=resumed, Ok(False)=no-op
 async def resume_async(self) -> HandleResult[bool]
 ```
 
+**Pause has two paths per node.** A node whose task is still `PENDING` moves
+nothing. A node whose task is already `CLAIMED` has that claim abandoned: the
+task row terminalizes as `CANCELLED` with a message naming the pause and, like
+every terminal task, its record moves to the task-history archive; the node
+returns to `READY` with its task id cleared, and resume enqueues a **fresh**
+task row. Nodes already executing are never interrupted. History records
+appearing during a pause are expected, not a fault.
+
 ### `get()` semantics
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
@@ -316,10 +324,18 @@ class HandleOperationError:
 
 ```
 PENDING → RUNNING → COMPLETED | FAILED | PAUSED | CANCELLED
+                             PAUSED → EXPIRED (age policy)
 ```
 
-`is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`.
+`is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
 **`PAUSED` is NOT terminal** — workflow can resume.
+
+`CANCELLED` means someone decided; `EXPIRED` means time ran out. A workflow
+PAUSED longer than `RecoveryConfig.paused_workflow_auto_cancel_after`
+(a `timedelta`, default `None` = disabled) is expired by policy, with the
+policy name and age recorded on the run's `error`. An expired child
+propagates to its parent exactly as a cancelled one. **Exhaustive matches
+over `WorkflowStatus` must handle `EXPIRED`.**
 
 ### WorkflowTaskStatus
 
