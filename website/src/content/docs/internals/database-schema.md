@@ -212,6 +212,20 @@ rows (default 500), one transaction per batch; deleting a workflow also
 removes its unconsumed progression evidence (the cascade above). See
 [Recovery Config](../../configuration/recovery-config#retention-cleanup).
 
+The partition-drop mechanism's cost character, measured with the
+mechanism as the only variable (the delete arm reproducing the
+pre-0.5.0 retention statement shape): **deleting scales with the
+retired population; dropping does not**. Net of round trips, retiring
+100,000 rows cost ~8.2 s by batched delete against ~111 ms by drop;
+300,000 rows cost ~25.8 s against ~112 ms. A delete also reclaims no
+space at the moment it runs — tuples are marked dead, vacuum later
+returns most of the space to reuse, and roughly a quarter of the
+original file stays allocated unless `VACUUM FULL` takes an exclusive
+lock. A drop unlinks the partition's files: the full size returns
+immediately, with no vacuum debt. (The comparison's arms are
+shape-faithful to what each version actually retires, not
+byte-identical.)
+
 ## File Location
 
 `horsies/core/models/task_pg.py` (live tables);

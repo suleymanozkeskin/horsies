@@ -115,6 +115,13 @@ list_schedules(broker)
   DOMAIN is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`.
+- A snapshot's `recovery_config` embeds three health payloads:
+  `partition_coverage` (coverage-ensure outcome; fails before fewer than two
+  future partitions remain), `partition_pruning`
+  (`{"finalized", "detached", "dropped", "refusals", "errors"}` — the last
+  two are reason-carrying lists, not counts; a refused partition is retried
+  every pass), and `phase2_recovery` (pass summary with quarantined counts
+  and refusals).
 
 ### Reads span live and history
 
