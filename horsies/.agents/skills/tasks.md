@@ -241,8 +241,9 @@ rows; a resend under the same key with a *different* request is a typed
 conflict. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention_class_key`**: how long the terminal record is kept. Omit for the
-immutable 30-day default class; pass `None` to keep the record forever. Those
-two are the only registered values — any other string returns
+immutable 30-day default class; pass `None` to keep the record forever; or
+name a class this deployment declares in `RecoveryConfig.retention_classes`
+(see the configs skill). Any other string returns
 `Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
 is written. The class is snapshotted on the row at enqueue and decides which
 history partition the record moves to when the task terminalizes.
