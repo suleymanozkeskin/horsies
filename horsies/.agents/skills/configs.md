@@ -347,6 +347,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
+| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
 
 **Removed in 0.5.0 — setting either fails config construction naming the
 successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions

@@ -10,6 +10,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
+## Unreleased
+
+### Added
+
+- **Declared retention classes.** A deployment may declare additional
+  finite retention classes in `RecoveryConfig.retention_classes`, each a
+  key and a duration. The maintenance owner registers every declared
+  class at startup and on each maintenance pass, exactly as it registers
+  the classes the library ships, so partition DDL stays out of adopter
+  hands and registration keeps a single owner. Tasks are then sent into a
+  declared class with `with_options(retention_class_key=...)`.
+
+  Declarations are validated where they are written: a key must be a
+  usable identifier, must not be one the library owns (`standard_30d`,
+  `forever`, `heartbeats`), must not repeat, and its duration must be
+  positive. Every problem in a config is reported together rather than
+  one per run. Re-declaring an existing key with a different duration is
+  refused by the registration machinery and named at startup — classes
+  are immutable.
+
+  `duration` is a minimum, not an exact age: history leaves span one day
+  and a leaf is dropped only once its whole day is past the duration, so
+  a row survives between `duration` and `duration + 1 day`. Sub-day
+  durations are accepted and never under-retain, but cannot expire faster
+  than daily partition granularity allows.
+
+### Changed
+
+- Send-time retention validation widens from the two shipped classes to
+  the set this deployment declares. The check stays process-static and
+  costs no database round trip, which makes the contract per-process:
+  a process whose config omits a class refuses it even if another
+  deployment registered that class in the same database. The rerun
+  path's registry lookup is unchanged.
+
 ## 0.5.0 — 2026-08-10
 
 Task-history live/history split. Schema v34. **This release requires an
