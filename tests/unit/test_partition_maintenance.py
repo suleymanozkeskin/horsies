@@ -92,3 +92,68 @@ class TestPublicationAtomicityDependency:
             assert renderer in republish_source, renderer
         ensure_source = inspect.getsource(ensure_partition_coverage)
         assert 'staged_detail_published' in ensure_source
+
+
+class TestPruningWiring:
+    def test_maintenance_pass_prunes_after_coverage(self) -> None:
+        """The tick runs coverage, then pruning, then reschedules.
+
+        This pin is the defect's own shape: the pruning mechanism once
+        existed fully tested with no production caller, so configured
+        retention durations were silently unenforced. It goes red if
+        the pruning call ever leaves the reaper pass.
+        """
+        from horsies.core.worker.reaper import ReaperMixin
+
+        source = inspect.getsource(ReaperMixin._run_reaper_pass)
+        positions = [
+            source.index('ensure_partition_coverage('),
+            source.index('prune_expired_partitions('),
+            source.index('state.next_partition_maintenance_at = ('),
+        ]
+        assert positions == sorted(positions)
+
+    def test_driver_finalizes_before_either_sweep(self) -> None:
+        """One pending finalization blocks every further detach on its
+        parent, so the finalize phase must precede both sweeps."""
+        from horsies.core.history.maintenance.pruning import (
+            prune_expired_partitions,
+        )
+
+        source = inspect.getsource(prune_expired_partitions)
+        positions = [
+            source.index('_finalize_interrupted_detaches('),
+            source.index('sweep_expired_heartbeat_leaves('),
+            source.index('sweep_expired_history_leaves('),
+        ]
+        assert positions == sorted(positions)
+
+
+class TestPruningDiscoveryFilters:
+    def test_forever_is_structurally_excluded(self) -> None:
+        """Both discovery statements require a non-NULL duration; the
+        forever class carries NULL and can never become a candidate,
+        by filter rather than by NULL interval arithmetic."""
+        from horsies.core.history.maintenance.pruning import (
+            EXPIRED_FINITE_LEAVES_SQL,
+            EXPIRED_HISTORY_LEAVES_SQL,
+        )
+
+        for statement in (
+            EXPIRED_FINITE_LEAVES_SQL,
+            EXPIRED_HISTORY_LEAVES_SQL,
+        ):
+            assert 'r.duration IS NOT NULL' in statement
+            assert 'c.dropped_at IS NULL' in statement
+
+    def test_history_discovery_excludes_the_heartbeat_class(self) -> None:
+        """Heartbeat leaves are the heartbeat sweep's; the history sweep
+        must not race it for the same leaves."""
+        from horsies.core.history.maintenance.pruning import (
+            EXPIRED_HISTORY_LEAVES_SQL,
+        )
+
+        assert (
+            'c.class_key <> :heartbeat_class_key'
+            in EXPIRED_HISTORY_LEAVES_SQL
+        )

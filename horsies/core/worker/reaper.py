@@ -51,6 +51,7 @@ class ReaperMixin:
         _app: Horsies | None
         _stop: asyncio.Event
         _partition_coverage_health: dict[str, Any] | None
+        _partition_pruning_health: dict[str, Any] | None
         _phase2_recovery_health: dict[str, Any] | None
 
     def _advisory_key_reaper(self) -> int:
@@ -290,8 +291,9 @@ class ReaperMixin:
                 # backlog that outlives the budget resumes next pass.
                 # Terminal TASK rows move to the task-history archive at
                 # terminalization and age by retention class; heartbeat
-                # rows live in partitions that drop whole — neither is
-                # row-deleted here anymore.
+                # rows live in partitions that drop whole. Both are
+                # pruned by the partition-maintenance pass below —
+                # neither is row-deleted here.
                 deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
                 batch_size = recovery_cfg.retention_delete_batch_size
@@ -367,18 +369,24 @@ class ReaperMixin:
                     f'Paused-workflow expiry sweep error: {expiry_err}'
                 )
 
-        # Coverage/publication maintenance: keep history and heartbeat
-        # leaves created ahead of writes and the staged readers
-        # published. Rides the reaper's cluster-wide gate, so one
-        # worker per interval runs it; a refusal is reported verbatim
-        # and never retried into silence — existing leaves keep
-        # absorbing writes until the horizon, and the next pass tries
-        # again.
+        # Partition maintenance: both halves of the retention promise.
+        # Coverage keeps history and heartbeat leaves created ahead of
+        # writes and the staged readers published; pruning detaches and
+        # drops leaves whose class duration has elapsed. Rides the
+        # reaper's cluster-wide gate, so one worker per interval runs
+        # it; a refusal is reported verbatim and never retried into
+        # silence — the next pass tries again.
         if now_monotonic >= state.next_partition_maintenance_at:
             from horsies.core.history.maintenance.coverage import (
                 CoverageEnsureFailed,
                 CoverageEnsured,
                 ensure_partition_coverage,
+            )
+            from horsies.core.history.maintenance.pruning import (
+                prune_expired_partitions,
+            )
+            from horsies.core.history.reads.publisher import (
+                StagedLoaderPublisher,
             )
 
             try:
@@ -439,6 +447,38 @@ class ReaperMixin:
                 logger.error(
                     f'Partition coverage ensure error: {coverage_err}'
                 )
+
+            # Pruning runs after coverage inside the same gate window:
+            # a coverage failure never blocks pruning and vice versa.
+            # Refusals (pinned locators, loader references, blocked
+            # finalizations) skip their leaf and surface on the health
+            # dict; the skipped leaf is the next pass's candidate.
+            try:
+                prune = await prune_expired_partitions(
+                    temp_broker.async_engine, StagedLoaderPublisher()
+                )
+                if prune.acted:
+                    summary = (
+                        'Partition pruning: '
+                        f'{len(prune.finalized_leaves)} finalized, '
+                        f'{prune.detached_count} detached, '
+                        f'{prune.dropped_count} dropped, '
+                        f'{len(prune.refusals)} refusal(s), '
+                        f'{len(prune.errors)} error(s)'
+                    )
+                    if prune.errors:
+                        logger.warning(summary)
+                    else:
+                        logger.info(summary)
+                self._partition_pruning_health = {
+                    'finalized': len(prune.finalized_leaves),
+                    'detached': prune.detached_count,
+                    'dropped': prune.dropped_count,
+                    'refusals': list(prune.refusals),
+                    'errors': list(prune.errors),
+                }
+            except Exception as prune_err:
+                logger.error(f'Partition pruning error: {prune_err}')
             finally:
                 state.next_partition_maintenance_at = (
                     now_monotonic
