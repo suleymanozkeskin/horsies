@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-10
 
 Task-history live/history split. Schema v34. **This release requires an
 offline cutover for existing deployments**: stop all units, upgrade the
@@ -95,12 +95,22 @@ dormant until invoked and adds no cost to deployments before cutover.
 - Rerun and idempotency API: re-execute a terminal task by reference
   with recorded lineage; scoped idempotency keys with a reservation
   window.
-- Workers own partition coverage: heartbeat and history partitions are
-  created ahead of writes at worker startup and by a periodic
-  maintenance pass. The worker role needs `CREATE` on the partition
-  parents; a deployment that withholds it must run an external
-  coverage cron. `run_schema_migrations` continues to govern versioned
-  migrations only.
+- Workers own partition coverage and pruning: heartbeat and history
+  partitions are created ahead of writes at worker startup and by a
+  periodic maintenance pass, and the same pass detaches and drops
+  leaves whose retention class duration has elapsed — a refusal (a
+  partition pinned by recovery evidence, a reader outliving the 5 s
+  detach timeout) skips that leaf, surfaces with its reason in the
+  `partition_pruning` health payload, and retries next pass. The
+  worker role needs `CREATE` on the partition parents; a deployment
+  that withholds it must run an external coverage cron.
+  `run_schema_migrations` continues to govern versioned migrations
+  only.
+- **`retention_class_key` at enqueue.** `with_options` and both send
+  paths accept it: omitted lands the immutable 30-day default class,
+  explicit `None` is the only route to a forever record, and an
+  unknown class name is refused at the send statement with nothing
+  written.
 - **Unresolvable crashed-worker recovery evidence quarantines after a
   bounded attempt count.** A phase-2 pending row whose disposition
   keeps refusing to resolve is retried for
