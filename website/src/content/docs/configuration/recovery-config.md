@@ -176,6 +176,15 @@ evidence still waiting in the outbox — the same disposition its consumer
 would reach for a workflow that is already terminal. Retention is never held
 up by a stalled consumer.
 
+The partition drops are performed by the worker's partition-maintenance
+pass, every `partition_maintenance_interval_s` alongside coverage: each
+finite-class partition past its horizon is detached and dropped whole. A
+refused partition (recovery evidence still pinning it, or a reader holding
+the detach past its 5 s timeout) is skipped, reported with its reason on
+the worker health surface, and retried each pass until the blocker clears.
+See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for the
+mechanism and its latency character.
+
 ```python
 RecoveryConfig(
     worker_state_retention_hours=24 * 14,      # Keep worker snapshots for 2 weeks

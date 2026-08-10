@@ -152,7 +152,7 @@ Snapshot timeseries for one worker, newest first.
 | `queues` | `list[str]` | Queues this worker serves |
 | `queue_priorities` | `dict[str, int] \| None` | Per-queue priorities (CUSTOM mode) |
 | `queue_max_concurrency` | `dict[str, int] \| None` | Per-queue concurrency (CUSTOM mode) |
-| `recovery_config` | `dict[str, Any] \| None` | Recovery configuration snapshot |
+| `recovery_config` | `dict[str, Any] \| None` | Recovery configuration snapshot, plus the embedded health payloads below |
 | `tasks_running` | `int` | RUNNING tasks at snapshot time |
 | `tasks_claimed` | `int` | CLAIMED tasks at snapshot time |
 | `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
@@ -160,6 +160,25 @@ Snapshot timeseries for one worker, newest first.
 | `cpu_percent` | `float \| None` | CPU percent (psutil) |
 | `children_memory_mb` | `float \| None` | Summed resident memory of the executor child processes |
 | `worker_started_at` | `datetime` | Worker process start time |
+
+### Embedded health payloads
+
+`recovery_config` carries three operational payloads beside the
+configuration snapshot, refreshed with each snapshot:
+
+- `partition_coverage` — the last coverage-ensure outcome: `state`
+  (`ensured` / `failed`), covered-through markers, and on failure the
+  stage, class, and typed refusal verbatim. Coverage health fails
+  **before** fewer than two future partitions remain, so the alarm
+  precedes the lapse.
+- `partition_pruning` — the last pruning pass:
+  `{"finalized": int, "detached": int, "dropped": int, "refusals": [...],
+  "errors": [...]}`. `refusals` and `errors` are reason-carrying lists,
+  not counts — a skipped partition arrives with the reason it was
+  skipped, and remains a candidate on the next pass.
+- `phase2_recovery` — the crashed-worker progression pass summary
+  (considered / applied / retained / failed counts, quarantined rows,
+  and the quarantine function's refusals verbatim).
 
 `memory_usage_mb` is the **parent** process only. Task code runs in the executor
 children, so per-child memory growth is invisible there; `children_memory_mb`

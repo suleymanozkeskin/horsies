@@ -344,7 +344,7 @@ Controls stale task detection, automatic recovery, and data retention.
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
 | `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |
 | `heartbeat_leaf_horizon_hours` | `int` | `6` | 2–48 | Complete future hourly heartbeat partitions kept ahead of writes |
-| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between coverage-ensure passes |
+| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
 

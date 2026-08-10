@@ -234,8 +234,23 @@ Tasks will remain stuck until manually resolved.
 of writes — at startup and on a periodic maintenance pass every
 `partition_maintenance_interval_s` (default 900s), keeping
 `heartbeat_leaf_horizon_hours` (default 6) complete future partitions
-available. Old partitions are dropped whole; there is no row-delete pass and
-no row-by-row scan.
+available.
+
+The same pass prunes: per finite retention class, every partition past its
+horizon is detached (`DETACH PARTITION CONCURRENTLY`, under a 5 s statement
+timeout) and dropped whole — there is no row-delete pass and no row-by-row
+scan. A refusal — recovery evidence still pinning a partition, or a reader
+holding the detach past its timeout — skips that partition and reports it
+with its reason on the worker health surface, and the partition is retried
+on every pass until the blocker clears. The `forever` history class is
+never pruned.
+
+Detach latency is a rule, not a constant: the age of the longest in-flight
+transaction that could still touch the parent, plus a few milliseconds. It
+does not scale with partition size, and readers are never blocked — the
+concurrent detach waits so that queries do not. In production the wait is
+capped at 5 s: a longer-lived reader produces a contained timeout and a
+retry on the next pass, never a stalled worker.
 
 `heartbeat_retention_hours` was removed in 0.5.0 — setting it fails
 validation naming the successor, because a row-delete window no longer
