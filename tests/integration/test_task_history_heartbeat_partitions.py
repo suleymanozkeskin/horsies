@@ -75,6 +75,27 @@ async def send_heartbeat(
     *,
     age: timedelta,
 ) -> None:
+    """Write one heartbeat, covering the hour it lands in.
+
+    Coverage runs forward from the current hour and never creates a past
+    one, because production writes heartbeats at `now` and never
+    backdates. This helper DOES backdate, so an `age` that crosses an
+    hour boundary lands where no leaf exists — which made callers fail
+    for one minute in sixty, decided by where the run's wall clock fell.
+
+    Creating the landing hour here fixes every caller at the point the
+    backdating happens. It is idempotent: a caller that already created
+    that hour (the recency-bound test does, deliberately) is unaffected.
+    """
+    landing = (await database_now(connection)) - age
+    await create_hourly_heartbeat_leaf(
+        connection,
+        CreateHourlyHeartbeatLeaf(
+            leaf=hourly_leaf_ref(
+                landing.replace(minute=0, second=0, microsecond=0)
+            )
+        ),
+    )
     await connection.execute(
         text(
             'INSERT INTO horsies_heartbeats '
@@ -185,6 +206,53 @@ class TestStaleProbeOnPartitionedStorage:
             )
             outcome = await fail_stale(connection, task_id)
             assert outcome.outcome == 'APPLIED'
+
+    @pytest.mark.asyncio
+    async def test_a_heartbeat_across_the_hour_boundary_has_a_partition(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """The boundary is MANUFACTURED, not waited for.
+
+        The suite's own backdating used to cross into an hour that
+        forward-only coverage never created, so it failed for one minute
+        in sixty — and passed the rest of the time for no better reason
+        than where the clock sat. A regression that inserts at a fixed
+        small age would inherit that: green whenever the run happens to
+        sit mid-hour.
+
+        So this derives its age FROM the current instant to guarantee the
+        crossing: enough to land in the previous hour whatever the minute.
+        The guard cannot go quiet by scheduling accident.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await prepare_heartbeat_storage(connection)
+            now = await database_now(connection)
+            # One second past the top of this hour, i.e. always previous.
+            crossing_age = timedelta(
+                minutes=now.minute, seconds=now.second + 1
+            )
+            task_id = await insert_live_task(
+                connection,
+                class_key=CLASS_KEY,
+                worker=WORKER,
+                started_at_offset=timedelta(minutes=-30),
+            )
+            await send_heartbeat(connection, task_id, age=crossing_age)
+
+            landed = (
+                await connection.execute(
+                    text(
+                        'SELECT count(*) FROM horsies_heartbeats '
+                        'WHERE task_id = CAST(:task_id AS uuid)'
+                    ),
+                    {'task_id': task_id},
+                )
+            ).scalar_one()
+            assert landed == 1, (
+                'a heartbeat backdated across the hour boundary found no '
+                'partition — coverage does not span what the suite writes'
+            )
 
     @pytest.mark.asyncio
     async def test_fresh_heartbeat_refuses_through_the_partitions(
