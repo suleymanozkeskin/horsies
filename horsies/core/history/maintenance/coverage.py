@@ -40,6 +40,7 @@ from ..heartbeats.partitioning import (
     EnsureHeartbeatCoverage,
     HeartbeatClassRegistered,
     HeartbeatClassVerified,
+    HeartbeatHorizonUpdated,
     ensure_heartbeat_coverage,
     hourly_leaf_ref,
     register_heartbeat_class,
@@ -135,7 +136,14 @@ async def ensure_partition_coverage(
         connection, horizon=timedelta(hours=heartbeat_horizon_hours)
     )
     match heartbeat_registration:
-        case HeartbeatClassRegistered() | HeartbeatClassVerified():
+        case (
+            HeartbeatClassRegistered()
+            | HeartbeatClassVerified()
+            | HeartbeatHorizonUpdated()
+        ):
+            # A horizon update is a success: the UPDATE has already
+            # run and the class carries the configured duration, so the
+            # pass must proceed to leaf creation like any other success.
             pass
         case _:
             return CoverageEnsureFailed(
