@@ -1,12 +1,12 @@
 ---
 title: Action Semantics
-summary: Exactly what task cancel, task retry, and workflow pause, resume, and cancel do to the rows and the processes behind them.
+summary: Exactly what task cancel, task rerun, and workflow pause, resume, and cancel do to the rows and the processes behind them.
 related: [web-ui-overview, web-ui-deployment, ../concepts/task-lifecycle, ../concepts/workflows/workflow-api]
-tags: [monitoring, actions, cancel, retry, pause, resume, workflow]
+tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
 ---
 
 Five actions are available from the monitoring API and the web UI: cancel and
-retry a task, and pause, resume, and cancel a workflow run. Each acts on
+rerun a task, and pause, resume, and cancel a workflow run. Each acts on
 database rows. Two of them leave a process running afterwards, and this page
 states which and why.
 
@@ -65,44 +65,60 @@ ineligible state.
 process that was executing may keep running for arbitrarily long afterwards, and
 that is not a failure of the cancel.
 
-## Task retry
+## Task rerun
 
-Resets the same row and re-enqueues it. There is no new task id.
+**The manual retry action is removed.** It reset a terminal row to `PENDING`
+in place; a terminal record is now immutable and lives in the history
+archive, so there is no row to reset. Re-execution is a **new request**:
+rerun mints a new task with a new id and records its lineage back to the
+source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 
-| Task status | Result |
+| Source task | Result |
 |---|---|
-| `FAILED`, `EXPIRED`, `CANCELLED` | Reset to `PENDING` and re-enqueued on its original queue |
-| `PENDING`, `CLAIMED`, `RUNNING`, `COMPLETED` | Refused, 409 `TASK_NOT_RETRYABLE` with the current status |
-| `good_until` has passed | Refused, 409 `TASK_EXPIRY_PASSED` |
-| Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
+| `FAILED`, `CANCELLED`, `EXPIRED` with a retained rerun input | New task enqueued (`RerunEnqueued` carries `new_task_id`) |
+| `COMPLETED` | Refused, `RerunNotEligible(COMPLETED_SOURCE)` — a succeeded request is not re-executed by replay |
+| Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, `RerunSourceLive` — its own lifecycle owns retry |
+| Input not retained or undecodable | Refused, `RerunInputUnavailable` or `RerunInputCorrupt` |
+| Not found in live or history | Refused, `RerunSourceAbsent` |
+| Row is a workflow node | Refused, `RerunNotEligible(WORKFLOW_TASK)` |
+| Caller key already used | `RerunKeyReplay` (same request) or `RerunKeyConflict` (different request under that key) |
 
-What the reset does:
+Whether a task can be rerun is decided **at enqueue**, not at rerun time: the
+`retain_rerun_input_default` broker setting (with a per-task override)
+decides whether the enqueue input is preserved with the record. A task
+enqueued without a retained input cannot be rerun later.
 
-- Clears the outcome fields: result, failure reason, error code, worker
-  identity, and every claim and finalize marker.
-- Sets a fresh `enqueued_at` and clears `next_retry_at`.
-- Sets `retry_count` to the highest attempt number already recorded for the
-  task. The next run therefore records `MAX(attempt) + 1`, which is why
-  **attempt history is preserved**: no attempt number is reused, and none is
-  skipped.
-- Emits the queue notification itself. A row moved back to `PENDING` by an
-  `UPDATE` does not fire the insert trigger, so without this the row would wait
-  for the next claim poll.
+Programmatic callers use the same contract:
 
-What the reset does **not** do:
+```python
+from datetime import timedelta
 
-- It does not modify `max_retries`. A manual retry does not grant extra
-  automatic retries.
-- It does not modify `good_until`. A manual retry does not extend expiry, which
-  is why a task past its expiry is refused rather than silently revived.
+from horsies import rerun_task, RerunTask, RerunEnqueuePolicy, RerunEnqueued
 
-The response carries `next_attempt_number`. A waiting `get_result` on the task
-resolves with the new run's result.
+outcome = await rerun_task(
+    connection,
+    RerunTask(source_task_id=task_id, deadline=None),
+    RerunEnqueuePolicy(
+        retention_class_key='standard_30d',
+        retain_rerun_input=True,
+        reservation_window=timedelta(hours=24),
+    ),
+)
+match outcome:
+    case RerunEnqueued(new_task_id=new_id):
+        ...
+```
 
-**Settled when:** the status moves away from what it was, or `retry_count`
-changes. Both are checked, because a fast task can fail again into the same
-status between two reads; `retry_count` jumps on reset whenever any prior
-attempt exists.
+The policy is supplied by the caller because enqueue policy lives in
+configuration, not in the rerun contract: the **new** request gets its own
+retention class, its own rerun-input retention, and its own key-reservation
+window.
+
+`RerunOutcome` is an exhaustive union — every refusal is a distinct typed
+variant, so a caller matching over it cannot silently miss one.
+
+**Settled when:** the response carries the new task id. The source record is
+unchanged: rerun never mutates history.
 
 ## Workflow pause
 
@@ -120,6 +136,10 @@ cleared. Those nodes get fresh task rows on resume.
 
 - **Nodes already executing finish.** Running user code is never interrupted.
 - **New nodes stop being scheduled.**
+- A cancelled claimed-but-unstarted task is terminal, so its record **moves to
+  the history archive** like any other terminal task, carrying a message
+  naming the pause. A node still `PENDING` moves nothing. The run row itself
+  is untouched beyond its status.
 - Unclaimed enqueued rows are left claimable; a worker's post-claim filter
   releases them sub-second.
 - Only `status` and `updated_at` change on the run row. `completed_at`,
@@ -189,6 +209,23 @@ the expected steady state after cancelling a run with work in flight.
 There is no restart or retry action for a workflow run, because no such
 primitive exists. `retry_start` retries a failed *start call*, not a run. To
 re-execute a workflow, send it again.
+
+## What the reads see
+
+Task reads resolve across both sides of the lifecycle: a task that has
+terminalized is answered from the history archive, so detail, result, and
+attempt history stay available after the row leaves the live table.
+
+List and aggregate reads are **window-scoped**. They cover live rows plus a
+bounded slice of terminal history: the last 24 hours by default, with
+optional `since` / `until`. Bounds must be timezone-aware and increasing,
+and the span may not exceed 30 days — a request over the maximum is refused
+with the bound named, never silently clamped.
+
+The page total follows a stated contract: **exact when any filter is
+active, a planner estimate on the unfiltered view.** An unfiltered total is
+therefore approximate by design on both sides of the split; narrow with any
+filter to get an exact count.
 
 ## Conflict handling
 

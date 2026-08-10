@@ -17,11 +17,14 @@ Workflows in Horsies are Directed Acyclic Graphs (DAGs) where:
 ```
 PENDING → RUNNING → COMPLETED
                   ↘ FAILED
-                  ↘ PAUSED (if on_error="pause")
+                  ↘ PAUSED (if on_error="pause") → EXPIRED (paused past the declared age policy)
                   ↘ CANCELLED (manual)
 ```
 
-**Terminal workflow statuses:** `COMPLETED`, `FAILED`, `CANCELLED`. (`PAUSED` is non-terminal.)
+**Terminal workflow statuses:** `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. (`PAUSED` is non-terminal.)
+
+`CANCELLED` means someone decided; `EXPIRED` means time ran out. An expired
+child propagates to its parent exactly as a cancelled one.
 
 ## Task Status Lifecycle
 
@@ -45,6 +48,7 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 | `FAILED` | `"FAILED"` | Yes |
 | `PAUSED` | `"PAUSED"` | No |
 | `CANCELLED` | `"CANCELLED"` | Yes |
+| `EXPIRED` | `"EXPIRED"` | Yes |
 
 `WorkflowTaskStatus` values:
 
@@ -239,6 +243,23 @@ When a task fails with `on_error="pause"`:
 3. **Running tasks may complete**: Tasks already running will finish (cooperative, no force-kill)
 4. **Already-enqueued tasks**: Tasks may still be claimed briefly, but paused workflows are filtered post-claim and those tasks are unclaimed (they do not execute until resume)
 5. **Resume required**: Workflow remains PAUSED until an explicit resume operation
+
+**Pause has two paths per node, and they differ:**
+
+- A node whose task is **still PENDING** moves nothing. Its task row stays
+  live and claimable-but-filtered until resume.
+- A node whose task is **already CLAIMED** has that claim abandoned: the task
+  row terminalizes as `CANCELLED` with a message naming the pause, and — like
+  every terminal task — its record moves to the history archive. The node
+  returns to `READY` with its task id cleared, and resume enqueues a **fresh**
+  task row. Seeing history records appear when a workflow is paused is
+  expected, not a fault.
+
+**Never-resumed pauses can be bounded by policy.** `paused_workflow_auto_cancel_after`
+(a `timedelta` on `RecoveryConfig`, default `None` = disabled) expires a
+workflow that has been PAUSED longer than the configured age, recording the
+policy name and age on the run's `error` column. No deployment changes
+behavior without declaring the rule.
 
 **What PAUSE blocks:**
 
