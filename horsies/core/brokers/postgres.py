@@ -2720,6 +2720,8 @@ class PostgresBroker:
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retain_rerun_input: Optional[bool] = None,
     ) -> BrokerResult[str]:
         """Synchronous task submission (runs enqueue_async in background loop)."""
         try:
@@ -2738,6 +2740,8 @@ class PostgresBroker:
                 good_until=good_until,
                 task_options=task_options,
                 idempotency_key=idempotency_key,
+                retention_class_key=retention_class_key,
+                retain_rerun_input=retain_rerun_input,
             )
         except Exception as exc:
             return _broker_err(
