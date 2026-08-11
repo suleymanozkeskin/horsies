@@ -161,6 +161,79 @@ class TestManifestFromCatalog:
         )
 
 
+class TestManifestSeparatesProbeListFromFloor:
+    """A leaf whose relation is gone leaves the probes and stays in the floor.
+
+    The two jobs answer different questions. The probe list says which
+    relations can be read — naming a dropped one builds a function that
+    dies at execution. The floor says where retained history begins, and
+    a leaf destroyed out of band DID retain history until someone removed
+    it. Narrowing the floor to the probe list would raise it over those
+    tasks and report them as predating retained history, presenting an
+    accidental drop as ordinary ageing.
+
+    Floor expectations are derived by calling the same function without
+    the exclusion rather than hand-written, so the assertion tracks the
+    generator instead of restating it.
+    """
+
+    def test_absent_relation_leaves_the_probe_list(self) -> None:
+        present = make_catalog_row(0)
+        gone = make_catalog_row(1)
+        manifest = manifest_from_catalog(
+            [present, gone], absent_relations=frozenset({gone.leaf_name})
+        )
+        assert [leaf.relation_name for leaf in manifest.leaves] == [
+            present.leaf_name
+        ]
+
+    def test_absent_relation_stays_in_the_birth_floor(self) -> None:
+        rows = [
+            make_catalog_row(0, min_birth_at=BASE - timedelta(hours=4)),
+            make_catalog_row(1, min_birth_at=BASE - timedelta(hours=1)),
+        ]
+        unfiltered = manifest_from_catalog(rows)
+        filtered = manifest_from_catalog(
+            rows, absent_relations=frozenset({rows[0].leaf_name})
+        )
+        assert filtered.birth_floor == unfiltered.birth_floor
+
+    def test_excluding_the_oldest_leaf_does_not_raise_the_floor(self) -> None:
+        oldest_birth = BASE - timedelta(hours=9)
+        rows = [
+            make_catalog_row(0, min_birth_at=oldest_birth),
+            make_catalog_row(1, min_birth_at=BASE),
+        ]
+        filtered = manifest_from_catalog(
+            rows, absent_relations=frozenset({rows[0].leaf_name})
+        )
+        # Errs LOW by construction: the surviving leaf's own birth would
+        # be the floor if the dropped leaf were excluded from it, and a
+        # task born in between would then be declared absent without a
+        # probe -- the aggressive direction this separation exists to
+        # avoid.
+        assert filtered.birth_floor == oldest_birth
+        assert filtered.birth_floor != BASE
+
+    def test_absent_relation_is_not_named_in_the_rendered_body(self) -> None:
+        present = make_catalog_row(0)
+        gone = make_catalog_row(1)
+        rendered = render_staged_provenance_function(
+            manifest_from_catalog(
+                [present, gone],
+                absent_relations=frozenset({gone.leaf_name}),
+            )
+        )
+        assert present.leaf_name in rendered
+        assert gone.leaf_name not in rendered
+
+    def test_unknown_absent_name_changes_nothing(self) -> None:
+        rows = [make_catalog_row(0), make_catalog_row(1)]
+        assert manifest_from_catalog(
+            rows, absent_relations=frozenset({'horsies_task_history_absent'})
+        ) == manifest_from_catalog(rows)
+
+
 class TestRenderedFunction:
     def render(self, *rows: LeafCatalogRow) -> str:
         return render_staged_lookup_function(manifest_from_catalog(list(rows)))

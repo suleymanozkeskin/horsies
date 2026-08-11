@@ -32,6 +32,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..commands import (
+    DETACH_STATEMENT_TIMEOUT_MS,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     FinalizeInterruptedLeafDetach,
@@ -68,10 +69,6 @@ __all__ = [
     'sweep_expired_history_leaves',
 ]
 
-# Bounds the concurrent detach's wait on long readers so one open
-# transaction stalls one leaf's detach, never the tick; the skipped
-# leaf is re-attempted next pass.
-DETACH_STATEMENT_TIMEOUT_MS: Final = 5_000
 
 # Finite task-history classes past horizon. `duration IS NOT NULL`
 # excludes forever explicitly; the heartbeat class has its own sweep.
@@ -201,7 +198,12 @@ async def _finalize_interrupted_detaches(
     for ref in interrupted:
         try:
             outcome = await finalize_interrupted_detach(
-                engine, FinalizeInterruptedLeafDetach(leaf=ref), publisher
+                engine,
+                FinalizeInterruptedLeafDetach(
+                    leaf=ref,
+                    statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
+                ),
+                publisher,
             )
         except SQLAlchemyError as error:
             errors.append(f'finalize {ref.leaf_name}: {error}')

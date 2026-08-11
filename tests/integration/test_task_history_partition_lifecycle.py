@@ -313,7 +313,9 @@ class TestDetachAndDrop:
             assert isinstance(inspection, LeafDetachable)
         detached = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+            ),
             UnpublishedLoader(),
         )
         assert isinstance(detached, LeafDetached)
@@ -364,7 +366,9 @@ class TestDetachAndDrop:
             )
         refused = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+            ),
             UnpublishedLoader(),
         )
         assert isinstance(refused, LeafPendingBlocked)
@@ -375,7 +379,9 @@ class TestDetachAndDrop:
             )
         detached = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+            ),
             UnpublishedLoader(),
         )
         assert isinstance(detached, LeafDetached)
@@ -395,7 +401,8 @@ class TestDetachAndDrop:
         outcome = await detach_expired_leaf(
             history_schema.engine,
             DetachExpiredHistoryLeaf(
-                leaf=ref, quarantine_horizon=timedelta(days=7)
+                leaf=ref, quarantine_horizon=timedelta(days=7),
+                statement_timeout_ms=None,
             ),
             UnpublishedLoader(),
         )
@@ -444,7 +451,8 @@ class TestDetachAndDrop:
         outcome = await detach_expired_leaf(
             history_schema.engine,
             DetachExpiredHistoryLeaf(
-                leaf=ref, quarantine_horizon=timedelta(days=7)
+                leaf=ref, quarantine_horizon=timedelta(days=7),
+                statement_timeout_ms=None,
             ),
             UnpublishedLoader(),
         )
@@ -468,7 +476,9 @@ class TestDetachAndDrop:
             assert pending.recovery_source == 'HISTORY'
         still_blocked = await detach_expired_leaf(
             history_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+            ),
             UnpublishedLoader(),
         )
         assert isinstance(still_blocked, LeafPendingBlocked)
@@ -495,7 +505,8 @@ class TestDetachAndDrop:
         outcome = await detach_expired_leaf(
             history_schema.engine,
             DetachExpiredHistoryLeaf(
-                leaf=ref, quarantine_horizon=timedelta(days=7)
+                leaf=ref, quarantine_horizon=timedelta(days=7),
+                statement_timeout_ms=None,
             ),
             UnpublishedLoader(),
         )

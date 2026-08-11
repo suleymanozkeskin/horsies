@@ -9,8 +9,9 @@ own it here: once at startup (before the first claim) and periodically
 under the reaper's cluster-wide gate.
 
 Every step is idempotent. Republication runs only when a leaf was
-actually created or a staged reader is absent; a healthy fleet's
-maintenance tick performs reads only.
+actually created, a staged reader is absent, or the published readers
+probe a relation that no longer exists; a healthy fleet's maintenance
+tick performs reads only.
 
 The fatal line is a measured fact, not a birth-state guess: after the
 ensure attempt, heartbeat coverage for the present instant either
@@ -55,14 +56,24 @@ from ..outcomes import (
 from ..partitions.catalog import database_now
 from ..partitions.manager import ensure_leaf_coverage
 from ..reads.detail import staged_detail_published
-from ..reads.publisher import StagedLoaderPublisher
+from ..reads.publisher import (
+    StagedLoaderPublisher,
+    published_manifest_absent_leaves,
+)
 
 
 @dataclass(frozen=True, slots=True)
 class CoverageEnsured:
     """One completed ensure pass, what it changed, and how far
     coverage now reaches — the operator's answer to "how long do
-    existing leaves absorb writes if maintenance starts failing"."""
+    existing leaves absorb writes if maintenance starts failing".
+
+    `absent_leaves` names catalog rows still called attached whose
+    relation no longer exists. Non-empty means someone dropped a leaf
+    behind the manager's back: the readers have been regenerated without
+    it so reads keep working, and the rows it held are gone. It is
+    reported rather than repaired — the catalog keeps the evidence, and
+    only an operator can decide what an unexpected drop means."""
 
     created_history_leaves: int
     created_heartbeat_leaves: int
@@ -70,16 +81,24 @@ class CoverageEnsured:
     heartbeat_covered_now: bool
     history_covered_through: datetime
     heartbeats_covered_through: datetime
+    absent_leaves: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
 class CoverageEnsureFailed:
-    """The pass stopped at a refusal; the fields name where and why."""
+    """The pass stopped at a refusal; the fields name where and why.
+
+    `absent_leaves` carries the same report as on the success outcome:
+    a vanished leaf must not be swallowed because some unrelated class
+    also failed in the same pass. Empty means none were OBSERVED by this
+    pass — the stages that run before republication stop early and never
+    reach the check, and they say so through `stage`."""
 
     stage: str
     class_key: str | None
     refusal: str
     heartbeat_covered_now: bool
+    absent_leaves: tuple[str, ...]
 
 
 type CoverageOutcome = CoverageEnsured | CoverageEnsureFailed
@@ -165,6 +184,7 @@ async def ensure_partition_coverage(
                 heartbeat_covered_now=await heartbeat_coverage_present(
                     connection
                 ),
+                absent_leaves=(),
             )
 
     default_registration = await register_finite_retention_class(
@@ -183,6 +203,7 @@ async def ensure_partition_coverage(
                 heartbeat_covered_now=await heartbeat_coverage_present(
                     connection
                 ),
+                absent_leaves=(),
             )
 
     for declared_key, declared_duration in declared_classes:
@@ -205,6 +226,7 @@ async def ensure_partition_coverage(
                     heartbeat_covered_now=await heartbeat_coverage_present(
                         connection
                     ),
+                    absent_leaves=(),
                 )
 
     publisher = StagedLoaderPublisher()
@@ -290,15 +312,31 @@ async def ensure_partition_coverage(
                     heartbeat_covered_now=(
                         await heartbeat_coverage_present(connection)
                     ),
+                    absent_leaves=(),
                 )
 
     # One probe stands in for all three staged readers because
     # republication is atomic across the triple; the dependency is
     # pinned by a test beside this logic.
+    #
+    # The third trigger is a leaf that vanished behind the manager's
+    # back. It creates nothing and publishes nothing, so neither of the
+    # other two conditions fires, and the published readers keep naming
+    # a relation that is gone -- which kills every finalize fleet-wide
+    # until something forces a regeneration. Republication is now
+    # self-correcting (the probe list requires the relation to exist),
+    # so this converges in one pass rather than rebuilding the same
+    # broken function.
     republished = False
-    if created_history > 0 or not await staged_detail_published(connection):
-        await publisher.republish(connection)
+    absent_leaves: tuple[str, ...] = ()
+    if (
+        created_history > 0
+        or await published_manifest_absent_leaves(connection)
+        or not await staged_detail_published(connection)
+    ):
+        republication = await publisher.republish(connection)
         republished = True
+        absent_leaves = republication.absent_leaves
 
     if failures:
         # Reported only after heartbeat coverage and republication have
@@ -315,6 +353,7 @@ async def ensure_partition_coverage(
             heartbeat_covered_now=(
                 await heartbeat_coverage_present(connection)
             ),
+            absent_leaves=absent_leaves,
         )
 
     now = await database_now(connection)
@@ -331,6 +370,7 @@ async def ensure_partition_coverage(
         heartbeats_covered_through=(
             hour_lower + timedelta(hours=heartbeat_horizon_hours + 1)
         ),
+        absent_leaves=absent_leaves,
     )
 
 

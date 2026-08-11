@@ -20,9 +20,25 @@ exists so the drop path has no optional-dependency branch.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+
+@dataclass(frozen=True, slots=True)
+class LoaderRepublished:
+    """One republication, and what it had to leave out.
+
+    `absent_leaves` names catalog rows the manager still believes attached
+    whose relation no longer exists. They are excluded from the probe list
+    because a generated function naming them dies at execution; they are
+    reported here because the exclusion heals a fleet-wide read failure
+    into a silent one, and an operator has to learn that a leaf vanished.
+    Empty on every healthy republication.
+    """
+
+    absent_leaves: tuple[str, ...]
 
 
 class LoaderPublication(Protocol):
@@ -35,7 +51,9 @@ class LoaderPublication(Protocol):
     leaves from the regenerated function — false absence by construction.
     """
 
-    async def republish(self, connection: AsyncConnection) -> None:
+    async def republish(
+        self, connection: AsyncConnection
+    ) -> LoaderRepublished:
         """Regenerate the staged lookup function from the full catalog."""
         ...
 
@@ -57,8 +75,10 @@ class UnpublishedLoader:
     proceed while the function still references the relation.
     """
 
-    async def republish(self, connection: AsyncConnection) -> None:
-        return None
+    async def republish(
+        self, connection: AsyncConnection
+    ) -> LoaderRepublished:
+        return LoaderRepublished(absent_leaves=())
 
     async def references_leaf(
         self,

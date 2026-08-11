@@ -15,6 +15,14 @@ Order is the whole point:
 Between 1 and 2 the readers still name the leaves, which is harmless
 because the relations still exist. Dropping first inverts that into the
 window that breaks: published readers naming relations that are gone.
+
+Publication now excludes leaves whose relation does not exist, so a
+reader stranded this way is repaired by the next republication. This
+helper still deletes first, and cannot do otherwise: it removes the
+class itself, and `horsies_task_history_leaf_catalog.class_key`
+references `horsies_retention_classes`, so the leaf rows must be gone
+before the class row can be. Marking them retired instead would leave
+the foreign key holding.
 """
 
 from __future__ import annotations

@@ -35,6 +35,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..commands import (
+    DETACH_STATEMENT_TIMEOUT_MS,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     InspectHistoryLeaf,
@@ -504,7 +505,11 @@ async def sweep_expired_heartbeat_leaves(
         )
         detach_outcome = await detach_expired_leaf(
             engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref,
+                quarantine_horizon=None,
+                statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
+            ),
             publisher,
         )
         drop_outcome: LeafDrop | None = None

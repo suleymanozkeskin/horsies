@@ -270,7 +270,7 @@ class AppConfig(BaseModel):
                         f'queue_retention maps {mapped_queue!r}, which is '
                         'not a queue this deployment has'
                     ),
-                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    code=ErrorCode.CONFIG_INVALID_RETENTION,
                     notes=[
                         f'configured queues: {sorted(configured_queues)}',
                         'an unmatched mapping builds a retention class '

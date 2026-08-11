@@ -527,7 +527,16 @@ async def finalize_interrupted_detach(
         await lock_leaf_for_session(
             connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
         )
+        prior_statement_timeout: str | None = None
         try:
+            if command.statement_timeout_ms is not None:
+                prior_statement_timeout = (
+                    await connection.execute(text('SHOW statement_timeout'))
+                ).scalar_one()
+                await connection.execute(
+                    text("SELECT set_config('statement_timeout', :value, false)"),
+                    {'value': f'{command.statement_timeout_ms}ms'},
+                )
             inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
             match inspection:
                 case LeafDetached():
@@ -558,6 +567,11 @@ async def finalize_interrupted_detach(
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
         finally:
             await connection.rollback()
+            if prior_statement_timeout is not None:
+                await connection.execute(
+                    text("SELECT set_config('statement_timeout', :value, false)"),
+                    {'value': prior_statement_timeout},
+                )
             await unlock_leaf_for_session(
                 connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
             )

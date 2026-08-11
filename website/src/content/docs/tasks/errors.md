@@ -342,6 +342,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
+| HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 
 ### Registry (HRS-300-HRS-399)
 

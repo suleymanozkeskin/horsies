@@ -175,6 +175,14 @@ class RecoveryConfig(BaseModel):
                 report.add(
                     ConfigurationError(
                         message=f'{name} moved to AppConfig.retention',
+                        # Deliberately a RECOVERY code, not
+                        # CONFIG_INVALID_RETENTION, despite the retention
+                        # wording: the user misconfigured RecoveryConfig
+                        # and RecoveryConfig is refusing. A moved-field
+                        # error belongs to the object that no longer has
+                        # the field, which is the only object positioned
+                        # to notice. The remedy living in retention does
+                        # not make the refusal a retention refusal.
                         code=ErrorCode.CONFIG_INVALID_RECOVERY,
                         notes=[
                             'it governs how long records live, not how '
