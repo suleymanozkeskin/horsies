@@ -9,11 +9,19 @@ attempt rows are deleted by the move, so the snapshot is the only home
 of attempt history and it purges with the row.
 
 Absence classifies through the same birth-floor mechanism the generated
-functions use: a v7 birth before the published manifest floor means the
+functions use: a v7 birth before the retained-history floor means the
 task, if it ever existed, lies before all retained history — the typed
 expired presentation. Never-seen and purged are indistinguishable past
 that point by construction, and the classification says exactly what is
 known instead of guessing.
+
+The floor comes from the attached leaf catalog, not from the published
+probe manifest. The two differ by exactly the leaves whose relation was
+dropped out of band, and those leaves DID retain history — someone
+removed it. Reading the floor from the probe list would raise it over
+them and report their tasks as predating retained history, which
+presents an accidental drop as ordinary ageing. The catalog floor keeps
+the claim true; unreadable is not the same as never kept.
 """
 
 from __future__ import annotations
@@ -29,7 +37,8 @@ from ..archive.attempts import AttemptRecord, decode_attempt_snapshot
 from ..archive.versions import DecodedArchiveValue
 from ..errors import HistoryContractError
 from ..identity.uuid7 import uuid7_birth_at
-from ..names import TASK_DETAIL_FUNCTION, TASK_LOOKUP_MANIFEST
+from ..names import HEARTBEAT_CLASS_KEY, TASK_DETAIL_FUNCTION
+from ..partitions.catalog import read_attached_birth_floor
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,9 +96,16 @@ class HistoryTaskDetail:
 @dataclass(frozen=True, slots=True)
 class TaskDetailAbsent:
     """No row anywhere. `predates_retained_floor` is True when the v7
-    birth lies before the published manifest floor (the typed expired
+    birth lies before the attached-catalog floor (the typed expired
     presentation), False when it lies within retained range, and None
-    when the identifier is not v7 or no floor is published."""
+    when the identifier is not v7 or no attached leaf carries a birth.
+
+    False is the answer for a task whose leaf was destroyed out of band:
+    its history was retained and then removed, so it does not predate
+    retained history. The row is gone either way, but the reason
+    published here stays true — an operator asking why a rerun is
+    impossible learns the partition is missing rather than that the task
+    aged out."""
 
     task_id: str
     predates_retained_floor: bool | None
@@ -222,16 +238,25 @@ async def _classify_absence(
     connection: AsyncConnection,
     task_id: str,
 ) -> bool | None:
+    """Whether a v7 birth predates all retained history.
+
+    The floor is read live from the attached leaf catalog rather than
+    from the published probe manifest, so a leaf whose relation was
+    dropped out of band still counts as retained history — see the
+    module docstring for why the two sources stopped agreeing.
+
+    A catalog carrying attached leaves before any reader is published
+    now yields a real answer where the manifest-sourced floor yielded
+    None. That is intended: the leaves say where history begins whether
+    or not a function has been generated over them, and answering from
+    what is known beats declaring the question unclassifiable.
+    """
     birth = uuid7_birth_at(task_id)
     if birth is None:
         return None
-    floor = (
-        await connection.execute(
-            text(
-                f'SELECT min(min_birth_at) FROM {TASK_LOOKUP_MANIFEST}'
-            )
-        )
-    ).scalar_one_or_none()
+    floor = await read_attached_birth_floor(
+        connection, excluded_class_key=HEARTBEAT_CLASS_KEY
+    )
     if floor is None:
         return None
     return birth < floor

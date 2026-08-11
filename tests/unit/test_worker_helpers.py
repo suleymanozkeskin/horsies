@@ -3156,6 +3156,7 @@ class TestStartupRegistersEveryClassItRuns:
                 created_history_leaves=0,
                 created_heartbeat_leaves=0,
                 republished=False,
+                absent_leaves=(),
                 heartbeat_covered_now=True,
                 history_covered_through=datetime(
                     2026, 1, 2, tzinfo=timezone.utc
@@ -3217,6 +3218,7 @@ class TestWorkerStartConnectionOrdering:
                 created_history_leaves=0,
                 created_heartbeat_leaves=0,
                 republished=False,
+                absent_leaves=(),
                 heartbeat_covered_now=True,
                 history_covered_through=datetime(
                     2026, 1, 2, tzinfo=timezone.utc

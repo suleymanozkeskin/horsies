@@ -109,24 +109,45 @@ class LookupLeaf:
 
 @dataclass(frozen=True, slots=True)
 class LookupManifest:
-    """The complete attached finite-leaf set, oldest first.
+    """What the generated functions probe, and where history begins.
 
-    `birth_floor` is set only when every attached leaf carried verified
-    birth metadata; a single unverified leaf disables the constant-time
-    purged fast path and the walk decides absence the long way.
+    Two jobs, and only the first is filtered by relation existence.
+    `leaves` is the probe list: a relation that does not exist cannot be
+    probed, and naming it anyway kills the function at execution.
+
+    `birth_floor` is the retained-history floor, computed over the
+    COMPLETE attached set including leaves whose relation is gone. It is
+    set only when every attached leaf carried verified birth metadata; a
+    single unverified leaf disables the constant-time purged fast path
+    and the walk decides absence the long way.
+
+    The floor is deliberately not narrowed to the probe list. Absence and
+    the EXPLANATION of absence are different claims: a task whose leaf was
+    destroyed out of band is genuinely unreadable, but it does not predate
+    retained history, and saying it does would present an accidental drop
+    as ordinary ageing. A floor computed over the full attached set errs
+    low, which only ever means probing before concluding absence.
     """
 
     leaves: tuple[LookupLeaf, ...]
     birth_floor: datetime | None
 
 
-def manifest_from_catalog(rows: Sequence[LeafCatalogRow]) -> LookupManifest:
+def manifest_from_catalog(
+    rows: Sequence[LeafCatalogRow],
+    *,
+    absent_relations: frozenset[str] = frozenset(),
+) -> LookupManifest:
     """Build the generation manifest from attached catalog rows.
 
     The rows must be the complete attached set across every retention
     class — the caller reads them through the catalog module's
     all-classes query. Ordering is normalized here; duplicate relation
     names are a contract violation the constructor surfaces.
+
+    `absent_relations` names attached leaves whose relation no longer
+    exists. They leave the probe list and stay in the floor, per the two
+    jobs `LookupManifest` documents.
 
     Non-history catalog consumers are excluded HERE, at assembly, so
     every manifest consumer inherits the filter: heartbeat leaves share
@@ -153,10 +174,11 @@ def manifest_from_catalog(rows: Sequence[LeafCatalogRow]) -> LookupManifest:
             min_birth_at=row.min_birth_at,
         )
         for row in ordered
+        if row.leaf_name not in absent_relations
     )
     birth_floor: datetime | None = None
-    if leaves and all(row.min_birth_verified for row in ordered):
-        observed = [leaf.min_birth_at for leaf in leaves if leaf.min_birth_at]
+    if ordered and all(row.min_birth_verified for row in ordered):
+        observed = [row.min_birth_at for row in ordered if row.min_birth_at]
         if observed:
             birth_floor = min(observed)
     return LookupManifest(leaves=leaves, birth_floor=birth_floor)
