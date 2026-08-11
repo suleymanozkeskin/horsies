@@ -64,6 +64,19 @@ and there is no migration contract between pre-1.0 versions.
   those leaves did retain history until someone removed it, so answering from
   the probe list would present an accidental drop as ordinary ageing.
 
+- **Retention configuration errors carry their own error code.** Every refusal
+  from `AppConfig.retention` — an unusable queue name or class key, a
+  non-positive or fractional duration, a reserved or duplicated class key, a
+  key too long for the relation names it is spliced into, and a `queue_retention`
+  mapping naming a queue the deployment does not have — now reports
+  `CONFIG_INVALID_RETENTION` (`HRS-216`). These answered with
+  `CONFIG_INVALID_RECOVERY` (`HRS-204`), left over from when the fields lived on
+  `RecoveryConfig`, and the queue cross-check answered with
+  `CONFIG_INVALID_QUEUE_MODE` (`HRS-200`). Setting a moved field on
+  `RecoveryConfig` still reports `CONFIG_INVALID_RECOVERY`: that refusal belongs
+  to the object that no longer has the field.
+
+
 - **Per-queue retention now applies on every enqueue path.** `.schedule()`,
   `.schedule_async()`, a `TaskSchedule` firing on its cron, and a workflow
   node's backing task resolve the queue mapping exactly as `.send()` does,
