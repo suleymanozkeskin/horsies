@@ -10,10 +10,9 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 
-DB_URL = os.environ.get(
-    'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies',
-)
+from tests.e2e.helpers.env import e2e_database_url
+
+DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

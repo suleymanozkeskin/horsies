@@ -19,10 +19,9 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.tasks import TaskResult, TaskError
 from horsies.core.utils.url import to_psycopg_url
 
-DB_URL = os.environ.get(
-    'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies',
-)
+from tests.e2e.helpers.env import e2e_database_url
+
+DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,

@@ -18,10 +18,9 @@ from horsies.core.models.schedule import (
     EveryDay,
 )
 
-DB_URL = os.environ.get(
-    'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ["DB_PASSWORD"]}@localhost:5432/horsies',
-)
+from tests.e2e.helpers.env import e2e_database_url
+
+DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 # Schedule config with a short interval for testing
 # Note: Schedules are defined dynamically in tests, but we need at least

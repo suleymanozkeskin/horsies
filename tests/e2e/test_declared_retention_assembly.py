@@ -37,11 +37,9 @@ pytestmark = [pytest.mark.e2e]
 
 INSTANCE = 'tests.e2e.tasks.instance_declared_retention:app'
 
-DB_URL = os.environ.get(
-    'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}'
-    '@localhost:5432/horsies',
-)
+from tests.e2e.helpers.env import e2e_database_url
+
+DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
 def _registered_duration() -> object | None:
