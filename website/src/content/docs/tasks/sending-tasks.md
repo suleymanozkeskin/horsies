@@ -336,6 +336,11 @@ Naming `'standard_30d'` is **not** the same as omitting the parameter.
 Omitting it takes the queue's mapping where one exists; naming the default
 class overrides that mapping for this send.
 
+The precedence is the same on `.schedule()` and `.schedule_async()` as on
+`.send()`, and the same for a `TaskSchedule` cron fire and a workflow
+node's backing task. `with_options(...)` applies its options to the
+delayed methods as well as the immediate ones.
+
 The class is snapshotted on the row at enqueue and decides which history
 partition the record moves to at terminalization; it cannot be changed
 afterwards. A retry replays the class its original send chose, so editing

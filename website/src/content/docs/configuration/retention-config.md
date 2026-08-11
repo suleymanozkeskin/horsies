@@ -67,6 +67,13 @@ Highest precedence first:
 Omitting the argument therefore means "the queue's mapping if there is
 one" — not `standard_30d` unconditionally.
 
+The same precedence applies wherever a task is enqueued: `.send()`,
+`.send_async()`, `.schedule()`, `.schedule_async()`, a `TaskSchedule`
+firing on its cron, and a workflow node's backing task. A cron fire
+resolves from the scheduler process's own configuration, and a workflow
+node from the queue its node runs on. The class is chosen at enqueue in
+every case.
+
 ```python
 # On the mapped 'emails' queue: kept 7 days
 await send_email.send_async(to=...)
@@ -108,6 +115,20 @@ mapped to 7 days". You can also name one explicitly at a send.
 `q_` is reserved: a class declared in `retention_classes` may not use the
 prefix, since durations there come from the mapping instead.
 
+### What each mapping costs
+
+A mapping keys on the queue *and* its duration, so two queues mapped to
+the same duration mint two independent classes — `{'a': 7d, 'b': 7d}`
+gives `q_a_7d` and `q_b_7d`, not one shared class. That is deliberate:
+a class has one duration, and merging them would tie two queues whose
+mappings can later diverge.
+
+Each class carries its own parent relation, `history_leaf_horizon_days
++ 1` daily leaves, and two indexes per leaf, all maintained on every
+pass. Ten mapped queues is roughly forty extra leaves and eighty extra
+indexes at the default horizon. Map the queues whose retention actually
+differs, rather than every queue.
+
 ### Length: roughly 13 characters of queue name
 
 A class key is spliced into the relations the class owns, and the longest
@@ -144,7 +165,7 @@ delete:
 
 | Category | Mechanism | Setting |
 |---|---|---|
-| Terminal **task** records | **Partition drop** — records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | retention class per task, not a setting here |
+| Terminal **task** records | **Partition drop** — records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | `queue_retention` per queue, or `retention_class_key` per send |
 | Heartbeats | **Partition drop** — hourly partitions drop whole | `heartbeat_leaf_horizon_hours` (coverage, not the window) |
 | Terminal **workflow** records | **Row delete** in batches | `terminal_record_retention_hours` |
 | Worker states | **Row delete**, same sweep | `worker_state_retention_hours` |
@@ -157,9 +178,10 @@ records use the first.
 ## Retention classes
 
 Every task carries a retention class, assigned at enqueue and
-snapshotted on the row; its window cannot be changed afterwards.
-Omitting the parameter uses the immutable 30-day class, and an explicit
-`None` keeps the record forever. See
+snapshotted on the row; its window cannot be changed afterwards. Which
+class it gets follows the precedence above: what the send asks for, then
+the queue's `queue_retention` mapping, then the immutable 30-day class.
+An explicit `None` keeps the record forever. See
 [Sending Tasks](../../tasks/sending-tasks#keep-a-terminal-record-forever).
 
 ### Declaring your own
