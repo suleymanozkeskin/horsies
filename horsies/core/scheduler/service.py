@@ -10,6 +10,7 @@ from typing import Optional
 from sqlalchemy import text
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
@@ -930,6 +931,16 @@ class Scheduler:
             task_options=None,
         )
 
+        # A fired slot lands on a queue like any other task, so the
+        # queue's mapping governs it. Resolved from THIS process's
+        # configuration at fire time, which is the only configuration a
+        # scheduler has; the fingerprint above does not cover retention,
+        # so slot identity is unchanged by the class chosen here.
+        retention_class_key = resolve_queue_retention_class(
+            getattr(self.app.config, 'retention', None),
+            validated_queue_name,
+        )
+
         return await self.broker.enqueue_async(
             task_name=schedule.task_name,
             queue_name=validated_queue_name,
@@ -939,4 +950,5 @@ class Scheduler:
             kwargs_json=kwargs_json,
             priority=priority,
             sent_at=sent_at,
+            retention_class_key=retention_class_key,
         )

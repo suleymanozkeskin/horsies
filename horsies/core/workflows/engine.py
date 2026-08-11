@@ -57,6 +57,7 @@ from horsies.core.models.workflow import (
     validate_workflow_generic_output_match,
 )
 from horsies.core.errors import WorkflowValidationError, ErrorCode, ConfigurationError
+from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.workflows.sql import (
     COUNT_CTX_TERMINAL_DEPS_SQL,
     ENQUEUE_SUBWORKFLOW_TASK_SQL,
@@ -590,6 +591,22 @@ async def enqueue_workflow_task(
     return task_id
 
 
+
+def _queue_retention_class(broker: Any, queue_name: str) -> str | None:
+    """The retention class a workflow backing task's queue resolves to.
+
+    Workflow nodes are enqueued by the engine rather than through a task
+    send, but they land on a queue like any other task, so the queue's
+    mapping governs them the same way. `broker` may be absent on paths
+    that build parameters without one; no broker means no configuration
+    to read, which resolves to the default class.
+    """
+    app = getattr(broker, 'app', None)
+    config = getattr(app, 'config', None)
+    return resolve_queue_retention_class(
+        getattr(config, 'retention', None), queue_name
+    )
+
 async def _build_enqueued_task_params(
     session: AsyncSession,
     workflow_id: str,
@@ -843,6 +860,7 @@ async def _build_enqueued_task_params(
             kwargs_json=kwargs_json,
             good_until=good_until_dt,
             task_options_json=task_options_str,
+            retention_class_key=_queue_retention_class(broker, queue_name),
         ),
     })
 
@@ -1390,6 +1408,9 @@ async def enqueue_subworkflow_task(
                         kwargs_json=root_kwargs_json,
                         good_until=good_until_dt,
                         task_options_json=child_task_options_json,
+                        retention_class_key=_queue_retention_class(
+                            broker, child_queue
+                        ),
                     ),
                 })
             elif not child_dep_indices:
