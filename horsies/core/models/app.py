@@ -246,6 +246,42 @@ class AppConfig(BaseModel):
                 )
             )
 
+        # A queue mapped for retention must be a queue this deployment
+        # has. RetentionConfig is a standalone model and cannot know the
+        # queue set; AppConfig owns both, so the cross-check belongs
+        # here. Fails closed because the open failure is silent: a
+        # misspelled queue mints a class that is registered, grown with
+        # leaves and indexes on every maintenance pass forever, and
+        # never routed into — while the queue the adopter meant keeps
+        # the 30-day default. Neither the policy nor an error.
+        # 'default' is the only queue a DEFAULT-mode app has; it is what
+        # Horsies.validate_queue_name returns for that mode.
+        configured_queues = (
+            {queue.name for queue in self.custom_queues}
+            if self.queue_mode == QueueMode.CUSTOM and self.custom_queues
+            else {'default'}
+        )
+        for mapped_queue in sorted(self.retention.queue_retention):
+            if mapped_queue in configured_queues:
+                continue
+            report.add(
+                ConfigurationError(
+                    message=(
+                        f'queue_retention maps {mapped_queue!r}, which is '
+                        'not a queue this deployment has'
+                    ),
+                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    notes=[
+                        f'configured queues: {sorted(configured_queues)}',
+                        'an unmatched mapping builds a retention class '
+                        'nothing ever routes into',
+                    ],
+                    help_text=(
+                        'correct the queue name, or remove the mapping'
+                    ),
+                )
+            )
+
         raise_collected(report)
         return self
 

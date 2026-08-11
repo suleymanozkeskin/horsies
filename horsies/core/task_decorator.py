@@ -46,6 +46,7 @@ from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.models.retention import (
     RetentionConfig,
     derived_queue_class_key,
+    resolve_queue_retention_class,
 )
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.history.identity.uuid7 import mint_task_id
@@ -1812,27 +1813,15 @@ def create_task_wrapper(
                 return explicit
 
     def _queue_retention_class(queue_name: str) -> str | None:
-        """The class this queue's mapping stands for, read at send time.
+        """This queue's mapped class, read from the app at send time.
 
-        Read through `app` rather than captured at decoration, for the
-        same reason the declared keys are: a task may be defined before
-        the app's config is finalised.
+        Read through `app` rather than captured at decoration, because a
+        task may be defined before the app's config is finalised. The
+        rule itself lives in one place so every enqueue path shares it.
         """
-        # `app.config` is not statically known here, so the attribute is
-        # checked for what it must be rather than assumed to be it: an
-        # app carrying no retention section has no mapping, and the
-        # default class is the answer.
-        retention = getattr(app.config, 'retention', None)
-        if not isinstance(retention, RetentionConfig):
-            return DEFAULT_RETENTION_CLASS_KEY
-        mapped = retention.queue_retention.get(queue_name, _UNSET_RETENTION)
-        match mapped:
-            case _UnsetRetention():
-                return DEFAULT_RETENTION_CLASS_KEY
-            case None:
-                return None
-            case duration:
-                return derived_queue_class_key(queue_name, duration)
+        return resolve_queue_retention_class(
+            getattr(app.config, 'retention', None), queue_name
+        )
 
     def _validate_retention_class_key(
         retention_class_key: str | None,
@@ -1934,6 +1923,9 @@ def create_task_wrapper(
         args: tuple[Any, ...],
         kwargs_dict: dict[str, Any],
         good_until_override: datetime | None | object,
+        *,
+        idempotency_key: str | None = None,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1946,6 +1938,16 @@ def create_task_wrapper(
         if delay_err is not None:
             return Err(delay_err)
 
+        # Same rule as the immediate paths: an explicitly named class is
+        # checked before anything is written, a derived one is not,
+        # because it comes from configuration already validated.
+        if not isinstance(retention_class_key, _UnsetRetention):
+            retention_error = _validate_retention_class_key(
+                retention_class_key
+            )
+            if retention_error is not None:
+                return Err(retention_error)
+
         prep = _prepare_send(
             args,
             kwargs_dict,
@@ -1955,6 +1957,16 @@ def create_task_wrapper(
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
+        if idempotency_key is not None:
+            payload = dataclasses.replace(
+                payload, idempotency_key=idempotency_key
+            )
+        payload = dataclasses.replace(
+            payload,
+            retention_class_key=_resolve_retention_choice(
+                retention_class_key, payload.queue_name
+            ),
+        )
         return _do_schedule(task_id, payload)
 
     async def _schedule_async_with_options(
@@ -1962,6 +1974,9 @@ def create_task_wrapper(
         args: tuple[Any, ...],
         kwargs_dict: dict[str, Any],
         good_until_override: datetime | None | object,
+        *,
+        idempotency_key: str | None = None,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1974,6 +1989,16 @@ def create_task_wrapper(
         if delay_err is not None:
             return Err(delay_err)
 
+        # Same rule as the immediate paths: an explicitly named class is
+        # checked before anything is written, a derived one is not,
+        # because it comes from configuration already validated.
+        if not isinstance(retention_class_key, _UnsetRetention):
+            retention_error = _validate_retention_class_key(
+                retention_class_key
+            )
+            if retention_error is not None:
+                return Err(retention_error)
+
         prep = _prepare_send(
             args,
             kwargs_dict,
@@ -1983,6 +2008,16 @@ def create_task_wrapper(
         if is_err(prep):
             return prep
         task_id, payload = prep.ok_value
+        if idempotency_key is not None:
+            payload = dataclasses.replace(
+                payload, idempotency_key=idempotency_key
+            )
+        payload = dataclasses.replace(
+            payload,
+            retention_class_key=_resolve_retention_choice(
+                retention_class_key, payload.queue_name
+            ),
+        )
         return await _do_schedule_async(task_id, payload)
 
     def send(
@@ -2057,7 +2092,11 @@ def create_task_wrapper(
             *args: P.args,
             **kwargs: P.kwargs,
         ) -> TaskSendResult[TaskHandle[T]]:
-            return _schedule_with_options(delay, args, kwargs, self.good_until)
+            return _schedule_with_options(
+                delay, args, kwargs, self.good_until,
+                idempotency_key=self.idempotency_key,
+                retention_class_key=self.retention_class_key,
+            )
 
         async def schedule_async(
             self,
@@ -2067,6 +2106,8 @@ def create_task_wrapper(
         ) -> TaskSendResult[TaskHandle[T]]:
             return await _schedule_async_with_options(
                 delay, args, kwargs, self.good_until,
+                idempotency_key=self.idempotency_key,
+                retention_class_key=self.retention_class_key,
             )
 
     def with_options(

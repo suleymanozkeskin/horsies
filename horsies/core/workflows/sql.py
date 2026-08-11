@@ -7,7 +7,10 @@ from typing import Any
 
 from sqlalchemy import text
 
-from ..history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from ..history.ddl.classes import (
+    DEFAULT_RETENTION_CLASS_KEY,
+    resolve_retention_class_key,
+)
 from ..history.identity.fingerprint import EnqueueCommandV1
 
 # -- SQL constants for start_workflow_async --
@@ -142,17 +145,24 @@ def workflow_task_enqueue_stamp(
     kwargs_json: str | None,
     good_until: datetime | None,
     task_options_json: str | None,
+    retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
 ) -> dict[str, Any]:
     """Enqueue-time facts for one workflow backing task.
 
-    Mirrors the ordinary enqueue path: the ratified default retention
-    class (immutable 30-day finite — never forever by default), a
+    Mirrors the ordinary enqueue path: the retention class its queue
+    resolves to — the caller resolves it, because the mapping lives in
+    app configuration and this module builds statements — a
     version-1 command fingerprint over the enqueue facts the engine
     built, and the rerun-input posture of workflow-bound rows —
     ``NEVER_ELIGIBLE``, because the rerun surface refuses them and
     their inputs are rebuilt by the engine, never replayed from a
     stored envelope.
     """
+    # `None` means forever, and the ordinary enqueue path translates it
+    # to the forever class key before storage. Do the same here, or a
+    # workflow node on a forever-mapped queue would store NULL where
+    # every other path stores 'forever'.
+    stored_class_key = resolve_retention_class_key(retention_class_key)
     fingerprint = EnqueueCommandV1(
         task_name=task_name,
         queue_name=queue_name,
@@ -162,13 +172,13 @@ def workflow_task_enqueue_stamp(
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options_json=task_options_json,
-        retention_class_key=DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key=stored_class_key,
         retain_rerun_input=False,
         rerun_of_task_id=None,
         rerun_root_task_id=None,
     ).fingerprint
     return {
-        'retention_class_key': DEFAULT_RETENTION_CLASS_KEY,
+        'retention_class_key': stored_class_key,
         'fingerprint_version': 1,
         'fingerprint': fingerprint,
         'retain_rerun_input': False,

@@ -95,6 +95,35 @@ def derived_queue_class_key(queue_name: str, duration: timedelta) -> str:
     )
 
 
+def resolve_queue_retention_class(
+    retention: object, queue_name: str
+) -> str | None:
+    """The class a queue's mapping stands for, or the default class.
+
+    The single definition every enqueue path resolves through — immediate
+    sends, delayed sends, cron fires, and workflow backing tasks. They
+    reach their configuration by different routes, so the routes differ
+    but the rule must not: a queue mapped here means the same thing
+    whatever put the task on it.
+
+    `retention` is typed as `object` because callers reach it through
+    attributes that are not statically known (`broker.app.config`,
+    `app.config`). Anything that is not a `RetentionConfig` carries no
+    mapping, so the default class is the answer.
+
+    Returns `None` for a queue mapped to forever — `None` is the explicit
+    forever choice everywhere in this codebase, not an absence.
+    """
+    if not isinstance(retention, RetentionConfig):
+        return DEFAULT_RETENTION_CLASS_KEY
+    if queue_name not in retention.queue_retention:
+        return DEFAULT_RETENTION_CLASS_KEY
+    duration = retention.queue_retention[queue_name]
+    if duration is None:
+        return None
+    return derived_queue_class_key(queue_name, duration)
+
+
 def _class_key_length_error(
     key: str,
     *,

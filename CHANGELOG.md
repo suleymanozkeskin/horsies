@@ -28,6 +28,49 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Per-queue retention now applies on every enqueue path.** `.schedule()`,
+  `.schedule_async()`, a `TaskSchedule` firing on its cron, and a workflow
+  node's backing task resolve the queue mapping exactly as `.send()` does,
+  with the class chosen at enqueue. Previously only the immediate sends
+  resolved it, so the same task landed a different retention class
+  depending on how it was enqueued, and nothing reported the divergence.
+  A cron fire resolves from the scheduler process's own configuration; a
+  workflow node from the queue its node runs on.
+
+- **An explicit retention choice on a delayed send is honored.**
+  `with_options(retention_class_key=None).schedule(...)` asked for the
+  record to be kept forever and the record was deleted at 30 days; a named
+  class was discarded the same way. The delayed methods never carried the
+  option. `idempotency_key` rode the same gap and is carried with it.
+
+- **Worker startup registers queue-derived classes.** Startup registered
+  declared classes only, so a task sent on a mapped queue before any
+  maintenance pass had no partition to move into at terminalization. The
+  window is not one tick: the periodic pass sits behind the cluster-wide
+  maintenance gate, which can deny.
+
+- **A failing retention class no longer stops heartbeat coverage or the
+  classes after it.** Containment previously covered raised exceptions in
+  history-class leaf coverage and nothing else. A *returned* refusal still
+  ended the pass, and every queue-derived key sorts before `standard_30d`,
+  so the feature made the adverse ordering systematic rather than
+  incidental. Heartbeat coverage ran after the failure report and so was
+  skipped entirely — and heartbeat leaves gate worker startup, so one
+  poisoned class row could leave a restarted fleet unable to come back.
+  Each class now runs inside a savepoint, so a database-level error rolls
+  back to that savepoint instead of poisoning the caller's transaction and
+  taking the pass down with it.
+
+- **A queue named in `queue_retention` must be a queue the deployment
+  has.** A misspelled queue was accepted, minted a class, and grew leaves
+  and indexes on every pass forever while nothing routed into it — and the
+  queue the adopter meant kept the 30-day default. Checked in both queue
+  modes, refused at construction naming the configured queues.
+
+- `RetentionChoice` is exported from `horsies`. It appears in the
+  `with_options` signature, so it was a type a reader could see and not
+  import.
+
 - **A retention class key longer than 31 characters could stop partition
   coverage across a deployment.** Configuration accepted any key up to
   PostgreSQL's 63-byte identifier limit, but the key is interpolated into

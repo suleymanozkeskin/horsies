@@ -60,20 +60,35 @@ def _make_app(retention: RetentionConfig) -> MagicMock:
     return app
 
 
-def _stamped_key(app: MagicMock, **send_options: Any) -> str | None:
-    """The retention class the broker was actually asked to store."""
+def _stamp(
+    app: MagicMock, path: str, **send_options: Any
+) -> dict[str, Any]:
+    """What the broker was actually asked to store, for one send path.
+
+    Read off the broker call rather than from a resolver, so a path that
+    resolves correctly and then fails to carry the result still fails.
+    """
     broker = MagicMock()
     broker.enqueue.return_value = Ok('task-abc')
     app.get_broker.return_value = broker
     wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+    target = wrapper.with_options(**send_options) if send_options else wrapper
 
-    if send_options:
-        result = wrapper.with_options(**send_options).send(x=1)
-    else:
-        result = wrapper.send(x=1)
+    match path:
+        case 'send':
+            result = target.send(x=1)
+        case 'schedule':
+            result = target.schedule(60, x=1)
+        case unknown:
+            raise AssertionError(f'unknown send path {unknown!r}')
     assert result.is_ok(), result
 
-    return broker.enqueue.call_args.kwargs['retention_class_key']
+    return broker.enqueue.call_args.kwargs
+
+
+def _stamped_key(app: MagicMock, **send_options: Any) -> str | None:
+    """The retention class an immediate send stores."""
+    return _stamp(app, 'send', **send_options)['retention_class_key']
 
 
 _MAPPED = RetentionConfig(queue_retention={MAPPED_QUEUE: timedelta(days=7)})
@@ -187,3 +202,83 @@ def test_json_task_options_do_not_carry_the_class() -> None:
     options = broker.enqueue.call_args.kwargs.get('task_options')
     if options is not None:
         assert 'retention' not in json.loads(options)
+
+
+# --- The delayed path resolves exactly as the immediate one does -------------
+#
+# Every row below was WRONG before this fix: `.schedule()` never touched
+# retention, so the payload kept its dataclass default and the broker was
+# handed `standard_30d` no matter what the queue mapped or the caller asked
+# for. Parametrized against `.send()` so the two paths cannot drift: a rule
+# that holds for one and not the other fails here.
+
+
+@pytest.mark.parametrize('path', ['send', 'schedule'])
+class TestEveryPathResolvesAlike:
+    def test_a_mapped_queue_resolves(self, path: str) -> None:
+        assert _stamp(_make_app(_MAPPED), path)['retention_class_key'] == (
+            DERIVED_KEY
+        )
+
+    def test_an_unmapped_queue_takes_the_default(self, path: str) -> None:
+        app = _make_app(RetentionConfig())
+
+        assert _stamp(app, path)['retention_class_key'] == 'standard_30d'
+
+    def test_an_explicit_forever_is_honored(self, path: str) -> None:
+        """The sub-case that silently deleted records at 30 days.
+
+        A caller asking for forever on the delayed path had the request
+        discarded and the record dropped on the default schedule.
+        """
+        stamped = _stamp(
+            _make_app(_MAPPED), path, retention_class_key=None
+        )['retention_class_key']
+
+        assert stamped is None
+
+    def test_an_explicit_default_beats_the_mapping(self, path: str) -> None:
+        stamped = _stamp(
+            _make_app(_MAPPED), path, retention_class_key='standard_30d'
+        )['retention_class_key']
+
+        assert stamped == 'standard_30d'
+
+    def test_an_explicit_derived_key_is_honored(self, path: str) -> None:
+        stamped = _stamp(
+            _make_app(_MAPPED), path, retention_class_key=DERIVED_KEY
+        )['retention_class_key']
+
+        assert stamped == DERIVED_KEY
+
+    def test_a_queue_mapped_to_none_resolves_to_forever(
+        self, path: str
+    ) -> None:
+        app = _make_app(RetentionConfig(queue_retention={MAPPED_QUEUE: None}))
+
+        assert _stamp(app, path)['retention_class_key'] is None
+
+    def test_an_unknown_class_is_refused_before_the_enqueue(
+        self, path: str
+    ) -> None:
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('task-abc')
+        app = _make_app(_MAPPED)
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        options = wrapper.with_options(retention_class_key='q_other_9d')
+
+        result = (
+            options.send(x=1) if path == 'send' else options.schedule(60, x=1)
+        )
+
+        assert result.is_err(), result
+        assert not broker.enqueue.called, (
+            'the refusal must precede the enqueue on every path'
+        )
+
+    def test_the_idempotency_key_is_carried(self, path: str) -> None:
+        """Rides the same bypass; fixed with it rather than left behind."""
+        stamped = _stamp(_make_app(_MAPPED), path, idempotency_key='k1')
+
+        assert stamped['idempotency_key'] == 'k1'

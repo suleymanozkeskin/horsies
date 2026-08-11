@@ -14,6 +14,8 @@ from horsies.core.errors import (
     MultipleValidationErrors,
 )
 from horsies.core.models.app import AppConfig
+from datetime import timedelta
+
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.recovery import RecoveryConfig
@@ -1390,3 +1392,82 @@ class TestPayloadPolicyWiring:
         config = AppConfig(queue_mode=QueueMode.DEFAULT, broker=BROKER)
         assert config.payload.warn_bytes == 1_048_576
         assert config.payload.reject_bytes is None
+
+
+@pytest.mark.unit
+class TestQueueRetentionNamesARealQueue:
+    """A mapped queue must be a queue the deployment has.
+
+    The open failure is silent and permanent: a misspelled queue is
+    accepted, its class is registered, and leaves and indexes are built
+    for it on every maintenance pass forever while nothing routes into
+    it — and the queue the adopter meant keeps the 30-day default. The
+    deployment has neither the policy it configured nor an error.
+
+    `RetentionConfig` cannot self-check this: it does not know the queue
+    set. `AppConfig` owns both, so the cross-check lives there.
+    """
+
+    def _broker(self) -> PostgresConfig:
+        return PostgresConfig(
+            database_url='postgresql+psycopg://u:p@localhost/db'
+        )
+
+    def test_default_mode_accepts_the_default_queue(self) -> None:
+        config = AppConfig(
+            broker=self._broker(),
+            queue_mode=QueueMode.DEFAULT,
+            retention=RetentionConfig(
+                queue_retention={'default': timedelta(days=7)}
+            ),
+        )
+
+        assert 'default' in config.retention.queue_retention
+
+    def test_default_mode_refuses_any_other_queue(self) -> None:
+        with pytest.raises(ConfigurationError) as caught:
+            AppConfig(
+                broker=self._broker(),
+                queue_mode=QueueMode.DEFAULT,
+                retention=RetentionConfig(
+                    queue_retention={'emails': timedelta(days=7)}
+                ),
+            )
+
+        assert 'emails' in str(caught.value)
+
+    def test_custom_mode_accepts_a_configured_queue(self) -> None:
+        config = AppConfig(
+            broker=self._broker(),
+            queue_mode=QueueMode.CUSTOM,
+            custom_queues=[CustomQueueConfig(name='emails', priority=100)],
+            retention=RetentionConfig(
+                queue_retention={'emails': timedelta(days=7)}
+            ),
+        )
+
+        assert config.retention.queue_retention['emails'] == timedelta(days=7)
+
+    def test_custom_mode_refuses_a_typo(self) -> None:
+        """The failure this guard exists for."""
+        with pytest.raises(ConfigurationError) as caught:
+            AppConfig(
+                broker=self._broker(),
+                queue_mode=QueueMode.CUSTOM,
+                custom_queues=[CustomQueueConfig(name='emails', priority=100)],
+                retention=RetentionConfig(
+                    queue_retention={'emals': timedelta(days=7)}
+                ),
+            )
+
+        message = str(caught.value)
+        assert 'emals' in message, 'the refusal must name the bad key'
+        assert 'emails' in message, (
+            'the refusal must list the queues that do exist, or the '
+            'adopter cannot see the typo'
+        )
+
+    def test_an_empty_mapping_is_unaffected(self) -> None:
+        config = AppConfig(broker=self._broker(), queue_mode=QueueMode.DEFAULT)
+
+        assert config.retention.queue_retention == {}

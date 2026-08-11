@@ -96,7 +96,12 @@ from .core.models.resilience import WorkerResilienceConfig
 from .core.types.status import TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES
 from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
-from .core.task_decorator import from_node, TaskHandle, TaskSendOptions
+from .core.task_decorator import (
+    from_node,
+    RetentionChoice,
+    TaskHandle,
+    TaskSendOptions,
+)
 from .core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendPayload,
@@ -222,6 +227,7 @@ __all__ = [
     # Recovery
     'RecoveryConfig',
     'RetentionClassConfig',
+    'RetentionChoice',
     'RetentionConfig',
     'WorkerResilienceConfig',
     # Exception mapper

@@ -3111,6 +3111,90 @@ class TestStartWithResilienceConfig:
 
 
 @pytest.mark.unit
+class TestStartupRegistersEveryClassItRuns:
+    """Startup registers the classes the send path can stamp.
+
+    The reaper's periodic pass and the worker's startup pass both
+    register classes, and only one of them was reading both sources. A
+    queue-derived class the send path stamps but startup never registers
+    has no partition to land in, and the window is not bounded by one
+    tick: the periodic pass sits behind the cluster-wide maintenance
+    gate, which can deny.
+
+    The test enters at `worker.start()` — above the threading — because
+    calling the registration helper directly would prove the helper
+    works while the startup path passed it the wrong argument, which is
+    exactly the defect.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_queue_derived_class_reaches_startup_registration(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import timedelta
+
+        from horsies.core.history.maintenance import coverage as coverage_module
+        from horsies.core.models.retention import (
+            RetentionClassConfig,
+            RetentionConfig,
+        )
+
+        worker = _make_worker()
+        worker.cfg.retention_config = RetentionConfig(
+            queue_retention={'default': timedelta(days=7)},
+            retention_classes=(
+                RetentionClassConfig(
+                    key='audit_1y', duration=timedelta(days=365)
+                ),
+            ),
+        )
+        captured: dict[str, Any] = {}
+
+        async def _ensured(*_args: Any, **kwargs: Any) -> Any:
+            captured['declared_classes'] = kwargs.get('declared_classes')
+            return coverage_module.CoverageEnsured(
+                created_history_leaves=0,
+                created_heartbeat_leaves=0,
+                republished=False,
+                heartbeat_covered_now=True,
+                history_covered_through=datetime(
+                    2026, 1, 2, tzinfo=timezone.utc
+                ),
+                heartbeats_covered_through=datetime(
+                    2026, 1, 1, 1, tzinfo=timezone.utc
+                ),
+            )
+
+        monkeypatch.setattr(
+            coverage_module, 'ensure_startup_coverage', _ensured
+        )
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=lambda **_kwargs: MagicMock()
+        )
+
+        async def _warm(_executor: Any) -> None:
+            return None
+
+        worker._warm_executor = AsyncMock(side_effect=_warm)  # type: ignore[assignment]
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(return_value=Ok(None))
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+
+        await worker.start()
+
+        registered = dict(captured['declared_classes'] or ())
+        assert 'q_default_7d' in registered, (
+            'startup did not register the class a mapped queue stamps; a '
+            f'task sent on it has no partition to land in. got: {sorted(registered)}'
+        )
+        assert registered['q_default_7d'] == timedelta(days=7)
+        assert 'audit_1y' in registered, (
+            'declared classes must still reach startup registration'
+        )
+
+
 class TestWorkerStartConnectionOrdering:
     """Tests for fork-safe worker startup ordering."""
 

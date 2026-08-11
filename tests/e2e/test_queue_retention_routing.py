@@ -9,6 +9,11 @@ The partition comes from `tableoid`, which is the routing fact itself
 rather than an inference from the class column: a record can carry the
 right class key and still sit in the wrong relation if the derived class
 was never registered.
+
+The send is not gated on the class existing. Waiting for it would test
+the maintenance pass rather than startup, and would pass even if startup
+registered nothing — so the absence of that gate is part of what this
+proves.
 """
 
 from __future__ import annotations
@@ -35,24 +40,6 @@ DB_URL = os.environ.get(
     f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}'
     '@localhost:5432/horsies',
 )
-
-
-def _class_is_registered() -> bool:
-    """The readiness condition IS the routing's precondition."""
-    engine = create_engine(DB_URL)
-    try:
-        with engine.connect() as connection:
-            return (
-                connection.execute(
-                    text(
-                        'SELECT 1 FROM horsies_retention_classes '
-                        'WHERE class_key = :key'
-                    ),
-                    {'key': DERIVED_CLASS_KEY},
-                )
-            ).scalar_one_or_none() is not None
-    finally:
-        engine.dispose()
 
 
 def _history_partition(task_id: str) -> str | None:
@@ -82,12 +69,13 @@ def _forget_derived_class() -> None:
 def test_a_mapped_queue_lands_the_record_in_its_derived_partition() -> None:
     _forget_derived_class()
     try:
-        with run_worker(
-            INSTANCE,
-            processes=1,
-            timeout=60.0,
-            ready_check=_class_is_registered,
-        ):
+        # No readiness gate on the class being registered. Startup
+        # coverage registers queue-derived classes, so a booted worker
+        # has the partition before it can claim anything — and the send
+        # below races that startup deliberately. A gate here would wait
+        # for the very condition under test and pass whether or not
+        # startup provided it.
+        with run_worker(INSTANCE, processes=1, timeout=60.0):
             sent = mapped_task.send(x=21)
             assert sent.is_ok(), sent
             task_id = sent.ok_value.task_id

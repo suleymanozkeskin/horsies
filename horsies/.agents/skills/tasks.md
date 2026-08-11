@@ -253,6 +253,12 @@ highest first:
 So omitting the argument means "the queue's mapping if there is one, and
 `standard_30d` otherwise" — not `standard_30d` unconditionally.
 
+This precedence holds on EVERY enqueue path — `.send()`, `.send_async()`,
+`.schedule()`, `.schedule_async()`, a `TaskSchedule` firing on its cron,
+and a workflow node's backing task. A cron fire resolves from the
+scheduler process's own config; a workflow node from the queue its node
+runs on. `.schedule*()` also carries `idempotency_key`.
+
 Valid values are `None`, `standard_30d`, any class declared in
 `AppConfig.retention.retention_classes`, and any class derived from
 `queue_retention` (`q_<queue>_<duration>`; see the configs skill). Any other

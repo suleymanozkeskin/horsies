@@ -129,10 +129,20 @@ async def ensure_partition_coverage(
 ) -> CoverageOutcome:
     """Register classes, cover leaves, publish readers — one pass.
 
-    The caller owns the transaction. On a refusal the pass stops and
-    reports it verbatim — a hole in the middle of coverage is not
-    coverage, and a refusal retried into silence is the failure mode
-    this owner exists to prevent.
+    The caller owns the transaction.
+
+    A refusal is reported, never retried into silence — that is the
+    failure mode this owner exists to prevent. What changed is the
+    SCOPE of the stop. A per-class failure no longer ends the pass: the
+    class is named, the remaining classes are served, heartbeat coverage
+    runs regardless, and the pass reports every class that failed. A
+    hole in one class's coverage is not a reason to open one in the
+    rest, and heartbeat leaves gate worker startup, so stopping early
+    turned one poisoned class row into a fleet that cannot restart.
+
+    Failures at the steps BEFORE the per-class loop — heartbeat class
+    registration, default class registration, declared registration —
+    still stop the pass, because nothing after them can be correct.
     """
     heartbeat_registration = await register_heartbeat_class(
         connection, horizon=timedelta(hours=heartbeat_horizon_hours)
@@ -199,54 +209,67 @@ async def ensure_partition_coverage(
 
     publisher = StagedLoaderPublisher()
     created_history = 0
-    # One class must not cost the others their coverage. The loop reads
-    # registered classes in key order, so an unhandled failure here
-    # silently denied leaves to every class sorting after it, and denied
-    # them from a database row that removing a declaration cannot reach.
-    # Containment mirrors the pruning pass, which bounds per leaf for the
-    # same reason, and it also keeps the failure visible: the caller
-    # matches on the returned refusal to set coverage health, and a raise
-    # left that health reporting whatever the previous pass had put there.
-    raised: list[str] = []
+    # One class must not cost the others their coverage, and "the others"
+    # includes heartbeats. Classes are served in key order, so an
+    # unbounded failure denied leaves to every class sorting after it --
+    # and every queue-derived key begins `q_`, which sorts before
+    # `standard_30d`, so the feature guarantees the adverse ordering
+    # rather than leaving it to chance.
+    #
+    # Each class runs inside a SAVEPOINT. A Python-level error needs only
+    # the try/except, but a DATABASE error aborts the enclosing
+    # transaction the caller owns, and every later statement -- including
+    # the health probe this function ends on -- would then fail with
+    # InFailedSqlTransaction and raise out of the pass entirely. Rolling
+    # back to the savepoint leaves the caller's transaction usable, so
+    # containment survives the failure kind that most needs it.
+    #
+    # Refusals are RETURNED rather than raised, so they are collected
+    # here too. Both kinds name their class; neither stops the loop.
+    failures: list[str] = []
     for class_key in await _finite_class_keys(connection):
         try:
-            creations = await ensure_leaf_coverage(
-                connection,
-                EnsureLeafCoverage(
-                    class_key=class_key, horizon_days=history_horizon_days
-                ),
-                publisher,
-            )
+            # The savepoint contains DATABASE ERRORS -- the
+            # transaction-aborting kind that would raise the pass out
+            # from under its caller -- and NEVER OUTCOMES. One aborted
+            # transaction fails every later statement, including the
+            # health probe this function ends on; rolling back to the
+            # savepoint leaves the caller's transaction usable, so
+            # containment survives the failure kind that most needs it.
+            async with connection.begin_nested():
+                creations = await ensure_leaf_coverage(
+                    connection,
+                    EnsureLeafCoverage(
+                        class_key=class_key, horizon_days=history_horizon_days
+                    ),
+                    publisher,
+                )
         except Exception as class_error:
-            raised.append(f'{class_key}: {class_error!r}')
+            failures.append(f'{class_key}: {class_error!r}')
             continue
-        for creation in creations:
-            match creation:
-                case LeafCreated():
-                    created_history += 1
-                case LeafAlreadyConformant() | LeafIndexRepaired():
-                    continue
-                case _:
-                    return CoverageEnsureFailed(
-                        stage='ensure_leaf_coverage',
-                        class_key=class_key,
-                        refusal=repr(creation),
-                        heartbeat_covered_now=(
-                            await heartbeat_coverage_present(connection)
-                        ),
-                    )
 
-    if raised:
-        # Every class is attempted before reporting, so the refusal names
-        # all of them rather than only the one that sorted first.
-        return CoverageEnsureFailed(
-            stage='ensure_leaf_coverage',
-            class_key=raised[0].split(':', 1)[0],
-            refusal=f'{len(raised)} class(es) failed: ' + '; '.join(raised),
-            heartbeat_covered_now=(
-                await heartbeat_coverage_present(connection)
-            ),
+        # A RETURNED refusal is a clean outcome: the connection is fine
+        # and whatever leaves were created before it are real. They are
+        # kept deliberately. Leaf coverage stops at its first refusal, so
+        # discarding the leaves it made first would mean a permanently
+        # refusing leaf blocked every earlier day of that class forever,
+        # re-doing and re-discarding the same work on every pass.
+        created_history += sum(
+            1 for creation in creations if isinstance(creation, LeafCreated)
         )
+        refusals = [
+            creation
+            for creation in creations
+            if not isinstance(
+                creation,
+                (LeafCreated, LeafAlreadyConformant, LeafIndexRepaired),
+            )
+        ]
+        if refusals:
+            failures.append(
+                f'{class_key}: '
+                + '; '.join(repr(item) for item in refusals)
+            )
 
     created_heartbeats = 0
     heartbeat_creations = await ensure_heartbeat_coverage(
@@ -276,6 +299,23 @@ async def ensure_partition_coverage(
     if created_history > 0 or not await staged_detail_published(connection):
         await publisher.republish(connection)
         republished = True
+
+    if failures:
+        # Reported only after heartbeat coverage and republication have
+        # run: those serve every class, and a failure in one class is no
+        # reason to withhold them. Every failed class is named, so the
+        # health surface carries the whole picture rather than whichever
+        # key sorted first.
+        return CoverageEnsureFailed(
+            stage='ensure_leaf_coverage',
+            class_key=failures[0].split(':', 1)[0],
+            refusal=(
+                f'{len(failures)} class(es) failed: ' + '; '.join(failures)
+            ),
+            heartbeat_covered_now=(
+                await heartbeat_coverage_present(connection)
+            ),
+        )
 
     now = await database_now(connection)
     day_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
