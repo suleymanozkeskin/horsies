@@ -10,6 +10,7 @@ from horsies.core.defaults import MAX_CLAIM_RENEW_AGE_MS
 
 if TYPE_CHECKING:
     from horsies.core.models.recovery import RecoveryConfig
+    from horsies.core.models.retention import RetentionConfig
     from horsies.core.models.resilience import WorkerResilienceConfig
 
 
@@ -69,6 +70,12 @@ class WorkerConfig:
     # Recovery configuration from AppConfig
     recovery_config: Optional['RecoveryConfig'] = (
         None  # RecoveryConfig, avoid circular import
+    )
+    # Retention configuration from AppConfig. Separate from recovery
+    # because it decides how long records live, not how stalled work is
+    # found; the worker needs both.
+    retention_config: Optional['RetentionConfig'] = (
+        None  # RetentionConfig, avoid circular import
     )
     resilience_config: Optional['WorkerResilienceConfig'] = (
         None  # WorkerResilienceConfig, allow override

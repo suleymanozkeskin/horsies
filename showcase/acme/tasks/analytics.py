@@ -124,7 +124,7 @@ def retention_audit(*, older_than_days: int) -> TaskResult[RetentionAudit, TaskE
     """Report what a retention policy would prune.
 
     Reports only — it never deletes. horsies prunes its own terminal rows on
-    the schedule `RecoveryConfig.terminal_record_retention_hours` sets; this is
+    the schedule `RetentionConfig.terminal_record_retention_hours` sets; this is
     the application's own data, and deleting a demo's history mid-demo would be
     a poor showcase.
     """

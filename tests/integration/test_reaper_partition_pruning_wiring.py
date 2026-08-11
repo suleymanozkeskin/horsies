@@ -36,6 +36,7 @@ from horsies.core.history.heartbeats.partitioning import (
 from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import database_now
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
 
@@ -86,7 +87,38 @@ async def _make_overdue_leaf(broker: PostgresBroker) -> tuple[str, str]:
         now = await database_now(connection)
         hour = now.replace(minute=0, second=0, microsecond=0)
 
+        # An hour the catalog REMEMBERS cannot be created again: a
+        # dropped leaf keeps its row as durable evidence it existed, and
+        # creation refuses rather than resurrect a retired anchor. On a
+        # fresh database no hour is remembered; on a long-lived one an
+        # earlier run may have dropped the hour this arithmetic picks, so
+        # step further back until an unremembered one is found instead of
+        # failing on the substrate.
         overdue = hourly_leaf_ref(hour - OVERDUE_BY)
+        for extra_hours in range(0, 12):
+            candidate = hourly_leaf_ref(
+                hour - OVERDUE_BY - extra_hours * timedelta(hours=1)
+            )
+            remembered = (
+                await connection.execute(
+                    text(
+                        'SELECT count(*) FROM '
+                        'horsies_task_history_leaf_catalog '
+                        'WHERE leaf_name = :leaf'
+                    ),
+                    {'leaf': candidate.leaf_name},
+                )
+            ).scalar_one()
+            if not remembered:
+                overdue = candidate
+                break
+        else:  # pragma: no cover - twelve remembered hours in a row
+            raise AssertionError(
+                'every candidate hour is remembered by the leaf catalog; '
+                'the database carries drop-memory this test cannot work '
+                'around'
+            )
+
         created = await create_hourly_heartbeat_leaf(
             connection, CreateHourlyHeartbeatLeaf(leaf=overdue)
         )
@@ -143,7 +175,10 @@ class TestReaperPrunesExpiredLeaves:
 
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), _pruning_pass_state()
+                broker,
+                RecoveryConfig(),
+                RetentionConfig(),
+                _pruning_pass_state(),
             )
 
             assert not await _leaf_exists(broker, overdue_name), (
@@ -176,7 +211,10 @@ class TestReaperPrunesExpiredLeaves:
         try:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), _pruning_pass_state()
+                broker,
+                RecoveryConfig(),
+                RetentionConfig(),
+                _pruning_pass_state(),
             )
             assert await _leaf_exists(broker, current_name), (
                 f'{current_name} is inside its horizon and was dropped'

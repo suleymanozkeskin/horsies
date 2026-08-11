@@ -100,7 +100,7 @@ is refused, because the accepted values are the ones this process knows.
 
 Beyond the 30-day default and forever, a deployment can declare its own
 finite classes in
-[`RecoveryConfig.retention_classes`](../../configuration/recovery-config#declaring-your-own-retention-classes)
+[`AppConfig.retention.retention_classes`](../../configuration/retention-config#declaring-your-own)
 and send into them by key:
 
 ```python

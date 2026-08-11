@@ -242,7 +242,7 @@ conflict. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention_class_key`**: how long the terminal record is kept. Omit for the
 immutable 30-day default class; pass `None` to keep the record forever; or
-name a class this deployment declares in `RecoveryConfig.retention_classes`
+name a class this deployment declares in `AppConfig.retention.retention_classes`
 (see the configs skill). Any other string returns
 `Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
 is written. The class is snapshotted on the row at enqueue and decides which

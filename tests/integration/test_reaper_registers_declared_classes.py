@@ -21,7 +21,11 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.recovery import RecoveryConfig, RetentionClassConfig
+from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import (
+    RetentionClassConfig,
+    RetentionConfig,
+)
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
 
@@ -51,8 +55,8 @@ def _maintenance_state() -> _ReaperPassState:
     )
 
 
-def _config_declaring(key: str, duration: timedelta) -> RecoveryConfig:
-    return RecoveryConfig(
+def _config_declaring(key: str, duration: timedelta) -> RetentionConfig:
+    return RetentionConfig(
         retention_classes=(
             RetentionClassConfig(key=key, duration=duration),
         )
@@ -126,6 +130,7 @@ class TestReaperRegistersDeclaredClasses:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                RecoveryConfig(),
                 _config_declaring(DECLARED_KEY, DECLARED_DURATION),
                 _maintenance_state(),
             )
@@ -147,8 +152,43 @@ class TestReaperRegistersDeclaredClasses:
         try:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), _maintenance_state()
+                broker, RecoveryConfig(), RetentionConfig(), _maintenance_state()
             )
             assert await _registered_duration(broker, DECLARED_KEY) is None
+        finally:
+            await _forget_class(broker, DECLARED_KEY)
+
+    @pytest.mark.asyncio
+    async def test_the_worker_config_carries_retention_to_the_pass(
+        self, broker: PostgresBroker
+    ) -> None:
+        """The retention split's seam: AppConfig.retention must reach the
+        registrar.
+
+        The pass takes `retention_cfg` explicitly, so a worker built from
+        an AppConfig must carry it through `WorkerConfig.retention_config`
+        or every declaration is inert. Entering at the loop's own binding
+        — `self.cfg.retention_config` — is what proves the threading,
+        which passing a config directly to the pass cannot.
+        """
+        await _forget_class(broker, DECLARED_KEY)
+        try:
+            worker = _reaper_worker(broker)
+            worker.cfg.retention_config = _config_declaring(
+                DECLARED_KEY, DECLARED_DURATION
+            )
+            # Read it back the way the loop does, then drive the pass
+            # with exactly that value.
+            carried = worker.cfg.retention_config
+            assert carried is not None, (
+                'WorkerConfig does not carry a retention section — the '
+                'declaration cannot reach the registrar'
+            )
+            await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
+                broker, RecoveryConfig(), carried, _maintenance_state()
+            )
+            assert await _registered_duration(broker, DECLARED_KEY) == (
+                DECLARED_DURATION
+            )
         finally:
             await _forget_class(broker, DECLARED_KEY)

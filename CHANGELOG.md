@@ -6,6 +6,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0: breaking changes may land in minor or patch releases,
 and there is no migration contract between pre-1.0 versions.
 
+## [Unreleased]
+
+### Changed
+
+- **Retention configuration moved to `AppConfig.retention`.** Nine fields
+  leave `RecoveryConfig` for a new `RetentionConfig`: `retention_classes`,
+  `terminal_record_retention_hours`, `worker_state_retention_hours`,
+  `retention_sweep_interval_s`, `retention_delete_batch_size`,
+  `history_leaf_horizon_days`, `heartbeat_leaf_horizon_hours`,
+  `partition_maintenance_interval_s`, and
+  `paused_workflow_auto_cancel_after`.
+
+  The two answer different questions. Recovery is about work that went
+  wrong — stale claims, dead runners, the thresholds for noticing.
+  Retention is about work that went right and is now history: how long
+  its record survives, how partitions are kept ahead of writes, and how
+  they are reclaimed. `paused_workflow_auto_cancel_after` moves with them
+  because expiring a workflow that has sat paused past a declared age is
+  a policy about how long a record stays actionable, not a response to a
+  crash.
+
+  Setting a moved field on `RecoveryConfig` fails at construction and
+  names its new home; every misplaced field in a config is reported at
+  once. There is no alias and no deprecation shim, per the pre-1.0
+  posture.
+
+  `RetentionConfig` and `RetentionClassConfig` export from `horsies`
+  directly. No schema change, and the worker-state monitoring payload
+  keeps its existing keys.
+
 ## [0.5.1] - 2026-08-10
 
 ### Added

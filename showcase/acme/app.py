@@ -37,6 +37,7 @@ from horsies import (
     PostgresConfig,
     QueueMode,
     RecoveryConfig,
+    RetentionConfig,
     ScheduleConfig,
     TaskSchedule,
     Weekday,
@@ -62,12 +63,17 @@ QUEUES: Final[list[CustomQueueConfig]] = [
     CustomQueueConfig(name=QUEUE_ANALYTICS, priority=90, max_concurrency=4),
 ]
 
-# Demo-tuned recovery: snapshots every 10 s keep the worker charts moving,
-# the reaper polls at the same cadence, and terminal rows are kept for a day
-# so yesterday's run is still readable. Everything else is the default.
+# Demo-tuned recovery: snapshots every 10 s keep the worker charts moving
+# and the reaper polls at the same cadence. Everything else is the default.
 RECOVERY: Final[RecoveryConfig] = RecoveryConfig(
     worker_state_snapshot_interval_ms=10_000,
     check_interval_ms=10_000,
+)
+
+# Demo-tuned retention: terminal workflow rows are kept for a day so
+# yesterday's run is still readable. Task records age by retention class,
+# not by this window.
+RETENTION: Final[RetentionConfig] = RetentionConfig(
     terminal_record_retention_hours=24,
 )
 
@@ -333,6 +339,7 @@ app = Horsies(
         custom_queues=QUEUES,
         broker=PostgresConfig(database_url=SecretStr(DATABASE.url)),
         recovery=RECOVERY,
+        retention=RETENTION,
         schedule=SCHEDULES,
         # One global mapping: any task that lets a KeyError escape reports
         # DATA_CORRUPTION. `apply_promotions` shows it next to an unmapped

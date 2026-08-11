@@ -17,6 +17,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.schedule import (
     DailySchedule,
     HourlySchedule,
@@ -1321,50 +1322,46 @@ class TestWorkerStateSnapshotInterval:
 
 @pytest.mark.unit
 class TestRetentionSweepInterval:
-    """RecoveryConfig.retention_sweep_interval_s bounds and default."""
+    """RetentionConfig.retention_sweep_interval_s bounds and default."""
 
     def test_default_is_5_minutes(self) -> None:
-        assert RecoveryConfig().retention_sweep_interval_s == 300
+        assert RetentionConfig().retention_sweep_interval_s == 300
 
     def test_bounds_accept_valid_edges(self) -> None:
-        assert RecoveryConfig(
-            retention_sweep_interval_s=30,
+        assert RetentionConfig(retention_sweep_interval_s=30,
         ).retention_sweep_interval_s == 30
-        assert RecoveryConfig(
-            retention_sweep_interval_s=86_400,
+        assert RetentionConfig(retention_sweep_interval_s=86_400,
         ).retention_sweep_interval_s == 86_400
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RecoveryConfig(retention_sweep_interval_s=29)
+            RetentionConfig(retention_sweep_interval_s=29)
 
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RecoveryConfig(retention_sweep_interval_s=86_401)
+            RetentionConfig(retention_sweep_interval_s=86_401)
 
 
 @pytest.mark.unit
 class TestRetentionDeleteBatchSize:
-    """RecoveryConfig.retention_delete_batch_size bounds and default."""
+    """RetentionConfig.retention_delete_batch_size bounds and default."""
 
     def test_default_is_500(self) -> None:
-        assert RecoveryConfig().retention_delete_batch_size == 500
+        assert RetentionConfig().retention_delete_batch_size == 500
 
     def test_bounds_accept_valid_edges(self) -> None:
-        assert RecoveryConfig(
-            retention_delete_batch_size=50,
+        assert RetentionConfig(retention_delete_batch_size=50,
         ).retention_delete_batch_size == 50
-        assert RecoveryConfig(
-            retention_delete_batch_size=10_000,
+        assert RetentionConfig(retention_delete_batch_size=10_000,
         ).retention_delete_batch_size == 10_000
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RecoveryConfig(retention_delete_batch_size=49)
+            RetentionConfig(retention_delete_batch_size=49)
 
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RecoveryConfig(retention_delete_batch_size=10_001)
+            RetentionConfig(retention_delete_batch_size=10_001)
 
 
 @pytest.mark.unit
@@ -1382,7 +1379,7 @@ class TestRemovedRetentionKnobsRejected:
             RecoveryConfig(heartbeat_retention_hours=24)
 
     def test_surviving_knob_governs_workflow_records(self) -> None:
-        cfg = RecoveryConfig(terminal_record_retention_hours=48)
+        cfg = RetentionConfig(terminal_record_retention_hours=48)
         assert cfg.terminal_record_retention_hours == 48
 
 

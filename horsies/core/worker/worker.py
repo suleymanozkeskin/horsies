@@ -831,19 +831,21 @@ class Worker(
                 ensure_startup_coverage,
             )
 
-            from horsies.core.models.recovery import RecoveryConfig
+            from horsies.core.models.retention import RetentionConfig
 
-            recovery_cfg = self.cfg.recovery_config or RecoveryConfig()
+            retention_cfg = (
+                self.cfg.retention_config or RetentionConfig()
+            )
             async with self.sf() as coverage_session:
                 startup_coverage = await ensure_startup_coverage(
                     await coverage_session.connection(),
-                    history_horizon_days=recovery_cfg.history_leaf_horizon_days,
+                    history_horizon_days=retention_cfg.history_leaf_horizon_days,
                     heartbeat_horizon_hours=(
-                        recovery_cfg.heartbeat_leaf_horizon_hours
+                        retention_cfg.heartbeat_leaf_horizon_hours
                     ),
                     declared_classes=tuple(
                         (declared.key, declared.duration)
-                        for declared in recovery_cfg.retention_classes
+                        for declared in retention_cfg.retention_classes
                     ),
                 )
                 await coverage_session.commit()

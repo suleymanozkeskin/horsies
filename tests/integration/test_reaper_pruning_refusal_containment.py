@@ -40,6 +40,7 @@ from horsies.core.history.partitions.catalog import database_now
 from horsies.core.history.partitions.manager import create_daily_leaf
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
 
@@ -236,7 +237,10 @@ class TestPruningRefusalContainment:
             worker = _reaper_worker(broker)
             # The assertion is that this RETURNS rather than raising.
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), _pruning_pass_state()
+                broker,
+                RecoveryConfig(),
+                RetentionConfig(),
+                _pruning_pass_state(),
             )
             assert await _leaf_exists(broker, leaf), (
                 f'{leaf.leaf_name} has a pending locator and must not be '
@@ -277,7 +281,10 @@ class TestPruningRefusalContainment:
             workflow_id = await _block_leaf(broker, blocked)
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), _pruning_pass_state()
+                broker,
+                RecoveryConfig(),
+                RetentionConfig(),
+                _pruning_pass_state(),
             )
             assert await _leaf_exists(broker, blocked), (
                 'the blocked leaf was dropped despite its locator'
