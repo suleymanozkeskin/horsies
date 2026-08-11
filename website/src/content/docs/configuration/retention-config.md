@@ -23,6 +23,10 @@ from horsies import AppConfig, RetentionConfig, RetentionClassConfig
 AppConfig(
     broker=...,
     retention=RetentionConfig(
+        queue_retention={
+            'emails': timedelta(days=7),
+            'audit': None,
+        },
         terminal_record_retention_hours=24 * 90,
         retention_classes=(
             RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
@@ -30,6 +34,108 @@ AppConfig(
     ),
 )
 ```
+
+## Retention per queue
+
+`queue_retention` maps a queue name to how long a task sent on it keeps
+its history record, or to `None` to keep it forever. It is the setting
+most deployments want: retention usually varies by what the work *is*,
+and the queue already says that.
+
+```python
+retention=RetentionConfig(
+    queue_retention={
+        'emails': timedelta(days=7),     # noisy, short-lived
+        'reports': timedelta(days=90),
+        'audit': None,                   # keep forever
+    },
+)
+```
+
+A queue with no entry is unchanged: its tasks take the immutable 30-day
+class. Nothing about existing deployments moves until a queue is named.
+
+### Which class a send gets
+
+Highest precedence first:
+
+1. **What the send asks for** — `with_options(retention_class_key=...)`.
+   Naming `standard_30d` explicitly is a choice and beats the mapping.
+2. **The queue's mapping**, if it has one.
+3. **`standard_30d`**, the immutable 30-day default.
+
+Omitting the argument therefore means "the queue's mapping if there is
+one" — not `standard_30d` unconditionally.
+
+```python
+# On the mapped 'emails' queue: kept 7 days
+await send_email.send_async(to=...)
+
+# Same queue, this one send opted back to 30 days
+await send_email.with_options(retention_class_key='standard_30d').send_async(to=...)
+```
+
+### Editing a mapping
+
+The duration is part of the class the mapping derives, so changing a
+number **mints a new class** rather than redefining one:
+
+| Time | `queue_retention['emails']` | New sends land in | Older records |
+|---|---|---|---|
+| Monday | `timedelta(days=7)` | `q_emails_7d` | — |
+| Friday | `timedelta(days=14)` | `q_emails_14d` | still in `q_emails_7d`, dropped on their 7-day promise |
+
+Both classes exist, each holding the records it was created for. This is
+deliberate: a class has exactly one duration, so rewriting it in place
+would silently restate a promise already made to records sitting in its
+partitions. Records enqueued under the old mapping age out under the old
+mapping.
+
+The same follows for the resolution point — the class is decided **when
+the task is sent** and recorded on the row. A retry replays the class its
+original send chose, so editing the map governs later sends and never
+reaches a task already in flight.
+
+### You will see the derived keys
+
+The mapping is the interface; the derived class is its visible artifact.
+Keys appear as `q_<queue>_<duration>` — `q_emails_7d`, `q_reports_90d`,
+`q_ingest_36h` — in monitoring surfaces, in the `retention_class_key`
+column, and as partition names (`horsies_task_history_q_emails_7d_...`).
+A key like `q_emails_7d` means "sent on the `emails` queue while it was
+mapped to 7 days". You can also name one explicitly at a send.
+
+`q_` is reserved: a class declared in `retention_classes` may not use the
+prefix, since durations there come from the mapping instead.
+
+### Length: roughly 13 characters of queue name
+
+A class key is spliced into the relations the class owns, and the longest
+of those is a per-leaf index name:
+
+```
+horsies_task_history_q_emails_7d_2026_08_11_enqueued_idx
+```
+
+PostgreSQL caps an identifier at 63 bytes and **truncates rather than
+refuses** past it, so the budget is enforced where you can act on it — at
+configuration, which refuses an over-long key and states the arithmetic.
+The bound is **18 characters for a class key**. After `q_`, the separator
+and a duration like `7d`, that leaves roughly **13 characters for a mapped
+queue name**. The same bound applies to keys declared by hand in
+`retention_classes`.
+
+### Migrating from `queue_terminal_record_retention_hours`
+
+`queue_retention` is the direct successor. The mapping is the same idea
+with a duration instead of an hour count, and it now drops partitions
+rather than deleting rows:
+
+| 0.4.x | Here |
+|---|---|
+| `queue_terminal_record_retention_hours={'emails': 168}` | `queue_retention={'emails': timedelta(days=7)}` |
+| `{'audit': None}` (no pruning) | `{'audit': None}` (forever) |
+| Row delete, space returned by autovacuum | Partition drop, space returned at once |
 
 ## What ages by what
 
@@ -106,6 +212,20 @@ horizon. A refused drop — recovery evidence still pinning it, or a
 reader holding the detach past its timeout — is skipped, reported with
 its reason on the worker health surface, and retried each pass until the
 blocker clears.
+
+A class that cannot be served is contained to itself. Its failure is
+recorded against its own key, the remaining classes still get their
+partitions, and the pass reports the refusal naming every class that
+failed. Two properties follow, and both are the point:
+
+- **The failure cannot spread.** Classes are served in key order, so an
+  unbounded failure would deny partitions to every class sorting after
+  it — a problem with one class becoming a coverage gap across the
+  deployment.
+- **The health surface goes red.** A refusal is a value the pass
+  returns and the health surface reports. Coverage health tells you
+  whether the owner could run, so a pass that cannot do its job must
+  never read the same as one that succeeded.
 
 ## Row-delete sweep
 

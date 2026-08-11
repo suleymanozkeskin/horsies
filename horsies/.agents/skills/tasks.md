@@ -191,7 +191,9 @@ async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHa
 def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
 # Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule)
-def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention_class_key: str | None = 'standard_30d') -> TaskSendOptions[P, T]
+def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention_class_key: str | None = <unset>) -> TaskSendOptions[P, T]
+# retention_class_key's default is absence, not 'standard_30d': omitting it
+# takes the queue's mapping, while naming 'standard_30d' overrides one.
 
 # Replay failed send with stored payload (ENQUEUE_FAILED only)
 def retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
@@ -240,17 +242,32 @@ a resend under the same key with the same request is a replay and creates zero
 rows; a resend under the same key with a *different* request is a typed
 conflict. Keys are not a rerun contract — they deduplicate enqueues.
 
-**`retention_class_key`**: how long the terminal record is kept. Omit for the
-immutable 30-day default class; pass `None` to keep the record forever; or
-name a class this deployment declares in `AppConfig.retention.retention_classes`
-(see the configs skill). Any other string returns
-`Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
-is written. The class is snapshotted on the row at enqueue and decides which
-history partition the record moves to when the task terminalizes.
+**`retention_class_key`**: how long the terminal record is kept. Precedence,
+highest first:
+
+1. What you pass here — a class key, or `None` for forever. Naming
+   `standard_30d` explicitly counts as a choice and beats a queue mapping.
+2. The queue's entry in `AppConfig.retention.queue_retention`, if it has one.
+3. The immutable 30-day default class.
+
+So omitting the argument means "the queue's mapping if there is one, and
+`standard_30d` otherwise" — not `standard_30d` unconditionally.
+
+Valid values are `None`, `standard_30d`, any class declared in
+`AppConfig.retention.retention_classes`, and any class derived from
+`queue_retention` (`q_<queue>_<duration>`; see the configs skill). Any other
+string returns `Err(VALIDATION_FAILED)` at the send call, naming the class,
+before anything is written. The class is snapshotted on the row at enqueue
+and decides which history partition the record moves to when the task
+terminalizes — so a later edit to `queue_retention` governs later sends and
+leaves records already enqueued under the promise they were given.
 
 ```python
 # Keep this task's terminal record forever
 await my_task.with_options(retention_class_key=None).send_async(**kwargs)
+
+# Opt one send back to the 30-day default on a queue that is mapped
+await my_task.with_options(retention_class_key='standard_30d').send_async(**kwargs)
 ```
 
 **When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
@@ -690,5 +707,6 @@ code and callers:
 - Rerun eligibility is decided **at enqueue**: `retain_rerun_input_default`
   (per-task override available) decides whether the enqueue input is preserved
   with the record. A `COMPLETED` source is not eligible for rerun.
-- Every task carries a retention class assigned at enqueue (default: the
-  immutable 30-day class); records age by dropping whole partitions.
+- Every task carries a retention class assigned at enqueue (the send's own
+  choice, else the queue's `queue_retention` mapping, else the immutable
+  30-day class); records age by dropping whole partitions.

@@ -8,6 +8,49 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-queue retention: `AppConfig.retention.queue_retention`.** Maps a
+  queue name to how long a task sent on it keeps its history record, or to
+  `None` to keep it forever. A queue with no entry is unchanged and takes
+  the immutable 30-day class. The duration is part of the class the mapping
+  derives (`emails` at seven days is `q_emails_7d`), so remapping mints a new
+  class rather than redefining one and records enqueued under the previous
+  mapping age out under the promise they were given. `q_` is reserved: a
+  `retention_classes` key may not use the prefix. The class is resolved at
+  the send and snapshotted on the row, so a retry replays the class its
+  original send chose. Precedence is the explicit `retention_class_key`
+  (including an explicit `standard_30d`), then the queue's mapping, then
+  `standard_30d` — omitting the argument now means "the queue's mapping if
+  there is one", which is the behaviour change for anyone who maps a queue.
+  The direct successor to 0.4.x's
+  `RecoveryConfig.queue_terminal_record_retention_hours`.
+
+### Fixed
+
+- **A retention class key longer than 31 characters could stop partition
+  coverage across a deployment.** Configuration accepted any key up to
+  PostgreSQL's 63-byte identifier limit, but the key is interpolated into
+  the relations the class owns and the longest of those adds 45 bytes, so
+  the class registered and every later maintenance pass then raised on its
+  leaf name. The pass reads registered classes from the database rather than
+  from configuration, so removing the declaration did not recover it. Keys
+  are now bounded at 18 characters — the point past which a derived name
+  exceeds the limit — and refused at configuration with the arithmetic. Two
+  shorter bands also break and are inside the bound: from 19 the index name
+  is silently truncated, and at 30 and 31 both of a leaf's index names
+  truncate to identical bytes and the second `CREATE INDEX` fails on a
+  duplicate.
+
+- **A failing retention class no longer denies coverage to the others.**
+  Classes are served in key order and a failure inside one escaped the loop,
+  so every class sorting after it stopped receiving partitions. Each class is
+  now bounded on its own: the failure is recorded against its key, the
+  remaining classes are served, and the pass reports a refusal naming every
+  class that failed. This also restores the health signal — the refusal is a
+  value the caller matches on, where a raised failure skipped that match and
+  left coverage health reporting whatever the previous pass had put there.
+
 ### Changed
 
 - **Retention configuration moved to `AppConfig.retention`.** Nine fields

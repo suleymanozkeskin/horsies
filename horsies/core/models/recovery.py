@@ -201,8 +201,10 @@ class RecoveryConfig(BaseModel):
             removed = {
                 'queue_terminal_record_retention_hours': (
                     'terminal task rows age by their retention class in '
-                    'the task-history archive; per-queue task retention '
-                    'windows no longer exist'
+                    'the task-history archive; map the queue in '
+                    'AppConfig.retention.queue_retention instead, which '
+                    'takes a duration and drops partitions rather than '
+                    'deleting rows'
                 ),
                 'heartbeat_retention_hours': (
                     'heartbeat rows live in time-partitioned leaves that '

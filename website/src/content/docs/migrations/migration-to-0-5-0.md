@@ -15,6 +15,14 @@ rows. Task and workflow identity columns are `uuid` (task ids UUIDv7).
 Manual in-place retry is removed; re-execution is a new task minted
 through the rerun API. Schema v34.
 
+If you set `RecoveryConfig.queue_terminal_record_retention_hours` in
+0.4.x, its successor is
+[`AppConfig.retention.queue_retention`](../../configuration/retention-config#retention-per-queue):
+the same per-queue idea, taking a `timedelta` (or `None` for forever)
+instead of an hour count, and dropping partitions instead of deleting
+rows. Setting the old field still fails validation, now naming that
+successor.
+
 horsies is pre-1.0: there is no migration contract between pre-1.0
 versions and no compatibility shim. A 0.5.0 fleet cannot share a
 database with an older fleet.
