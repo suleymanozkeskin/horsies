@@ -28,9 +28,14 @@ from horsies.core.history.reads.publisher import StagedLoaderPublisher
 
 
 async def _forget(database_url: str, class_key: str) -> None:
-    engine = create_async_engine(database_url, isolation_level='AUTOCOMMIT')
+    # No AUTOCOMMIT: engine-level autocommit makes `begin()` a no-op, so
+    # republish's statements would commit one at a time and a partial
+    # failure would leave a half-regenerated reader — the divergence this
+    # helper exists to prevent. PostgreSQL has transactional DDL, so each
+    # phase can be atomic at no cost.
+    engine = create_async_engine(database_url)
     try:
-        async with engine.connect() as connection:
+        async with engine.begin() as connection:
             leaves = (
                 await connection.execute(
                     text(
@@ -55,7 +60,7 @@ async def _forget(database_url: str, class_key: str) -> None:
         async with engine.begin() as connection:
             await StagedLoaderPublisher().republish(connection)
 
-        async with engine.connect() as connection:
+        async with engine.begin() as connection:
             for leaf_name in leaves:
                 await connection.execute(
                     text(f'DROP TABLE IF EXISTS {leaf_name} CASCADE')
