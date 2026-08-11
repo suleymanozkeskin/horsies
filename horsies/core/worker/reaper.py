@@ -403,6 +403,25 @@ class ReaperMixin:
                         ),
                         declared_classes=retention_cfg.registrable_classes(),
                     )
+                # A leaf the catalog still calls attached whose relation
+                # is gone means someone dropped it behind the manager's
+                # back. The readers have already been regenerated without
+                # it, so reads keep working and the loss is now silent —
+                # which is exactly why it is logged at warning rather
+                # than folded into the info line. The rows it held are
+                # gone; the catalog row is deliberately left intact as
+                # the operator's evidence.
+                if coverage.absent_leaves:
+                    logger.warning(
+                        'Partition coverage: cataloged leaves have no '
+                        'relation and were excluded from the staged '
+                        'readers: '
+                        f'{", ".join(coverage.absent_leaves)}. Reads and '
+                        'terminalization are restored; the records those '
+                        'leaves held are gone. The catalog rows are kept '
+                        'as evidence and resolving them is an operator '
+                        'decision.'
+                    )
                 match coverage:
                     case CoverageEnsureFailed():
                         logger.error(
@@ -416,6 +435,7 @@ class ReaperMixin:
                             'heartbeat_covered_now': (
                                 coverage.heartbeat_covered_now
                             ),
+                            'absent_leaves': list(coverage.absent_leaves),
                         }
                     case CoverageEnsured(
                         created_history_leaves=created_history,
@@ -443,6 +463,7 @@ class ReaperMixin:
                             'heartbeats_covered_through': (
                                 coverage.heartbeats_covered_through.isoformat()
                             ),
+                            'absent_leaves': list(coverage.absent_leaves),
                         }
                     case _:
                         pass
