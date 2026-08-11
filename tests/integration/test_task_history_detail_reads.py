@@ -271,7 +271,9 @@ class TestDetail:
 
         detached = await detach_expired_leaf(
             terminalization_schema.engine,
-            DetachExpiredHistoryLeaf(leaf=ref, quarantine_horizon=None),
+            DetachExpiredHistoryLeaf(
+                leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
+            ),
             publisher,
         )
         async with terminalization_schema.engine.begin() as connection:

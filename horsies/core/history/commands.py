@@ -13,6 +13,8 @@ is the validator, and every executor downstream may rely on it.
 
 from __future__ import annotations
 
+from typing import Final
+
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -118,13 +120,22 @@ class EnsureLeafCoverage:
             )
 
 
+DETACH_STATEMENT_TIMEOUT_MS: Final = 5_000
+"""Bound on a concurrent detach's wait for conflicting readers.
+
+One open transaction stalls one leaf, never the maintenance tick; the
+skipped leaf is the next pass's candidate. Defined here because both
+sweeps need it and the pruning module already imports the heartbeat one.
+"""
+
+
 @dataclass(frozen=True, slots=True)
 class DetachExpiredHistoryLeaf:
     """Concurrently detach one expired, unblocked leaf.
 
     Runs on a dedicated autocommit connection because
     `DETACH PARTITION ... CONCURRENTLY` cannot run inside a transaction
-    block. The optional statement timeout bounds the wait on long readers.
+    block. The statement timeout bounds the wait on long readers.
 
     `quarantine_horizon` is stated at every call site: None means a
     pending locator on the leaf always refuses the detach; a duration
@@ -132,11 +143,19 @@ class DetachExpiredHistoryLeaf:
     first moved through the quarantine protocol — copy, verify,
     repoint — and only a leaf whose blockers all resolved proceeds to
     detach. A quarantine refusal keeps the leaf pinned.
+
+    `statement_timeout_ms` carries no default. It once defaulted to
+    None, and a call site that simply omitted it waited on a lock with
+    no bound while holding the cluster-wide maintenance gate — the
+    omission read as "nothing to say here" rather than as a choice.
+    Stating it is now mandatory, exactly as `quarantine_horizon` is;
+    None remains available and means unbounded, but only where someone
+    wrote it.
     """
 
     leaf: LeafRef
     quarantine_horizon: timedelta | None
-    statement_timeout_ms: int | None = None
+    statement_timeout_ms: int | None
 
     def __post_init__(self) -> None:
         if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
@@ -150,10 +169,24 @@ class FinalizeInterruptedLeafDetach:
     """Complete a concurrent detach that a crash left half-done.
 
     Must run before any further detach on the same parent; PostgreSQL
-    refuses new detaches while one is pending finalization.
+    refuses new detaches while one is pending finalization. That is what
+    makes an unbounded wait here worse than a slow leaf: the statement
+    that is stuck is also the statement blocking every future detach on
+    the parent, and the pass holding it holds the cluster-wide
+    maintenance gate.
+
+    `statement_timeout_ms` carries no default for the same reason
+    `quarantine_horizon` does not: unbounded is a decision, and a
+    default lets a call site take it without making it. None still
+    means unbounded, but only where someone wrote None.
     """
 
     leaf: LeafRef
+    statement_timeout_ms: int | None
+
+    def __post_init__(self) -> None:
+        if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
+            raise ValueError('statement timeout must be positive')
 
 
 @dataclass(frozen=True, slots=True)
