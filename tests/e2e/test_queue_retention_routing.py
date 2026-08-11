@@ -19,6 +19,7 @@ import time
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.e2e.helpers.retention import forget_retention_class
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks.instance_queue_retention import (
     DERIVED_CLASS_KEY,
@@ -74,49 +75,8 @@ def _history_partition(task_id: str) -> str | None:
 
 
 def _forget_derived_class() -> None:
-    """Drop the derived class and everything built for it.
-
-    Order matters: the leaf catalog carries a foreign key to the class.
-    """
-    engine = create_engine(DB_URL, isolation_level='AUTOCOMMIT')
-    try:
-        with engine.connect() as connection:
-            leaves = (
-                connection.execute(
-                    text(
-                        'SELECT leaf_name FROM '
-                        'horsies_task_history_leaf_catalog '
-                        'WHERE class_key = :key'
-                    ),
-                    {'key': DERIVED_CLASS_KEY},
-                )
-            ).scalars().all()
-            for leaf_name in leaves:
-                connection.execute(
-                    text(f'DROP TABLE IF EXISTS {leaf_name} CASCADE')
-                )
-            connection.execute(
-                text(
-                    'DELETE FROM horsies_task_history_leaf_catalog '
-                    'WHERE class_key = :key'
-                ),
-                {'key': DERIVED_CLASS_KEY},
-            )
-            connection.execute(
-                text(
-                    'DROP TABLE IF EXISTS '
-                    f'horsies_task_history_{DERIVED_CLASS_KEY} CASCADE'
-                )
-            )
-            connection.execute(
-                text(
-                    'DELETE FROM horsies_retention_classes '
-                    'WHERE class_key = :key'
-                ),
-                {'key': DERIVED_CLASS_KEY},
-            )
-    finally:
-        engine.dispose()
+    """Drop the derived class, its leaves, and the readers naming them."""
+    forget_retention_class(DB_URL, DERIVED_CLASS_KEY)
 
 
 def test_a_mapped_queue_lands_the_record_in_its_derived_partition() -> None:
