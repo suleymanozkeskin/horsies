@@ -152,6 +152,14 @@ def _poll_ready(
     ready_check: ReadyCheck | None,
 ) -> None:
     deadline = time.time() + timeout
+    # A probe that raises is retried, because early failures are the
+    # normal shape of "not ready yet" -- the database is not accepting
+    # connections, the schema is mid-install. But the exception is KEPT.
+    # Swallowed outright, a probe that can never succeed -- a typo in its
+    # SQL, a relation it names that does not exist -- is indistinguishable
+    # from a worker that is merely slow, and the suite reports a timeout
+    # for the whole startup while the real fault sat in the probe.
+    last_failure: BaseException | None = None
     while time.time() < deadline:
         if proc.poll() is not None:
             returncode = proc.returncode
@@ -166,13 +174,19 @@ def _poll_ready(
         try:
             if ready_check():
                 return
-        except Exception:
-            pass
+        except Exception as probe_error:
+            last_failure = probe_error
         time.sleep(0.2)
 
     stdout, stderr = _drain_output(proc)
+    probe_report = (
+        f'\nready check last raised {type(last_failure).__name__}: '
+        f'{last_failure}'
+        if last_failure is not None
+        else '\nready check returned false every attempt and never raised'
+    )
     raise RuntimeError(
-        f'Worker did not become ready before timeout\n'
+        f'Worker did not become ready before timeout{probe_report}\n'
         f'stdout: {stdout}\nstderr: {stderr}'
     )
 
