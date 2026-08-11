@@ -85,20 +85,6 @@ class CoverageEnsureFailed:
 type CoverageOutcome = CoverageEnsured | CoverageEnsureFailed
 
 
-class _ClassRefused(Exception):
-    """One class's leaf coverage returned refusals.
-
-    Carried as an exception only to unwind the class's SAVEPOINT: a
-    refusal means the work did not happen, so anything the attempt wrote
-    before refusing must not survive. It never escapes this module.
-    """
-
-    def __init__(self, class_key: str, refusals: Sequence[object]) -> None:
-        super().__init__(class_key)
-        self.class_key = class_key
-        self.refusals = tuple(refusals)
-
-
 async def heartbeat_coverage_present(connection: AsyncConnection) -> bool:
     """Whether a heartbeat leaf covers the present instant.
 
@@ -243,6 +229,13 @@ async def ensure_partition_coverage(
     failures: list[str] = []
     for class_key in await _finite_class_keys(connection):
         try:
+            # The savepoint contains DATABASE ERRORS -- the
+            # transaction-aborting kind that would raise the pass out
+            # from under its caller -- and NEVER OUTCOMES. One aborted
+            # transaction fails every later statement, including the
+            # health probe this function ends on; rolling back to the
+            # savepoint leaves the caller's transaction usable, so
+            # containment survives the failure kind that most needs it.
             async with connection.begin_nested():
                 creations = await ensure_leaf_coverage(
                     connection,
@@ -251,27 +244,32 @@ async def ensure_partition_coverage(
                     ),
                     publisher,
                 )
-                refusals = [
-                    creation
-                    for creation in creations
-                    if not isinstance(
-                        creation,
-                        (LeafCreated, LeafAlreadyConformant, LeafIndexRepaired),
-                    )
-                ]
-                if refusals:
-                    raise _ClassRefused(class_key, refusals)
-                created_history += sum(
-                    1 for creation in creations
-                    if isinstance(creation, LeafCreated)
-                )
-        except _ClassRefused as refused:
-            failures.append(
-                f'{refused.class_key}: '
-                + '; '.join(repr(item) for item in refused.refusals)
-            )
         except Exception as class_error:
             failures.append(f'{class_key}: {class_error!r}')
+            continue
+
+        # A RETURNED refusal is a clean outcome: the connection is fine
+        # and whatever leaves were created before it are real. They are
+        # kept deliberately. Leaf coverage stops at its first refusal, so
+        # discarding the leaves it made first would mean a permanently
+        # refusing leaf blocked every earlier day of that class forever,
+        # re-doing and re-discarding the same work on every pass.
+        created_history += sum(
+            1 for creation in creations if isinstance(creation, LeafCreated)
+        )
+        refusals = [
+            creation
+            for creation in creations
+            if not isinstance(
+                creation,
+                (LeafCreated, LeafAlreadyConformant, LeafIndexRepaired),
+            )
+        ]
+        if refusals:
+            failures.append(
+                f'{class_key}: '
+                + '; '.join(repr(item) for item in refusals)
+            )
 
     created_heartbeats = 0
     heartbeat_creations = await ensure_heartbeat_coverage(

@@ -25,13 +25,23 @@ from horsies.core.history.maintenance.coverage import (
     CoverageEnsured,
     ensure_partition_coverage,
 )
-from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.history.ddl.classes import (
+    ClassAlreadyRegistered,
+    ClassRegistered,
+    DEFAULT_RETENTION_CLASS_KEY,
+    finite_class_parent_name,
+    register_finite_retention_class,
+)
 from horsies.core.history.names import (
     LEAF_CATALOG,
     MAX_RETENTION_CLASS_KEY_LENGTH,
     RETENTION_CLASSES,
 )
 from horsies.core.history.heartbeats.partitioning import HEARTBEAT_CLASS_KEY
+from horsies.core.history.partitions.catalog import (
+    daily_leaf_name,
+    database_now,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -107,16 +117,31 @@ async def test_coverage_contains_the_failure_and_keeps_going(
             connection, history_horizon_days=2, heartbeat_horizon_hours=3
         )
     assert isinstance(baseline, CoverageEnsured), baseline
+
+    # Its own horizon, lower than the returned-refusal test's, because
+    # coverage is idempotent: two tests sharing a horizon means whichever
+    # runs second is owed nothing and its count proves nothing. The
+    # premise is asserted rather than assumed, so a database left at a
+    # higher horizon by an earlier run fails here saying so instead of
+    # looking like a containment regression.
+    horizon = 3
+    owed = horizon + 1
     before = await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)
+    assert before < owed, (
+        f'premise broken: the default class already holds {before} leaves '
+        f'against a horizon of {horizon}, so this pass owes it nothing'
+    )
 
     await _plant_unusable_class(broker)
     try:
-        # Raising the horizon means the default class is OWED a new leaf.
-        # It can only receive one if the loop survived the class sorting
-        # ahead of it, so the count is the containment evidence.
+        # The default class is OWED a leaf and can only receive it if the
+        # loop survived the class sorting ahead of it, so the count is
+        # the containment evidence.
         async with broker.async_engine.begin() as connection:
             outcome = await ensure_partition_coverage(
-                connection, history_horizon_days=3, heartbeat_horizon_hours=3
+                connection,
+                history_horizon_days=horizon,
+                heartbeat_horizon_hours=3,
             )
 
         assert isinstance(outcome, CoverageEnsureFailed), (
@@ -126,7 +151,7 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         assert _UNUSABLE_KEY in outcome.refusal, (
             f'the refusal must name the class that failed: {outcome!r}'
         )
-        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) > before, (
+        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) == owed, (
             'a class sorting after the unusable one was denied its leaf; '
             'the failure is still taking the rest of the pass with it'
         )
@@ -210,24 +235,36 @@ async def test_a_returned_refusal_is_contained_like_a_raise(
     exception handler, so the pass used to return on the first one and
     deny coverage to every class sorting after it.
     """
-    async with broker.async_engine.begin() as connection:
-        baseline = await ensure_partition_coverage(
-            connection, history_horizon_days=2, heartbeat_horizon_hours=3
-        )
-    assert isinstance(baseline, CoverageEnsured), baseline
+    # A horizon no other test in this file reaches. Coverage is
+    # idempotent, so "the count went up" is only evidence when this pass
+    # is the one that owes a leaf; sharing a horizon with the test above
+    # meant it had already been created and this one proved nothing.
+    horizon = 5
+    owed = horizon + 1
+
     before = await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)
+    assert before < owed, (
+        f'premise broken: the default class already holds {before} leaves '
+        f'against a horizon of {horizon}, so this pass owes it nothing and '
+        'the count cannot show whether it was served'
+    )
 
     await _plant_class_without_relation(broker)
     try:
         async with broker.async_engine.begin() as connection:
             outcome = await ensure_partition_coverage(
-                connection, history_horizon_days=3, heartbeat_horizon_hours=3
+                connection,
+                history_horizon_days=horizon,
+                heartbeat_horizon_hours=3,
             )
 
         assert isinstance(outcome, CoverageEnsureFailed), outcome
         assert _REFUSING_KEY in outcome.refusal, outcome
-        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) > before, (
-            'a returned refusal still denied coverage to the class after it'
+        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) == owed, (
+            'a returned refusal still denied coverage to the class after '
+            f'it: the default class holds '
+            f'{await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)} '
+            f'leaves, not the {owed} a horizon of {horizon} owes it'
         )
     finally:
         await _forget_refusing_class(broker)
@@ -276,22 +313,27 @@ async def test_a_database_error_does_not_poison_the_pass(
     taken by an ordinary table, so CREATE fails on a duplicate relation
     rather than returning a refusal.
     """
-    parent = f'horsies_task_history_{_REFUSING_KEY}'
     async with broker.async_engine.begin() as connection:
-        await _plant_class_row(connection)
-        await connection.execute(
-            text(
-                f'CREATE TABLE IF NOT EXISTS {parent} '
-                'PARTITION OF horsies_task_history '
-                f"FOR VALUES IN ('{_REFUSING_KEY}') PARTITION BY RANGE (enqueued_at)"
-            )
+        # Registered through the shipped function, not hand-written DDL:
+        # the parent's partition key is the library's to choose, and a
+        # guess at it would test the collision against a relation the
+        # real registrar would never have built.
+        registration = await register_finite_retention_class(
+            connection, class_key=_REFUSING_KEY, duration=timedelta(days=7)
         )
+        assert isinstance(
+            registration, (ClassRegistered, ClassAlreadyRegistered)
+        ), registration
+        parent = finite_class_parent_name(_REFUSING_KEY)
         # The name the next pass will try to create, occupied by a table
-        # that is not a partition of it.
-        today = (
-            await connection.execute(text('SELECT current_date'))
-        ).scalar_one()
-        squatter = f'{parent}_{today:%Y_%m_%d}'
+        # that is not a partition of it. Derived exactly as the pass
+        # derives it -- `current_date` renders in the SESSION timezone
+        # while the pass normalizes `database_now()`, so on a non-UTC
+        # session the two disagree near midnight and the squatter would
+        # sit on a name nothing tries to create.
+        now = await database_now(connection)
+        day_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        squatter = daily_leaf_name(parent, day_lower)
         await connection.execute(
             text(f'CREATE TABLE IF NOT EXISTS {squatter} (x int)')
         )
