@@ -14,6 +14,7 @@ also the shape a deployment would be left in by a version that accepted it.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy import text
@@ -30,6 +31,7 @@ from horsies.core.history.names import (
     MAX_RETENTION_CLASS_KEY_LENGTH,
     RETENTION_CLASSES,
 )
+from horsies.core.history.heartbeats.partitioning import HEARTBEAT_CLASS_KEY
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -130,3 +132,189 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         )
     finally:
         await _forget_unusable_class(broker)
+
+
+# A key that sorts BEFORE the default class, as every queue-derived key
+# does: `q_` < `standard_30d` in byte order. The ordering is no longer
+# incidental — the feature guarantees the adverse case.
+_REFUSING_KEY = 'q_broken_7d'
+
+
+async def _plant_class_row(connection: Any) -> None:
+    """Register `_REFUSING_KEY` without creating anything for it."""
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {RETENTION_CLASSES} (
+                class_key, duration, partition_interval,
+                finite_parent_name, created_at
+            ) VALUES (
+                :key, :duration, :interval, :parent,
+                statement_timestamp()
+            )
+            ON CONFLICT (class_key) DO NOTHING
+            """
+        ),
+        {
+            'key': _REFUSING_KEY,
+            'duration': timedelta(days=7),
+            'interval': timedelta(days=1),
+            'parent': f'horsies_task_history_{_REFUSING_KEY}',
+        },
+    )
+
+
+async def _plant_class_without_relation(broker: PostgresBroker) -> None:
+    """A registered class whose parent relation does not exist.
+
+    This is the divergence the teardown-ordering fix exists to prevent,
+    and it is reachable on a real deployment by an operator DROP. Leaf
+    coverage RETURNS a refusal for it rather than raising, which is the
+    escape a try/except cannot see.
+    """
+    async with broker.async_engine.begin() as connection:
+        await _plant_class_row(connection)
+
+
+async def _forget_refusing_class(broker: PostgresBroker) -> None:
+    async with broker.async_engine.begin() as connection:
+        await connection.execute(
+            text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
+            {'key': _REFUSING_KEY},
+        )
+        await connection.execute(
+            text(f'DELETE FROM {RETENTION_CLASSES} WHERE class_key = :key'),
+            {'key': _REFUSING_KEY},
+        )
+
+
+async def _heartbeat_leaf_count(broker: PostgresBroker) -> int:
+    async with broker.async_engine.connect() as connection:
+        return (
+            await connection.execute(
+                text(
+                    f'SELECT count(*) FROM {LEAF_CATALOG} '
+                    'WHERE class_key = :key'
+                ),
+                {'key': HEARTBEAT_CLASS_KEY},
+            )
+        ).scalar_one()
+
+
+async def test_a_returned_refusal_is_contained_like_a_raise(
+    broker: PostgresBroker,
+) -> None:
+    """The escape a try/except cannot catch.
+
+    `create_daily_leaf` RETURNS its refusals. They never reach an
+    exception handler, so the pass used to return on the first one and
+    deny coverage to every class sorting after it.
+    """
+    async with broker.async_engine.begin() as connection:
+        baseline = await ensure_partition_coverage(
+            connection, history_horizon_days=2, heartbeat_horizon_hours=3
+        )
+    assert isinstance(baseline, CoverageEnsured), baseline
+    before = await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)
+
+    await _plant_class_without_relation(broker)
+    try:
+        async with broker.async_engine.begin() as connection:
+            outcome = await ensure_partition_coverage(
+                connection, history_horizon_days=3, heartbeat_horizon_hours=3
+            )
+
+        assert isinstance(outcome, CoverageEnsureFailed), outcome
+        assert _REFUSING_KEY in outcome.refusal, outcome
+        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) > before, (
+            'a returned refusal still denied coverage to the class after it'
+        )
+    finally:
+        await _forget_refusing_class(broker)
+
+
+async def test_heartbeat_coverage_survives_a_failing_history_class(
+    broker: PostgresBroker,
+) -> None:
+    """Heartbeat leaves gate worker startup.
+
+    Stopping the pass before heartbeat coverage turned one poisoned
+    class row into a fleet that cannot restart: within the heartbeat
+    horizon no leaf covers the present instant, heartbeat writes fail,
+    and startup refuses outright.
+    """
+    await _plant_class_without_relation(broker)
+    try:
+        async with broker.async_engine.begin() as connection:
+            outcome = await ensure_partition_coverage(
+                connection, history_horizon_days=3, heartbeat_horizon_hours=6
+            )
+
+        assert isinstance(outcome, CoverageEnsureFailed), outcome
+        assert outcome.heartbeat_covered_now, (
+            'the present instant lost heartbeat coverage while a history '
+            'class was failing'
+        )
+        assert await _heartbeat_leaf_count(broker) > 0
+    finally:
+        await _forget_refusing_class(broker)
+
+
+async def test_a_database_error_does_not_poison_the_pass(
+    broker: PostgresBroker,
+) -> None:
+    """The variant a Python-level raise cannot reproduce.
+
+    A DATABASE error aborts the caller's transaction. Without a
+    savepoint, every later statement — including the health probe this
+    function ends on — fails with InFailedSqlTransaction and the pass
+    raises instead of reporting, which is the stale-health defect
+    containment was introduced to fix.
+
+    The trigger is a real database error: the class's parent exists and
+    is partitioned, but the leaf name it will try to create is already
+    taken by an ordinary table, so CREATE fails on a duplicate relation
+    rather than returning a refusal.
+    """
+    parent = f'horsies_task_history_{_REFUSING_KEY}'
+    async with broker.async_engine.begin() as connection:
+        await _plant_class_row(connection)
+        await connection.execute(
+            text(
+                f'CREATE TABLE IF NOT EXISTS {parent} '
+                'PARTITION OF horsies_task_history '
+                f"FOR VALUES IN ('{_REFUSING_KEY}') PARTITION BY RANGE (enqueued_at)"
+            )
+        )
+        # The name the next pass will try to create, occupied by a table
+        # that is not a partition of it.
+        today = (
+            await connection.execute(text('SELECT current_date'))
+        ).scalar_one()
+        squatter = f'{parent}_{today:%Y_%m_%d}'
+        await connection.execute(
+            text(f'CREATE TABLE IF NOT EXISTS {squatter} (x int)')
+        )
+
+    try:
+        async with broker.async_engine.begin() as connection:
+            outcome = await ensure_partition_coverage(
+                connection, history_horizon_days=3, heartbeat_horizon_hours=3
+            )
+
+        # Reaching this line at all is most of the assertion: without a
+        # savepoint the aborted transaction makes the pass raise.
+        assert isinstance(outcome, CoverageEnsureFailed), outcome
+        assert _REFUSING_KEY in outcome.refusal, outcome
+        assert isinstance(outcome.heartbeat_covered_now, bool), (
+            'the health probe ran, so the transaction was still usable'
+        )
+    finally:
+        async with broker.async_engine.begin() as connection:
+            await connection.execute(
+                text(f'DROP TABLE IF EXISTS {squatter} CASCADE')
+            )
+            await connection.execute(
+                text(f'DROP TABLE IF EXISTS {parent} CASCADE')
+            )
+        await _forget_refusing_class(broker)
