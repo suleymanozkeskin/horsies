@@ -293,9 +293,12 @@ outcome = await rerun_task(
     connection,
     RerunTask(source_task_id=task_id, deadline=None),
     RerunEnqueuePolicy(
-        # 'standard_30d', 'forever', or a class this deployment declares
-        # in AppConfig.retention.retention_classes; the rerun path checks the
-        # key against the registry and refuses an unregistered one.
+        # 'standard_30d', 'forever', a class declared in
+        # AppConfig.retention.retention_classes, or one derived from
+        # AppConfig.retention.queue_retention (q_<queue>_<duration>). A rerun
+        # states its class outright -- there is no queue mapping to fall back
+        # on here. The rerun path checks the key against the registry and
+        # refuses an unregistered one.
         retention_class_key='standard_30d',
         retain_rerun_input=True,
         reservation_window=timedelta(hours=24),

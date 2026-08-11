@@ -81,9 +81,14 @@ For workflow nodes, use `.node(good_until=...)` instead — see [Typed Node Buil
 
 ### Keep a Terminal Record Forever
 
-Every task's terminal record ages by its retention class — the 30-day
-default unless the send says otherwise. Pass `retention_class_key=None` to
-keep the record forever:
+Every task's terminal record ages by its retention class. Which class a
+send gets, highest precedence first: what the send asks for, then the
+queue's [`queue_retention`](../../configuration/retention-config#retention-per-queue)
+mapping if it has one, then the immutable 30-day default. Omitting the
+argument therefore takes the queue's mapping where one exists — and
+naming `standard_30d` explicitly is a choice that overrides it.
+
+Pass `retention_class_key=None` to keep the record forever:
 
 ```python
 match await audit_task.with_options(retention_class_key=None).send_async(entry=entry):
@@ -306,7 +311,7 @@ Same `delay` validation as `.schedule()`.
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
-### `.with_options(*, good_until=None, idempotency_key=None, retention_class_key='standard_30d') -> TaskSendOptions[P, T]`
+### `.with_options(*, good_until=None, idempotency_key=None, retention_class_key=<unset>) -> TaskSendOptions[P, T]`
 
 Return a per-send options builder. The returned object exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with the overridden options applied.
 
@@ -314,19 +319,27 @@ Return a per-send options builder. The returned object exposes `.send()`, `.send
 | --------- | ---- | ----------- |
 | `good_until` | `datetime \| None` | Task expiry deadline (must be timezone-aware) |
 | `idempotency_key` | `str \| None` | Caller-supplied enqueue-deduplication key, scoped per task name |
-| `retention_class_key` | `str \| None` | Terminal-record retention: omit for the 30-day default class, `None` for forever |
+| `retention_class_key` | `str \| None` | Terminal-record retention: omit to take the queue's mapping (else the 30-day default), `None` for forever |
 
 **Returns:** `TaskSendOptions[P, T]` — a builder with `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()`.
 
 Passing `good_until=None` explicitly clears any internally inherited deadline.
 
-`retention_class_key` accepts exactly two values: `'standard_30d'` (the
-immutable 30-day default — the same as omitting the parameter) and `None`
-(keep the terminal record forever). Any other string returns
-`Err(VALIDATION_FAILED)` at the send call, naming the class, before anything
-is written. The class is snapshotted on the row at enqueue and decides which
-history partition the record moves to at terminalization; it cannot be
-changed afterwards.
+`retention_class_key` accepts `None` (keep the terminal record forever),
+`'standard_30d'` (the immutable 30-day default), any class declared in
+`AppConfig.retention.retention_classes`, and any class derived from
+`AppConfig.retention.queue_retention` (`q_<queue>_<duration>`). Any other
+string returns `Err(VALIDATION_FAILED)` at the send call, naming the class,
+before anything is written.
+
+Naming `'standard_30d'` is **not** the same as omitting the parameter.
+Omitting it takes the queue's mapping where one exists; naming the default
+class overrides that mapping for this send.
+
+The class is snapshotted on the row at enqueue and decides which history
+partition the record moves to at terminalization; it cannot be changed
+afterwards. A retry replays the class its original send chose, so editing
+`queue_retention` governs later sends and never reaches a task in flight.
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 

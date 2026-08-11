@@ -401,10 +401,7 @@ class ReaperMixin:
                         heartbeat_horizon_hours=(
                             retention_cfg.heartbeat_leaf_horizon_hours
                         ),
-                        declared_classes=tuple(
-                            (declared.key, declared.duration)
-                            for declared in retention_cfg.retention_classes
-                        ),
+                        declared_classes=retention_cfg.registrable_classes(),
                     )
                 match coverage:
                     case CoverageEnsureFailed():

@@ -199,14 +199,27 @@ async def ensure_partition_coverage(
 
     publisher = StagedLoaderPublisher()
     created_history = 0
+    # One class must not cost the others their coverage. The loop reads
+    # registered classes in key order, so an unhandled failure here
+    # silently denied leaves to every class sorting after it, and denied
+    # them from a database row that removing a declaration cannot reach.
+    # Containment mirrors the pruning pass, which bounds per leaf for the
+    # same reason, and it also keeps the failure visible: the caller
+    # matches on the returned refusal to set coverage health, and a raise
+    # left that health reporting whatever the previous pass had put there.
+    raised: list[str] = []
     for class_key in await _finite_class_keys(connection):
-        creations = await ensure_leaf_coverage(
-            connection,
-            EnsureLeafCoverage(
-                class_key=class_key, horizon_days=history_horizon_days
-            ),
-            publisher,
-        )
+        try:
+            creations = await ensure_leaf_coverage(
+                connection,
+                EnsureLeafCoverage(
+                    class_key=class_key, horizon_days=history_horizon_days
+                ),
+                publisher,
+            )
+        except Exception as class_error:
+            raised.append(f'{class_key}: {class_error!r}')
+            continue
         for creation in creations:
             match creation:
                 case LeafCreated():
@@ -222,6 +235,18 @@ async def ensure_partition_coverage(
                             await heartbeat_coverage_present(connection)
                         ),
                     )
+
+    if raised:
+        # Every class is attempted before reporting, so the refusal names
+        # all of them rather than only the one that sorted first.
+        return CoverageEnsureFailed(
+            stage='ensure_leaf_coverage',
+            class_key=raised[0].split(':', 1)[0],
+            refusal=f'{len(raised)} class(es) failed: ' + '; '.join(raised),
+            heartbeat_covered_now=(
+                await heartbeat_coverage_present(connection)
+            ),
+        )
 
     created_heartbeats = 0
     heartbeat_creations = await ensure_heartbeat_coverage(

@@ -26,6 +26,7 @@ import os
 import pytest
 from sqlalchemy import create_engine, text
 
+from tests.e2e.helpers.retention import forget_retention_class
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks.instance_declared_retention import (
     E2E_CLASS_DURATION,
@@ -62,50 +63,8 @@ def _registered_duration() -> object | None:
 
 
 def _forget_class() -> None:
-    """Remove the class and anything the maintenance pass built for it.
-
-    Order matters: the leaf catalog carries a foreign key to the class,
-    and a registered class gets leaves created for it on the same pass.
-    """
-    engine = create_engine(DB_URL, isolation_level='AUTOCOMMIT')
-    try:
-        with engine.connect() as connection:
-            leaves = (
-                connection.execute(
-                    text(
-                        'SELECT leaf_name FROM '
-                        'horsies_task_history_leaf_catalog '
-                        'WHERE class_key = :key'
-                    ),
-                    {'key': E2E_CLASS_KEY},
-                )
-            ).scalars().all()
-            for leaf_name in leaves:
-                connection.execute(
-                    text(f'DROP TABLE IF EXISTS {leaf_name} CASCADE')
-                )
-            connection.execute(
-                text(
-                    'DELETE FROM horsies_task_history_leaf_catalog '
-                    'WHERE class_key = :key'
-                ),
-                {'key': E2E_CLASS_KEY},
-            )
-            connection.execute(
-                text(
-                    'DROP TABLE IF EXISTS '
-                    f'horsies_task_history_{E2E_CLASS_KEY} CASCADE'
-                )
-            )
-            connection.execute(
-                text(
-                    'DELETE FROM horsies_retention_classes '
-                    'WHERE class_key = :key'
-                ),
-                {'key': E2E_CLASS_KEY},
-            )
-    finally:
-        engine.dispose()
+    """Drop the class, its leaves, and the readers naming them."""
+    forget_retention_class(DB_URL, E2E_CLASS_KEY)
 
 
 def test_a_booted_worker_registers_its_declared_class() -> None:

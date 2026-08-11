@@ -17,6 +17,7 @@ from datetime import timedelta
 import pytest
 
 from horsies.core.errors import ConfigurationError, MultipleValidationErrors
+from horsies.core.history.names import MAX_RETENTION_CLASS_KEY_LENGTH
 from horsies.core.models.retention import (
     RESERVED_RETENTION_CLASS_KEYS,
     RetentionClassConfig,
@@ -61,6 +62,58 @@ class TestDeclaredRetentionClasses:
                     RetentionClassConfig(key=unsafe, duration=timedelta(days=5)),
                 )
             )
+
+    def test_a_key_at_the_budget_is_accepted(self) -> None:
+        """The bound is a limit, not a margin: the last legal key passes."""
+        key = 'k' * MAX_RETENTION_CLASS_KEY_LENGTH
+
+        config = RetentionConfig(
+            retention_classes=(
+                RetentionClassConfig(key=key, duration=timedelta(days=5)),
+            )
+        )
+
+        assert config.retention_classes[0].key == key
+
+    def test_an_over_long_key_is_refused_with_its_arithmetic(self) -> None:
+        """A key that is a safe identifier but too long to name relations.
+
+        `is_safe_identifier` accepts up to the identifier limit itself,
+        so this key passes every other check. Unrefused it registers,
+        and the failure then lands in the maintenance pass against a
+        database row that removing the declaration no longer reaches.
+        """
+        key = 'k' * (MAX_RETENTION_CLASS_KEY_LENGTH + 1)
+
+        with pytest.raises(ConfigurationError) as caught:
+            RetentionConfig(
+                retention_classes=(
+                    RetentionClassConfig(key=key, duration=timedelta(days=5)),
+                )
+            )
+
+        message = str(caught.value)
+        assert str(len(key)) in message, 'the refusal must state the length'
+        assert str(MAX_RETENTION_CLASS_KEY_LENGTH) in message, (
+            'the refusal must state the limit it enforces'
+        )
+
+    def test_the_index_collision_band_is_refused(self) -> None:
+        """The band a property probe cannot see is inside the bound.
+
+        At these lengths a leaf builds fine and both of its index names
+        truncate to the same bytes, so the second CREATE INDEX fails on
+        a duplicate. The length bound is what keeps them out.
+        """
+        for key_length in (30, 31):
+            with pytest.raises(ConfigurationError):
+                RetentionConfig(
+                    retention_classes=(
+                        RetentionClassConfig(
+                            key='k' * key_length, duration=timedelta(days=5)
+                        ),
+                    )
+                )
 
     @pytest.mark.parametrize(
         'bad_duration', [timedelta(0), timedelta(seconds=-1), timedelta(days=-30)]
