@@ -37,10 +37,16 @@ from horsies.core.history.heartbeats.partitioning import (
 )
 from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
 from horsies.core.history.maintenance.coverage import (
+    CoverageEnsureFailed,
     CoverageEnsured,
     ensure_partition_coverage,
 )
-from horsies.core.history.names import LEAF_CATALOG, TASK_PROVENANCE_FUNCTION
+from horsies.core.history.names import (
+    HEARTBEAT_CLASS_KEY,
+    LEAF_CATALOG,
+    RETENTION_CLASSES,
+    TASK_PROVENANCE_FUNCTION,
+)
 from horsies.core.history.outcomes import LeafCreated
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
@@ -67,6 +73,7 @@ pytestmark = [pytest.mark.integration]
 
 UTC = timezone.utc
 CLASS_KEY = 'it_missing_leaf'
+OTHER_CLASS_KEY = 'it_lost_parent'
 
 history_schema = task_history_schema_fixture('task_history_it_missing_leaf')
 
@@ -258,21 +265,32 @@ class TestMissingLeafBreaksAndHeals:
     async def test_maintenance_pass_republishes_on_the_divergence_alone(
         self, history_schema: HistorySchema
     ) -> None:
-        """The pass heals it without any leaf being created.
+        """The pass heals it with no leaf created and no reader missing.
 
         Republication is otherwise driven by leaf creation and by an
-        absent reader. A leaf vanishing does neither, so without the
-        divergence trigger the broken function stays published and the
-        pass reports a healthy fleet while every finalize fails.
+        absent staged reader. A leaf vanishing does neither, so without
+        the divergence trigger the broken function stays published and
+        the pass reports a healthy fleet while every finalize fails.
 
-        The disable verification is the probe assertion before the pass:
-        the readers are proved to name the missing relation first.
+        The pass runs once to steady state first, so the second pass
+        creates nothing and `created_history_leaves == 0` isolates the
+        trigger as the sole cause of the republication. The leaf is
+        older than the coverage horizon, which is the case that leaves
+        create-ahead untouched.
         """
         async with history_schema.engine.begin() as connection:
             await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             parent = await register_class(connection, CLASS_KEY)
             now = await database_now(connection)
-            gone = await _create_leaf(connection, parent=parent, day=now)
+            gone = await _create_leaf(
+                connection, parent=parent, day=now - timedelta(days=10)
+            )
+
+        async with history_schema.engine.begin() as connection:
+            settled = await ensure_partition_coverage(
+                connection, history_horizon_days=2, heartbeat_horizon_hours=2
+            )
+        assert isinstance(settled, CoverageEnsured), settled
 
         async with history_schema.engine.begin() as connection:
             await connection.execute(text(f'DROP TABLE {gone}'))
@@ -282,11 +300,12 @@ class TestMissingLeafBreaksAndHeals:
 
         async with history_schema.engine.begin() as connection:
             outcome = await ensure_partition_coverage(
-                connection,
-                history_horizon_days=2,
-                heartbeat_horizon_hours=2,
+                connection, history_horizon_days=2, heartbeat_horizon_hours=2
             )
         assert isinstance(outcome, CoverageEnsured), outcome
+        assert outcome.created_history_leaves == 0, (
+            'the trigger is only proved when nothing was created'
+        )
         assert outcome.republished is True
         assert outcome.absent_leaves == (gone,)
 
@@ -294,22 +313,101 @@ class TestMissingLeafBreaksAndHeals:
             assert await published_manifest_absent_leaves(connection) == ()
 
     @pytest.mark.asyncio
-    async def test_unresolvable_parent_raises_rather_than_emptying(
+    async def test_in_horizon_loss_is_reported_and_freezes_that_class(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """Losing a leaf create-ahead owns reports AND refuses the class.
+
+        A leaf inside the coverage horizon cannot be recreated while its
+        catalog row survives, so the class refuses. The report must
+        survive that refusal — a vanished leaf swallowed because the
+        same pass also failed a class would be the silence this work
+        exists to remove. Pins the documented operator consequence.
+        """
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
+            await register_class(connection, CLASS_KEY)
+            settled = await ensure_partition_coverage(
+                connection, history_horizon_days=2, heartbeat_horizon_hours=2
+            )
+        assert isinstance(settled, CoverageEnsured), settled
+
+        async with history_schema.engine.begin() as connection:
+            now = await database_now(connection)
+            lower, _ = day_bounds(now)
+            gone = daily_leaf_name(
+                f'horsies_task_history_{CLASS_KEY}', lower
+            )
+            await connection.execute(text(f'DROP TABLE {gone}'))
+
+        async with history_schema.engine.begin() as connection:
+            outcome = await ensure_partition_coverage(
+                connection, history_horizon_days=2, heartbeat_horizon_hours=2
+            )
+        assert isinstance(outcome, CoverageEnsureFailed), outcome
+        assert outcome.stage == 'ensure_leaf_coverage'
+        assert outcome.class_key == CLASS_KEY
+        assert outcome.absent_leaves == (gone,), (
+            'the report must survive the class refusal in the same pass'
+        )
+
+        # Republication ran before the refusal was reported, so the
+        # readers are healed even though create-ahead is frozen.
+        async with history_schema.engine.connect() as connection:
+            assert await published_manifest_absent_leaves(connection) == ()
+
+    @pytest.mark.asyncio
+    async def test_no_parent_resolving_at_all_raises(
         self, history_schema: HistorySchema
     ) -> None:
         """A session that cannot see the schema must not publish absence.
 
-        `to_regclass` resolves through `search_path`, so a connection
-        that cannot see the history schema reports every leaf missing.
-        Treating that as data would empty the manifest and turn all
-        retained history into genuine false absence, so the parent is
-        the discriminator and an unresolvable one fails closed.
+        `to_regclass` resolves through `search_path`. If nothing at all
+        resolves, publishing the result would empty the manifest and
+        report every retained row as absent, so the reader fails closed
+        instead. Dropping the only parent cascades to its leaf, which
+        reproduces the shape such a session sees.
         """
         async with history_schema.engine.begin() as connection:
             parent = await register_class(connection, CLASS_KEY)
             now = await database_now(connection)
             await _create_leaf(connection, parent=parent, day=now)
-            lower, upper = day_bounds(now + timedelta(days=1))
+
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(text(f'DROP TABLE {parent} CASCADE'))
+
+        async with history_schema.engine.connect() as connection:
+            with pytest.raises(HistoryParentAbsent, match='cannot see'):
+                await read_manifest_leaf_rows(connection)
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_rows_are_never_consulted_by_the_guard(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """A pre-cutover heartbeat row must not refuse publication.
+
+        Heartbeat leaves share the leaf catalog and leave the manifest at
+        assembly, and a deployment that has not run the heartbeat cutover
+        carries a heartbeat catalog row whose parent does not exist —
+        which heartbeat registration models as a typed refusal, not an
+        error. The guard is scoped to the rows the probe list contains,
+        so such a row is neither resolved nor reported, and a deployment
+        holding ONLY such rows cannot satisfy the systemic threshold.
+        """
+        async with history_schema.engine.begin() as connection:
+            parent = await register_class(connection, CLASS_KEY)
+            now = await database_now(connection)
+            kept = await _create_leaf(connection, parent=parent, day=now)
+            lower, upper = day_bounds(now)
+            await connection.execute(
+                text(
+                    f'INSERT INTO {RETENTION_CLASSES} ('
+                    'class_key, duration, partition_interval, '
+                    'finite_parent_name, created_at) VALUES ('
+                    ':class_key, NULL, NULL, NULL, statement_timestamp())'
+                ),
+                {'class_key': HEARTBEAT_CLASS_KEY},
+            )
             await connection.execute(
                 text(
                     f'INSERT INTO {LEAF_CATALOG} ('
@@ -322,15 +420,72 @@ class TestMissingLeafBreaksAndHeals:
                     'statement_timestamp())'
                 ),
                 {
-                    'leaf_name': 'horsies_task_history_unreachable_2026_01_01',
-                    'parent_name': 'horsies_task_history_unreachable',
-                    'class_key': CLASS_KEY,
+                    'leaf_name': 'horsies_heartbeats_2026_08_07_00',
+                    'parent_name': 'horsies_heartbeats',
+                    'class_key': HEARTBEAT_CLASS_KEY,
                     'lower': lower,
                     'upper': upper,
-                    'index_name': 'horsies_task_history_unreachable_task_idx',
+                    'index_name': 'horsies_heartbeats_2026_08_07_00_task_idx',
                 },
             )
 
         async with history_schema.engine.connect() as connection:
-            with pytest.raises(HistoryParentAbsent, match='cannot see'):
-                await read_manifest_leaf_rows(connection)
+            selection = await read_manifest_leaf_rows(connection)
+        # Present in the attached set, absent from the probe accounting:
+        # the reader keeps the catalog's whole memory and consults only
+        # what the manifest will use.
+        assert 'horsies_heartbeats_2026_08_07_00' in {
+            row.leaf_name for row in selection.attached
+        }
+        assert selection.absent_relations == frozenset()
+        assert kept in {row.leaf_name for row in selection.attached}
+
+        async with history_schema.engine.begin() as connection:
+            republication = await StagedLoaderPublisher().republish(connection)
+        assert republication.absent_leaves == ()
+
+    @pytest.mark.asyncio
+    async def test_one_history_parent_gone_is_reported_not_raised(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """One class's parent gone is that class's loss, not the session's.
+
+        The systemic guard must not fire per row. With another history
+        class still resolving, the unreachable class's leaf is reported
+        absent like any other missing relation and publication proceeds.
+        """
+        async with history_schema.engine.begin() as connection:
+            kept_parent = await register_class(connection, CLASS_KEY)
+            lost_parent = await register_class(connection, OTHER_CLASS_KEY)
+            now = await database_now(connection)
+            kept = await _create_leaf(
+                connection, parent=kept_parent, day=now
+            )
+            lower, upper = day_bounds(now)
+            lost = daily_leaf_name(lost_parent, lower)
+            outcome = await create_daily_leaf(
+                connection,
+                CreateDailyHistoryLeaf(
+                    leaf=LeafRef(
+                        leaf_name=lost,
+                        class_key=OTHER_CLASS_KEY,
+                        bounds=LeafBounds(lower=lower, upper=upper),
+                    )
+                ),
+                StagedLoaderPublisher(),
+            )
+            assert isinstance(outcome, LeafCreated), outcome
+
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(
+                text(f'DROP TABLE {lost_parent} CASCADE')
+            )
+
+        async with history_schema.engine.connect() as connection:
+            selection = await read_manifest_leaf_rows(connection)
+        assert selection.absent_relations == frozenset({lost})
+        assert kept in {row.leaf_name for row in selection.attached}
+
+        async with history_schema.engine.begin() as connection:
+            republication = await StagedLoaderPublisher().republish(connection)
+        assert republication.absent_leaves == (lost,)

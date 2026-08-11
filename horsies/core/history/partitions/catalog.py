@@ -27,7 +27,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import is_safe_identifier
 from ..errors import HistoryContractError, HistoryParentAbsent
-from ..names import LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES
+from ..names import (
+    HEARTBEAT_CLASS_KEY,
+    LEAF_CATALOG,
+    LEAF_LOCK_KEY_FUNCTION,
+    RETENTION_CLASSES,
+)
 
 INDEX_SCHEMA_VERSION = 1
 """Current per-leaf index layout version recorded on creation."""
@@ -344,16 +349,36 @@ async def read_manifest_leaf_rows(
     """The attached set for publication, with missing relations named.
 
     `to_regclass` resolves through `search_path`, so a session that cannot
-    see the schema reports EVERY leaf missing — and publishing that would
+    see the schema reports every leaf missing, and publishing that would
     empty the manifest and turn all retained history into genuine false
-    absence. The parent relation is the discriminator: one leaf gone with
-    its parent still resolving is a dropped leaf, while a leaf whose parent
-    is equally unresolvable is a session that cannot see the schema. The
-    second raises rather than reporting a fleet-wide loss as data.
+    absence. Most of that hazard is already closed upstream: this reader's
+    own query names the leaf catalog unqualified, so a session that cannot
+    see the schema fails there with `undefined_table` before any leaf is
+    examined. What remains is leaf relations resolving NULL en masse while
+    the catalog itself stays readable.
+
+    That residue is a SYSTEMIC question, so it takes a systemic test: no
+    history row resolving its parent. One unresolvable parent means that
+    one class's parent is gone — its leaves are unreadable and reported
+    absent like any other — and treating a single row as evidence about
+    the session would refuse publication over a class that may not even
+    be probed.
+
+    Scope is what makes the test mean anything, so this reader consults
+    exactly the rows the probe list will contain: history classes, the
+    same filter `manifest_from_catalog` applies at assembly. Heartbeat
+    leaves share this catalog and never enter the manifest, and a
+    deployment that has not run the heartbeat cutover carries heartbeat
+    rows whose parent does not exist — a state the heartbeat registration
+    models as a typed refusal rather than an error. Resolving those rows
+    here would let a tolerated state raise, and a deployment holding only
+    such rows would satisfy any threshold phrased over the whole catalog.
     """
     rows = (await connection.execute(text(_MANIFEST_SELECTION_SQL))).all()
     attached: list[LeafCatalogRow] = []
     absent: list[str] = []
+    history_rows = 0
+    any_parent_resolves = False
     for row in rows:
         leaf_name = _required_str(row.leaf_name, 'leaf_name')
         catalog_row = await read_leaf_catalog_row(connection, leaf_name)
@@ -362,19 +387,20 @@ async def read_manifest_leaf_rows(
                 f'attached leaf {leaf_name!r} vanished from the catalog mid-read'
             )
         attached.append(catalog_row)
+        if catalog_row.class_key == HEARTBEAT_CLASS_KEY:
+            continue
+        history_rows += 1
         relation_exists = _required_bool(row.relation_exists, 'relation_exists')
         parent_exists = _required_bool(row.parent_exists, 'parent_exists')
-        match (relation_exists, parent_exists):
-            case (True, _):
-                pass
-            case (False, True):
-                absent.append(leaf_name)
-            case (False, False):
-                raise HistoryParentAbsent(
-                    f'neither leaf {leaf_name!r} nor its parent '
-                    f'{catalog_row.parent_name!r} resolves; the session '
-                    f'cannot see the history schema'
-                )
+        any_parent_resolves = any_parent_resolves or parent_exists
+        if not relation_exists:
+            absent.append(leaf_name)
+    if history_rows and not any_parent_resolves:
+        raise HistoryParentAbsent(
+            'no attached history leaf resolves its parent relation; the '
+            'session cannot see the history schema, and publishing this '
+            'would report every retained row as absent'
+        )
     return ManifestLeafSelection(
         attached=tuple(attached), absent_relations=frozenset(absent)
     )
