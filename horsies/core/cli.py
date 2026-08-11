@@ -529,6 +529,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_tasks_per_child=args.max_tasks_per_child,
         max_memory_per_child_mb=args.max_memory_per_child_mb,
         recovery_config=app.config.recovery,
+        retention_config=app.config.retention,
         resilience_config=app.config.resilience,
         loglevel=log_level_int,
     )

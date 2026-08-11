@@ -5,6 +5,7 @@ from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.exception_mapper import (
@@ -45,6 +46,7 @@ class AppConfig(BaseModel):
     max_claim_renew_age_ms: int = MAX_CLAIM_RENEW_AGE_MS
     payload: PayloadPolicy = Field(default_factory=PayloadPolicy)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
     resilience: WorkerResilienceConfig = Field(default_factory=WorkerResilienceConfig)
     schedule: Optional[ScheduleConfig] = Field(
         default=None, description='Scheduler configuration'
@@ -331,10 +333,19 @@ class AppConfig(BaseModel):
         lines.append(
             f'    heartbeat_intervals: runner={self.recovery.runner_heartbeat_interval_ms}ms, claimer={self.recovery.claimer_heartbeat_interval_ms}ms'
         )
+
+        # Retention config — its own section, because it answers a
+        # different question than recovery does.
+        lines.append('  retention:')
         lines.append(
             f'    retention_hours: '
-            f'worker_states={self.recovery.worker_state_retention_hours}, '
-            f'terminal_workflows={self.recovery.terminal_record_retention_hours}'
+            f'worker_states={self.retention.worker_state_retention_hours}, '
+            f'terminal_workflows='
+            f'{self.retention.terminal_record_retention_hours}'
+        )
+        lines.append(
+            f'    declared_classes: '
+            f'{[c.key for c in self.retention.retention_classes]}'
         )
 
         # Resilience config

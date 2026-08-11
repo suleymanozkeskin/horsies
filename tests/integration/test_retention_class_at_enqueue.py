@@ -32,9 +32,10 @@ from horsies.core.history.maintenance.coverage import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.recovery import (
-    RecoveryConfig,
+from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import (
     RetentionClassConfig,
+    RetentionConfig,
 )
 from horsies.core.models.task_send_types import TaskSendErrorCode
 from horsies.core.models.tasks import TaskError, TaskResult
@@ -90,7 +91,7 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
             broker=PostgresConfig(
                 database_url='postgresql+psycopg://u:p@localhost/db',
             ),
-            recovery=RecoveryConfig(
+            retention=RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(
                         key=DECLARED_KEY, duration=timedelta(days=90)
@@ -174,7 +175,7 @@ async def _coverage(broker: PostgresBroker) -> None:
     cannot terminalize without provisioned coverage, and the shipped
     startup ensure returns a TYPED refusal that must be checked, not
     assumed away."""
-    defaults = RecoveryConfig()
+    defaults = RetentionConfig()
     async with broker.async_engine.begin() as connection:
         outcome = await ensure_startup_coverage(
             connection,

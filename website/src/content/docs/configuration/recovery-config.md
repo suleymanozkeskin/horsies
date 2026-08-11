@@ -1,7 +1,7 @@
 ---
 title: Recovery Config
 summary: Automatic detection and recovery of stale tasks.
-related: [../../workers/heartbeats-recovery, app-config]
+related: [retention-config, ../../workers/heartbeats-recovery, app-config]
 tags: [configuration, recovery, heartbeats]
 ---
 
@@ -48,14 +48,6 @@ config = AppConfig(
 | `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
 | `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
-| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
-| `worker_state_retention_hours` | `int \| None` | 168 (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
-| `terminal_record_retention_hours` | `int \| None` | 720 (30 days) | Hours to keep terminal **workflow** records; `None` disables pruning. Terminal task rows move to the task-history archive and age by retention class, not by this window |
-| `history_leaf_horizon_days` | `int` | 3 | Complete future daily history partitions kept created ahead of writes (2–14; 2 is the coverage-health red line) |
-| `heartbeat_leaf_horizon_hours` | `int` | 6 | Complete future hourly heartbeat partitions kept created ahead of writes (2–48) |
-| `partition_maintenance_interval_s` | `int` | 900 | Seconds between coverage-ensure passes (60–3,600) |
-| `retention_sweep_interval_s` | `int` | 300 (5 min) | Seconds between retention sweep passes (30s–24h) |
-| `retention_delete_batch_size` | `int` | 500 | Rows per workflow-retention `DELETE` batch (50–10,000); each batch commits independently |
 
 All time values for thresholds and intervals are in milliseconds. Retention windows are in hours; the sweep interval is in seconds.
 
@@ -65,6 +57,10 @@ partitions drop whole; a row-delete window no longer exists.
 `queue_terminal_record_retention_hours` — terminal task records age by the
 retention class assigned at enqueue; per-queue row-delete windows no longer
 exist.
+
+Retention and partition-coverage fields moved to
+[`AppConfig.retention`](retention-config); this table lists only what
+`RecoveryConfig` still owns.
 
 ## Recovery Behaviors
 
@@ -160,87 +156,17 @@ RecoveryConfig(
 )
 ```
 
-## Retention Cleanup
+## Retention
 
-Three categories age by three different mechanisms:
+Retention moved to its own configuration section:
+[`AppConfig.retention`](retention-config). It decides how long records
+live and how their storage is prepared and reclaimed, which is a
+different question from the one this page answers — recovery is about
+work that went wrong, retention about work that went right and is now
+history.
 
-| Category | Mechanism | Config | Default |
-|----------|-----------|--------|---------|
-| Terminal task records | **Partition drop.** Records live in `horsies_task_history`, partitioned by the retention class assigned at enqueue; a partition past its class's window is dropped whole | Retention class per task (assigned at enqueue; default 30-day class, explicit `None` = forever) | 30 days |
-| Heartbeats | **Partition drop.** Hourly partitions; old partitions drop whole | none (fixed by partition lifecycle) | — |
-| Terminal workflow records | **Row delete.** The reaper prunes `horsies_workflows` / `horsies_workflow_tasks` rows every `retention_sweep_interval_s` in batches of `retention_delete_batch_size`, a commit per batch | `terminal_record_retention_hours` (`None` disables) | 30 days |
-| Worker states | **Row delete**, same sweep | `worker_state_retention_hours` (`None` disables) | 7 days |
-
-Deleting a workflow also removes any unconsumed crashed-worker progression
-evidence still waiting in the outbox — the same disposition its consumer
-would reach for a workflow that is already terminal. Retention is never held
-up by a stalled consumer.
-
-The partition drops are performed by the worker's partition-maintenance
-pass, every `partition_maintenance_interval_s` alongside coverage: each
-finite-class partition past its horizon is detached and dropped whole. A
-refused partition (recovery evidence still pinning it, or a reader holding
-the detach past its 5 s timeout) is skipped, reported with its reason on
-the worker health surface, and retried each pass until the blocker clears.
-See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for the
-mechanism and its latency character.
-
-```python
-RecoveryConfig(
-    worker_state_retention_hours=24 * 14,      # Keep worker snapshots for 2 weeks
-    terminal_record_retention_hours=24 * 90,   # Keep workflow records for 90 days
-)
-```
-
-Per-task retention is decided when the row is created: every task carries
-a retention class assigned at enqueue, snapshotted on the row, and its
-window cannot be changed afterwards. Omitting the parameter uses the
-immutable 30-day class; an explicit `None` keeps the record forever.
-
-### Declaring your own retention classes
-
-A deployment can declare additional finite classes. Declaring a class does
-not create it — the maintenance owner registers every declared class at
-startup and on each pass, exactly as it registers the classes the library
-ships, which keeps partition DDL out of application code and registration
-under one owner.
-
-```python
-from datetime import timedelta
-from horsies.core.models.recovery import RecoveryConfig, RetentionClassConfig
-
-RecoveryConfig(
-    retention_classes=(
-        RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
-        RetentionClassConfig(key='transient_2d', duration=timedelta(days=2)),
-    )
-)
-```
-
-Tasks are then sent into a declared class by key:
-
-```python
-my_task.with_options(retention_class_key='audit_1y').send(order_id=42)
-```
-
-**Declarations are checked where you write them.** A key must be a usable
-identifier, must not be one the library owns (`standard_30d`, `forever`,
-`heartbeats`), must not repeat, and its duration must be positive. Every
-problem in a config is reported together, not one per run. Re-declaring an
-existing key with a *different* duration is refused at startup and named:
-classes are immutable, because rows already carry the old window.
-
-**`duration` is a minimum, not an exact age.** History partitions span one
-day and are dropped only once the whole day is past the duration, so a row
-survives between `duration` and `duration + 1 day`. Sub-day durations are
-accepted and never under-retain, but cannot expire faster than daily
-partition granularity allows.
-
-**Validation is per-process.** The set of acceptable class keys comes from
-this process's config, so the check costs no database round trip at send
-time. The consequence is deliberate: a process whose config omits a class
-refuses it even if another deployment registered that class in the same
-database. Declare a class in every process that sends into it.
+Setting a retention field on `RecoveryConfig` fails at construction and
+names its new home; there is no alias.
 
 ## Disabling Recovery
 

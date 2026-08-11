@@ -42,7 +42,8 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `claim_lease_ms` | `int \| None` | `None` | Claim lease duration; None uses default 60s |
 | `max_claim_renew_age_ms` | `int` | `180_000` (3 min) | Max age of CLAIMED task that heartbeat will renew |
 | `payload` | `PayloadPolicy` | `PayloadPolicy()` | Payload-size guardrail (warn/reject thresholds) |
-| `recovery` | `RecoveryConfig` | `RecoveryConfig()` | Stale task detection and retention |
+| `recovery` | `RecoveryConfig` | `RecoveryConfig()` | Stale task detection and automatic recovery |
+| `retention` | `RetentionConfig` | `RetentionConfig()` | How long records live; partition coverage and pruning |
 | `resilience` | `WorkerResilienceConfig` | `WorkerResilienceConfig()` | Worker retry behavior |
 | `schedule` | `ScheduleConfig \| None` | `None` | Recurring task schedules |
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
@@ -323,7 +324,8 @@ AppConfig(
 
 ## RecoveryConfig
 
-Controls stale task detection, automatic recovery, and data retention.
+Controls stale task detection and automatic recovery. Retention moved
+to `AppConfig.retention` — see RetentionConfig below.
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
@@ -339,15 +341,6 @@ Controls stale task detection, automatic recovery, and data retention.
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
 | `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it |
-| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
-| `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
-| `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
-| `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |
-| `heartbeat_leaf_horizon_hours` | `int` | `6` | 2–48 | Complete future hourly heartbeat partitions kept ahead of writes |
-| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
-| `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
-| `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
-| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
 
 **Removed in 0.5.0 — setting either fails config construction naming the
 successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions
@@ -382,6 +375,29 @@ Runs on `check_interval_ms` cadence:
 3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old heartbeat, worker_state, and terminal rows based on retention settings; a deleted task's `task_attempts` history is purged in the same statement. Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
 **CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
+
+
+## RetentionConfig
+
+Reached as `AppConfig.retention`. Controls how long records live and how
+their storage is prepared and reclaimed — a different question from
+recovery, which is about work that went wrong.
+
+Setting any of these on `RecoveryConfig` fails at construction naming
+`AppConfig.retention.<field>`; there is no alias.
+
+| Field | Type | Default | Range | Description |
+|---|---|---|---|---|
+| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep |
+| `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
+| `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
+| `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |
+| `heartbeat_leaf_horizon_hours` | `int` | `6` | 2–48 | Complete future hourly heartbeat partitions kept ahead of writes |
+| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
+| `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
+| `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
+| `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
+
 
 ## WorkerResilienceConfig
 

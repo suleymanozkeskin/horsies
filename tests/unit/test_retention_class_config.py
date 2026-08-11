@@ -17,20 +17,20 @@ from datetime import timedelta
 import pytest
 
 from horsies.core.errors import ConfigurationError, MultipleValidationErrors
-from horsies.core.models.recovery import (
+from horsies.core.models.retention import (
     RESERVED_RETENTION_CLASS_KEYS,
-    RecoveryConfig,
     RetentionClassConfig,
+    RetentionConfig,
 )
 
 
 @pytest.mark.unit
 class TestDeclaredRetentionClasses:
     def test_no_declarations_is_the_default(self) -> None:
-        assert RecoveryConfig().retention_classes == ()
+        assert RetentionConfig().retention_classes == ()
 
     def test_a_well_formed_declaration_is_accepted(self) -> None:
-        config = RecoveryConfig(
+        config = RetentionConfig(
             retention_classes=(
                 RetentionClassConfig(key='audit_1y', duration=timedelta(days=365)),
             )
@@ -42,7 +42,7 @@ class TestDeclaredRetentionClasses:
     def test_reserved_keys_are_refused(self, reserved: str) -> None:
         """The library owns these and fixes their durations."""
         with pytest.raises(ConfigurationError) as caught:
-            RecoveryConfig(
+            RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(key=reserved, duration=timedelta(days=5)),
                 )
@@ -56,7 +56,7 @@ class TestDeclaredRetentionClasses:
     def test_unusable_identifiers_are_refused(self, unsafe: str) -> None:
         """The key becomes part of a relation name for the class partition."""
         with pytest.raises(ConfigurationError):
-            RecoveryConfig(
+            RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(key=unsafe, duration=timedelta(days=5)),
                 )
@@ -69,7 +69,7 @@ class TestDeclaredRetentionClasses:
         self, bad_duration: timedelta
     ) -> None:
         with pytest.raises(ConfigurationError):
-            RecoveryConfig(
+            RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(key='weekly', duration=bad_duration),
                 )
@@ -78,7 +78,7 @@ class TestDeclaredRetentionClasses:
     def test_a_duplicate_key_is_refused(self) -> None:
         """A class has exactly one duration."""
         with pytest.raises(ConfigurationError) as caught:
-            RecoveryConfig(
+            RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(key='weekly', duration=timedelta(days=7)),
                     RetentionClassConfig(key='weekly', duration=timedelta(days=14)),
@@ -94,7 +94,7 @@ class TestDeclaredRetentionClasses:
         more raise `MultipleValidationErrors` wrapping the report.
         """
         with pytest.raises(MultipleValidationErrors) as caught:
-            RecoveryConfig(
+            RetentionConfig(
                 retention_classes=(
                     RetentionClassConfig(key='forever', duration=timedelta(days=5)),
                     RetentionClassConfig(key='bad key', duration=timedelta(days=5)),
@@ -113,9 +113,53 @@ class TestDeclaredRetentionClasses:
         past, so the row survives longer than declared — never less.
         Accepting it is correct; the guide documents the granularity.
         """
-        config = RecoveryConfig(
+        config = RetentionConfig(
             retention_classes=(
                 RetentionClassConfig(key='hourly_ish', duration=timedelta(hours=1)),
             )
         )
         assert config.retention_classes[0].duration == timedelta(hours=1)
+
+
+@pytest.mark.unit
+class TestReportedRetentionEqualsGoverning:
+    """The health surface reports what the worker actually runs on.
+
+    The maintenance pass binds `retention_config or RetentionConfig()`,
+    so an unset section means the worker runs on DEFAULTS. If the
+    snapshot resolved differently it would publish nulls for a worker
+    governed by real values — a surface disagreeing with the behaviour
+    it describes.
+    """
+
+    def test_an_unset_section_reports_the_defaults_it_runs_on(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+        from horsies.core.worker.health import _effective_retention
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@h/d',
+            psycopg_dsn='postgresql://u:p@h/d',
+            queues=['default'],
+        )
+        assert cfg.retention_config is None
+        effective = _effective_retention(cfg)
+        assert effective.terminal_record_retention_hours == (
+            RetentionConfig().terminal_record_retention_hours
+        ), 'an unset section must report the defaults the pass runs on'
+        assert effective.worker_state_retention_hours == (
+            RetentionConfig().worker_state_retention_hours
+        )
+
+    def test_a_set_section_reports_itself(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+        from horsies.core.worker.health import _effective_retention
+
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@h/d',
+            psycopg_dsn='postgresql://u:p@h/d',
+            queues=['default'],
+            retention_config=RetentionConfig(
+                terminal_record_retention_hours=99
+            ),
+        )
+        assert _effective_retention(cfg).terminal_record_retention_hours == 99

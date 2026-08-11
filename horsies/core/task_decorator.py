@@ -1746,7 +1746,7 @@ def create_task_wrapper(
         Accepted: the parameter omitted (the immutable 30-day default
         class), explicit ``None`` (forever), the default class named
         verbatim, or any class this deployment DECLARES in
-        ``RecoveryConfig.retention_classes``.
+        ``AppConfig.retention.retention_classes``.
 
         The set is process-static because the surface is config-only —
         adopters declare classes, the maintenance owner registers them —
@@ -1791,11 +1791,11 @@ def create_task_wrapper(
         Read through ``app`` rather than captured at decoration, because
         a task may be defined before the app's config is finalised.
         """
-        recovery = getattr(app.config, 'recovery', None)
-        if recovery is None:
+        retention = getattr(app.config, 'retention', None)
+        if retention is None:
             return frozenset()
         return frozenset(
-            declared.key for declared in recovery.retention_classes
+            declared.key for declared in retention.retention_classes
         )
 
     def _validate_delay(delay: int) -> TaskSendError | None:

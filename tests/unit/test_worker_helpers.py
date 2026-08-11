@@ -21,6 +21,7 @@ import logging
 
 from horsies.core.worker.finalize import _PersistedTaskOutcome
 
+from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -690,7 +691,7 @@ class TestReaperRetentionPass:
         with pytest.raises(Exception, match='drop whole'):
             RecoveryConfig(heartbeat_retention_hours=12)
         # The surviving knob governs workflow terminal records.
-        cfg = RecoveryConfig(terminal_record_retention_hours=48)
+        cfg = RetentionConfig(terminal_record_retention_hours=48)
         assert cfg.terminal_record_retention_hours == 48
 
     @pytest.mark.asyncio
@@ -703,6 +704,8 @@ class TestReaperRetentionPass:
             auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
+        )
+        worker.cfg.retention_config = RetentionConfig(
             worker_state_retention_hours=24,
             terminal_record_retention_hours=48,
         )
@@ -3208,6 +3211,8 @@ def _make_reaper_worker(
         auto_terminate_orphaned_workflow_tasks=auto_terminate,
         auto_fail_stale_running=auto_fail,
         check_interval_ms=1_000,
+    )
+    worker.cfg.retention_config = RetentionConfig(
         worker_state_retention_hours=None,
         terminal_record_retention_hours=None,
     )
@@ -3528,7 +3533,9 @@ class TestReaperMatchArms:
             auto_requeue_stale_claimed=True,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
-                worker_state_retention_hours=None,
+        )
+        worker.cfg.retention_config = RetentionConfig(
+            worker_state_retention_hours=None,
             terminal_record_retention_hours=None,
         )
 
@@ -3588,7 +3595,9 @@ class TestReaperMatchArms:
             auto_requeue_stale_claimed=True,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
-                worker_state_retention_hours=None,
+        )
+        worker.cfg.retention_config = RetentionConfig(
+            worker_state_retention_hours=None,
             terminal_record_retention_hours=None,
         )
 
@@ -4983,7 +4992,9 @@ async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) 
         'horsies.core.workflows.recovery.recover_stuck_workflows',
         AsyncMock(return_value=0),
     ):
-        await worker._run_reaper_pass(broker, RecoveryConfig(), state)
+        await worker._run_reaper_pass(
+            broker, RecoveryConfig(), RetentionConfig(), state
+        )
 
 
 @pytest.mark.unit

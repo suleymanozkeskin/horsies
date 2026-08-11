@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from horsies.core.history.maintenance.coverage import ensure_partition_coverage
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
 
@@ -39,10 +39,10 @@ class TestConfigBounds:
         self, field: str, value: int
     ) -> None:
         with pytest.raises(ValidationError, match=field):
-            RecoveryConfig(**cast('dict[str, Any]', {field: value}))
+            RetentionConfig(**cast('dict[str, Any]', {field: value}))
 
     def test_defaults_hold_the_ratified_values(self) -> None:
-        config = RecoveryConfig()
+        config = RetentionConfig()
         assert config.history_leaf_horizon_days == 3
         assert config.heartbeat_leaf_horizon_hours == 6
         assert config.partition_maintenance_interval_s == 900

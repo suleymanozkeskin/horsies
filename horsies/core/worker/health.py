@@ -36,11 +36,28 @@ from horsies.core.worker.sql import (
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from horsies.core.models.retention import RetentionConfig
+    from horsies.core.worker.config import WorkerConfig
+
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
+
+
+def _effective_retention(cfg: 'WorkerConfig') -> 'RetentionConfig':
+    """The retention config the worker actually runs on.
+
+    The maintenance pass binds `retention_config or RetentionConfig()`,
+    so an unset section means the worker runs on DEFAULTS, not on
+    nothing. The health surface reports what governs, so it must resolve
+    the same way — otherwise a worker running on defaults publishes
+    nulls, and the snapshot disagrees with the behaviour it describes.
+    """
+    from horsies.core.models.retention import RetentionConfig
+
+    return cfg.retention_config or RetentionConfig()
 
 
 class HealthMixin:
@@ -185,8 +202,8 @@ class HealthMixin:
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
-                    'worker_state_retention_hours': self.cfg.recovery_config.worker_state_retention_hours,
-                    'terminal_record_retention_hours': self.cfg.recovery_config.terminal_record_retention_hours,
+                    'worker_state_retention_hours': _effective_retention(self.cfg).worker_state_retention_hours,
+                    'terminal_record_retention_hours': _effective_retention(self.cfg).terminal_record_retention_hours,
                 }
 
             # One session for the counts and the snapshot INSERT — three

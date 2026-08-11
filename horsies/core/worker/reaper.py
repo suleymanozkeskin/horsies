@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.recovery import RecoveryConfig
+    from horsies.core.models.retention import RetentionConfig
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
@@ -75,6 +76,7 @@ class ReaperMixin:
         self,
         temp_broker: 'PostgresBroker',
         recovery_cfg: 'RecoveryConfig',
+        retention_cfg: 'RetentionConfig',
         state: _ReaperPassState,
     ) -> None:
         """One reaper pass: stale-task recovery, pending expiry, workflow
@@ -296,20 +298,20 @@ class ReaperMixin:
                 # neither is row-deleted here.
                 deadline = now_monotonic + _RETENTION_PASS_TIME_BUDGET_S
 
-                batch_size = recovery_cfg.retention_delete_batch_size
+                batch_size = retention_cfg.retention_delete_batch_size
 
-                if recovery_cfg.worker_state_retention_hours is not None:
+                if retention_cfg.worker_state_retention_hours is not None:
                     deleted_worker_states = await self._delete_expired_in_batches(
                         temp_broker,
                         DELETE_EXPIRED_WORKER_STATES_SQL,
                         {
-                            'retention_hours': recovery_cfg.worker_state_retention_hours,
+                            'retention_hours': retention_cfg.worker_state_retention_hours,
                         },
                         deadline,
                         batch_size,
                     )
 
-                if recovery_cfg.terminal_record_retention_hours is not None:
+                if retention_cfg.terminal_record_retention_hours is not None:
                     # Workflows and their node rows go together in one
                     # workflow-batched statement (node purge is a CTE inside
                     # it). The all-backing-tasks-terminal guard makes
@@ -321,7 +323,7 @@ class ReaperMixin:
                         temp_broker,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
                         {
-                            'retention_hours': recovery_cfg.terminal_record_retention_hours,
+                            'retention_hours': retention_cfg.terminal_record_retention_hours,
                         },
                         deadline,
                         batch_size,
@@ -338,7 +340,7 @@ class ReaperMixin:
                 logger.error(f'Retention cleanup error: {cleanup_err}')
             finally:
                 state.next_retention_cleanup_at = (
-                    now_monotonic + recovery_cfg.retention_sweep_interval_s
+                    now_monotonic + retention_cfg.retention_sweep_interval_s
                 )
 
         # Paused-age expiry: the declared policy's sweep. Gated on the
@@ -347,7 +349,7 @@ class ReaperMixin:
         # path's locked sequence with EXPIRED as the terminal status,
         # so an expiring workflow leaves no claimable backing rows and
         # no ENQUEUED nodes behind.
-        if recovery_cfg.paused_workflow_auto_cancel_after is not None:
+        if retention_cfg.paused_workflow_auto_cancel_after is not None:
             from horsies.core.workflows.lifecycle import (
                 expire_paused_workflows,
             )
@@ -356,7 +358,7 @@ class ReaperMixin:
                 expired = await expire_paused_workflows(
                     temp_broker.session_factory,
                     older_than=(
-                        recovery_cfg.paused_workflow_auto_cancel_after
+                        retention_cfg.paused_workflow_auto_cancel_after
                     ),
                 )
                 if expired > 0:
@@ -394,14 +396,14 @@ class ReaperMixin:
                     coverage = await ensure_partition_coverage(
                         coverage_conn,
                         history_horizon_days=(
-                            recovery_cfg.history_leaf_horizon_days
+                            retention_cfg.history_leaf_horizon_days
                         ),
                         heartbeat_horizon_hours=(
-                            recovery_cfg.heartbeat_leaf_horizon_hours
+                            retention_cfg.heartbeat_leaf_horizon_hours
                         ),
                         declared_classes=tuple(
                             (declared.key, declared.duration)
-                            for declared in recovery_cfg.retention_classes
+                            for declared in retention_cfg.retention_classes
                         ),
                     )
                 match coverage:
@@ -486,7 +488,7 @@ class ReaperMixin:
             finally:
                 state.next_partition_maintenance_at = (
                     now_monotonic
-                    + recovery_cfg.partition_maintenance_interval_s
+                    + retention_cfg.partition_maintenance_interval_s
                 )
 
     async def _delete_expired_in_batches(
@@ -555,7 +557,13 @@ class ReaperMixin:
         if not self.cfg.recovery_config:
             return
 
+        from horsies.core.models.retention import RetentionConfig
+
         recovery_cfg = self.cfg.recovery_config
+        # A worker built without a retention section still needs one: the
+        # maintenance pass reads coverage horizons and sweep cadence from
+        # it, and those have defaults rather than being optional.
+        retention_cfg = self.cfg.retention_config or RetentionConfig()
         check_interval_ms = recovery_cfg.check_interval_ms
         temp_broker = None
         owns_temp_broker = False
@@ -625,7 +633,7 @@ class ReaperMixin:
                     # holder dies mid-pass.
                     if not gate_enabled:
                         await self._run_reaper_pass(
-                            temp_broker, recovery_cfg, state,
+                            temp_broker, recovery_cfg, retention_cfg, state,
                         )
                     else:
                         async with self.sf() as gate_session:
@@ -635,7 +643,10 @@ class ReaperMixin:
                             )
                             if bool(gate_result.scalar()):
                                 await self._run_reaper_pass(
-                                    temp_broker, recovery_cfg, state,
+                                    temp_broker,
+                                    recovery_cfg,
+                                    retention_cfg,
+                                    state,
                                 )
                             else:
                                 logger.debug(
