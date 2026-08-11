@@ -3,12 +3,21 @@
 Every caller wants the same thing: an explicit override if one is set,
 otherwise a local URL built from `DB_PASSWORD`. Written inline as
 `os.environ.get(NAME, f'...{os.environ["DB_PASSWORD"]}...')`, the default
-is built BEFORE `get` chooses, so the fallback raises `KeyError` even
-when the override is present and is the value that would have been used.
-An override alone was therefore not enough to run the suite.
+is built BEFORE `get` chooses, so the fallback raised `KeyError` even
+when the override was present and was the value that would have been
+used. An override alone was therefore not enough to run the suite.
 
-Resolution is lazy here, and the failure names both ways out instead of
-surfacing as a bare `KeyError: 'DB_PASSWORD'` from a module import.
+Resolution is lazy here, which is the whole fix: an override is honoured
+without `DB_PASSWORD` existing.
+
+Resolving with NOTHING set still yields a URL rather than raising, and
+that is deliberate rather than lax. The unit suite imports e2e task
+modules as fixtures for the app-locator tests -- `test_worker_imports`
+loads `tests.e2e.tasks.instance` -- and the unit job carries no database
+credentials. Import must therefore not require one. A URL that cannot
+authenticate fails at connect time, where the test that needs a database
+is the one that reports it, rather than at import, where a test that
+only wanted the module object collapses instead.
 """
 
 from __future__ import annotations
@@ -29,13 +38,7 @@ def e2e_database_url(*env_names: str) -> str:
         value = os.environ.get(name)
         if value:
             return value
-    password = os.environ.get('DB_PASSWORD')
-    if not password:
-        consulted = ', '.join(env_names or DEFAULT_URL_ENV_NAMES)
-        raise RuntimeError(
-            'no e2e database configured: set DB_PASSWORD, or set one of '
-            f'{consulted} to a full database URL'
-        )
+    password = os.environ.get('DB_PASSWORD', '')
     return (
         f'postgresql+psycopg://postgres:{password}@localhost:5432/horsies'
     )
