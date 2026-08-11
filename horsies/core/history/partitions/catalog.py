@@ -26,7 +26,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import is_safe_identifier
-from ..errors import HistoryContractError
+from ..errors import HistoryContractError, HistoryParentAbsent
 from ..names import LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES
 
 INDEX_SCHEMA_VERSION = 1
@@ -299,6 +299,126 @@ async def read_all_attached_leaf_rows(
     function and turn their retained rows into false absence.
     """
     return await _read_attached(connection, class_key=None)
+
+
+@dataclass(frozen=True, slots=True)
+class ManifestLeafSelection:
+    """The attached set, split by whether the relation actually exists.
+
+    The staged readers probe relations by name, and PostgreSQL does not
+    validate PL/pgSQL bodies at CREATE — a generated function naming a
+    relation that is gone builds happily and dies at execution, on the
+    finalize path, for every queue and class at once. So the probe list
+    must be filtered by existence.
+
+    The catalog is NOT corrected to match. A cataloged-attached leaf whose
+    relation vanished means someone changed the database behind the
+    manager's back, and `CatalogConflictKind` states the stance: that needs
+    an operator, not a heuristic. Stamping the row dropped would destroy
+    the evidence of an accidental drop and reclassify it as ordinary
+    ageing. The reader routes around the wound; the memory keeps it.
+
+    Both halves are retained because they answer different questions. The
+    probe list says which relations can be read; the complete attached set
+    says what history was retained, which is what the birth floor means.
+    """
+
+    attached: tuple[LeafCatalogRow, ...]
+    absent_relations: frozenset[str]
+
+
+_MANIFEST_SELECTION_SQL = f"""
+SELECT leaf_name,
+       to_regclass(leaf_name) IS NOT NULL AS relation_exists,
+       to_regclass(parent_name) IS NOT NULL AS parent_exists
+FROM {LEAF_CATALOG}
+WHERE detached_at IS NULL
+  AND dropped_at IS NULL
+ORDER BY lower_anchor, leaf_name
+"""
+
+
+async def read_manifest_leaf_rows(
+    connection: AsyncConnection,
+) -> ManifestLeafSelection:
+    """The attached set for publication, with missing relations named.
+
+    `to_regclass` resolves through `search_path`, so a session that cannot
+    see the schema reports EVERY leaf missing — and publishing that would
+    empty the manifest and turn all retained history into genuine false
+    absence. The parent relation is the discriminator: one leaf gone with
+    its parent still resolving is a dropped leaf, while a leaf whose parent
+    is equally unresolvable is a session that cannot see the schema. The
+    second raises rather than reporting a fleet-wide loss as data.
+    """
+    rows = (await connection.execute(text(_MANIFEST_SELECTION_SQL))).all()
+    attached: list[LeafCatalogRow] = []
+    absent: list[str] = []
+    for row in rows:
+        leaf_name = _required_str(row.leaf_name, 'leaf_name')
+        catalog_row = await read_leaf_catalog_row(connection, leaf_name)
+        if catalog_row is None:
+            raise HistoryContractError(
+                f'attached leaf {leaf_name!r} vanished from the catalog mid-read'
+            )
+        attached.append(catalog_row)
+        relation_exists = _required_bool(row.relation_exists, 'relation_exists')
+        parent_exists = _required_bool(row.parent_exists, 'parent_exists')
+        match (relation_exists, parent_exists):
+            case (True, _):
+                pass
+            case (False, True):
+                absent.append(leaf_name)
+            case (False, False):
+                raise HistoryParentAbsent(
+                    f'neither leaf {leaf_name!r} nor its parent '
+                    f'{catalog_row.parent_name!r} resolves; the session '
+                    f'cannot see the history schema'
+                )
+    return ManifestLeafSelection(
+        attached=tuple(attached), absent_relations=frozenset(absent)
+    )
+
+
+async def read_attached_birth_floor(
+    connection: AsyncConnection,
+    *,
+    excluded_class_key: str,
+) -> datetime | None:
+    """The minimum birth time across every attached leaf of a real class.
+
+    Unfiltered by relation existence, deliberately. The floor answers
+    "does this identifier predate all RETAINED history", and a leaf
+    destroyed out of band was retained — its rows were real and then
+    someone removed them. Dropping it from the floor would raise the floor
+    and reclassify those tasks as too old to have been kept, which is a
+    false explanation of a true absence.
+
+    Two independent things currently keep heartbeat leaves out of the
+    floor, and neither should be mistaken for the other. `min()` skips
+    NULLs and heartbeat rows are created with `min_birth_at` NULL, so
+    they cannot reach the floor today whatever this predicate says. The
+    class filter is the one that states the INTENT: heartbeats are not
+    task history and their birth times are not where history begins.
+    Remove the filter and nothing breaks until someone gives heartbeat
+    leaves a birth time, at which point the floor silently starts
+    tracking liveness rows.
+    """
+    value = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT min(min_birth_at)
+                FROM {LEAF_CATALOG}
+                WHERE detached_at IS NULL
+                  AND dropped_at IS NULL
+                  AND class_key <> :excluded_class_key
+                """
+            ),
+            {'excluded_class_key': excluded_class_key},
+        )
+    ).scalar_one_or_none()
+    return _optional_datetime(value, 'min_birth_at')
 
 
 async def _read_attached(
