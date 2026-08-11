@@ -76,11 +76,25 @@ class TestRetentionModuleUsesOneCode:
         self,
     ) -> None:
         source = inspect.getsource(retention_module)
-        referenced = set(re.findall(r'ErrorCode\.([A-Z_]+)', source))
+        referenced = re.findall(r'ErrorCode\.([A-Z_]+)', source)
         assert referenced, 'no error codes found; the pattern stopped matching'
-        assert referenced == {'CONFIG_INVALID_RETENTION'}, (
-            f'models/retention.py refuses with {sorted(referenced)}; every '
-            f'retention-config refusal must carry CONFIG_INVALID_RETENTION'
+        assert set(referenced) == {'CONFIG_INVALID_RETENTION'}, (
+            f'models/retention.py refuses with {sorted(set(referenced))}; '
+            f'every retention-config refusal must carry '
+            f'CONFIG_INVALID_RETENTION'
+        )
+        # The set assertion alone cannot see a site this pattern MISSES.
+        # A refusal reaching the enum another way -- an aliased import, a
+        # getattr -- would contribute no match, leave the set unchanged,
+        # and pass while carrying the wrong code. Counting against the
+        # constructions closes that: every ConfigurationError built here
+        # must name its code the way this test can read.
+        constructions = len(re.findall(r'ConfigurationError\(', source))
+        assert len(referenced) == constructions, (
+            f'{constructions} ConfigurationError constructions in '
+            f'models/retention.py but {len(referenced)} readable code '
+            f'references; a refusal reaches ErrorCode by a route this '
+            f'test cannot audit'
         )
 
     def test_the_code_is_distinct_and_in_the_config_band(self) -> None:
