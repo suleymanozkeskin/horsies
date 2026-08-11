@@ -55,7 +55,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartResult,
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
-from horsies.core.workflows.engine import _queue_retention_class
+from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
     GET_WORKFLOW_STATUS_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
@@ -609,7 +609,7 @@ async def start_workflow_async(
                                 good_until=good_until_dt,
                                 task_options_json=task_options_json,
                                 retention_class_key=(
-                                    _queue_retention_class(
+                                    queue_retention_class(
                                         broker, resolved_queue
                                     )
                                 ),
