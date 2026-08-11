@@ -150,7 +150,7 @@ def _class_key_length_error(
             f'retention class key {key!r} is {len(key)} characters; '
             f'the limit is {MAX_RETENTION_CLASS_KEY_LENGTH}'
         ),
-        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+        code=ErrorCode.CONFIG_INVALID_RETENTION,
         notes=[
             *extra_notes,
             'the key is interpolated into every relation the class owns',
@@ -336,7 +336,7 @@ class RetentionConfig(BaseModel):
                             f'queue {queue_name!r} cannot be mapped: the '
                             'name is not a usable identifier'
                         ),
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[
                             'the queue name becomes part of the derived '
                             'retention class and its relation names',
@@ -359,7 +359,7 @@ class RetentionConfig(BaseModel):
                             f'queue {queue_name!r} maps to a non-positive '
                             'retention'
                         ),
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[f'duration={duration!r}'],
                         help_text=(
                             'map a positive duration, or None to keep '
@@ -377,7 +377,7 @@ class RetentionConfig(BaseModel):
                             f'queue {queue_name!r} maps to {duration!r}, '
                             'which is not a whole number of seconds'
                         ),
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[
                             'the duration is written into the class key, '
                             'so it must render exactly',
@@ -417,7 +417,7 @@ class RetentionConfig(BaseModel):
                 report.add(
                     ConfigurationError(
                         message=f'retention class {key!r} is reserved',
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[
                             'the library owns this key and fixes its '
                             'duration',
@@ -433,7 +433,7 @@ class RetentionConfig(BaseModel):
                             f'retention class {key!r} uses the reserved '
                             f'{QUEUE_DERIVED_CLASS_PREFIX!r} prefix'
                         ),
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[
                             'keys with this prefix are generated from '
                             'queue_retention and their durations come '
@@ -450,7 +450,7 @@ class RetentionConfig(BaseModel):
                     ConfigurationError(
                         message=f'retention class {key!r} is not a usable '
                                 'identifier',
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[
                             'the key becomes part of a PostgreSQL relation '
                             'name for the class partition',
@@ -472,7 +472,7 @@ class RetentionConfig(BaseModel):
                 report.add(
                     ConfigurationError(
                         message=f'retention class {key!r} declared twice',
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=['a class has exactly one duration'],
                         help_text='remove the duplicate declaration',
                     )
@@ -483,7 +483,7 @@ class RetentionConfig(BaseModel):
                     ConfigurationError(
                         message=f'retention class {key!r} has a '
                                 'non-positive duration',
-                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        code=ErrorCode.CONFIG_INVALID_RETENTION,
                         notes=[f'duration={declared.duration!r}'],
                         help_text='declare a positive duration',
                     )

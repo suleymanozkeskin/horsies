@@ -564,6 +564,7 @@ class TestErrorCode:
             ErrorCode.WORKER_INVALID_LOCATOR,
             ErrorCode.CONFIG_INVALID_RESILIENCE,
             ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+            ErrorCode.CONFIG_INVALID_RETENTION,
         ]
         for code in config_codes:
             # HRS-200-HRS-299 range
