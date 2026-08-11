@@ -30,7 +30,12 @@ from horsies.core.errors import (
 from horsies.core.history.commands import is_safe_identifier
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
-from horsies.core.history.names import HEARTBEAT_CLASS_KEY
+from horsies.core.history.names import (
+    HEARTBEAT_CLASS_KEY,
+    MAX_RETENTION_CLASS_KEY_LENGTH,
+    POSTGRES_IDENTIFIER_LIMIT,
+    TASK_HISTORY_PARENT,
+)
 
 
 RESERVED_RETENTION_CLASS_KEYS: frozenset[str] = frozenset(
@@ -39,6 +44,46 @@ RESERVED_RETENTION_CLASS_KEYS: frozenset[str] = frozenset(
 """Keys the library owns. A declaration may not redefine one: their
 durations are fixed by the library and a conflicting redeclaration would
 be refused by the registration machinery at startup anyway."""
+
+
+def _class_key_length_error(
+    key: str,
+    *,
+    help_text: str,
+    extra_notes: tuple[str, ...] = (),
+) -> ConfigurationError | None:
+    """Refuse a class key too long for the relations it will name.
+
+    Shared by both key sources — keys an adopter declares and keys
+    derived from a queue mapping — because both end up interpolated into
+    the same relation names and both fail the same way.
+
+    Refusing here is the whole point. The key is accepted by
+    `is_safe_identifier` up to the identifier limit itself, so without
+    this check an over-long key registers successfully and only fails
+    later, inside the maintenance pass, on a database row that removing
+    the declaration no longer reaches.
+    """
+    if len(key) <= MAX_RETENTION_CLASS_KEY_LENGTH:
+        return None
+    longest = f'{TASK_HISTORY_PARENT}_{key}_2026_08_11_enqueued_idx'
+    return ConfigurationError(
+        message=(
+            f'retention class key {key!r} is {len(key)} characters; '
+            f'the limit is {MAX_RETENTION_CLASS_KEY_LENGTH}'
+        ),
+        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+        notes=[
+            *extra_notes,
+            'the key is interpolated into every relation the class owns',
+            f'longest of them: {longest}',
+            f'that is {len(longest)} bytes against PostgreSQL\'s '
+            f'{POSTGRES_IDENTIFIER_LIMIT}-byte identifier limit',
+            'over-long names are truncated rather than rejected, so two '
+            'of a leaf\'s indexes can collide on one name',
+        ],
+        help_text=help_text,
+    )
 
 
 class RetentionClassConfig(BaseModel):
@@ -166,7 +211,7 @@ class RetentionConfig(BaseModel):
         Every problem is collected, so a config with several bad
         declarations reports all of them once rather than one per run.
         """
-        report = ValidationReport('recovery')
+        report = ValidationReport('retention')
         seen: set[str] = set()
         for declared in self.retention_classes:
             key = declared.key
@@ -199,6 +244,13 @@ class RetentionConfig(BaseModel):
                         ),
                     )
                 )
+            else:
+                too_long = _class_key_length_error(
+                    key,
+                    help_text='shorten the key',
+                )
+                if too_long is not None:
+                    report.add(too_long)
             if key in seen:
                 report.add(
                     ConfigurationError(
