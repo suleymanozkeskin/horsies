@@ -6,10 +6,32 @@ has lost twice: an entry landed in one file and not the other, both
 times found by a later reader rather than by the change that made them
 diverge.
 
-This makes the convention an invariant the suite owns. It compares the
-Unreleased sections by their words, so reflowing a paragraph is free
-while a missing or extra entry fails. Absent from both passes: on
-release day the section is retitled to a version in both files at once.
+This makes the convention an invariant the suite owns. It compares
+sections by their words, so reflowing a paragraph is free while a
+missing or extra entry fails. Absent from both passes: on release day
+the section is retitled to a version in both files at once.
+
+Released sections are covered by their HEADINGS, not their bodies: the
+set of released versions must match, so a version section landing in one
+file only fails here.
+
+Their bodies are deliberately NOT compared, and the reason is measured
+rather than assumed. 18 of the 31 shared released sections already
+differ, several substantially — 0.3.0 carries 731 words in the root file
+against 442 on the website. The website's history is an abridgement, not
+a copy, so a body comparison over it would fail on the state the repo
+has shipped for its whole life and could only be silenced. Reconciling
+that history, or ratifying the abridgement, is its own decision.
+
+The limit that follows, stated so it is not mistaken for coverage: a
+correction applied to one file's already-released section and not the
+other's is NOT caught. Only Unreleased bodies and the released version
+set are guarded.
+
+Not hypothetical: within a day of landing, this guard caught a
+mis-resolved cherry-pick conflict that had taken one branch's whole
+changelog and silently dropped the entries of a release merged in
+between — on the branch carrying this very extension.
 """
 
 from __future__ import annotations
@@ -50,6 +72,25 @@ def _words(body: str) -> list[str]:
     return body.split()
 
 
+# The root file writes `## [0.5.1] - 2026-08-10`; the website writes
+# `## 0.5.1`. The version is the shared part, so it is the key.
+_RELEASED_HEADING = re.compile(
+    r'^##\s+\[?(\d+\.\d+\.\d+)\]?.*$', re.MULTILINE
+)
+
+
+def _released_sections(path: Path) -> dict[str, str]:
+    """Every released section of `path`, keyed by its version."""
+    text = path.read_text(encoding='utf-8')
+    sections: dict[str, str] = {}
+    for heading in _RELEASED_HEADING.finditer(text):
+        rest = text[heading.end():]
+        following = _NEXT_HEADING.search(rest)
+        body = rest if following is None else rest[: following.start()]
+        sections[heading.group(1)] = body
+    return sections
+
+
 def test_both_changelogs_exist() -> None:
     """Guard the premise: a missing file would make parity vacuous."""
     assert ROOT_CHANGELOG.is_file(), ROOT_CHANGELOG
@@ -85,4 +126,21 @@ def test_unreleased_sections_are_body_identical() -> None:
         f'  root: {len(root_words)} words, website: {len(site_words)}\n'
         f'  only in root:    {only_root[:12]}\n'
         f'  only in website: {only_site[:12]}'
+    )
+
+
+def test_the_same_versions_are_released_in_both() -> None:
+    """The set of released versions is part of the parity.
+
+    A version section added to one file only would otherwise pass the
+    body comparison below, which can only compare versions both files
+    have.
+    """
+    root = set(_released_sections(ROOT_CHANGELOG))
+    site = set(_released_sections(SITE_CHANGELOG))
+    assert root, 'no released sections found; the heading pattern stopped matching'
+    assert root == site, (
+        'the changelogs list different released versions.\n'
+        f'  only in root:    {sorted(root - site)}\n'
+        f'  only in website: {sorted(site - root)}'
     )

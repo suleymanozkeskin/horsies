@@ -80,6 +80,18 @@ there is no migration contract between pre-1.0 versions.
   `RecoveryConfig` still reports `CONFIG_INVALID_RECOVERY`: that refusal belongs
   to the object that no longer has the field.
 
+- **The e2e suite honours a database URL override.** Its modules built the
+  local fallback URL as the `default` argument of `os.environ.get`, so the
+  fallback was evaluated before the override was chosen and a missing
+  `DB_PASSWORD` raised `KeyError` at import even when the override was set and
+  was the value that would have been used. Resolution is lazy and shared, and
+  the failure names both ways out.
+
+- **A worker ready-check that raises is reported, not swallowed.** The e2e
+  helper retried a raising probe and discarded the exception, so a probe that
+  could never succeed was indistinguishable from a slow worker and surfaced as
+  a startup timeout. The last failure is now carried into the timeout message.
+
 
 - **Per-queue retention now applies on every enqueue path.** `.schedule()`,
   `.schedule_async()`, a `TaskSchedule` firing on its cron, and a workflow

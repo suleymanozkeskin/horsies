@@ -10,10 +10,15 @@ rather than an inference from the class column: a record can carry the
 right class key and still sit in the wrong relation if the derived class
 was never registered.
 
-The send is not gated on the class existing. Waiting for it would test
-the maintenance pass rather than startup, and would pass even if startup
-registered nothing — so the absence of that gate is part of what this
-proves.
+The send is not gated on the class existing: waiting for it would make
+the test measure whichever registration path happened to run first.
+
+What this proves is the routing outcome — a task sent on a mapped queue
+ends up in that queue's derived partition, through a real worker and a
+real terminalization. It does NOT prove which path registered the class.
+Startup registration and the periodic maintenance pass both create it,
+and nothing here separates them, so a claim about startup specifically
+rests on the unit test that exercises startup registration directly.
 """
 
 from __future__ import annotations
@@ -35,11 +40,9 @@ pytestmark = [pytest.mark.e2e]
 
 INSTANCE = 'tests.e2e.tasks.instance_queue_retention:app'
 
-DB_URL = os.environ.get(
-    'HORSES_E2E_DB_URL',
-    f'postgresql+psycopg://postgres:{os.environ.get("DB_PASSWORD", "")}'
-    '@localhost:5432/horsies',
-)
+from tests.e2e.helpers.env import e2e_database_url
+
+DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
 def _history_partition(task_id: str) -> str | None:
