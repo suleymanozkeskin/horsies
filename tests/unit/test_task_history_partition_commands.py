@@ -146,7 +146,9 @@ class TestEnsureLeafCoverage:
 class TestDetachExpiredHistoryLeaf:
     def test_accepts_absent_timeout(self) -> None:
         command = DetachExpiredHistoryLeaf(
-            leaf=make_leaf_ref(), quarantine_horizon=None
+            leaf=make_leaf_ref(),
+            quarantine_horizon=None,
+            statement_timeout_ms=None,
         )
         assert command.statement_timeout_ms is None
 
@@ -167,21 +169,45 @@ class TestDetachExpiredHistoryLeaf:
                 statement_timeout_ms=timeout_ms,
             )
 
-    def test_quarantine_horizon_has_no_default(self) -> None:
-        # Every call site states its detach-horizon posture explicitly;
-        # a silent default would let existing callers change behavior
-        # without review.
+    @pytest.mark.parametrize(
+        'field_name', ['quarantine_horizon', 'statement_timeout_ms']
+    )
+    def test_field_has_no_default(self, field_name: str) -> None:
+        # Every call site states its detach posture explicitly; a silent
+        # default would let existing callers change behavior without
+        # review. statement_timeout_ms joined this rule after two call
+        # sites took its None default and waited on a lock unbounded
+        # while holding the cluster-wide maintenance gate -- an omission
+        # that read as "nothing to say" rather than as a choice.
         for field in dataclasses.fields(DetachExpiredHistoryLeaf):
-            if field.name == 'quarantine_horizon':
+            if field.name == field_name:
                 assert field.default is dataclasses.MISSING
-                break
-        else:
-            raise AssertionError('quarantine_horizon field is missing')
+                return
+        raise AssertionError(f'{field_name} field is missing')
+
+    def test_finalize_timeout_has_no_default(self) -> None:
+        # A blocked FINALIZE blocks every future detach on the parent,
+        # so unbounded is the most expensive default in the family.
+        for field in dataclasses.fields(FinalizeInterruptedLeafDetach):
+            if field.name == 'statement_timeout_ms':
+                assert field.default is dataclasses.MISSING
+                return
+        raise AssertionError('statement_timeout_ms field is missing')
+
+    @pytest.mark.parametrize('timeout_ms', [0, -1])
+    def test_finalize_rejects_non_positive_timeout(
+        self, timeout_ms: int
+    ) -> None:
+        with pytest.raises(ValueError, match='positive'):
+            FinalizeInterruptedLeafDetach(
+                leaf=make_leaf_ref(), statement_timeout_ms=timeout_ms
+            )
 
     def test_accepts_positive_horizon(self) -> None:
         command = DetachExpiredHistoryLeaf(
             leaf=make_leaf_ref(),
             quarantine_horizon=timedelta(days=7),
+            statement_timeout_ms=None,
         )
         assert command.quarantine_horizon == timedelta(days=7)
 
@@ -193,6 +219,7 @@ class TestDetachExpiredHistoryLeaf:
             DetachExpiredHistoryLeaf(
                 leaf=make_leaf_ref(),
                 quarantine_horizon=horizon,  # type: ignore[arg-type]
+                statement_timeout_ms=None,
             )
 
 
@@ -239,7 +266,10 @@ class TestCommandUnion:
                 'quarantine_horizon',
                 'statement_timeout_ms',
             },
-            FinalizeInterruptedLeafDetach: {'leaf'},
+            FinalizeInterruptedLeafDetach: {
+                'leaf',
+                'statement_timeout_ms',
+            },
             DropDetachedHistoryLeaf: {'leaf'},
             CollectPartitionHealth: {'class_key', 'application_managed'},
         }
@@ -264,4 +294,34 @@ class TestDerivedNames:
         assert (
             leaf_id_index_name('horsies_task_history_finite_30d_2026_08_06')
             == 'horsies_task_history_finite_30d_2026_08_06_task_idx'
+        )
+
+
+class TestFinalizeAppliesItsTimeout:
+    """Carrying the field is not the same as using it.
+
+    Adding `statement_timeout_ms` to the command would look like a fix
+    while the executor ignored it, so this reads the executor's own
+    source for the two statements that make the timeout real: reading
+    the prior value, and setting the new one. A FINALIZE that waits
+    unbounded blocks every future detach on its parent, so the failure
+    this guards is the expensive one in the family.
+    """
+
+    def test_finalize_reads_and_sets_the_statement_timeout(self) -> None:
+        import inspect as _inspect
+
+        from horsies.core.history.partitions.manager import (
+            finalize_interrupted_detach,
+        )
+
+        source = _inspect.getsource(finalize_interrupted_detach)
+        assert 'command.statement_timeout_ms' in source, (
+            'the finalize executor never reads the timeout it is given'
+        )
+        assert "SHOW statement_timeout" in source, (
+            'the prior timeout is not captured, so it cannot be restored'
+        )
+        assert source.count("set_config('statement_timeout'") == 2, (
+            'the timeout must be both applied and restored'
         )
