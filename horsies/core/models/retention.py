@@ -15,7 +15,7 @@ policy on workflow rows, not a response to a crash.
 
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Annotated, Final, Self
 
 from datetime import timedelta
 
@@ -44,6 +44,55 @@ RESERVED_RETENTION_CLASS_KEYS: frozenset[str] = frozenset(
 """Keys the library owns. A declaration may not redefine one: their
 durations are fixed by the library and a conflicting redeclaration would
 be refused by the registration machinery at startup anyway."""
+
+
+QUEUE_DERIVED_CLASS_PREFIX: Final = 'q_'
+"""Namespace for classes derived from `queue_retention`.
+
+Reserved: a declared class may not start with it. Adopters do not name
+these classes, so the prefix keeps a hand-written declaration from
+colliding with one the mapping generates.
+"""
+
+
+class DurationNotWholeSeconds(Exception):
+    """A duration that cannot be rendered into a class key exactly.
+
+    Raised rather than rounded. The key encodes the duration, so a
+    rounded key would name a retention period the class does not have.
+    """
+
+
+def render_duration(duration: timedelta) -> str:
+    """A duration as the shortest exact unit: `7d`, `36h`, `90m`, `45s`.
+
+    Largest-first so common horizons stay short — the rendering is part
+    of a relation name and every character is budget.
+    """
+    total_seconds = duration.total_seconds()
+    if total_seconds != int(total_seconds):
+        raise DurationNotWholeSeconds(repr(duration))
+    total = int(total_seconds)
+    for unit, size in (('d', 86_400), ('h', 3_600), ('m', 60)):
+        if total % size == 0:
+            return f'{total // size}{unit}'
+    return f'{total}s'
+
+
+def derived_queue_class_key(queue_name: str, duration: timedelta) -> str:
+    """The retention class a queue mapping stands for.
+
+    The duration is IN the key, so changing a queue's mapping mints a new
+    class rather than redefining an existing one. That is what lets
+    records enqueued under the old promise age out under it while new
+    records take the new one — a class has exactly one duration, and
+    rewriting it would silently restate the promise already made to rows
+    sitting in the old class's partitions.
+    """
+    return (
+        f'{QUEUE_DERIVED_CLASS_PREFIX}{queue_name}_'
+        f'{render_duration(duration)}'
+    )
 
 
 def _class_key_length_error(
@@ -164,6 +213,18 @@ class RetentionConfig(BaseModel):
         ),
     )
 
+    queue_retention: dict[str, timedelta | None] = Field(
+        default_factory=dict,
+        description=(
+            'Per-queue retention: how long a task sent on this queue '
+            'keeps its history record, or None to keep it forever. The '
+            'class is resolved and recorded when the task is sent, so a '
+            'later edit governs later sends and never rewrites the '
+            'promise made to records already enqueued. An explicit '
+            'retention_class_key at the send call overrides the mapping'
+        ),
+    )
+
     partition_maintenance_interval_s: Annotated[
         int, Field(ge=60, le=3_600),
     ] = Field(
@@ -204,6 +265,114 @@ class RetentionConfig(BaseModel):
             )
         return self
 
+    def registrable_classes(self) -> tuple[tuple[str, timedelta], ...]:
+        """Every finite class the maintenance owner must register.
+
+        Declared classes and the classes a queue mapping derives are the
+        same kind of thing to the registrar: a key and a duration it
+        must create a partition for. They are returned together so the
+        registration path cannot serve one source and miss the other —
+        a queue mapped to a class that was never registered would send
+        tasks into a partition that does not exist.
+
+        Queues mapped to None contribute nothing: forever is a class the
+        library already owns.
+        """
+        derived = tuple(
+            (derived_queue_class_key(queue_name, duration), duration)
+            for queue_name, duration in self.queue_retention.items()
+            if duration is not None
+        )
+        declared = tuple(
+            (declared.key, declared.duration)
+            for declared in self.retention_classes
+        )
+        return declared + derived
+
+    @model_validator(mode='after')
+    def validate_queue_retention(self) -> Self:
+        """Refuse a mapping whose derived class could not be created.
+
+        The queue name is not merely a lookup key here — it is spliced
+        into the class key and from there into relation names, so it
+        carries the same constraints a declared key does and is checked
+        the same way.
+        """
+        report = ValidationReport('retention')
+        for queue_name, duration in self.queue_retention.items():
+            if not is_safe_identifier(queue_name):
+                report.add(
+                    ConfigurationError(
+                        message=(
+                            f'queue {queue_name!r} cannot be mapped: the '
+                            'name is not a usable identifier'
+                        ),
+                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        notes=[
+                            'the queue name becomes part of the derived '
+                            'retention class and its relation names',
+                        ],
+                        help_text=(
+                            'use letters, digits and underscores, '
+                            'starting with a letter or underscore'
+                        ),
+                    )
+                )
+                continue
+            if duration is None:
+                # Forever is an existing library class, so it derives
+                # nothing and has no key to bound.
+                continue
+            if duration <= timedelta(0):
+                report.add(
+                    ConfigurationError(
+                        message=(
+                            f'queue {queue_name!r} maps to a non-positive '
+                            'retention'
+                        ),
+                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        notes=[f'duration={duration!r}'],
+                        help_text=(
+                            'map a positive duration, or None to keep '
+                            'records forever'
+                        ),
+                    )
+                )
+                continue
+            try:
+                derived = derived_queue_class_key(queue_name, duration)
+            except DurationNotWholeSeconds:
+                report.add(
+                    ConfigurationError(
+                        message=(
+                            f'queue {queue_name!r} maps to {duration!r}, '
+                            'which is not a whole number of seconds'
+                        ),
+                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        notes=[
+                            'the duration is written into the class key, '
+                            'so it must render exactly',
+                        ],
+                        help_text='round the mapping to whole seconds',
+                    )
+                )
+                continue
+            too_long = _class_key_length_error(
+                derived,
+                help_text=(
+                    f'shorten the queue name; {queue_name!r} leaves '
+                    f'{len(derived) - len(queue_name)} characters of the '
+                    'key to the prefix and duration'
+                ),
+                extra_notes=(
+                    f'queue {queue_name!r} derives the class {derived!r}',
+                ),
+            )
+            if too_long is not None:
+                report.add(too_long)
+        raise_collected(report)
+        return self
+
     @model_validator(mode='after')
     def validate_retention_classes(self) -> Self:
         """Reject declarations the registration machinery could not honour.
@@ -226,6 +395,25 @@ class RetentionConfig(BaseModel):
                             f'reserved: {sorted(RESERVED_RETENTION_CLASS_KEYS)}',
                         ],
                         help_text='choose a different key',
+                    )
+                )
+            elif key.startswith(QUEUE_DERIVED_CLASS_PREFIX):
+                report.add(
+                    ConfigurationError(
+                        message=(
+                            f'retention class {key!r} uses the reserved '
+                            f'{QUEUE_DERIVED_CLASS_PREFIX!r} prefix'
+                        ),
+                        code=ErrorCode.CONFIG_INVALID_RECOVERY,
+                        notes=[
+                            'keys with this prefix are generated from '
+                            'queue_retention and their durations come '
+                            'from that mapping',
+                        ],
+                        help_text=(
+                            'choose a key without the prefix, or map the '
+                            'queue in queue_retention instead'
+                        ),
                     )
                 )
             elif not is_safe_identifier(key):

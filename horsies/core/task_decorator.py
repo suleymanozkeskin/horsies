@@ -43,6 +43,10 @@ from horsies.core.codec.signature_check import (
     check_task_signature,
 )
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.models.retention import (
+    RetentionConfig,
+    derived_queue_class_key,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
@@ -93,6 +97,33 @@ P = ParamSpec('P')
 T = TypeVar('T')
 E = TypeVar('E')
 _UNSET: Final[object] = object()
+
+
+class _UnsetRetention:
+    """No retention choice was made at this send call.
+
+    Retention needs three states where a string default only carries
+    two. `standard_30d` passed explicitly and the parameter omitted are
+    the same string, but they must resolve differently: a queue mapping
+    loses to the explicit choice and wins over the omission. Absence is
+    therefore its own value.
+
+    Typed, unlike the untyped `_UNSET` above it, because these three
+    states are the whole semantics and a checker should reject anything
+    outside them.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return '<no retention choice>'
+
+
+_UNSET_RETENTION: Final[_UnsetRetention] = _UnsetRetention()
+
+# A retention argument as callers may express it: a class key, explicit
+# None for forever, or absence.
+type RetentionChoice = str | None | _UnsetRetention
 
 # Internal retry constants for resend_on_transient_err.
 # 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
@@ -860,7 +891,7 @@ class TaskFunction(Protocol[P, T]):
         *,
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> 'TaskSendOptions[P, T]': ...
 
     @abstractmethod
@@ -1674,7 +1705,7 @@ def create_task_wrapper(
         good_until_override: datetime | None | object,
         *,
         idempotency_key: str | None = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1682,9 +1713,16 @@ def create_task_wrapper(
                 message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
-        retention_error = _validate_retention_class_key(retention_class_key)
-        if retention_error is not None:
-            return Err(retention_error)
+        # Only an explicit key is validated here. A key the mapping
+        # derives is generated from configuration that was already
+        # checked, and validating it against the declared set would
+        # refuse the very classes the mapping exists to create.
+        if not isinstance(retention_class_key, _UnsetRetention):
+            retention_error = _validate_retention_class_key(
+                retention_class_key
+            )
+            if retention_error is not None:
+                return Err(retention_error)
 
         prep = _prepare_send(
             args,
@@ -1699,7 +1737,10 @@ def create_task_wrapper(
                 payload, idempotency_key=idempotency_key
             )
         payload = dataclasses.replace(
-            payload, retention_class_key=retention_class_key
+            payload,
+            retention_class_key=_resolve_retention_choice(
+                retention_class_key, payload.queue_name
+            ),
         )
         return _do_send(task_id, payload)
 
@@ -1709,7 +1750,7 @@ def create_task_wrapper(
         good_until_override: datetime | None | object,
         *,
         idempotency_key: str | None = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendError(
@@ -1717,9 +1758,16 @@ def create_task_wrapper(
                 message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
                 retryable=False,
             ))
-        retention_error = _validate_retention_class_key(retention_class_key)
-        if retention_error is not None:
-            return Err(retention_error)
+        # Only an explicit key is validated here. A key the mapping
+        # derives is generated from configuration that was already
+        # checked, and validating it against the declared set would
+        # refuse the very classes the mapping exists to create.
+        if not isinstance(retention_class_key, _UnsetRetention):
+            retention_error = _validate_retention_class_key(
+                retention_class_key
+            )
+            if retention_error is not None:
+                return Err(retention_error)
 
         prep = _prepare_send(
             args,
@@ -1734,9 +1782,57 @@ def create_task_wrapper(
                 payload, idempotency_key=idempotency_key
             )
         payload = dataclasses.replace(
-            payload, retention_class_key=retention_class_key
+            payload,
+            retention_class_key=_resolve_retention_choice(
+                retention_class_key, payload.queue_name
+            ),
         )
         return await _do_send_async(task_id, payload)
+
+    def _resolve_retention_choice(
+        choice: RetentionChoice, queue_name: str
+    ) -> str | None:
+        """The class key to stamp, given what the caller asked for.
+
+        Precedence, highest first: an explicit argument at the send call
+        (including an explicit `None` for forever and an explicit
+        `standard_30d`), then this queue's `queue_retention` mapping,
+        then the immutable 30-day default.
+
+        Resolution happens once, here, and the result is written into
+        the payload. The payload is the replay envelope, so a retry
+        carries the class the original send chose — editing the mapping
+        governs later sends and never restates the promise already made
+        to a task in flight.
+        """
+        match choice:
+            case _UnsetRetention():
+                return _queue_retention_class(queue_name)
+            case explicit:
+                return explicit
+
+    def _queue_retention_class(queue_name: str) -> str | None:
+        """The class this queue's mapping stands for, read at send time.
+
+        Read through `app` rather than captured at decoration, for the
+        same reason the declared keys are: a task may be defined before
+        the app's config is finalised.
+        """
+        # `app.config` is not statically known here, so the attribute is
+        # checked for what it must be rather than assumed to be it: an
+        # app carrying no retention section has no mapping, and the
+        # default class is the answer.
+        retention = getattr(app.config, 'retention', None)
+        if not isinstance(retention, RetentionConfig):
+            return DEFAULT_RETENTION_CLASS_KEY
+        mapped = retention.queue_retention.get(queue_name, _UNSET_RETENTION)
+        match mapped:
+            case _UnsetRetention():
+                return DEFAULT_RETENTION_CLASS_KEY
+            case None:
+                return None
+            case duration:
+                return derived_queue_class_key(queue_name, duration)
 
     def _validate_retention_class_key(
         retention_class_key: str | None,
@@ -1792,9 +1888,17 @@ def create_task_wrapper(
         a task may be defined before the app's config is finalised.
         """
         retention = getattr(app.config, 'retention', None)
-        if retention is None:
+        if not isinstance(retention, RetentionConfig):
             return frozenset()
-        return frozenset(
+        # Classes the mapping derives are declared too, just not by
+        # hand. Naming one explicitly must be accepted, or the queue
+        # whose mapping created it could not be targeted by key.
+        derived = frozenset(
+            derived_queue_class_key(queue_name, duration)
+            for queue_name, duration in retention.queue_retention.items()
+            if duration is not None
+        )
+        return derived | frozenset(
             declared.key for declared in retention.retention_classes
         )
 
@@ -1916,10 +2020,13 @@ def create_task_wrapper(
             self,
             good_until: datetime | None,
             idempotency_key: str | None,
-            retention_class_key: str | None,
+            retention_class_key: RetentionChoice,
         ) -> None:
             self.good_until = good_until
             self.idempotency_key = idempotency_key
+            # Carried unresolved: `with_options(...)` may be built before
+            # the send that knows which queue it goes to, and absence
+            # must still read as absence when it gets there.
             self.retention_class_key = retention_class_key
 
         def send(
@@ -1966,7 +2073,7 @@ def create_task_wrapper(
         *,
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
-        retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+        retention_class_key: RetentionChoice = _UNSET_RETENTION,
     ) -> TaskSendOptions[P, T]:
         """Set options for one ad-hoc send without changing the task definition.
 
@@ -2149,7 +2256,7 @@ def create_task_wrapper(
             *,
             good_until: datetime | None = None,
             idempotency_key: str | None = None,
-            retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
+            retention_class_key: RetentionChoice = _UNSET_RETENTION,
         ) -> TaskSendOptions[P, T]:
             return with_options(
                 good_until=good_until,
