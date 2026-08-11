@@ -12,6 +12,21 @@ catalog set across every retention class. Accepting a caller-supplied
 manifest was rejected: a caller scoped to one class would silently drop
 every other class's leaves from the function, and the resulting false
 absence would be undetectable at the call site.
+
+The probe list additionally requires each relation to exist. A leaf the
+catalog still calls attached whose relation was dropped out of band would
+otherwise be rendered into the function body, which CREATE accepts and
+execution rejects — on the finalize path, for every queue and class at
+once. Excluding it is honest rather than false absence: a relation that
+does not exist holds no rows to hide. The catalog row is left untouched;
+`CatalogConflictKind` in `outcomes.py` reserves catalog correction to an
+operator, and the exclusion is reported instead.
+
+The manifest table therefore records exactly the probe list and nothing
+else. `references_leaf` answers from it, and `drop_detached_leaf` refuses
+a drop while it answers True — so an unprobed row written here would
+block a legitimate drop on behalf of a reader that never looks at the
+relation.
 """
 
 from __future__ import annotations
@@ -20,7 +35,8 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..names import TASK_LOOKUP_MANIFEST
-from ..partitions.catalog import read_all_attached_leaf_rows
+from ..partitions.catalog import read_manifest_leaf_rows
+from ..partitions.publication import LoaderRepublished
 from .lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
@@ -33,10 +49,21 @@ from .lookup_generation import (
 class StagedLoaderPublisher:
     """Implements the partition manager's `LoaderPublication` protocol."""
 
-    async def republish(self, connection: AsyncConnection) -> None:
-        """Regenerate function and manifest from the full attached set."""
+    async def republish(
+        self, connection: AsyncConnection
+    ) -> LoaderRepublished:
+        """Regenerate function and manifest from the full attached set.
+
+        Leaves the manager still believes attached whose relation no
+        longer exists are excluded from the probe list and returned, so
+        the regeneration is self-correcting: republishing over a wound
+        heals it in one pass instead of rebuilding the same broken
+        function.
+        """
+        selection = await read_manifest_leaf_rows(connection)
         manifest = manifest_from_catalog(
-            await read_all_attached_leaf_rows(connection)
+            selection.attached,
+            absent_relations=selection.absent_relations,
         )
         await connection.execute(text(render_staged_lookup_function(manifest)))
         # PostgreSQL overloads by signature: the provenance function's
@@ -56,6 +83,9 @@ class StagedLoaderPublisher:
             text(render_staged_detail_function(manifest))
         )
         await _rewrite_manifest_table(connection, manifest)
+        return LoaderRepublished(
+            absent_leaves=tuple(sorted(selection.absent_relations))
+        )
 
     async def references_leaf(
         self,
@@ -77,6 +107,38 @@ class StagedLoaderPublisher:
             )
         ).scalar_one()
         return bool(referenced)
+
+
+async def published_manifest_absent_leaves(
+    connection: AsyncConnection,
+) -> tuple[str, ...]:
+    """Published probe entries whose relation no longer resolves.
+
+    The divergence trigger for maintenance. Republication is otherwise
+    driven by leaf creation, and a leaf vanishing creates nothing — so
+    without this probe the broken function stays published until some
+    unrelated change forces a regeneration.
+
+    One statement, and empty on a healthy fleet. It answers a different
+    question from `republish`'s own return: this names what the CURRENTLY
+    PUBLISHED function probes and cannot reach, which includes leaves the
+    catalog has since stamped dropped; that names catalog rows still
+    called attached whose relation is gone, which is the operator-visible
+    anomaly.
+    """
+    rows = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT leaf_name
+                FROM {TASK_LOOKUP_MANIFEST}
+                WHERE to_regclass(leaf_name) IS NULL
+                ORDER BY leaf_name
+                """
+            )
+        )
+    ).all()
+    return tuple(str(row.leaf_name) for row in rows)
 
 
 async def _rewrite_manifest_table(

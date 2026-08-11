@@ -249,6 +249,59 @@ failed. Two properties follow, and both are the point:
   whether the owner could run, so a pass that cannot do its job must
   never read the same as one that succeeded.
 
+### A partition dropped outside the library
+
+Dropping a history partition directly — `DROP TABLE` against a leaf, or
+a teardown that removes relations before the readers stop naming them —
+leaves the leaf catalog saying the partition is attached while the
+relation is gone. The next maintenance pass detects the divergence,
+regenerates the readers without that partition, and reports it:
+
+```
+Partition coverage: cataloged leaves have no relation and were excluded
+from the staged readers: horsies_task_history_standard_30d_2026_08_11.
+Reads and terminalization are restored; the records those leaves held
+are gone. The catalog rows are kept as evidence and resolving them is
+an operator decision.
+```
+
+The name also appears under `absent_leaves` on the coverage health
+surface.
+
+What the pass does and does not restore:
+
+| | State |
+|---|---|
+| Reads and terminalization | Restored automatically on the next pass |
+| Records the partition held | Gone; they were in the dropped relation |
+| Every other retention class | Unaffected |
+
+One case needs the operator before coverage resumes. A partition inside
+the coverage horizon — today's, or one of the next
+`history_leaf_horizon_days` — cannot be recreated while its catalog row
+survives, because the row and the database disagree about whether the
+partition exists. That class stops gaining new partitions until the
+disagreement is resolved. A partition older than the horizon is outside
+what coverage creates, so nothing is blocked.
+
+The library never resolves the disagreement on its own: a partition that
+vanished unexpectedly is a fact an operator needs to see, and repairing
+the catalog silently would destroy the evidence.
+
+To resume coverage for the class, confirm the loss was intended, then
+delete the catalog row for the leaf whose relation is gone:
+
+```sql
+DELETE FROM horsies_task_history_leaf_catalog
+WHERE leaf_name = 'horsies_task_history_standard_30d_2026_08_11';
+```
+
+The next pass creates the class's partitions again from its horizon.
+Records that lived in the dropped partition are not recoverable.
+
+To remove partitions without entering this state, delete the catalog
+rows first, let the readers republish, and drop the relations last.
+
 ## Row-delete sweep
 
 | Setting | Default | Controls |

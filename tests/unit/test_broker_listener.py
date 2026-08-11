@@ -1403,6 +1403,7 @@ def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None
         created_history_leaves=0,
         created_heartbeat_leaves=0,
         republished=False,
+        absent_leaves=(),
         heartbeat_covered_now=True,
         history_covered_through=datetime(2026, 1, 2, tzinfo=timezone.utc),
         heartbeats_covered_through=datetime(

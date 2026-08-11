@@ -32,6 +32,31 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A leaf the catalog names and the database no longer has stops failing
+  every finalize.** The staged history readers are generated from the leaf
+  catalog, and PostgreSQL does not validate PL/pgSQL bodies at `CREATE`, so a
+  reader naming a relation dropped out of band built successfully and failed at
+  execution — inside the provenance probe on the terminalization path, which
+  made one missing leaf fail every finalize in every queue and every retention
+  class. The probe list is now filtered by relation existence when the manifest
+  is built, so republication is self-correcting, and the maintenance pass
+  republishes when the published readers name a relation that no longer
+  resolves rather than only when a leaf was created. The vanished leaf is named
+  on the coverage health surface and logged at warning level. The catalog row
+  is left untouched: a leaf that disappeared behind the manager's back is an
+  operator's decision, and stamping it dropped would erase the evidence. The
+  history that leaf held is unreadable. A leaf inside the coverage horizon
+  cannot be recreated while its catalog row survives, so that class gains no
+  new partitions until an operator resolves the conflict; other classes are
+  unaffected.
+
+- **A destroyed leaf's tasks are no longer reported as too old to keep.**
+  `predates_retained_floor`, which reaches the rerun surface, is derived from
+  the attached leaf catalog rather than from the published probe list. The two
+  differ by exactly the leaves whose relation was dropped out of band, and
+  those leaves did retain history until someone removed it, so answering from
+  the probe list would present an accidental drop as ordinary ageing.
+
 - **Retention configuration errors carry their own error code.** Every refusal
   from `AppConfig.retention` — an unusable queue name or class key, a
   non-positive or fractional duration, a reserved or duplicated class key, a
@@ -43,6 +68,7 @@ there is no migration contract between pre-1.0 versions.
   `CONFIG_INVALID_QUEUE_MODE` (`HRS-200`). Setting a moved field on
   `RecoveryConfig` still reports `CONFIG_INVALID_RECOVERY`: that refusal belongs
   to the object that no longer has the field.
+
 
 - **Per-queue retention now applies on every enqueue path.** `.schedule()`,
   `.schedule_async()`, a `TaskSchedule` firing on its cron, and a workflow
