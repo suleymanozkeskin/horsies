@@ -27,6 +27,11 @@ The limit that follows, stated so it is not mistaken for coverage: a
 correction applied to one file's already-released section and not the
 other's is NOT caught. Only Unreleased bodies and the released version
 set are guarded.
+
+Not hypothetical: within a day of landing, this guard caught a
+mis-resolved cherry-pick conflict that had taken one branch's whole
+changelog and silently dropped the entries of a release merged in
+between — on the branch carrying this very extension.
 """
 
 from __future__ import annotations
