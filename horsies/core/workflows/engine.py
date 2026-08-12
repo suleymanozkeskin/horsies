@@ -2722,7 +2722,7 @@ async def on_subworkflow_complete(
     # would silently fail the parent node of a still-live child. All call
     # sites gate on terminal children, so this only fires on corrupt rows.
     match child_status:
-        case 'COMPLETED' | 'FAILED' | 'CANCELLED':
+        case 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'EXPIRED':
             pass
         case _:
             logger.error(

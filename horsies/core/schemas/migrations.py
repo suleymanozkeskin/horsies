@@ -303,7 +303,13 @@ from sqlalchemy import text
 #      index names differ from the canonical derivation, and a name
 #      guard would either miss them or create duplicates.
 
-SCHEMA_VERSION = 34
+# v35: durable offline-cutover completion marker, plus RANGE subpartitioning
+#      for the forever history class. The migration version and independently
+#      operated cutover are separate state dimensions: an upgraded pre-cutover
+#      database records v35 but does not receive the completion row. Fresh and
+#      already-cut-over databases receive it only after structural validation.
+
+SCHEMA_VERSION = 35
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

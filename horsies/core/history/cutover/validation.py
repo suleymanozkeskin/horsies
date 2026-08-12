@@ -14,10 +14,11 @@ from dataclasses import dataclass
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..names import TASK_HISTORY_PARENT
+from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
 from ..terminalization.live_cutover import CUTOVER_COLUMNS
 from ..terminalization.move import LIVE_TASKS
 from .relocation import RELOCATION_LEDGER
+from .state import cutover_complete
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +48,25 @@ _UUID_COLUMNS: tuple[tuple[str, str], ...] = (
 async def validate_cutover(
     connection: AsyncConnection,
 ) -> CutoverValidated | CutoverInvalid:
+    structural = await validate_cutover_structure(connection)
+    if isinstance(structural, CutoverInvalid):
+        return structural
+    if not await cutover_complete(connection):
+        return CutoverInvalid(
+            violations=('the durable cutover completion marker is absent',)
+        )
+    return structural
+
+
+async def validate_cutover_structure(
+    connection: AsyncConnection,
+) -> CutoverValidated | CutoverInvalid:
+    """Validate the frozen posture without consulting its durable marker.
+
+    Schema migration uses this before writing the marker for a fresh or
+    already-cut-over database. The operator-facing validator additionally
+    requires the marker through ``validate_cutover`` above.
+    """
     violations: list[str] = []
 
     terminal = int(
@@ -125,6 +145,48 @@ async def validate_cutover(
     )
     if not heartbeats_partitioned:
         violations.append('the heartbeat shape is not partitioned')
+
+    forever_partitioned = bool(
+        (
+            await connection.execute(
+                text(
+                    "SELECT relkind = 'p' FROM pg_class "
+                    'WHERE oid = to_regclass(:relation)'
+                ),
+                {'relation': TASK_HISTORY_FOREVER},
+            )
+        ).scalar_one_or_none()
+    )
+    if not forever_partitioned:
+        violations.append('the forever history class is not RANGE-partitioned')
+    else:
+        uncataloged_forever_leaves = int(
+            (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT count(*)
+                        FROM pg_partition_tree(
+                            CAST(:relation AS regclass)
+                        ) AS tree
+                        JOIN pg_class AS child ON child.oid = tree.relid
+                        LEFT JOIN horsies_task_history_leaf_catalog AS catalog
+                          ON catalog.leaf_name = child.relname
+                         AND catalog.detached_at IS NULL
+                         AND catalog.dropped_at IS NULL
+                        WHERE tree.isleaf
+                          AND catalog.leaf_name IS NULL
+                        """
+                    ),
+                    {'relation': TASK_HISTORY_FOREVER},
+                )
+            ).scalar_one()
+        )
+        if uncataloged_forever_leaves:
+            violations.append(
+                f'{uncataloged_forever_leaves} forever history leaves '
+                'are absent from the leaf catalog'
+            )
 
     totals = (
         await connection.execute(

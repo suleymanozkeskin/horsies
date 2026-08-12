@@ -106,7 +106,9 @@ CREATE_WORKFLOW_NOTIFY_FUNCTION_SQL = text("""
     BEGIN
         IF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
             -- Workflow completion notifications
-            IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED') THEN
+            IF NEW.status IN (
+                'COMPLETED', 'FAILED', 'CANCELLED', 'PAUSED', 'EXPIRED'
+            ) THEN
                 PERFORM pg_notify('workflow_done', NEW.id::text);
             END IF;
         END IF;

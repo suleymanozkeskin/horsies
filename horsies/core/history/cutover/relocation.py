@@ -58,13 +58,20 @@ envelope columns, and the history insert routes by terminal day.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
 from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import TASK_HISTORY_PARENT
+from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
+from ..partitions.catalog import daily_leaf_name, read_retention_class
+from ..partitions.manager import create_daily_leaf
+from ..partitions.publication import UnpublishedLoader
+from ..reads.publisher import StagedLoaderPublisher
 from ..terminalization.move import (
     ATTEMPT_ENCODER_FUNCTION,
     LIVE_ATTEMPTS,
@@ -260,6 +267,8 @@ async def relocate_terminal_batch(
             rows_relocated=int(totals.rows),
         )
 
+    await _ensure_batch_leaf_coverage(connection, task_ids=task_ids)
+
     inserted = (
         await connection.execute(
             text(
@@ -336,3 +345,76 @@ async def relocate_terminal_batch(
         rows_relocated=len(task_ids),
         legacy_kind_rows=legacy_kind_rows,
     )
+
+
+async def _ensure_batch_leaf_coverage(
+    connection: AsyncConnection,
+    *,
+    task_ids: list[str],
+) -> None:
+    """Ensure every destination day in one offline relocation batch.
+
+    The relocation projection maps a missing legacy class to ``forever``. The
+    coverage query applies that same mapping, so its distinct class/day set is
+    exactly the partition set this batch's insert can reach. Publication occurs
+    once after all creations, avoiding a full manifest rewrite per leaf.
+    """
+    destinations = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT COALESCE(
+                           retention_class_key, '{FOREVER_CLASS_KEY}'
+                       ) AS class_key,
+                       date_trunc('day', terminal_at, 'UTC') AS lower_anchor
+                FROM {LIVE_TASKS}
+                WHERE id::text = ANY(CAST(:task_ids AS text[]))
+                GROUP BY COALESCE(
+                             retention_class_key, '{FOREVER_CLASS_KEY}'
+                         ),
+                         date_trunc('day', terminal_at, 'UTC')
+                ORDER BY class_key, lower_anchor
+                """
+            ),
+            {'task_ids': task_ids},
+        )
+    ).all()
+    created = False
+    for destination in destinations:
+        class_key = str(destination.class_key)
+        lower = destination.lower_anchor
+        retention_class = await read_retention_class(connection, class_key)
+        if retention_class is None:
+            raise RuntimeError(
+                f'relocation destination class {class_key!r} is not registered'
+            )
+        parent_name = (
+            'horsies_task_history_forever'
+            if class_key == FOREVER_CLASS_KEY
+            else retention_class.finite_parent_name
+        )
+        if parent_name is None:
+            raise RuntimeError(
+                f'relocation destination class {class_key!r} has no RANGE parent'
+            )
+        leaf = LeafRef(
+            leaf_name=daily_leaf_name(parent_name, lower),
+            class_key=class_key,
+            bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
+        )
+        outcome = await create_daily_leaf(
+            connection,
+            CreateDailyHistoryLeaf(leaf=leaf),
+            UnpublishedLoader(),
+        )
+        match outcome:
+            case LeafCreated():
+                created = True
+            case LeafAlreadyConformant() | LeafIndexRepaired():
+                pass
+            case _:
+                raise RuntimeError(
+                    f'relocation destination leaf refused: {outcome!r}'
+                )
+    if created:
+        await StagedLoaderPublisher().republish(connection)

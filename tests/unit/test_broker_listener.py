@@ -1444,6 +1444,10 @@ class TestCallerUnwrapContract:
             patch(
                 'horsies.core.brokers.postgres.PostgresListener'
             ) as mock_listener_cls,
+            patch(
+                'horsies.core.brokers.postgres.cutover_complete',
+                new=AsyncMock(return_value=True),
+            ),
         ):
             mock_engine.return_value = MagicMock()
             mock_engine.return_value.dispose = AsyncMock()

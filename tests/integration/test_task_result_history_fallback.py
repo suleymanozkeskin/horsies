@@ -198,5 +198,12 @@ class TestHistoryFallback:
             outcome = await broker.get_raw_result_record_async(completed)
             assert is_err(outcome)
             assert 'digest mismatch' in outcome.err_value.message
+
+            info = await broker.get_task_info_async(
+                completed, include_result=True
+            )
+            assert is_err(info)
+            assert info.err_value.code.value == 'INVALID_JSON_PAYLOAD'
+            assert 'failed validation' in info.err_value.message
         finally:
             await broker.close_async()

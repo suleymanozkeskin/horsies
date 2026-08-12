@@ -74,10 +74,14 @@ async def demote_to_upgraded_world(connection: AsyncConnection) -> None:
     re-added on the varchar shape, heartbeats flat. Not a production
     path; the mirror of the emission suite's rewind."""
     from horsies.core.history.cutover.program import uninstall_programs
+    from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
 
     from tests.integration.history_seeding import relax_cutover_columns
 
     await uninstall_programs(connection)
+    await connection.execute(
+        text(f'DELETE FROM {CUTOVER_STATE_TABLE}')
+    )
     await relax_cutover_columns(connection)
     await connection.execute(
         text(

@@ -82,7 +82,8 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
     """
     config = PostgresConfig(database_url=DB_URL)
     brk = PostgresBroker(config)
-    await brk.ensure_schema_initialized()
+    initialized = await brk.ensure_schema_initialized()
+    assert initialized.is_ok(), initialized
     from tests.integration.history_seeding import ensure_history_seedable
 
     async with brk.async_engine.begin() as connection:

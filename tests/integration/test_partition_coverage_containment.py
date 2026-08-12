@@ -10,19 +10,10 @@ The trigger is planted the only way it can now occur: written straight to
 `horsies_retention_classes`, since configuration refuses the key. That is
 also the shape a deployment would be left in by a version that accepted it.
 
-ORDER-DEPENDENT BY CONSTRUCTION. Coverage is idempotent, so a pass only
-proves it served a class when that pass is the one that owed the leaf.
-The tests counting the SHARED default class therefore climb: horizon 3,
-then 5. Running this file out of definition order — `-p xdist`,
-`--random-order` — breaks that, and it breaks LOUDLY: each asserts its
-premise first and fails saying the class already holds more leaves than
-its horizon owes, rather than reading as a containment regression.
-
-A test that registers its OWN class is exempt, because it starts from
-zero however the file is ordered — which is why the survivor test at the
-foot of this file can use a lower horizon than the tests above it. Give
-a new test either its own class or a horizon above every other test
-counting the default one.
+Coverage is idempotent, so a pass proves it served a class only when that
+pass owes the class a leaf. Each count-based test registers its own passing
+class. The premise is therefore independent of definition order, earlier
+suite runs against the same database, and parallel collection.
 """
 
 from __future__ import annotations
@@ -64,6 +55,8 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 # 'a' so it sorts BEFORE the default class, which is the whole point —
 # the class denied coverage must be one the loop reaches afterwards.
 _UNUSABLE_KEY = 'a' + 'k' * 34
+_RAISE_SURVIVOR_KEY = 'z_raise_survivor_7d'
+_RETURN_SURVIVOR_KEY = 'z_return_survivor_7d'
 
 
 async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
@@ -77,6 +70,31 @@ async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
                 {'key': class_key},
             )
         ).scalar_one()
+
+
+async def _register_owned_class(broker: PostgresBroker, class_key: str) -> None:
+    await _forget_owned_class(broker, class_key)
+    async with broker.async_engine.begin() as connection:
+        registration = await register_finite_retention_class(
+            connection,
+            class_key=class_key,
+            duration=timedelta(days=7),
+        )
+    assert isinstance(registration, ClassRegistered), registration
+
+
+async def _forget_owned_class(broker: PostgresBroker, class_key: str) -> None:
+    parent = finite_class_parent_name(class_key)
+    async with broker.async_engine.begin() as connection:
+        await connection.execute(text(f'DROP TABLE IF EXISTS {parent} CASCADE'))
+        await connection.execute(
+            text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
+            {'key': class_key},
+        )
+        await connection.execute(
+            text(f'DELETE FROM {RETENTION_CLASSES} WHERE class_key = :key'),
+            {'key': class_key},
+        )
 
 
 async def _plant_unusable_class(broker: PostgresBroker) -> None:
@@ -132,23 +150,14 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         )
     assert isinstance(baseline, CoverageEnsured), baseline
 
-    # Its own horizon, lower than the returned-refusal test's, because
-    # coverage is idempotent: two tests sharing a horizon means whichever
-    # runs second is owed nothing and its count proves nothing. The
-    # premise is asserted rather than assumed, so a database left at a
-    # higher horizon by an earlier run fails here saying so instead of
-    # looking like a containment regression.
+    await _register_owned_class(broker, _RAISE_SURVIVOR_KEY)
     horizon = 3
     owed = horizon + 1
-    before = await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)
-    assert before < owed, (
-        f'premise broken: the default class already holds {before} leaves '
-        f'against a horizon of {horizon}, so this pass owes it nothing'
-    )
+    assert await _leaf_count(broker, _RAISE_SURVIVOR_KEY) == 0
 
     await _plant_unusable_class(broker)
     try:
-        # The default class is OWED a leaf and can only receive it if the
+        # The owned class is OWED leaves and can only receive them if the
         # loop survived the class sorting ahead of it, so the count is
         # the containment evidence.
         async with broker.async_engine.begin() as connection:
@@ -165,12 +174,13 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         assert _UNUSABLE_KEY in outcome.refusal, (
             f'the refusal must name the class that failed: {outcome!r}'
         )
-        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) == owed, (
+        assert await _leaf_count(broker, _RAISE_SURVIVOR_KEY) == owed, (
             'a class sorting after the unusable one was denied its leaf; '
             'the failure is still taking the rest of the pass with it'
         )
     finally:
         await _forget_unusable_class(broker)
+        await _forget_owned_class(broker, _RAISE_SURVIVOR_KEY)
 
 
 # A key that sorts BEFORE the default class, as every queue-derived key
@@ -289,19 +299,10 @@ async def test_a_returned_refusal_is_contained_like_a_raise(
     never reaches an exception handler, so the pass used to return on
     the first one and deny coverage to every class sorting after it.
     """
-    # A horizon no other test in this file reaches. Coverage is
-    # idempotent, so "the count went up" is only evidence when this pass
-    # is the one that owes a leaf; sharing a horizon with the test above
-    # meant it had already been created and this one proved nothing.
+    await _register_owned_class(broker, _RETURN_SURVIVOR_KEY)
     horizon = 5
     owed = horizon + 1
-
-    before = await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)
-    assert before < owed, (
-        f'premise broken: the default class already holds {before} leaves '
-        f'against a horizon of {horizon}, so this pass owes it nothing and '
-        'the count cannot show whether it was served'
-    )
+    assert await _leaf_count(broker, _RETURN_SURVIVOR_KEY) == 0
 
     squatter = await _plant_class_with_squatted_leaf(broker)
     try:
@@ -314,16 +315,17 @@ async def test_a_returned_refusal_is_contained_like_a_raise(
 
         assert isinstance(outcome, CoverageEnsureFailed), outcome
         assert _REFUSING_KEY in outcome.refusal, outcome
-        assert await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY) == owed, (
+        survivor_count = await _leaf_count(broker, _RETURN_SURVIVOR_KEY)
+        assert survivor_count == owed, (
             'a returned refusal still denied coverage to the class after '
-            f'it: the default class holds '
-            f'{await _leaf_count(broker, DEFAULT_RETENTION_CLASS_KEY)} '
+            f'it: the owned class holds {survivor_count} '
             f'leaves, not the {owed} a horizon of {horizon} owes it'
         )
     finally:
         await _drop_if_present(broker, squatter)
         await _drop_if_present(broker, finite_class_parent_name(_REFUSING_KEY))
         await _forget_refusing_class(broker)
+        await _forget_owned_class(broker, _RETURN_SURVIVOR_KEY)
 
 
 async def test_heartbeat_coverage_survives_a_failing_history_class(

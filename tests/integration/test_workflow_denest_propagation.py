@@ -185,6 +185,45 @@ async def test_driver_advances_parent_from_already_terminal_child(
 
 
 @pytest.mark.asyncio
+async def test_driver_propagates_expired_child_as_parent_failure(
+    engine: AsyncEngine, session: AsyncSession,
+) -> None:
+    parent_id = await _insert_workflow(session, status='RUNNING')
+    child_id = await _insert_workflow(
+        session,
+        status='EXPIRED',
+        parent_workflow_id=parent_id,
+        parent_task_index=0,
+    )
+    await _insert_subworkflow_node(
+        session,
+        workflow_id=parent_id,
+        task_index=0,
+        sub_workflow_id=child_id,
+    )
+    await session.commit()
+
+    worker = _make_worker(engine)
+    try:
+        await worker._drive_parent_propagations([child_id])
+
+        assert await _statuses(session, parent_id) == ('FAILED', 'FAILED')
+        summary = (
+            await session.execute(
+                text(
+                    'SELECT sub_workflow_summary '
+                    'FROM horsies_workflow_tasks '
+                    'WHERE workflow_id = :wf AND task_index = 0'
+                ),
+                {'wf': parent_id},
+            )
+        ).scalar_one()
+        assert _load_json(summary)['status'] == 'EXPIRED'
+    finally:
+        await _cleanup(session, [child_id, parent_id])
+
+
+@pytest.mark.asyncio
 async def test_outputless_child_propagates_as_none_output(
     engine: AsyncEngine, session: AsyncSession,
 ) -> None:

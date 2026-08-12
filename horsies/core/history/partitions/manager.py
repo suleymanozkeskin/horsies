@@ -34,7 +34,11 @@ from ..commands import (
     LeafRef,
 )
 from ..errors import HistoryParentAbsent
-from ..names import LEAF_CATALOG, WORKFLOW_PHASE2_PENDING
+from ..names import (
+    LEAF_CATALOG,
+    TASK_HISTORY_FOREVER,
+    WORKFLOW_PHASE2_PENDING,
+)
 from ..outcomes import (
     CatalogConflictKind,
     ClassIntervalMismatch,
@@ -86,6 +90,21 @@ from datetime import timedelta
 
 
 _DAILY = timedelta(days=1)
+
+
+def _history_class_parent(
+    class_key: str, retention_class: RetentionClassRow
+) -> str | None:
+    """Return the RANGE parent for a history class.
+
+    Finite classes persist their generated parent name. ``forever`` is the
+    one reserved unbounded-retention class; its metadata deliberately has no
+    duration, while its physical LIST child is a RANGE parent from schema
+    v35 onward.
+    """
+    if class_key == 'forever' and retention_class.duration is None:
+        return TASK_HISTORY_FOREVER
+    return retention_class.finite_parent_name
 
 
 async def inspect_leaf(
@@ -211,8 +230,11 @@ async def create_daily_leaf(
     match retention_class:
         case None:
             return RetentionClassAbsent(class_key=leaf.class_key)
-        case RetentionClassRow(duration=None):
-            return ForeverClassLeaf(class_key=leaf.class_key)
+        case RetentionClassRow(
+            duration=None,
+            partition_interval=None,
+        ) if leaf.class_key == 'forever':
+            pass
         case RetentionClassRow(partition_interval=interval) if interval != _DAILY:
             return ClassIntervalMismatch(
                 class_key=leaf.class_key,
@@ -222,9 +244,9 @@ async def create_daily_leaf(
             )
         case RetentionClassRow():
             pass
-    parent_name = retention_class.finite_parent_name
+    parent_name = _history_class_parent(leaf.class_key, retention_class)
     if parent_name is None:
-        raise AssertionError('finite class invariant enforced by the catalog reader')
+        return ForeverClassLeaf(class_key=leaf.class_key)
 
     await lock_leaf_for_transaction(
         connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
@@ -369,8 +391,11 @@ async def ensure_leaf_coverage(
     match retention_class:
         case None:
             return (RetentionClassAbsent(class_key=command.class_key),)
-        case RetentionClassRow(duration=None):
-            return (ForeverClassLeaf(class_key=command.class_key),)
+        case RetentionClassRow(
+            duration=None,
+            partition_interval=None,
+        ) if command.class_key == 'forever':
+            pass
         case RetentionClassRow(partition_interval=interval) if interval != _DAILY:
             return (
                 ClassIntervalMismatch(
@@ -382,9 +407,9 @@ async def ensure_leaf_coverage(
             )
         case RetentionClassRow():
             pass
-    parent_name = retention_class.finite_parent_name
+    parent_name = _history_class_parent(command.class_key, retention_class)
     if parent_name is None:
-        raise AssertionError('finite class invariant enforced by the catalog reader')
+        return (ForeverClassLeaf(class_key=command.class_key),)
 
     now = await database_now(connection)
     today_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)

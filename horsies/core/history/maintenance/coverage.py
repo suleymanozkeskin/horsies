@@ -38,6 +38,7 @@ from ..ddl.classes import (
     DEFAULT_RETENTION_DURATION,
     register_finite_retention_class,
 )
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..heartbeats.partitioning import (
     EnsureHeartbeatCoverage,
     HeartbeatClassRegistered,
@@ -122,18 +123,21 @@ async def heartbeat_coverage_present(connection: AsyncConnection) -> bool:
     return bool(present)
 
 
-async def _finite_class_keys(connection: AsyncConnection) -> list[str]:
+async def _history_class_keys(connection: AsyncConnection) -> list[str]:
     rows = (
         await connection.execute(
             text(
                 f"""
                 SELECT class_key FROM {RETENTION_CLASSES}
-                WHERE duration IS NOT NULL
+                WHERE (duration IS NOT NULL OR class_key = :forever_class)
                   AND class_key <> :heartbeat_class
                 ORDER BY class_key
                 """
             ),
-            {'heartbeat_class': HEARTBEAT_CLASS_KEY},
+            {
+                'heartbeat_class': HEARTBEAT_CLASS_KEY,
+                'forever_class': FOREVER_CLASS_KEY,
+            },
         )
     ).all()
     return [row.class_key for row in rows]
@@ -249,7 +253,7 @@ async def ensure_partition_coverage(
     # Refusals are RETURNED rather than raised, so they are collected
     # here too. Both kinds name their class; neither stops the loop.
     failures: list[str] = []
-    for class_key in await _finite_class_keys(connection):
+    for class_key in await _history_class_keys(connection):
         try:
             # The savepoint contains DATABASE ERRORS -- the
             # transaction-aborting kind that would raise the pass out
@@ -378,9 +382,8 @@ async def ensure_partition_coverage(
 class StartupCoverageRefused:
     """The worker must not start: no heartbeat leaf covers now.
 
-    Raised as a hard startup error by the worker — starting anyway
-    guarantees the first RUNNING transition fails on a missing
-    heartbeat partition.
+    Raised as a hard startup error by the worker — starting anyway guarantees
+    the first RUNNING transition fails on a missing heartbeat partition.
     """
 
     outcome: CoverageOutcome
@@ -393,7 +396,12 @@ async def ensure_startup_coverage(
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]] = (),
 ) -> CoverageOutcome | StartupCoverageRefused:
-    """The worker-startup ensure: fatal exactly when now is uncovered."""
+    """The worker-startup ensure: fatal exactly when now is uncovered.
+
+    A ``CoverageEnsureFailed`` report can describe one contained history
+    class after heartbeat coverage and reader republication succeeded. That
+    report remains non-fatal so unaffected classes retain partial availability.
+    """
     outcome = await ensure_partition_coverage(
         connection,
         history_horizon_days=history_horizon_days,

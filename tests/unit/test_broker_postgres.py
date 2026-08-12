@@ -317,6 +317,15 @@ class TestPostgresBrokerPgBouncerWiring:
             ) as mock_engine,
             patch('horsies.core.brokers.postgres.async_sessionmaker'),
             patch('horsies.core.brokers.postgres.PostgresListener'),
+            patch(
+                'horsies.core.history.partitions.forever.'
+                'ensure_forever_range_partitioning',
+                new=AsyncMock(return_value=0),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.cutover_complete',
+                new=AsyncMock(return_value=True),
+            ),
         ):
             config = PostgresConfig(
                 database_url=database_url,
@@ -347,6 +356,7 @@ class TestPostgresBrokerPgBouncerWiring:
         begin_ctx.__aenter__ = AsyncMock(return_value=conn)
         begin_ctx.__aexit__ = AsyncMock(return_value=None)
         engine.begin.return_value = begin_ctx
+        engine.connect.return_value = begin_ctx
 
         with (
             patch(
@@ -354,6 +364,15 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch('horsies.core.brokers.postgres.async_sessionmaker'),
             patch('horsies.core.brokers.postgres.PostgresListener'),
+            patch(
+                'horsies.core.brokers.postgres.cutover_complete',
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                'horsies.core.history.partitions.forever.'
+                'ensure_forever_range_partitioning',
+                new=AsyncMock(return_value=0),
+            ),
         ):
             config = PostgresConfig(
                 database_url='postgresql+psycopg://u:p@localhost/db',
@@ -399,6 +418,15 @@ class TestPostgresBrokerPgBouncerWiring:
             ),
             patch('horsies.core.brokers.postgres.async_sessionmaker'),
             patch('horsies.core.brokers.postgres.PostgresListener'),
+            patch(
+                'horsies.core.history.partitions.forever.'
+                'ensure_forever_range_partitioning',
+                new=AsyncMock(return_value=0),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.cutover_complete',
+                new=AsyncMock(return_value=True),
+            ),
         ):
             config = PostgresConfig(
                 database_url='postgresql+psycopg://u:p@pooler:6432/db',
@@ -2760,6 +2788,7 @@ class TestSchemaVersionInitialization:
         begin_ctx.__aenter__ = AsyncMock(return_value=conn)
         begin_ctx.__aexit__ = AsyncMock(return_value=None)
         engine.begin.return_value = begin_ctx
+        engine.connect.return_value = begin_ctx
 
         with (
             patch(
@@ -2768,6 +2797,10 @@ class TestSchemaVersionInitialization:
             ),
             patch('horsies.core.brokers.postgres.async_sessionmaker'),
             patch('horsies.core.brokers.postgres.PostgresListener'),
+            patch(
+                'horsies.core.brokers.postgres.cutover_complete',
+                new=AsyncMock(return_value=True),
+            ),
         ):
             broker = PostgresBroker(
                 PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
@@ -2784,6 +2817,40 @@ class TestSchemaVersionInitialization:
             for call in conn.execute.await_args_list
         )
         conn.run_sync.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_future_schema_version_is_refused(self) -> None:
+        from horsies.core.schemas.migrations import SCHEMA_VERSION
+
+        broker = _make_broker()
+        engine = MagicMock()
+        broker._read_schema_version_if_exists = AsyncMock(
+            return_value=SCHEMA_VERSION + 1
+        )
+        broker._run_schema_migrations_with_retry = AsyncMock()
+
+        with pytest.raises(RuntimeError, match='newer than this build supports'):
+            await broker._maybe_run_schema_init(engine)
+
+        broker._run_schema_migrations_with_retry.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_read_only_broker_leaves_schema_compatibility_to_probe(self) -> None:
+        broker = _make_broker()
+        engine = MagicMock()
+        broker.run_schema_migrations = False
+        broker._read_schema_version_if_exists = AsyncMock(return_value=0)
+        broker._run_schema_migrations_with_retry = AsyncMock()
+
+        marker_probe = AsyncMock(return_value=False)
+        with patch(
+            'horsies.core.brokers.postgres.cutover_complete',
+            new=marker_probe,
+        ):
+            await broker._maybe_run_schema_init(engine)
+
+        broker._run_schema_migrations_with_retry.assert_not_awaited()
+        marker_probe.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_schema_version_table_skips_version_read(self) -> None:
@@ -2831,7 +2898,12 @@ class TestSchemaVersionInitialization:
         engine.begin.return_value = begin_ctx
 
         broker = _make_broker()
-        await broker._run_schema_migrations(engine)
+        with patch(
+            'horsies.core.history.partitions.forever.'
+            'ensure_forever_range_partitioning',
+            new=AsyncMock(return_value=0),
+        ):
+            await broker._run_schema_migrations(engine)
 
         calls = conn.execute.await_args_list
         lock_indices = [

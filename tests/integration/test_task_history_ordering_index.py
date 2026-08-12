@@ -45,11 +45,10 @@ from horsies.core.history.reads.pages import (
     history_page_statement,
     history_sort_expression,
 )
-from horsies.core.history.names import TASK_HISTORY_FOREVER
-
 from tests.integration.task_history_harness import (
     INSERT_HISTORY_ROW_SQL,
     HistorySchema,
+    current_forever_leaf,
     day_bounds,
     frozen_history_row,
     register_class,
@@ -67,18 +66,27 @@ CLASS_KEY = 'it_ordering_idx'
 history_schema = task_history_schema_fixture('task_history_it_ordering_idx')
 
 
-def _leaf_ref(parent_name: str, lower: datetime) -> LeafRef:
+def _leaf_ref(
+    parent_name: str,
+    lower: datetime,
+    *,
+    class_key: str = CLASS_KEY,
+) -> LeafRef:
     return LeafRef(
         leaf_name=daily_leaf_name(parent_name, lower),
-        class_key=CLASS_KEY,
+        class_key=class_key,
         bounds=LeafBounds(lower=lower, upper=lower + timedelta(days=1)),
     )
 
 
 async def _create_leaf(
-    connection: AsyncConnection, parent_name: str, lower: datetime
+    connection: AsyncConnection,
+    parent_name: str,
+    lower: datetime,
+    *,
+    class_key: str = CLASS_KEY,
 ) -> LeafRef:
-    ref = _leaf_ref(parent_name, lower)
+    ref = _leaf_ref(parent_name, lower, class_key=class_key)
     outcome = await create_daily_leaf(
         connection, CreateDailyHistoryLeaf(leaf=ref), UnpublishedLoader()
     )
@@ -87,14 +95,15 @@ async def _create_leaf(
 
 
 class TestLeafBirth:
-    """Forever and daily leaves are born with the index."""
+    """Forever and finite daily leaves are born with the index."""
 
     async def test_forever_leaf_carries_the_ordering_index(
         self, history_schema: HistorySchema
     ) -> None:
         async with history_schema.engine.connect() as connection:
+            forever_leaf = await current_forever_leaf(connection)
             assert await read_leaf_ordering_index_exists(
-                connection, TASK_HISTORY_FOREVER
+                connection, forever_leaf
             )
 
     async def test_created_daily_leaf_carries_the_ordering_index(
@@ -170,7 +179,7 @@ class TestDefaultSortPlan:
     ) -> None:
         """No Sort node above the append; backward index scans below it.
 
-        Seeds two populated leaves — the forever leaf and one daily
+        Seeds two populated leaves — one forever leaf and one daily
         finite leaf — so ordered consumption across leaves (Merge
         Append) is required, not just a single-partition special case.
         ANALYZE is committed before the EXPLAIN so the plan reflects
@@ -181,6 +190,12 @@ class TestDefaultSortPlan:
         async with history_schema.engine.begin() as connection:
             parent_name = await register_class(connection, CLASS_KEY)
             ref = await _create_leaf(connection, parent_name, lower)
+            forever_ref = await _create_leaf(
+                connection,
+                'horsies_task_history_forever',
+                lower,
+                class_key='forever',
+            )
             for offset_minutes in range(200):
                 anchor = lower + timedelta(minutes=offset_minutes)
                 await connection.execute(
@@ -200,7 +215,10 @@ class TestDefaultSortPlan:
                     ),
                 )
             await connection.execute(
-                text(f'ANALYZE horsies_task_history, {ref.leaf_name}')
+                text(
+                    'ANALYZE horsies_task_history, '
+                    f'{forever_ref.leaf_name}, {ref.leaf_name}'
+                )
             )
 
         window = HistoryWindow(

@@ -145,7 +145,22 @@ async def scratch_database() -> AsyncIterator[str]:
 async def _migrate(url: str) -> None:
     broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
     try:
-        await broker.ensure_schema_initialized()
+        initialized = await broker.ensure_schema_initialized()
+        assert initialized.is_ok(), initialized
+    finally:
+        await broker.close_async()
+
+
+async def _migrate_pre_cutover(url: str) -> None:
+    """Apply migrations to a legacy identity shape and require refusal."""
+    broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
+    try:
+        initialized = await broker.ensure_schema_initialized()
+        assert initialized.is_err()
+        assert (
+            'offline task-history cutover is incomplete'
+            in initialized.unwrap_err().message
+        )
     finally:
         await broker.close_async()
 
@@ -249,14 +264,19 @@ async def _assert_fresh_end_state(engine: AsyncEngine) -> None:
             )
         ).scalar_one()
         assert bool(heartbeats_partitioned)
-        from horsies.core.history.names import TASK_HISTORY_FOREVER
         from horsies.core.history.partitions.catalog import (
             read_leaf_ordering_index_exists,
         )
+        from horsies.core.history.cutover.state import cutover_complete
+        from tests.integration.task_history_harness import (
+            current_forever_leaf,
+        )
 
+        forever_leaf = await current_forever_leaf(connection)
         assert await read_leaf_ordering_index_exists(
-            connection, TASK_HISTORY_FOREVER
-        ), 'the forever leaf is born with the enqueue-order index'
+            connection, forever_leaf
+        ), 'the current forever leaf is born with the enqueue-order index'
+        assert await cutover_complete(connection)
 
 
 async def _assert_end_state(engine: AsyncEngine) -> None:
@@ -568,7 +588,7 @@ class TestUpgradePaths:
                 )
                 await connection.commit()
 
-            await _migrate(scratch_database)
+            await _migrate_pre_cutover(scratch_database)
             await _assert_end_state(engine)
 
             async with engine.connect() as connection:
@@ -597,6 +617,199 @@ class TestUpgradePaths:
             # updated_at is the first fallback that has a value here, so it is
             # the instant the row must end up dated by.
             assert dated.terminal_at == dated.updated_at
+        finally:
+            await engine.dispose()
+
+    async def test_current_version_without_cutover_marker_refuses_startup(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """The integer watermark alone cannot authorize the post-cutover fleet."""
+        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(f'DELETE FROM {CUTOVER_STATE_TABLE}'))
+        finally:
+            await engine.dispose()
+
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(scratch_database))
+        )
+        try:
+            initialized = await broker.ensure_schema_initialized()
+            assert initialized.is_err()
+            error = initialized.unwrap_err()
+            assert 'offline task-history cutover is incomplete' in error.message
+            from horsies.web.schema import SchemaProbe, SchemaState
+
+            status = await SchemaProbe(broker, ttl_seconds=0).status()
+            assert status.state is SchemaState.CUTOVER_REQUIRED
+            assert status.compatible is False
+        finally:
+            await broker.close_async()
+
+    async def test_v34_forever_leaf_converts_without_rewriting_old_rows(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """Schema v35 bounds the old forever population and moves only today."""
+        from datetime import datetime, timedelta, timezone
+
+        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+        from horsies.core.history.names import (
+            LEAF_CATALOG,
+            TASK_HISTORY_FOREVER,
+            TASK_HISTORY_PARENT,
+        )
+        from horsies.core.history.partitions.forever import FOREVER_LEGACY_LEAF
+        from tests.integration.task_history_harness import (
+            INSERT_HISTORY_ROW_SQL,
+            current_forever_leaf,
+            frozen_history_row,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        old_id = str(uuid.uuid4())
+        current_id = str(uuid.uuid4())
+        today = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        old_anchor = today - timedelta(days=30)
+        current_anchor = today + timedelta(hours=1)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        f"DELETE FROM {LEAF_CATALOG} "
+                        "WHERE class_key = 'forever'"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        f'ALTER TABLE {TASK_HISTORY_PARENT} '
+                        f'DETACH PARTITION {TASK_HISTORY_FOREVER}'
+                    )
+                )
+                await connection.execute(
+                    text(f'DROP TABLE {TASK_HISTORY_FOREVER} CASCADE')
+                )
+                await connection.execute(
+                    text(
+                        f'CREATE TABLE {TASK_HISTORY_FOREVER} '
+                        f'PARTITION OF {TASK_HISTORY_PARENT} '
+                        "FOR VALUES IN ('forever')"
+                    )
+                )
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {TASK_HISTORY_FOREVER}_task_idx '
+                        f'ON {TASK_HISTORY_FOREVER} (task_id)'
+                    )
+                )
+                await connection.execute(
+                    text(
+                        f'CREATE INDEX {TASK_HISTORY_FOREVER}_enqueued_idx '
+                        f'ON {TASK_HISTORY_FOREVER} (enqueued_at)'
+                    )
+                )
+                archive_defaults = {
+                    'attempt_archive_version': '1',
+                    'attempt_snapshot_codec': "'json-utf8'",
+                    'attempt_snapshot_content_type': "'application/json'",
+                    'attempt_snapshot': "convert_to('[]', 'UTF8')",
+                    'attempt_snapshot_digest': (
+                        "sha256(convert_to('[]', 'UTF8'))"
+                    ),
+                    'rerun_input_disposition': "'NEVER_ELIGIBLE'",
+                }
+                for column, expression in archive_defaults.items():
+                    await connection.execute(
+                        text(
+                            f'ALTER TABLE {TASK_HISTORY_PARENT} '
+                            f'ALTER COLUMN {column} SET DEFAULT {expression}'
+                        )
+                    )
+                for task_id, anchor in (
+                    (old_id, old_anchor),
+                    (current_id, current_anchor),
+                ):
+                    await connection.execute(
+                        text(INSERT_HISTORY_ROW_SQL),
+                        frozen_history_row(
+                            task_id=task_id,
+                            class_key='forever',
+                            terminal_at=anchor,
+                        ),
+                    )
+                for column in archive_defaults:
+                    await connection.execute(
+                        text(
+                            f'ALTER TABLE {TASK_HISTORY_PARENT} '
+                            f'ALTER COLUMN {column} DROP DEFAULT'
+                        )
+                    )
+                await connection.execute(text(f'DELETE FROM {CUTOVER_STATE_TABLE}'))
+                await connection.execute(
+                    text('DELETE FROM horsies_schema_version WHERE version > 34')
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version (version) VALUES (34) '
+                        'ON CONFLICT DO NOTHING'
+                    )
+                )
+
+            await _migrate(scratch_database)
+
+            async with engine.connect() as connection:
+                relkind = (
+                    await connection.execute(
+                        text(
+                            "SELECT relkind FROM pg_class "
+                            'WHERE oid = CAST(:relation AS regclass)'
+                        ),
+                        {'relation': TASK_HISTORY_FOREVER},
+                    )
+                ).scalar_one()
+                assert relkind == 'p'
+                current_leaf = await current_forever_leaf(connection)
+                locations = {
+                    str(row.task_id): str(row.relation)
+                    for row in (
+                        await connection.execute(
+                            text(
+                                f'SELECT task_id, tableoid::regclass AS relation '
+                                f'FROM {TASK_HISTORY_PARENT} '
+                                'WHERE task_id IN ('
+                                'CAST(:old_id AS uuid), CAST(:current_id AS uuid))'
+                            ),
+                            {'old_id': old_id, 'current_id': current_id},
+                        )
+                    ).all()
+                }
+                assert locations == {
+                    old_id: FOREVER_LEGACY_LEAF,
+                    current_id: current_leaf,
+                }
+                plan = '\n'.join(
+                    str(row[0])
+                    for row in (
+                        await connection.execute(
+                            text(
+                                f'EXPLAIN SELECT count(*) FROM '
+                                f'{TASK_HISTORY_PARENT} '
+                                "WHERE retention_class_key = 'forever' "
+                                'AND retention_anchor_at >= :today'
+                            ),
+                            {'today': today},
+                        )
+                    ).all()
+                )
+                assert FOREVER_LEGACY_LEAF not in plan
         finally:
             await engine.dispose()
 
@@ -686,7 +899,7 @@ class TestUpgradePaths:
                 )
                 await connection.commit()
 
-            await _migrate(scratch_database)
+            await _migrate_pre_cutover(scratch_database)
 
             restored = await _seed_running(engine)
             assert await _completion_outcome(engine, restored) == 'APPLIED'
@@ -809,6 +1022,14 @@ class TestOrderingIndexMigration:
 
     ORDERING_CLASS = 'upgrade_ordering'
 
+    async def _current_forever_leaf(self, engine: AsyncEngine) -> str:
+        from tests.integration.task_history_harness import (
+            current_forever_leaf,
+        )
+
+        async with engine.connect() as connection:
+            return await current_forever_leaf(connection)
+
     async def _make_finite_leaf(self, engine: AsyncEngine) -> str:
         """One finite daily leaf on a migrated database; returns its name."""
         from datetime import datetime, timedelta, timezone
@@ -908,11 +1129,10 @@ class TestOrderingIndexMigration:
     ) -> None:
         """A database whose leaves predate the index is repaired by the walk.
 
-        Covers BOTH leaf shapes — the forever LIST leaf and a finite
-        daily leaf — because the walk must reach leaves under the
-        finite sub-parents, not only the parent's direct child.
+        Covers both nested leaf shapes — a forever daily leaf and a finite
+        daily leaf — because the walk must reach leaves below both RANGE
+        sub-parents, not only the LIST parent's direct children.
         """
-        from horsies.core.history.names import TASK_HISTORY_FOREVER
         from horsies.core.history.partitions.catalog import (
             leaf_enqueued_index_name,
         )
@@ -921,8 +1141,9 @@ class TestOrderingIndexMigration:
         engine = _engine(scratch_database)
         try:
             finite_leaf = await self._make_finite_leaf(engine)
+            forever_leaf = await self._current_forever_leaf(engine)
             async with engine.connect() as connection:
-                for leaf_name in (TASK_HISTORY_FOREVER, finite_leaf):
+                for leaf_name in (forever_leaf, finite_leaf):
                     await connection.execute(
                         text(
                             'DROP INDEX '
@@ -931,7 +1152,7 @@ class TestOrderingIndexMigration:
                     )
                 await connection.commit()
             assert (
-                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                await self._ordering_index_count(engine, forever_leaf)
                 == 0
             )
             assert await self._ordering_index_count(engine, finite_leaf) == 0
@@ -940,7 +1161,7 @@ class TestOrderingIndexMigration:
             await _migrate(scratch_database)
 
             assert (
-                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                await self._ordering_index_count(engine, forever_leaf)
                 == 1
             )
             assert await self._ordering_index_count(engine, finite_leaf) == 1
@@ -957,17 +1178,16 @@ class TestOrderingIndexMigration:
         that matters: watermark lowered, statements re-run, exactly one
         matching index per leaf afterwards.
         """
-        from horsies.core.history.names import TASK_HISTORY_FOREVER
-
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
             finite_leaf = await self._make_finite_leaf(engine)
+            forever_leaf = await self._current_forever_leaf(engine)
             await self._rewind_watermark(engine, 33)
             await _migrate(scratch_database)
 
             assert (
-                await self._ordering_index_count(engine, TASK_HISTORY_FOREVER)
+                await self._ordering_index_count(engine, forever_leaf)
                 == 1
             )
             assert await self._ordering_index_count(engine, finite_leaf) == 1

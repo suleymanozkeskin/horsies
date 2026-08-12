@@ -1,22 +1,22 @@
 """Generation of the staged task-lookup function from the leaf catalog.
 
 The generated function is the qualified boundary-gate shape: PL/pgSQL that
-probes the live table, then the forever child, then finite leaves as static
-direct table references. Each reached statement is eligible for plan
+probes the live table, then every cataloged history leaf as a static direct
+table reference. This includes the RANGE leaves of the forever class. Each
+reached statement is eligible for plan
 caching, and no statement ever references the partitioned parent — the
 parent's plan-time fan-out over ~514 relations is the measured failure the
 staged form replaced.
 
-UUIDv7 identifiers prune the finite walk. The embedded birth time is decoded
-after the live and forever probes miss; a leaf is excluded only when its
-terminal-time upper bound lies at or before the birth minus the five-second
-forward-clock bound the database enforces at enqueue — a client clock that
-is behind reduces pruning only, never produces false absence. When every
-attached leaf carries verified birth metadata, a birth before the global
-floor returns absence in constant time. Candidate leaves are probed
-oldest-first: a task terminalizes at or after its birth, so the oldest
-non-excluded leaf is the most likely location. Legacy identifiers walk
-every leaf newest-first, unconditionally.
+UUIDv7 identifiers use their embedded birth time as a probe-order hint, never
+as an existence proof. Likely leaves are probed oldest-first after subtracting
+the five-second clock-skew allowance. If they miss, every skipped leaf is
+probed newest-first before absence is returned. Caller-supplied identifiers
+and historical rows therefore remain readable even when their embedded time
+violates the expected enqueue clock bound. When every attached leaf carries
+verified birth metadata, a birth before the global minimum remains a safe
+constant-time absence: that minimum is derived from the stored rows, not an
+assertion about caller clocks. Legacy identifiers walk every leaf newest-first.
 
 The function never assumes a finite request lifetime. Regeneration is owned
 by the partition manager through the publication seam; this module renders
@@ -34,7 +34,6 @@ from ..names import (
     HEARTBEAT_CLASS_KEY,
     LIVE_TASKS,
     TASK_DETAIL_FUNCTION,
-    TASK_HISTORY_FOREVER,
     TASK_HISTORY_PARENT,
     TASK_LOOKUP_FUNCTION,
     TASK_LOOKUP_MANIFEST,
@@ -46,7 +45,7 @@ from ..partitions.catalog import LeafCatalogRow
 
 
 CLOCK_BOUND_SECONDS = 5
-"""The forward-clock bound shared with enqueue-time database validation."""
+"""Clock-skew allowance used only to order likely UUIDv7 probes."""
 
 
 TASK_LOOKUP_TYPE_DDL = f"""
@@ -314,8 +313,6 @@ def _staged_function(
         if absence_statement is not None
         else f'RETURN ROW(FALSE, {absence_values})::{return_type};'
     )
-    forever_probe = history_probe(TASK_HISTORY_FOREVER)
-
     if not manifest.leaves:
         finite_section = ''
     else:
@@ -329,6 +326,10 @@ def _staged_function(
         pruned_probes = '\n'.join(
             _pruned_probe(leaf, history_probe(leaf.relation_name))
             for leaf in manifest.leaves
+        )
+        fallback_probes = '\n'.join(
+            _fallback_probe(leaf, history_probe(leaf.relation_name))
+            for leaf in reversed(manifest.leaves)
         )
         legacy_probes = '\n'.join(
             history_probe(leaf.relation_name)
@@ -353,6 +354,10 @@ def _staged_function(
             v_effective_birth :=
                 v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';
 {pruned_probes}
+            -- Birth time is an optimization hint, not an integrity
+            -- constraint. Probe every leaf skipped above before declaring
+            -- absence so a caller-clock violation cannot hide a retained row.
+{fallback_probes}
         ELSE
 {legacy_probes}
         END IF;
@@ -373,7 +378,6 @@ def _staged_function(
         v_effective_birth timestamptz;
     BEGIN
 {live_probe}
-{forever_probe}
 {finite_section}
         {absence}
     END
@@ -385,6 +389,15 @@ def _pruned_probe(leaf: LookupLeaf, probe: str) -> str:
     upper = _timestamp_literal(leaf.upper_anchor)
     return f"""
             IF v_effective_birth < {upper} THEN
+{probe}
+            END IF;
+"""
+
+
+def _fallback_probe(leaf: LookupLeaf, probe: str) -> str:
+    upper = _timestamp_literal(leaf.upper_anchor)
+    return f"""
+            IF v_effective_birth >= {upper} THEN
 {probe}
             END IF;
 """

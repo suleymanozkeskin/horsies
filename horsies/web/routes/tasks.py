@@ -27,6 +27,7 @@ from horsies.monitoring import (
     StatusCount,
     TaskDetail,
     TaskListPage,
+    MAX_TASK_PAGE_REACH,
     get_task_detail,
     list_tasks,
     task_breakdown,
@@ -156,6 +157,14 @@ def build_router(broker: PostgresBroker) -> APIRouter:
         limit: int = Query(default=50, ge=1, le=200),
     ) -> TaskListPage:
         """A paginated, server-sorted, server-filtered slice of tasks."""
+        if offset + limit > MAX_TASK_PAGE_REACH:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f'offset + limit must be <= {MAX_TASK_PAGE_REACH}; '
+                    f'got {offset + limit}'
+                ),
+            )
         result = await list_tasks(
             broker,
             window=_window_or_400(since, until),

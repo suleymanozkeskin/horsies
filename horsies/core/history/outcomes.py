@@ -277,7 +277,7 @@ type HealthFault = (
 
 @dataclass(frozen=True, slots=True)
 class ClassCoverage:
-    """Coverage arithmetic for one finite retention class."""
+    """Coverage arithmetic for one daily-partitioned history class."""
 
     class_key: str
     attached_leaf_count: int

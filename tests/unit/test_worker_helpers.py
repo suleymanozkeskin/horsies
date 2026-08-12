@@ -3196,6 +3196,50 @@ class TestStartupRegistersEveryClassItRuns:
         )
 
 
+@pytest.mark.unit
+class TestWorkerStartupCoverageOutcome:
+    """The worker distinguishes fatal coverage from contained reports."""
+
+    @pytest.mark.asyncio
+    async def test_contained_history_failure_reaches_listener_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The worker consumes a covered-heartbeat failure as a report."""
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        worker = _make_worker()
+        failure = coverage_module.CoverageEnsureFailed(
+            stage='ensure_leaf_coverage',
+            class_key='custom_7d',
+            refusal='current class leaf is missing',
+            heartbeat_covered_now=True,
+            absent_leaves=('horsies_task_history_custom_7d_2026_08_12',),
+        )
+        monkeypatch.setattr(
+            coverage_module,
+            'ensure_startup_coverage',
+            AsyncMock(return_value=failure),
+        )
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
+        worker._warm_executor = AsyncMock()  # type: ignore[assignment]
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(
+            return_value=Ok([asyncio.Queue(), asyncio.Queue()])
+        )
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+
+        def _close_spawned(coro, **kwargs):  # type: ignore[no-untyped-def]
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_close_spawned)  # type: ignore[assignment]
+
+        await worker.start()
+
+        worker.listener.start.assert_awaited_once()
+
+
 class TestWorkerStartConnectionOrdering:
     """Tests for fork-safe worker startup ordering."""
 
