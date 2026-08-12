@@ -131,6 +131,9 @@ type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
 type SortDirection = Literal['asc', 'desc']
 
+MAX_TASK_PAGE_REACH = 500
+"""Maximum ``offset + limit`` accepted by the bounded two-side merge."""
+
 # Sort key -> the expression it orders by, tagged with nullability.
 # ``queue_s`` and ``exec_s`` sort by the pure-SQL spans (dispatch->start,
 # start->finish) so the table can be triaged by where time is spent. A live
@@ -841,6 +844,29 @@ async def task_facets(
                         await session.execute(text(sql), params)
                     ).all()
                 ]
+            history_category_totals: dict[str, int] = {}
+            for category in ErrorCategory:
+                category_sql, category_params = history_count_statement(
+                    window,
+                    _history_scope(
+                        statuses=statuses,
+                        task_names=[],
+                        queues=[],
+                        workers=[],
+                        error_codes=[],
+                        error_categories=[category],
+                        retried_only=retried_only,
+                    ),
+                )
+                category_count = int(
+                    (
+                        await session.execute(
+                            text(category_sql), category_params
+                        )
+                    ).scalar_one()
+                )
+                if category_count:
+                    history_category_totals[category.value] = category_count
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
 
@@ -855,6 +881,7 @@ async def task_facets(
             counts[value] = counts.get(value, 0) + count
         return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
 
+    live_error_rows = error_rows
     worker_rows = _merged(worker_rows, HistoryFacet.WORKER)
     name_rows = _merged(name_rows, HistoryFacet.TASK_NAME)
     queue_rows = _merged(queue_rows, HistoryFacet.QUEUE_NAME)
@@ -870,10 +897,15 @@ async def task_facets(
         )
         for value, count in error_rows
     ]
-    category_totals: dict[str, int] = {}
-    for facet in error_facets:
-        category_totals[facet.category] = (
-            category_totals.get(facet.category, 0) + facet.count
+    category_totals: dict[str, int] = dict(history_category_totals)
+    for value, count in live_error_rows:
+        if value is None:
+            continue
+        category = (
+            categorize_error_code(value) or ErrorCategory.DOMAIN
+        ).value
+        category_totals[category] = (
+            category_totals.get(category, 0) + count
         )
 
     selected = {category.value for category in error_categories}
@@ -1193,6 +1225,10 @@ async def list_tasks(
     # by the SAME key, and the merge re-sorts and slices — correct for
     # any page within the capped reach, with cost bounded by the caps.
     reach = offset + limit
+    if reach > MAX_TASK_PAGE_REACH:
+        raise ValueError(
+            f'offset + limit must be <= {MAX_TASK_PAGE_REACH}; got {reach}'
+        )
     rows_stmt = list_rows_statement(
         scope=scope,
         sort_by=sort_by,
@@ -1212,7 +1248,7 @@ async def list_tasks(
     page_sql, page_params = history_page_statement(
         HistoryPageQuery(
             window=window,
-            limit=min(max(reach, 1), 500),
+            limit=max(reach, 1),
             offset=0,
             scope=history_scope,
             order_by=history_sort_expression(

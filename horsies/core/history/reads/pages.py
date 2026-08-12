@@ -65,22 +65,24 @@ class HistorySort(Enum):
     TERMINAL_AT_ASC = 'terminal_at ASC'
 
 
-_SORT_FIELD_EXPRESSIONS: Final[dict[str, str]] = {
-    'enqueued_at': 'enqueued_at',
-    'started_at': 'started_at',
+_SORT_FIELD_EXPRESSIONS: Final[dict[str, tuple[str, bool]]] = {
+    'enqueued_at': ('enqueued_at', False),
+    'started_at': ('started_at', True),
     'completed_at': (
-        "CASE WHEN status = 'COMPLETED' THEN terminal_at END"
+        "CASE WHEN status = 'COMPLETED' THEN terminal_at END",
+        True,
     ),
     'failed_at': (
-        "CASE WHEN status <> 'COMPLETED' THEN terminal_at END"
+        "CASE WHEN status <> 'COMPLETED' THEN terminal_at END",
+        True,
     ),
-    'status': 'status',
-    'task_name': 'task_name',
-    'queue_name': 'queue_name',
-    'priority': 'priority',
-    'retry_count': 'retry_count',
-    'queue_s': '(started_at - enqueued_at)',
-    'exec_s': '(terminal_at - started_at)',
+    'status': ('status', False),
+    'task_name': ('task_name', False),
+    'queue_name': ('queue_name', False),
+    'priority': ('priority', False),
+    'retry_count': ('retry_count', False),
+    'queue_s': ('(started_at - enqueued_at)', True),
+    'exec_s': ('(terminal_at - started_at)', True),
 }
 
 
@@ -93,10 +95,13 @@ def history_sort_expression(field: str, *, descending: bool) -> str:
     stands in for the status-conditional end stamps exactly as the
     summary mapping presents them.
     """
-    expression = _SORT_FIELD_EXPRESSIONS.get(field)
-    if expression is None:
+    sort_key = _SORT_FIELD_EXPRESSIONS.get(field)
+    if sort_key is None:
         raise ValueError(f'unknown history sort field: {field!r}')
-    return f'{expression} {"DESC" if descending else "ASC"}'
+    expression, nullable = sort_key
+    direction = 'DESC' if descending else 'ASC'
+    null_order = ' NULLS LAST' if nullable else ''
+    return f'{expression} {direction}{null_order}'
 
 
 @dataclass(frozen=True, slots=True)

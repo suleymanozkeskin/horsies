@@ -348,6 +348,15 @@ class TestRequestValidation:
 
         assert response.status_code == 422
 
+    async def test_task_page_reach_past_five_hundred_is_rejected(self) -> None:
+        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+
+        async with client_for(app) as client:
+            response = await client.get('/api/tasks?offset=500&limit=1')
+
+        assert response.status_code == 400
+        assert 'offset + limit must be <= 500' in response.json()['detail']
+
 
 class TestStaticServing:
     """The SPA shell, its assets, and the config injected into the page."""

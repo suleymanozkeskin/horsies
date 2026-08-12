@@ -574,6 +574,34 @@ class TestTaskFacets:
         assert len(result.ok_value.error_codes) == 30
         assert result.ok_value.error_category_totals == {ErrorCategory.DOMAIN.value: 35}
 
+    async def test_history_category_totals_exceed_the_history_facet_cap(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            *[
+                make_task(
+                    status=TaskStatus.FAILED,
+                    error_code=f'HISTORY_DOMAIN_{index:03d}',
+                )
+                for index in range(201)
+            ],
+        )
+
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        assert len(result.ok_value.error_codes) == 30
+        assert result.ok_value.error_category_totals == {
+            ErrorCategory.DOMAIN.value: 201
+        }
+
 
 # --------------------------------------------------------------------------- #
 # task_breakdown

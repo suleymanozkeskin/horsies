@@ -61,6 +61,7 @@ from horsies.monitoring.task_actions import (
     cancel_task,
 )
 from horsies.monitoring.queries import (
+    MAX_TASK_PAGE_REACH,
     SortDirection,
     TaskGroupBy,
     TaskSortField,
@@ -92,6 +93,7 @@ __all__ = [
     'TaskCancelled',
     'cancel_task',
     # Query parameter vocabularies
+    'MAX_TASK_PAGE_REACH',
     'SortDirection',
     'TaskGroupBy',
     'TaskSortField',

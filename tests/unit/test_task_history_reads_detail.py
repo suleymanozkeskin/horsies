@@ -38,6 +38,7 @@ from horsies.core.history.reads.pages import (
     HistoryWindow,
     history_facet_statement,
     history_page_statement,
+    history_sort_expression,
     history_scope_conditions,
 )
 
@@ -170,6 +171,24 @@ class TestBuilderValidation:
             HistoryPageQuery(window=make_window(), limit=501)
         with pytest.raises(ValueError, match='non-negative'):
             HistoryPageQuery(window=make_window(), limit=1, offset=-1)
+
+    @pytest.mark.parametrize(
+        'field',
+        ['started_at', 'completed_at', 'failed_at', 'queue_s', 'exec_s'],
+    )
+    def test_nullable_descending_sorts_render_nulls_last(self, field: str) -> None:
+        assert history_sort_expression(field, descending=True).endswith(
+            'DESC NULLS LAST'
+        )
+
+    @pytest.mark.parametrize(
+        'field',
+        ['enqueued_at', 'status', 'task_name', 'queue_name', 'priority'],
+    )
+    def test_nonnullable_sorts_do_not_change_the_index_path(self, field: str) -> None:
+        expression = history_sort_expression(field, descending=True)
+        assert expression.endswith(' DESC')
+        assert 'NULLS LAST' not in expression
 
     def test_page_statement_carries_the_taxonomy_dimension(self) -> None:
         """The page WHERE renders every scope dimension the counts do.
