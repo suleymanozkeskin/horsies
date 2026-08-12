@@ -15,6 +15,7 @@ pub mod maintenance;
 pub mod names;
 pub mod outcomes;
 pub mod partitions;
+pub mod reads;
 pub mod rerun;
 
 #[cfg(test)]

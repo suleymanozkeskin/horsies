@@ -5,6 +5,9 @@ pub enum HistoryError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    #[error("history archive decode error: {0}")]
+    ArchiveDecode(#[from] crate::core::history::archive::versions::ArchiveDecodeError),
+
     #[error("history contract violation: {0}")]
     Contract(String),
 
