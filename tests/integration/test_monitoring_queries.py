@@ -553,6 +553,72 @@ class TestTaskFacets:
         assert is_ok(result)
         assert len(result.ok_value.task_names) == 50
 
+    async def test_value_facets_sum_both_sides_before_the_global_cap(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        live_rows = [
+            make_task(task_name=f'live_{index:03d}')
+            for index in range(50)
+            for _ in range(2)
+        ]
+        await insert_rows(
+            session,
+            *live_rows,
+            make_task(task_name='shared_target'),
+            make_task(
+                task_name='shared_target', status=TaskStatus.COMPLETED
+            ),
+            make_task(
+                task_name='shared_target', status=TaskStatus.COMPLETED
+            ),
+        )
+
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        counts = {
+            facet.value: facet.count for facet in result.ok_value.task_names
+        }
+        assert len(counts) == 50
+        assert counts['shared_target'] == 3
+
+    async def test_selected_error_family_is_ranked_before_its_code_cap(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        await insert_rows(
+            session,
+            *[
+                make_task(
+                    status=TaskStatus.FAILED,
+                    error_code=f'HISTORY_DOMAIN_{index:03d}',
+                )
+                for index in range(201)
+            ],
+            make_task(
+                status=TaskStatus.CANCELLED,
+                error_code='TASK_CANCELLED',
+            ),
+        )
+
+        result = await task_facets(
+            broker,
+            window=_test_window(),
+            statuses=[],
+            error_categories=[ErrorCategory.OUTCOME],
+            retried_only=False,
+        )
+
+        assert is_ok(result)
+        assert [facet.value for facet in result.ok_value.error_codes] == [
+            'TASK_CANCELLED'
+        ]
+
     async def test_category_totals_cover_codes_the_list_drops(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
