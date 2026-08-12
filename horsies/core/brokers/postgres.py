@@ -1504,12 +1504,20 @@ class PostgresBroker:
                 result = await session.execute(stmt)
                 row = result.fetchone()
                 if row is None:
-                    # The reservation claim and task insert are one unit. A
-                    # task-ID conflict means this transaction did not create
-                    # the task whose idempotency digest would later
-                    # terminalize the reservation, so committing here would
-                    # leave an immortal LIVE reservation. Roll the claim back
-                    # before verifying the existing task's exact-ID payload.
+                    if scoped_key_digest is not None:
+                        return await self._bind_key_after_task_id_conflict(
+                            session,
+                            task_id=task_id,
+                            enqueue_sha=enqueue_sha,
+                            task_name=task_name,
+                            key_digest=scoped_key_digest,
+                            command_fingerprint=cutover.ok_value[
+                                'command_fingerprint'
+                            ],
+                        )
+                    # An unkeyed exact-ID retry owns no additional state.
+                    # Roll back before verifying the existing payload in a
+                    # separate read transaction.
                     await session.rollback()
                 else:
                     await session.commit()
@@ -1527,6 +1535,94 @@ class PostgresBroker:
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
+
+    async def _bind_key_after_task_id_conflict(
+        self,
+        session: AsyncSession,
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+        key_digest: bytes,
+        command_fingerprint: bytes,
+    ) -> BrokerResult[str]:
+        """Bind a claimed key to an exact existing live task atomically.
+
+        The reservation claim already ran in ``session``. Locking the task row
+        orders adoption against terminalization, which deletes that row while
+        holding the same row lock. A successful commit therefore cannot leave
+        a live reservation whose task lacks the matching digest.
+        """
+        existing = (
+            await session.execute(
+                select(
+                    TaskModel.enqueue_sha,
+                    TaskModel.idempotency_key_digest,
+                    TaskModel.command_fingerprint_version,
+                    TaskModel.command_fingerprint,
+                )
+                .where(TaskModel.id == task_id)
+                .with_for_update()
+            )
+        ).one_or_none()
+        if existing is None:
+            await session.rollback()
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                    message=(
+                        f'task_id {task_id} conflict detected but row disappeared '
+                        f'before key binding for {task_name}'
+                    ),
+                    retryable=False,
+                    exception=None,
+                )
+            )
+        existing_fingerprint = existing.command_fingerprint
+        if (
+            existing.enqueue_sha != enqueue_sha
+            or existing.command_fingerprint_version != 1
+            or existing_fingerprint is None
+            or bytes(existing_fingerprint) != command_fingerprint
+        ):
+            await session.rollback()
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                    message=(
+                        f'task_id {task_id} already exists with different payload '
+                        f'for task {task_name}'
+                    ),
+                    retryable=False,
+                    exception=None,
+                )
+            )
+
+        bound_digest = existing.idempotency_key_digest
+        if bound_digest is not None and bytes(bound_digest) != key_digest:
+            await session.rollback()
+            return Err(
+                BrokerOperationError(
+                    code=BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+                    message=(
+                        f'task_id {task_id} for {task_name} is already bound '
+                        'to a different idempotency key'
+                    ),
+                    retryable=False,
+                    exception=None,
+                )
+            )
+        if bound_digest is None:
+            await session.execute(
+                text(
+                    'UPDATE horsies_tasks '
+                    'SET idempotency_key_digest = :key_digest '
+                    'WHERE id = CAST(:task_id AS uuid)'
+                ),
+                {'key_digest': key_digest, 'task_id': task_id},
+            )
+        await session.commit()
+        return Ok(task_id)
 
     async def _verify_enqueue_conflict(
         self,
