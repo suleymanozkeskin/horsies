@@ -156,6 +156,14 @@ Each is a typed entrypoint under `horsies.core.history.cutover`; each
 refuses rather than proceeding on a violated precondition, and every
 refusal names its reason.
 
+A database already tightened by 0.5.0 or 0.5.1 contains only the legacy
+`task_history_v1` marker. Keep every unit stopped and run
+`validate_cutover` inside a committing transaction before its first restart
+on a build that requires `task_history_v1_validated_v1`; do not rerun tighten.
+`CutoverInvalid` leaves the validated attestation absent. Correct every named
+violation and rerun validation. Startup remains refused until validation
+returns `CutoverValidated` and the transaction commits.
+
 | Stage | Entry point | Reversible? |
 |---|---|---|
 | 1. Preflight (read-only) | `run_preflight` | n/a — reads only |
@@ -165,7 +173,7 @@ refusal names its reason.
 | 5. Envelope preparation | `prepare_legacy_batch` (batched, resumable) | rows are re-preparable |
 | 6. Relocation | `relocate_terminal_batch` (ledgered, resumable) | resume-safe; restore backup to abort |
 | 7. **Tighten — point of no return** | `tighten_to_frozen` | **backup restore only** |
-| 8. Validation (read-only) | `validate_cutover` | n/a |
+| 8. Validation and attestation | `validate_cutover` | rerun after correcting any violation |
 
 - The preflight inventories the work and (after a short fitted dry run)
   produces a duration estimate with its coefficients and a 5/4 planning
@@ -179,13 +187,15 @@ refusal names its reason.
   at its first statement. Before it: stop at any stage, run the
   teardown, restore nothing — the old fleet still works. After it: the
   backup is the only way back.
-- Tighten writes `task_history_v1` to `horsies_cutover_state` as its final
-  statement. The marker commits atomically with the frozen DDL. An integer
-  schema watermark without this row does not authorize startup or monitoring
-  actions.
-- Validation attests the frozen posture from catalog facts: live-only
+- Tighten executes the point-of-no-return DDL but does not authorize startup.
+  Validation writes `task_history_v1_validated_v1` to
+  `horsies_cutover_state` only after every structural check passes. An integer
+  schema watermark or the legacy `task_history_v1` row does not authorize
+  startup or monitoring actions.
+- Validation checks the frozen posture from catalog facts: live-only
   status domain, uuid identity, required enqueue-time columns, bounded
-  `forever` leaves, and the durable completion marker.
+  `forever` leaves, and relocation-ledger reconciliation, then writes the
+  durable attestation in the same transaction.
 
 ### After the window
 
@@ -196,7 +206,7 @@ dimensions:
 SELECT max(version) FROM horsies_schema_version;
 SELECT completed_at
 FROM horsies_cutover_state
-WHERE cutover_name = 'task_history_v1';
+WHERE cutover_name = 'task_history_v1_validated_v1';
 ```
 
 The version must equal the build's `SCHEMA_VERSION` and the marker query must

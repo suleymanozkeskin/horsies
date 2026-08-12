@@ -30,17 +30,20 @@ and there is no migration contract between pre-1.0 versions.
 
 - **Schema v35 separates migration completion from offline-cutover
   completion.** The integer schema watermark no longer authorizes a fleet by
-  itself. Tighten writes a durable cutover marker in the same transaction as
-  its point-of-no-return DDL; worker startup and monitoring actions require
-  both the exact supported schema version and that marker. A database at a
-  newer schema version is refused.
+  itself. Stage-6 validation writes the versioned
+  `task_history_v1_validated_v1` attestation only after every structural check
+  passes; tighten no longer writes it, and the earlier `task_history_v1`
+  marker is not accepted. Worker startup and monitoring actions require both
+  the exact supported schema version and the validated attestation. A database
+  at a newer schema version is refused.
 
 - **Bounded history windows can prune the `forever` class.** The class is a
   RANGE-subpartitioned parent. Existing pre-v35 rows before the current UTC
   day remain in one bounded legacy leaf; only current-day rows move during
-  conversion, and subsequent rows use daily leaves. This removes the
-  per-request scan of the complete forever population without another
-  terminalization-path index.
+  conversion, and subsequent rows use daily leaves. Offline relocation routes
+  older classless rows into that existing legacy leaf instead of attempting an
+  overlapping daily partition. This removes the per-request scan of the
+  complete forever population without another terminalization-path index.
 
 - **UUIDv7 birth time is a lookup hint, not an absence proof.** Staged history
   readers probe birth-compatible leaves first, then every skipped leaf before
@@ -48,9 +51,10 @@ and there is no migration contract between pre-1.0 versions.
   from the enqueue clock remains readable.
 
 - **A task-ID conflict cannot leave a live idempotency reservation without an
-  owning task.** The reservation claim and task insert now roll back together
-  when the insert loses `ON CONFLICT`; exact-ID payload verification runs
-  after that rollback.
+  owning task or an unbound successful key.** After exact-ID payload
+  verification, a keyed retry atomically binds the existing live task to the
+  claimed key. A later fresh-ID retry replays that task, and a task already
+  bound to a different key is refused.
 
 - **`WorkflowStatus.EXPIRED` is terminal across result waits, notifications,
   and subworkflow propagation.** Paused-workflow expiry stores a structured
@@ -61,8 +65,9 @@ and there is no migration contract between pre-1.0 versions.
   results.** Requests with `offset + limit > 500` are refused explicitly
   instead of querying only 500 rows and returning an empty later page.
   Nullable descending history sorts use `NULLS LAST`, matching the live-side
-  merge, and error-category totals use uncapped category counts while the
-  dropdown remains capped.
+  merge. Facet counts are summed across live and history before global ranking
+  and capping, selected error families are filtered before their code cap, and
+  error-category totals use uncapped category counts.
 
 - **History task detail verifies result envelopes before decoding them.** The
   task-info path now enforces the stored result digest and envelope metadata,
