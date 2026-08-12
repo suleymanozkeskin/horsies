@@ -12,6 +12,15 @@ pub enum BrokerError {
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
+    /// The migration chain is current, but the separately operated history
+    /// cutover has not produced its validated completion attestation.
+    #[error(
+        "schema migrations are current but the offline task-history cutover is incomplete; \
+         run the documented cutover stages through tighten and validation before starting \
+         this fleet"
+    )]
+    IncompleteTaskHistoryCutover,
+
     /// JSON serialization/deserialization error.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -53,12 +62,14 @@ impl BrokerError {
     /// Retryable: `Database` (when the underlying sqlx error is retryable),
     /// `ConnectionFailed`, `ListenerClosed`.
     ///
-    /// Non-retryable: `Migration`, `Serialization`, `InvalidStatus`.
+    /// Non-retryable: `Migration`, `IncompleteTaskHistoryCutover`,
+    /// `Serialization`, `InvalidStatus`.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::Migration(_)
+            | Self::IncompleteTaskHistoryCutover
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
             | Self::PayloadMismatch { .. }

@@ -664,13 +664,33 @@ impl PostgresBroker {
 
     /// Ensure the embedded schema is initialized exactly once for this broker.
     ///
-    /// The first successful call runs embedded SQL migrations. Later calls are
-    /// a no-op. If initialization fails, the guard remains unset so a future
-    /// caller can retry.
+    /// The first successful call runs embedded SQL migrations and verifies the
+    /// validated task-history cutover attestation. Later calls are a no-op. If
+    /// initialization fails, the guard remains unset so a future caller can
+    /// retry.
     pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
         self.schema_initialized
             .get_or_try_init(|| async {
                 self.migrate().await?;
+                let cutover_table_exists: bool = sqlx::query_scalar(
+                    "SELECT to_regclass('horsies_cutover_state') IS NOT NULL",
+                )
+                .fetch_one(&self.session_pool)
+                .await?;
+                if !cutover_table_exists {
+                    return Err(BrokerError::IncompleteTaskHistoryCutover);
+                }
+                let cutover_complete: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (\
+                         SELECT 1 FROM horsies_cutover_state \
+                         WHERE cutover_name = 'task_history_v1_validated_v1'\
+                     )",
+                )
+                .fetch_one(&self.session_pool)
+                .await?;
+                if !cutover_complete {
+                    return Err(BrokerError::IncompleteTaskHistoryCutover);
+                }
                 Ok::<(), BrokerError>(())
             })
             .await?;
