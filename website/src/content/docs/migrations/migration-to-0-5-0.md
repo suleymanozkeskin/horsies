@@ -32,7 +32,46 @@ horsies is pre-1.0: there is no migration contract between pre-1.0
 versions and no compatibility shim. A 0.5.0 fleet cannot share a
 database with an older fleet.
 
-**Two upgrade paths exist. Most deployments should take Path A.**
+## Upgrading a 0.5.0 or 0.5.1 database to schema v35
+
+This is an offline schema upgrade. **Stop every unit before migration**:
+producers, workers, schedulers, and monitoring/web. Keep them stopped until
+validation commits the `task_history_v1_validated_v1` attestation. There is no
+rolling-upgrade path.
+
+The migration converts `horsies_task_history_forever` from an unbounded LIST
+leaf to a RANGE-partitioned parent in one transaction. It detaches and renames
+the old leaf, creates the new parent and current-day leaf, moves current-day
+rows, bounds and reattaches the legacy leaf, and rebuilds the legacy leaf's
+task-ID and enqueue-order indexes. The partition DDL is not concurrent. Active
+history readers and terminalizers can hold conflicting locks, and the bound
+check plus index builds process the complete legacy `forever` population.
+Plan the window from both that population and the deployment's longest open
+database transaction; the number of rows moved is not a duration estimate.
+Do not leave 0.5.0 or 0.5.1 workers running against the converted schema:
+their maintenance pass treats `forever` as one unbounded leaf and does not
+create the daily coverage v35 terminalization requires.
+
+Use this sequence:
+
+1. Stop producers, then drain pending and in-flight work if possible.
+2. Stop workers, schedulers, and monitoring/web. Confirm no application
+   transaction remains open against the database.
+3. Take and verify a database backup.
+4. Install the new package and let one migration-capable broker initialize the
+   schema. Its initialization applies v35 and then refuses normal startup while
+   the new attestation is absent; this refusal is expected.
+5. Run `validate_cutover` inside a committing transaction. Do not rerun
+   preparation, relocation, or tighten on a database already cut over by
+   0.5.0 or 0.5.1.
+6. Verify the schema version and attestation with the queries under
+   [After the window](#after-the-window), then start only the upgraded units.
+
+A fresh database is born with the v35 `forever` shape and its validated
+attestation. It does not run this conversion and needs no v35 offline window.
+
+The following two paths are for databases that have not completed the 0.5.0
+cutover. Most deployments should take Path A.
 
 | | Path A — new database | Path B — offline cutover |
 |---|---|---|
