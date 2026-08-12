@@ -32,9 +32,23 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Schema v35 is an offline upgrade for existing 0.5.0 and 0.5.1
+  databases.** Stop producers, workers, schedulers, and monitoring/web before
+  the first v35 migration starts, and keep them stopped through validation;
+  there is no rolling-upgrade path. The `forever` conversion uses
+  non-concurrent partition DDL and rebuilds the legacy leaf's task-ID and
+  enqueue-order indexes in the migration transaction. Its window therefore
+  depends on blocking transactions and the complete legacy `forever`
+  population, even though only current-day rows move. A 0.5.1 worker does not
+  create the daily `forever` coverage required by v35 and must not remain
+  connected after conversion. Do not rerun the 0.5.0 cutover: after migration,
+  run `validate_cutover` in a committing transaction and restart only after it
+  writes `task_history_v1_validated_v1`. Fresh databases require no offline
+  conversion.
+
 - **Schema v35 separates migration completion from offline-cutover
   completion.** The integer schema watermark no longer authorizes a fleet by
-  itself. Stage-6 validation writes the versioned
+  itself. Post-cutover validation writes the versioned
   `task_history_v1_validated_v1` attestation only after every structural check
   passes; tighten no longer writes it, and the earlier `task_history_v1`
   marker is not accepted. Worker startup and monitoring actions require both
