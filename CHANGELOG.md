@@ -8,6 +8,8 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-08-12
+
 ### Added
 
 - **Per-queue retention: `AppConfig.retention.queue_retention`.** Maps a
@@ -27,6 +29,16 @@ and there is no migration contract between pre-1.0 versions.
   `RecoveryConfig.queue_terminal_record_retention_hours`.
 
 ### Fixed
+
+- **A monitoring filter change no longer evicts the panels it scopes.** Every
+  aggregate is keyed by the filters it is scoped to, so changing one started a
+  query with nothing cached under the new key and the panel rendered nothing
+  until it landed — taking its row off the page and putting it back, shifting
+  the page below it twice per filter change. `useTaskStats`, `useFacets` and
+  `useWorkflowRuns` now keep the previous scope's data across a key change, as
+  `useTasks` and `useBreakdown` already did. The status strip also holds its row
+  before any counts exist, since `task_stats` always returns all seven lifecycle
+  statuses including zeros.
 
 - **Schema v35 is an offline upgrade for existing 0.5.0 and 0.5.1
   databases.** Stop producers, workers, schedulers, and monitoring/web before
