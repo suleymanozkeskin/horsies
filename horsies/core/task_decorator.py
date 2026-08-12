@@ -2119,9 +2119,10 @@ def create_task_wrapper(
         """Set options for one ad-hoc send without changing the task definition.
 
         ``retention_class_key``: omit for the immutable 30-day default
-        class; pass ``None`` to keep the terminal record forever. The
-        registered adopter-facing values are exactly those two — custom
-        class registration is not exposed.
+        class; pass ``None`` to keep the terminal record forever; or pass
+        the key of a finite class declared in
+        ``AppConfig.retention.retention_classes``. Unknown keys are refused
+        before the enqueue writes anything.
         """
         return _TaskSendOptionsImpl(good_until, idempotency_key, retention_class_key)
 
