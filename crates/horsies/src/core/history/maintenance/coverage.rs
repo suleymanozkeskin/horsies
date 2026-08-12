@@ -1,0 +1,297 @@
+//! Startup and periodic owner for coverage plus reader publication.
+
+use chrono::{DateTime, Duration, Timelike, Utc};
+use sqlx::PgConnection;
+
+use crate::core::history::commands::EnsureLeafCoverage;
+use crate::core::history::ddl::classes::{
+    register_finite_retention_class, ClassRegistration, DEFAULT_RETENTION_CLASS_KEY,
+    DEFAULT_RETENTION_DURATION_DAYS, FOREVER_CLASS_KEY,
+};
+use crate::core::history::errors::HistoryError;
+use crate::core::history::heartbeats::partitioning::{
+    ensure_heartbeat_coverage, hourly_leaf_ref, register_heartbeat_class, EnsureHeartbeatCoverage,
+    HeartbeatClassRegistration,
+};
+use crate::core::history::names::{HEARTBEAT_CLASS_KEY, RETENTION_CLASSES};
+use crate::core::history::outcomes::LeafCreation;
+use crate::core::history::partitions::catalog::database_now;
+use crate::core::history::partitions::manager::ensure_leaf_coverage;
+use crate::core::history::partitions::publication::LoaderPublication;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredRetentionClass {
+    pub class_key: String,
+    pub duration: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageEnsured {
+    pub created_history_leaves: u64,
+    pub created_heartbeat_leaves: u64,
+    pub republished: bool,
+    pub heartbeat_covered_now: bool,
+    pub history_covered_through: DateTime<Utc>,
+    pub heartbeats_covered_through: DateTime<Utc>,
+    pub absent_leaves: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageEnsureFailed {
+    pub stage: &'static str,
+    pub class_key: Option<String>,
+    pub refusal: String,
+    pub heartbeat_covered_now: bool,
+    pub absent_leaves: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoverageOutcome {
+    Ensured(CoverageEnsured),
+    Failed(CoverageEnsureFailed),
+}
+
+impl CoverageOutcome {
+    pub fn heartbeat_covered_now(&self) -> bool {
+        match self {
+            Self::Ensured(outcome) => outcome.heartbeat_covered_now,
+            Self::Failed(outcome) => outcome.heartbeat_covered_now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartupCoverageOutcome {
+    Ready(CoverageOutcome),
+    Refused(CoverageOutcome),
+}
+
+pub async fn heartbeat_coverage_present(
+    connection: &mut PgConnection,
+) -> Result<bool, HistoryError> {
+    let now = database_now(connection).await?;
+    let lower = now
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
+    let leaf = hourly_leaf_ref(lower)?;
+    Ok(sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(leaf.leaf_name())
+        .fetch_one(connection)
+        .await?)
+}
+
+async fn history_class_keys(connection: &mut PgConnection) -> Result<Vec<String>, HistoryError> {
+    let sql = format!(
+        "SELECT class_key FROM {RETENTION_CLASSES}
+         WHERE (duration IS NOT NULL OR class_key = $1) AND class_key <> $2
+         ORDER BY class_key"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(FOREVER_CLASS_KEY)
+        .bind(HEARTBEAT_CLASS_KEY)
+        .fetch_all(connection)
+        .await?)
+}
+
+pub async fn ensure_partition_coverage<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_classes: &[DeclaredRetentionClass],
+    publisher: &P,
+) -> Result<CoverageOutcome, HistoryError> {
+    let heartbeat_registration = register_heartbeat_class(
+        connection,
+        Duration::hours(i64::from(heartbeat_horizon_hours)),
+    )
+    .await?;
+    if matches!(
+        heartbeat_registration,
+        HeartbeatClassRegistration::ParentUnpartitioned
+    ) {
+        return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+            stage: "register_heartbeat_class",
+            class_key: Some(HEARTBEAT_CLASS_KEY.to_owned()),
+            refusal: format!("{heartbeat_registration:?}"),
+            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+            absent_leaves: Vec::new(),
+        }));
+    }
+
+    let default_registration = register_finite_retention_class(
+        connection,
+        DEFAULT_RETENTION_CLASS_KEY,
+        Duration::days(DEFAULT_RETENTION_DURATION_DAYS),
+    )
+    .await?;
+    if !matches!(
+        default_registration,
+        ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
+    ) {
+        return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+            stage: "register_default_class",
+            class_key: Some(DEFAULT_RETENTION_CLASS_KEY.to_owned()),
+            refusal: format!("{default_registration:?}"),
+            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+            absent_leaves: Vec::new(),
+        }));
+    }
+    for declared in declared_classes {
+        let registration =
+            register_finite_retention_class(connection, &declared.class_key, declared.duration)
+                .await?;
+        if !matches!(
+            registration,
+            ClassRegistration::Registered { .. } | ClassRegistration::AlreadyRegistered { .. }
+        ) {
+            return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+                stage: "register_declared_class",
+                class_key: Some(declared.class_key.clone()),
+                refusal: format!("{registration:?}"),
+                heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+                absent_leaves: Vec::new(),
+            }));
+        }
+    }
+
+    let mut created_history = 0_u64;
+    let mut failures = Vec::new();
+    for (savepoint_number, class_key) in history_class_keys(connection)
+        .await?
+        .into_iter()
+        .enumerate()
+    {
+        let savepoint = format!("horsies_history_coverage_{savepoint_number}");
+        sqlx::query(&format!("SAVEPOINT {savepoint}"))
+            .execute(&mut *connection)
+            .await?;
+        let command = EnsureLeafCoverage::new(&class_key, history_horizon_days)
+            .map_err(|error| HistoryError::contract(error.to_string()))?;
+        let class_result = ensure_leaf_coverage(connection, &command, publisher).await;
+        let creations = match class_result {
+            Ok(creations) => {
+                sqlx::query(&format!("RELEASE SAVEPOINT {savepoint}"))
+                    .execute(&mut *connection)
+                    .await?;
+                creations
+            }
+            Err(error) => {
+                sqlx::query(&format!("ROLLBACK TO SAVEPOINT {savepoint}"))
+                    .execute(&mut *connection)
+                    .await?;
+                sqlx::query(&format!("RELEASE SAVEPOINT {savepoint}"))
+                    .execute(&mut *connection)
+                    .await?;
+                failures.push(format!("{class_key}: {error}"));
+                continue;
+            }
+        };
+        created_history += creations
+            .iter()
+            .filter(|creation| matches!(creation, LeafCreation::Created { .. }))
+            .count() as u64;
+        let refusals: Vec<String> = creations
+            .into_iter()
+            .filter(|creation| {
+                !matches!(
+                    creation,
+                    LeafCreation::Created { .. }
+                        | LeafCreation::AlreadyConformant { .. }
+                        | LeafCreation::IndexRepaired { .. }
+                )
+            })
+            .map(|creation| format!("{creation:?}"))
+            .collect();
+        if !refusals.is_empty() {
+            failures.push(format!("{class_key}: {}", refusals.join("; ")));
+        }
+    }
+
+    let heartbeat_command = EnsureHeartbeatCoverage::new(heartbeat_horizon_hours)?;
+    let heartbeat_creations = ensure_heartbeat_coverage(connection, &heartbeat_command).await?;
+    let mut created_heartbeats = 0_u64;
+    for creation in heartbeat_creations {
+        match creation {
+            LeafCreation::Created { .. } => created_heartbeats += 1,
+            LeafCreation::AlreadyConformant { .. } | LeafCreation::IndexRepaired { .. } => {}
+            refusal => {
+                return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+                    stage: "ensure_heartbeat_coverage",
+                    class_key: Some(HEARTBEAT_CLASS_KEY.to_owned()),
+                    refusal: format!("{refusal:?}"),
+                    heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+                    absent_leaves: Vec::new(),
+                }));
+            }
+        }
+    }
+
+    let mut republished = false;
+    let mut absent_leaves = Vec::new();
+    if created_history > 0 || publisher.needs_republication(connection).await? {
+        let report = publisher.republish(connection).await?;
+        republished = true;
+        absent_leaves = report.absent_leaves;
+    }
+    if !failures.is_empty() {
+        let first_class = failures[0]
+            .split_once(':')
+            .map(|(class, _)| class.to_owned());
+        return Ok(CoverageOutcome::Failed(CoverageEnsureFailed {
+            stage: "ensure_leaf_coverage",
+            class_key: first_class,
+            refusal: format!(
+                "{} class(es) failed: {}",
+                failures.len(),
+                failures.join("; ")
+            ),
+            heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+            absent_leaves,
+        }));
+    }
+    let now = database_now(connection).await?;
+    let day = now
+        .with_hour(0)
+        .and_then(|value| value.with_minute(0))
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
+    let hour = now
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
+    Ok(CoverageOutcome::Ensured(CoverageEnsured {
+        created_history_leaves: created_history,
+        created_heartbeat_leaves: created_heartbeats,
+        republished,
+        heartbeat_covered_now: heartbeat_coverage_present(connection).await?,
+        history_covered_through: day + Duration::days(i64::from(history_horizon_days) + 1),
+        heartbeats_covered_through: hour + Duration::hours(i64::from(heartbeat_horizon_hours) + 1),
+        absent_leaves,
+    }))
+}
+
+pub async fn ensure_startup_coverage<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_classes: &[DeclaredRetentionClass],
+    publisher: &P,
+) -> Result<StartupCoverageOutcome, HistoryError> {
+    let outcome = ensure_partition_coverage(
+        connection,
+        history_horizon_days,
+        heartbeat_horizon_hours,
+        declared_classes,
+        publisher,
+    )
+    .await?;
+    if outcome.heartbeat_covered_now() {
+        Ok(StartupCoverageOutcome::Ready(outcome))
+    } else {
+        Ok(StartupCoverageOutcome::Refused(outcome))
+    }
+}

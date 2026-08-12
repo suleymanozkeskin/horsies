@@ -9,9 +9,12 @@ pub mod archive;
 pub mod commands;
 pub mod ddl;
 pub mod errors;
+pub mod heartbeats;
 pub mod identity;
+pub mod maintenance;
 pub mod names;
 pub mod outcomes;
+pub mod partitions;
 pub mod rerun;
 
 #[cfg(test)]
