@@ -2863,17 +2863,40 @@ class PostgresBroker:
         )
         raw_result_value: dict[str, Any] | None = None
         if include_result and detail.result_payload is not None:
-            _lr = loads_json(detail.result_payload.decode('utf-8'))
-            if is_err(_lr):
+            from horsies.core.history.archive.results import (
+                decode_result_envelope,
+            )
+            from horsies.core.history.archive.versions import (
+                DecodedArchiveValue,
+            )
+
+            if detail.result_digest is None:
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                     message=(
-                        f'Result JSON parse failed for task '
-                        f'{task_id}: {_lr.err_value}'
+                        f'History result digest is absent for task {task_id}'
                     ),
                     retryable=False,
                 ))
-            loaded = _lr.ok_value
+            decoded = decode_result_envelope(
+                version=detail.result_envelope_version,
+                codec=detail.result_codec,
+                content_type=detail.result_content_type,
+                payload=detail.result_payload,
+                digest=detail.result_digest,
+            )
+            match decoded:
+                case DecodedArchiveValue(value=loaded):
+                    pass
+                case failure:
+                    return Err(BrokerOperationError(
+                        code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                        message=(
+                            f'History result envelope failed validation for '
+                            f'task {task_id}: {failure!r}'
+                        ),
+                        retryable=False,
+                    ))
             if loaded is not None and not isinstance(loaded, dict):
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
@@ -2883,7 +2906,7 @@ class PostgresBroker:
                     ),
                     retryable=False,
                 ))
-            raw_result_value = loaded
+            raw_result_value = cast('dict[str, Any] | None', loaded)
 
         attempts: list[TaskAttemptInfo] | None = None
         if include_attempts:
