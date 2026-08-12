@@ -384,4 +384,3 @@ async def test_retention_keeps_terminal_workflow_with_live_task(
         )
     ).fetchone() is not None
     assert wf_present, 'workflow retained until its backing task is terminal'
-
