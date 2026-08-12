@@ -1,11 +1,13 @@
-"""Stage 6: post-cutover validation — read-only, concrete, typed.
+"""Stage 6: post-cutover validation and durable attestation.
 
 Every check names a fact the frozen posture requires: no terminal row
 lives, the live-only status domain holds, every declared not-null
 cutover column is not-null in the catalog, the identity columns are
 uuid, the heartbeat shape is partitioned, and the history population
 reconciles with the relocation ledger. Violations are sentences, not
-booleans."""
+booleans. Only successful validation writes the versioned marker that
+startup accepts; a typed validation failure revokes that marker.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +20,11 @@ from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
 from ..terminalization.live_cutover import CUTOVER_COLUMNS
 from ..terminalization.move import LIVE_TASKS
 from .relocation import RELOCATION_LEDGER
-from .state import cutover_complete
+from .state import (
+    CLEAR_CUTOVER_COMPLETE_SQL,
+    CUTOVER_NAME,
+    MARK_CUTOVER_COMPLETE_SQL,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,13 +54,15 @@ _UUID_COLUMNS: tuple[tuple[str, str], ...] = (
 async def validate_cutover(
     connection: AsyncConnection,
 ) -> CutoverValidated | CutoverInvalid:
+    """Validate the frozen posture and durably attest only a valid result."""
     structural = await validate_cutover_structure(connection)
     if isinstance(structural, CutoverInvalid):
-        return structural
-    if not await cutover_complete(connection):
-        return CutoverInvalid(
-            violations=('the durable cutover completion marker is absent',)
+        await connection.execute(
+            CLEAR_CUTOVER_COMPLETE_SQL,
+            {'cutover_name': CUTOVER_NAME},
         )
+        return structural
+    await connection.execute(MARK_CUTOVER_COMPLETE_SQL)
     return structural
 
 
@@ -63,9 +71,9 @@ async def validate_cutover_structure(
 ) -> CutoverValidated | CutoverInvalid:
     """Validate the frozen posture without consulting its durable marker.
 
-    Schema migration uses this before writing the marker for a fresh or
-    already-cut-over database. The operator-facing validator additionally
-    requires the marker through ``validate_cutover`` above.
+    Schema migration uses this before writing the marker for a fresh database.
+    The operator-facing validator owns the same validate-then-mark sequence
+    through ``validate_cutover`` above.
     """
     violations: list[str] = []
 

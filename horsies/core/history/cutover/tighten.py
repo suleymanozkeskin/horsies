@@ -38,7 +38,6 @@ from ..terminalization.live_cutover import (
     tightening_cutover_ddl,
 )
 from ..terminalization.move import LIVE_ATTEMPTS, LIVE_TASKS
-from .state import MARK_CUTOVER_COMPLETE_DDL
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,10 +346,6 @@ async def tighten_to_frozen(
     statements.extend(cutover_fragments())
     statements.append('DROP TABLE horsies_heartbeats')
     statements.append(HEARTBEATS_PARTITIONED_DDL)
-    # The marker is the final statement: a committed marker therefore means
-    # every point-of-no-return DDL statement above committed with it.
-    statements.append(MARK_CUTOVER_COMPLETE_DDL)
-
     for statement in statements:
         await connection.execute(text(statement))
     return TightenComplete(statements_executed=len(statements))
