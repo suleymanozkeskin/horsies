@@ -1,6 +1,6 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v34).
+summary: PostgreSQL tables for live tasks, the task-history archive, heartbeats, worker states, and schedules (schema v35).
 related: [postgres-broker, operational-indexes, ../../configuration/broker-config, ../../migrations/migration-to-0-5-0]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -60,9 +60,10 @@ one.
 ## horsies_task_history
 
 The terminal archive. Partitioned `LIST (retention_class_key)` at the
-top; each finite retention class is sub-partitioned `RANGE
-(retention_anchor_at)` into daily leaves; the `forever` class is a
-single leaf with no time bounds (nothing in it expires). Records carry
+top; each retention class is sub-partitioned `RANGE
+(retention_anchor_at)` into daily leaves. The `forever` class uses the same
+bounded leaves but never drops them; a v34 upgrade retains older rows in one
+bounded legacy leaf and routes current and subsequent rows by day. Records carry
 the task's terminal projection plus an archived snapshot of its attempt
 history; a record is immutable once written and ages with its class —
 retention drops whole partitions, it never deletes rows.
@@ -72,9 +73,10 @@ Every leaf carries two indexes: `(task_id)` for point lookups and
 merge-appends leaves in index order and stops at the LIMIT).
 
 Supporting tables: `horsies_retention_classes` (class definitions;
-immutable windows), the leaf catalog (which daily leaves exist, their
-bounds, and reader publication), and `horsies_key_reservations` (the
-scoped idempotency-key registry with its expiry index).
+immutable windows), the leaf catalog (which bounded leaves exist, their
+bounds, and reader publication), `horsies_key_reservations` (the scoped
+idempotency-key registry with its expiry index), and
+`horsies_cutover_state` (the durable offline-cutover completion marker).
 
 ## Workflow progression outbox and quarantine
 
@@ -191,9 +193,12 @@ credentials accordingly.
 ## Schema Creation
 
 Tables are created by the broker's first initialization and evolved by
-the versioned migration chain (`horsies_schema_version` records the
-installed version; 0.5.0 is schema v34). Creation is protected by an
-advisory lock. From 0.5.0 the worker role also needs `CREATE` on the
+the versioned migration chain (`horsies_schema_version` records the installed
+version; the current development schema is v35). The exact version and the
+`task_history_v1` row in `horsies_cutover_state` are both required after an
+offline upgrade; the integer watermark alone does not attest cutover
+completion. Creation is protected by an advisory lock. From 0.5.0 the worker
+role also needs `CREATE` on the
 partition parents — workers create heartbeat and history partitions
 ahead of writes; a deployment that withholds it must run an external
 coverage cron.

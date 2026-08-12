@@ -1,7 +1,7 @@
 ---
 title: Migrating to 0.5.0
 summary: The task-history live/history split (schema v34) — two upgrade paths, the offline cutover stages, and what each path keeps.
-related: [../internals/database-schema, ../monitoring/action-semantics, ../configuration/recovery-config]
+related: [../internals/database-schema, ../monitoring/action-semantics, ../configuration/retention-config]
 tags: [migration, task-history, 0.5.0, breaking-changes, cutover]
 ---
 
@@ -14,6 +14,11 @@ class and day. The live table holds only `PENDING`, `CLAIMED`, and
 rows. Task and workflow identity columns are `uuid` (task ids UUIDv7).
 Manual in-place retry is removed; re-execution is a new task minted
 through the rerun API. Schema v34.
+
+Current unreleased builds use schema v35. Schema v35 retains the 0.5.0
+cutover stages and adds a durable completion marker plus bounded RANGE leaves
+for the `forever` class. The v34 statements below describe the released
+0.5.0/0.5.1 database shape; the v35 notes state the current behavior.
 
 If you set `RecoveryConfig.queue_terminal_record_retention_hours` in
 0.4.x, its successor is
@@ -100,14 +105,14 @@ hardware.
    The backfill is optional for correctness: preparation accepts
    class-less rows and resolves them to `forever`, stamping the class
    back onto the row so the resolution is visible before relocation.
-   **It is strongly recommended for monitoring performance.** A large
-   `forever` population whose anchors predate the dashboard's default
-   24-hour window is scanned in full by every history list call — the
-   forever partition carries no time bounds, so the window cannot skip
-   it, and on a measured ~110,000-row forever population that scan
-   costs more than the daily leaves' entire read path. Rows in a
-   finite class land in day partitions the window prunes structurally.
-   Backfill a finite class unless the rows genuinely must live forever.
+   On the released v34 schema, a large `forever` population whose anchors
+   predate the dashboard's default 24-hour window is scanned in full by every
+   history list call because that partition carries no time bounds. Schema
+   v35 converts `forever` into a RANGE parent: pre-current-day rows stay in one
+   bounded legacy leaf, current-day rows move to a daily leaf, and later rows
+   use daily leaves. Bounded monitoring windows can then prune the legacy
+   population. Choose a finite class when the records should age out; schema
+   v35 removes the monitoring-performance reason to misstate that policy.
 
 2. **Decide rerun retention.** With the shipped
    `retain_rerun_input_default = False`, pre-0.5.0 tasks are not
@@ -139,10 +144,14 @@ hardware.
 
 ### The stages, in order
 
-Upgrade the package, apply migrations (broker init applies the chain;
-seconds — the v34 step also builds one enqueue-order index per existing
-history leaf, so a database that already carries a large history pays
-index-build time proportional to its size here), then run the stages.
+Upgrade the package, apply migrations, then run the stages. Broker
+initialization applies the chain; on a pre-cutover database at schema v35 it
+then returns `SCHEMA_INIT_FAILED` deliberately because the completion marker
+does not exist yet. Do not start any unit in response to that refusal. The v34
+step builds one enqueue-order index per existing history leaf, so a database
+that already carries a large history pays index-build time proportional to
+its size. The v35 conversion keeps pre-current-day `forever` rows in place and
+moves only current-day rows.
 Each is a typed entrypoint under `horsies.core.history.cutover`; each
 refuses rather than proceeding on a violated precondition, and every
 refusal names its reason.
@@ -170,17 +179,32 @@ refusal names its reason.
   at its first statement. Before it: stop at any stage, run the
   teardown, restore nothing — the old fleet still works. After it: the
   backup is the only way back.
+- Tighten writes `task_history_v1` to `horsies_cutover_state` as its final
+  statement. The marker commits atomically with the frozen DDL. An integer
+  schema watermark without this row does not authorize startup or monitoring
+  actions.
 - Validation attests the frozen posture from catalog facts: live-only
-  status domain, uuid identity, required enqueue-time columns.
+  status domain, uuid identity, required enqueue-time columns, bounded
+  `forever` leaves, and the durable completion marker.
 
 ### After the window
 
-Start the upgraded units. Confirm the deploy by **schema version, not
-version string** — a pre-release deploy from a branch still reports the
-old `__version__`; `SELECT version FROM horsies_schema_version` is the
-truth. First worker startup creates partition coverage ahead of writes;
-the dashboard reads live and history transparently; new terminal tasks
-appear in `horsies_task_history` within minutes.
+Start the upgraded units only after validation passes. Confirm both schema
+dimensions:
+
+```sql
+SELECT max(version) FROM horsies_schema_version;
+SELECT completed_at
+FROM horsies_cutover_state
+WHERE cutover_name = 'task_history_v1';
+```
+
+The version must equal the build's `SCHEMA_VERSION` and the marker query must
+return one row. A pre-release branch may still report an older package
+`__version__`, so the package string is not a schema check. First worker
+startup creates partition coverage ahead of writes; the dashboard reads live
+and history transparently; new terminal tasks appear in
+`horsies_task_history` within minutes.
 
 ## Both paths: what to check on day one
 
