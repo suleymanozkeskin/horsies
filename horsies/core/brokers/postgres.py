@@ -54,6 +54,11 @@ from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     resolve_retention_class_key,
 )
+from horsies.core.history.cutover.state import (
+    CREATE_CUTOVER_STATE_TABLE_SQL,
+    MARK_CUTOVER_COMPLETE_SQL,
+    cutover_complete,
+)
 from horsies.core.utils.db import (
     is_retryable_connection_error,
     register_identity_text_reads,
@@ -717,9 +722,27 @@ class PostgresBroker:
             raise
 
     async def _maybe_run_schema_init(self, engine: AsyncEngine) -> None:
-        if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
+        stored_version = await self._read_schema_version_if_exists(engine)
+        # Read-only consumers such as the monitoring service must be able to
+        # inspect an absent, old, incomplete-cutover, or future schema and
+        # report its status without mutating it. Compatibility enforcement is
+        # owned by their schema-status probe; fleet brokers enforce it below.
+        if not self.run_schema_migrations:
             return
-        await self._run_schema_migrations_with_retry(engine)
+        if stored_version < SCHEMA_VERSION:
+            await self._run_schema_migrations_with_retry(engine)
+        elif stored_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f'database schema v{stored_version} is newer than this '
+                f'build supports (v{SCHEMA_VERSION})'
+            )
+        async with engine.connect() as conn:
+            if not await cutover_complete(conn):
+                raise RuntimeError(
+                    'schema migrations are current but the offline task-history '
+                    'cutover is incomplete; run the documented cutover stages '
+                    'through tighten and validation before starting this fleet'
+                )
 
     async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
@@ -767,6 +790,7 @@ class PostgresBroker:
                 return
 
             await conn.run_sync(Base.metadata.create_all)
+            await conn.execute(CREATE_CUTOVER_STATE_TABLE_SQL)
 
             # Migration: ensure NOT NULL columns have server-side DEFAULTs
             # for existing tables created before server_default was added.
@@ -953,6 +977,17 @@ class PostgresBroker:
                 for statement in ADD_RERUN_INPUT_COLUMNS_SQL:
                     await conn.execute(statement)
 
+            # Migration (v35): ``forever`` is a RANGE parent instead of one
+            # unbounded LIST leaf. The conversion retains pre-today rows in a
+            # bounded legacy leaf and moves only the current UTC day's rows.
+            # Subsequent monitoring windows can therefore prune old forever
+            # history without adding another terminalization-path index.
+            from horsies.core.history.partitions.forever import (
+                ensure_forever_range_partitioning,
+            )
+
+            await ensure_forever_range_partitioning(conn)
+
             # Migration (v30): the registry maintenance indexes, closing
             # v28's recorded deliberate absence on the already-deployed
             # registry.
@@ -1102,6 +1137,25 @@ class PostgresBroker:
                     ))
                     for statement in cutover_fragments():
                         await conn.execute(text(statement))
+
+                # A native-uuid database is either fresh or already cut over,
+                # but identity alone is not enough to attest the frozen
+                # posture. Validate every structural invariant before writing
+                # the durable marker.
+                from horsies.core.history.cutover.validation import (
+                    CutoverInvalid,
+                    CutoverValidated,
+                    validate_cutover_structure,
+                )
+
+                match await validate_cutover_structure(conn):
+                    case CutoverValidated():
+                        await conn.execute(MARK_CUTOVER_COMPLETE_SQL)
+                    case CutoverInvalid(violations=violations):
+                        raise RuntimeError(
+                            'native-uuid schema failed cutover validation: '
+                            + '; '.join(violations)
+                        )
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,

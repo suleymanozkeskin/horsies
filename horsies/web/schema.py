@@ -35,6 +35,7 @@ from horsies.core.schemas.migrations import (
     SCHEMA_VERSION,
     SCHEMA_VERSION_TABLE_EXISTS_SQL,
 )
+from horsies.core.history.cutover.state import cutover_complete
 
 logger = get_logger('web')
 
@@ -49,6 +50,9 @@ class SchemaState(str, Enum):
 
     MATCH = 'MATCH'
     MISMATCH = 'MISMATCH'
+    # Migration chain is current, but the separately operated offline
+    # cutover has not reached its durable completion marker.
+    CUTOVER_REQUIRED = 'CUTOVER_REQUIRED'
     # Only ever the result of a successful observation.
     ABSENT = 'ABSENT'
     # The probe has never succeeded, so there is nothing to report yet.
@@ -86,6 +90,13 @@ class SchemaIncompatible(Exception):
                     'unavailable. Start a horsies app or worker to '
                     'initialize it; the monitoring tool never modifies the '
                     'database schema.'
+                )
+            case SchemaState.CUTOVER_REQUIRED:
+                self.detail = (
+                    f'Database schema is v{status.version}, but the offline '
+                    'task-history cutover is incomplete. Run the documented '
+                    'cutover stages through tighten and validation before '
+                    'enabling actions.'
                 )
             case _:
                 self.detail = (
@@ -160,6 +171,11 @@ class SchemaProbe:
                 stored = int(
                     (await session.execute(READ_SCHEMA_VERSION_SQL)).scalar_one() or 0
                 )
+                completed = (
+                    await cutover_complete(await session.connection())
+                    if stored == SCHEMA_VERSION
+                    else False
+                )
         except SQLAlchemyError as exc:
             logger.warning(f'Schema version probe failed: {exc}')
             return None
@@ -172,7 +188,13 @@ class SchemaProbe:
             )
         return SchemaStatus(
             state=(
-                SchemaState.MATCH if stored == SCHEMA_VERSION else SchemaState.MISMATCH
+                SchemaState.MISMATCH
+                if stored != SCHEMA_VERSION
+                else (
+                    SchemaState.MATCH
+                    if completed
+                    else SchemaState.CUTOVER_REQUIRED
+                )
             ),
             version=stored,
             expected_version=SCHEMA_VERSION,

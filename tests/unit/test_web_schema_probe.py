@@ -68,6 +68,7 @@ class TestSchemaStatus:
     def test_only_match_is_compatible(self) -> None:
         assert status(SchemaState.MATCH, SCHEMA_VERSION).compatible is True
         assert status(SchemaState.MISMATCH, SCHEMA_VERSION - 1).compatible is False
+        assert status(SchemaState.CUTOVER_REQUIRED, SCHEMA_VERSION).compatible is False
         assert status(SchemaState.ABSENT, None).compatible is False
         assert status(SchemaState.UNKNOWN, None).compatible is False
 
@@ -181,6 +182,17 @@ class TestSchemaGuard:
         assert raised.value.code == SCHEMA_INCOMPATIBLE
         assert 'no horsies schema' in raised.value.detail
         assert 'never modifies the database schema' in raised.value.detail
+
+    async def test_current_version_without_cutover_marker_refuses_actions(self) -> None:
+        guard = schema_guard(
+            StubProbe([status(SchemaState.CUTOVER_REQUIRED, SCHEMA_VERSION)])
+        )
+
+        with pytest.raises(SchemaIncompatible) as raised:
+            await guard()
+
+        assert raised.value.code == SCHEMA_INCOMPATIBLE
+        assert 'cutover is incomplete' in raised.value.detail
 
 
 class TestNoDdlConstructionFlag:

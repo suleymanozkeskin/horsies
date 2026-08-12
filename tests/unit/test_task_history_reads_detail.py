@@ -85,12 +85,12 @@ class TestDetailRendersFromTheSharedSkeleton:
             assert skeleton_fragment in identity
             assert skeleton_fragment in detail
 
-    def test_probe_order_live_then_forever_then_finite(self) -> None:
+    def test_probe_order_live_then_cataloged_leaf(self) -> None:
         detail = render_staged_detail_function(make_manifest())
         live = detail.index('FROM horsies_tasks WHERE id = p_task_id')
-        forever = detail.index('horsies_task_history_forever')
         finite = detail.index('horsies_task_history_x_2026_08_01')
-        assert live < forever < finite
+        assert live < finite
+        assert 'FROM horsies_task_history_forever' not in detail
 
     def test_history_hit_returns_the_whole_row(self) -> None:
         detail = render_staged_detail_function(make_manifest())

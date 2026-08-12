@@ -87,7 +87,7 @@ BASELINE_SCHEMA_VERSION: Final = 26
 # `substrate_identity()` raises when the database's version is not this pin.
 # `qual_boundary33` is therefore unusable until rebuilt at 34, which is a
 # deliberate consequence and not an accident of the bump.
-CANDIDATE_SCHEMA_VERSION: Final = 34
+CANDIDATE_SCHEMA_VERSION: Final = 35
 
 SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 

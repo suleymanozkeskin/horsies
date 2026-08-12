@@ -39,12 +39,15 @@ from horsies.core.history.identity.uuid7 import MonotonicUuid7Generator
 from horsies.core.history.maintenance.coverage import (
     CoverageEnsureFailed,
     CoverageEnsured,
+    StartupCoverageRefused,
     ensure_partition_coverage,
+    ensure_startup_coverage,
 )
 from horsies.core.history.names import (
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
     RETENTION_CLASSES,
+    TASK_HISTORY_FOREVER,
     TASK_PROVENANCE_FUNCTION,
 )
 from horsies.core.history.outcomes import LeafCreated
@@ -357,6 +360,46 @@ class TestMissingLeafBreaksAndHeals:
             assert await published_manifest_absent_leaves(connection) == ()
 
     @pytest.mark.asyncio
+    async def test_in_horizon_loss_does_not_veto_worker_startup(
+        self, history_schema: HistorySchema
+    ) -> None:
+        """A contained history-class loss is not a heartbeat failure.
+
+        This exercises the startup caller directly on its first pass after an
+        out-of-band drop. The pass republishes readers, reports the missing
+        class leaf, and proves current heartbeat writes remain covered.
+        """
+        async with history_schema.engine.begin() as connection:
+            await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
+            parent = await register_class(connection, CLASS_KEY)
+            settled = await ensure_partition_coverage(
+                connection,
+                history_horizon_days=2,
+                heartbeat_horizon_hours=2,
+            )
+            assert isinstance(settled, CoverageEnsured), settled
+            now = await database_now(connection)
+            lower, _ = day_bounds(now)
+            gone = daily_leaf_name(parent, lower)
+            await connection.execute(text(f'DROP TABLE {gone}'))
+
+        async with history_schema.engine.begin() as connection:
+            startup = await ensure_startup_coverage(
+                connection,
+                history_horizon_days=2,
+                heartbeat_horizon_hours=2,
+            )
+
+        assert isinstance(startup, CoverageEnsureFailed), startup
+        assert not isinstance(startup, StartupCoverageRefused), startup
+        assert startup.heartbeat_covered_now is True
+        assert startup.absent_leaves == (gone,)
+        assert gone in startup.refusal
+
+        async with history_schema.engine.connect() as connection:
+            assert await published_manifest_absent_leaves(connection) == ()
+
+    @pytest.mark.asyncio
     async def test_no_parent_resolving_at_all_raises(
         self, history_schema: HistorySchema
     ) -> None:
@@ -365,8 +408,8 @@ class TestMissingLeafBreaksAndHeals:
         `to_regclass` resolves through `search_path`. If nothing at all
         resolves, publishing the result would empty the manifest and
         report every retained row as absent, so the reader fails closed
-        instead. Dropping the only parent cascades to its leaf, which
-        reproduces the shape such a session sees.
+        instead. The frozen schema has both the finite test parent and the
+        explicit ``forever`` parent; dropping both reproduces the condition.
         """
         async with history_schema.engine.begin() as connection:
             parent = await register_class(connection, CLASS_KEY)
@@ -374,7 +417,9 @@ class TestMissingLeafBreaksAndHeals:
             await _create_leaf(connection, parent=parent, day=now)
 
         async with history_schema.engine.begin() as connection:
-            await connection.execute(text(f'DROP TABLE {parent} CASCADE'))
+            await connection.execute(
+                text(f'DROP TABLE {parent}, {TASK_HISTORY_FOREVER} CASCADE')
+            )
 
         async with history_schema.engine.connect() as connection:
             with pytest.raises(HistoryParentAbsent, match='cannot see'):

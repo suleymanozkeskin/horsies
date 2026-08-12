@@ -521,6 +521,31 @@ class TestDetachAndDrop:
 
 class TestHealth:
     @pytest.mark.asyncio
+    async def test_forever_class_has_daily_coverage_health(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            creations = await ensure_leaf_coverage(
+                connection,
+                EnsureLeafCoverage(class_key='forever', horizon_days=3),
+                UnpublishedLoader(),
+            )
+            assert not any(
+                isinstance(creation, ForeverClassLeaf)
+                for creation in creations
+            )
+            report = await collect_partition_health(
+                connection,
+                CollectPartitionHealth(
+                    class_key='forever', application_managed=True
+                ),
+            )
+            assert report.is_healthy
+            assert report.coverage is not None
+            assert report.coverage.complete_future_intervals >= 2
+            assert report.coverage.detachable_leaf_count == 0
+
+    @pytest.mark.asyncio
     async def test_covered_class_is_healthy(
         self, history_schema: HistorySchema
     ) -> None:

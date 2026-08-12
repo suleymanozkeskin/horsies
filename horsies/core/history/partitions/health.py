@@ -17,14 +17,15 @@ statements regardless of leaf count, which is what keeps it inside its
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import CollectPartitionHealth
 from ..errors import HistoryContractError, HistoryParentAbsent
-from ..names import LEAF_CATALOG, WORKFLOW_PHASE2_PENDING
+from ..ddl.tables import FOREVER_CLASS_KEY
+from ..names import LEAF_CATALOG, TASK_HISTORY_FOREVER, WORKFLOW_PHASE2_PENDING
 from ..outcomes import (
     CatalogConflictKind,
     ClassCoverage,
@@ -75,6 +76,11 @@ async def collect_partition_health(
                 coverage=None,
                 faults=(RetentionClassAbsent(class_key=command.class_key),),
             )
+        case RetentionClassRow(duration=None) if (
+            command.class_key == FOREVER_CLASS_KEY
+        ):
+            duration = None
+            parent_name = TASK_HISTORY_FOREVER
         case RetentionClassRow(duration=None):
             return PartitionHealthReport(
                 class_key=command.class_key,
@@ -82,13 +88,15 @@ async def collect_partition_health(
                 coverage=None,
                 faults=(),
             )
-        case RetentionClassRow():
+        case RetentionClassRow(
+            duration=timedelta() as duration,
+            finite_parent_name=str() as parent_name,
+        ):
             pass
-    duration = retention_class.duration
-    parent_name = retention_class.finite_parent_name
-    if duration is None or parent_name is None:
-        raise AssertionError('finite class invariant enforced by the catalog reader')
-
+        case RetentionClassRow():
+            raise AssertionError(
+                'finite class invariant enforced by the catalog reader'
+            )
     survey = await _survey_attached_leaves(
         connection, class_key=command.class_key, parent_name=parent_name
     )
@@ -148,7 +156,7 @@ async def collect_partition_health(
             complete_future += 1
         if leaf.blocker_count > 0:
             blocked += 1
-        elif leaf.upper_anchor + duration <= now:
+        elif duration is not None and leaf.upper_anchor + duration <= now:
             detachable += 1
 
     if complete_future < COVERAGE_FLOOR_INTERVALS:

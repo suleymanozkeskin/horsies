@@ -30,14 +30,13 @@ the exhaustion outcome with the marker set, never replaced.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..archive.versions import JSON_UTF8_CODEC
-from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
+from ..names import TASK_HISTORY_PARENT
 from ..partitions.locks import lock_leaf_for_transaction
 from .jobs import (
     TRANSCODE_BATCHES,
@@ -90,11 +89,6 @@ from .transforms import (
     replacement_relation_name,
     transformed_select,
 )
-
-_FOREVER_ANCHOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
-"""The forever leaf has no catalog anchor; its advisory lock uses this
-fixed instant so every maintenance participant derives the same key."""
-
 
 class TranscodeStateError(Exception):
     """A stage was invoked from a job state that cannot accept it."""
@@ -1056,18 +1050,7 @@ async def _job_relations(
 async def _lock_relation_leaf(
     connection: AsyncConnection, relation: TranscodeRelationRow
 ) -> None:
-    """The leaf advisory lock serializing against the partition manager.
-
-    Finite leaves derive class and anchor from the leaf catalog by
-    name; the forever leaf is not cataloged and uses its fixed anchor.
-    Transaction-scoped: released at commit, so the copy's
-    one-leaf-at-a-time cardinality holds by construction.
-    """
-    if relation.source_relation_name == TASK_HISTORY_FOREVER:
-        await lock_leaf_for_transaction(
-            connection, class_key='forever', anchor=_FOREVER_ANCHOR
-        )
-        return
+    """The cataloged leaf lock serializing against partition maintenance."""
     row = (
         await connection.execute(
             text(
@@ -1094,8 +1077,6 @@ async def _catalog_attachment_holds(
     """The in-window catalog check: the leaf is still attached and not
     detached or dropped — verify-before-lock applied to the catalog
     dimension."""
-    if relation.source_relation_name == TASK_HISTORY_FOREVER:
-        return True
     row = (
         await connection.execute(
             text(

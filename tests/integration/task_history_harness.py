@@ -93,6 +93,11 @@ def task_history_schema_fixture(schema_name: str):  # type: ignore[no-untyped-de
                 *quarantine_fragments(),
             ):
                 await connection.execute(text(fragment))
+            from horsies.core.history.partitions.forever import (
+                ensure_forever_range_partitioning,
+            )
+
+            await ensure_forever_range_partitioning(connection)
         yield HistorySchema(schema_name=schema_name, engine=engine)
         await engine.dispose()
         async with admin_engine.connect() as connection:
@@ -132,6 +137,22 @@ async def register_class(
             return parent_name
         case _:
             raise AssertionError(f'class registration failed: {outcome!r}')
+
+
+async def current_forever_leaf(connection: AsyncConnection) -> str:
+    """Return the bounded ``forever`` leaf covering database time."""
+    leaf_name = (
+        await connection.execute(
+            text(
+                "SELECT leaf_name FROM horsies_task_history_leaf_catalog "
+                "WHERE class_key = 'forever' "
+                'AND detached_at IS NULL AND dropped_at IS NULL '
+                'AND lower_anchor <= statement_timestamp() '
+                'AND upper_anchor > statement_timestamp()'
+            )
+        )
+    ).scalar_one()
+    return str(leaf_name)
 
 
 def frozen_history_row(
