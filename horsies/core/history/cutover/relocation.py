@@ -58,7 +58,7 @@ envelope columns, and the history insert routes by terminal day.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final
 
 from sqlalchemy import text
@@ -66,9 +66,15 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..names import TASK_HISTORY_PARENT
+from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
 from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
-from ..partitions.catalog import daily_leaf_name, read_retention_class
+from ..partitions.catalog import (
+    daily_leaf_name,
+    read_leaf_catalog_row,
+    read_leaf_physical_state,
+    read_retention_class,
+)
+from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import create_daily_leaf
 from ..partitions.publication import UnpublishedLoader
 from ..reads.publisher import StagedLoaderPublisher
@@ -356,8 +362,11 @@ async def _ensure_batch_leaf_coverage(
 
     The relocation projection maps a missing legacy class to ``forever``. The
     coverage query applies that same mapping, so its distinct class/day set is
-    exactly the partition set this batch's insert can reach. Publication occurs
-    once after all creations, avoiding a full manifest rewrite per leaf.
+    exactly the partition set this batch's insert can reach. A v34 conversion
+    retains one MINVALUE-to-conversion-day forever leaf; an older destination
+    already routes there and must not request an overlapping daily partition.
+    Publication occurs once after all creations, avoiding a full manifest
+    rewrite per leaf.
     """
     destinations = (
         await connection.execute(
@@ -380,6 +389,7 @@ async def _ensure_batch_leaf_coverage(
         )
     ).all()
     created = False
+    legacy_forever_upper = await _attached_legacy_forever_upper(connection)
     for destination in destinations:
         class_key = str(destination.class_key)
         lower = destination.lower_anchor
@@ -397,6 +407,12 @@ async def _ensure_batch_leaf_coverage(
             raise RuntimeError(
                 f'relocation destination class {class_key!r} has no RANGE parent'
             )
+        if (
+            class_key == FOREVER_CLASS_KEY
+            and legacy_forever_upper is not None
+            and lower < legacy_forever_upper
+        ):
+            continue
         leaf = LeafRef(
             leaf_name=daily_leaf_name(parent_name, lower),
             class_key=class_key,
@@ -418,3 +434,34 @@ async def _ensure_batch_leaf_coverage(
                 )
     if created:
         await StagedLoaderPublisher().republish(connection)
+
+
+async def _attached_legacy_forever_upper(
+    connection: AsyncConnection,
+) -> datetime | None:
+    """Upper bound of the attached v34 catch-all, if it is conformant.
+
+    The catalog supplies the typed upper bound while the physical-state check
+    proves the named relation is still attached with the cataloged partition
+    bound. The legacy leaf's lower physical bound is MINVALUE by construction.
+    """
+    catalog = await read_leaf_catalog_row(connection, FOREVER_LEGACY_LEAF)
+    if (
+        catalog is None
+        or catalog.class_key != FOREVER_CLASS_KEY
+        or catalog.parent_name != TASK_HISTORY_FOREVER
+        or catalog.detached_at is not None
+        or catalog.dropped_at is not None
+    ):
+        return None
+    physical = await read_leaf_physical_state(
+        connection,
+        leaf_name=catalog.leaf_name,
+        parent_name=catalog.parent_name,
+        id_index_name=catalog.id_index_name,
+    )
+    conformant = (
+        physical.detach_pending is False
+        and physical.partition_bound == catalog.partition_bound
+    )
+    return catalog.upper_anchor if conformant else None

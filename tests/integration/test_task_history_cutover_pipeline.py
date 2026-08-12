@@ -30,6 +30,7 @@ from horsies.core.history.cutover.relocation import (
     RELOCATION_LEDGER_DDL,
     RelocationComplete,
 )
+from horsies.core.history.cutover.state import cutover_complete
 from horsies.core.history.cutover.tighten import (
     TightenComplete,
     TightenRefused,
@@ -188,11 +189,13 @@ async def test_the_offline_program_end_to_end(
                 ),
             )
             assert isinstance(tightened, TightenComplete), tightened
+            assert await cutover_complete(connection) is False
 
-            # Stage 6: validation attests the frozen posture.
+            # Stage 6: validation, not tighten, attests the frozen posture.
             validated = await validate_cutover(connection)
             assert isinstance(validated, CutoverValidated), validated
             assert validated.history_rows == 3
+            assert await cutover_complete(connection) is True
 
             # The surviving live row rides the frozen shape PREPARED:
             # disposition, fingerprint, and the resolved class present,

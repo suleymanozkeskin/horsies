@@ -22,7 +22,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
@@ -167,6 +167,45 @@ async def _migrate_pre_cutover(url: str) -> None:
 
 def _engine(url: str) -> AsyncEngine:
     return create_async_engine(url)
+
+
+async def _restore_v34_forever_shape(connection: AsyncConnection) -> None:
+    """Replace the v35 RANGE parent with v34's unbounded LIST leaf."""
+    from horsies.core.history.names import (
+        LEAF_CATALOG,
+        TASK_HISTORY_FOREVER,
+        TASK_HISTORY_PARENT,
+    )
+
+    await connection.execute(
+        text(f"DELETE FROM {LEAF_CATALOG} WHERE class_key = 'forever'")
+    )
+    await connection.execute(
+        text(
+            f'ALTER TABLE {TASK_HISTORY_PARENT} '
+            f'DETACH PARTITION {TASK_HISTORY_FOREVER}'
+        )
+    )
+    await connection.execute(text(f'DROP TABLE {TASK_HISTORY_FOREVER} CASCADE'))
+    await connection.execute(
+        text(
+            f'CREATE TABLE {TASK_HISTORY_FOREVER} '
+            f'PARTITION OF {TASK_HISTORY_PARENT} '
+            "FOR VALUES IN ('forever')"
+        )
+    )
+    await connection.execute(
+        text(
+            f'CREATE INDEX {TASK_HISTORY_FOREVER}_task_idx '
+            f'ON {TASK_HISTORY_FOREVER} (task_id)'
+        )
+    )
+    await connection.execute(
+        text(
+            f'CREATE INDEX {TASK_HISTORY_FOREVER}_enqueued_idx '
+            f'ON {TASK_HISTORY_FOREVER} (enqueued_at)'
+        )
+    )
 
 
 async def _stored_version(engine: AsyncEngine) -> int:
@@ -620,18 +659,28 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
-    async def test_current_version_without_cutover_marker_refuses_startup(
+    async def test_current_version_with_only_legacy_marker_refuses_startup(
         self,
         scratch_database: str,
     ) -> None:
-        """The integer watermark alone cannot authorize the post-cutover fleet."""
-        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+        """The pre-validation marker cannot authorize the post-cutover fleet."""
+        from horsies.core.history.cutover.state import (
+            CUTOVER_STATE_TABLE,
+            LEGACY_CUTOVER_NAME,
+        )
 
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
         try:
             async with engine.begin() as connection:
                 await connection.execute(text(f'DELETE FROM {CUTOVER_STATE_TABLE}'))
+                await connection.execute(
+                    text(
+                        f'INSERT INTO {CUTOVER_STATE_TABLE} (cutover_name) '
+                        'VALUES (:cutover_name)'
+                    ),
+                    {'cutover_name': LEGACY_CUTOVER_NAME},
+                )
         finally:
             await engine.dispose()
 
@@ -651,6 +700,57 @@ class TestUpgradePaths:
         finally:
             await broker.close_async()
 
+    async def test_failed_validation_revokes_the_startup_attestation(
+        self,
+        scratch_database: str,
+    ) -> None:
+        from horsies.core.history.cutover.state import cutover_complete
+        from horsies.core.history.cutover.validation import (
+            CutoverInvalid,
+            validate_cutover,
+        )
+        from horsies.core.history.names import LEAF_CATALOG
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.begin() as connection:
+                assert await cutover_complete(connection) is True
+                removed = (
+                    await connection.execute(
+                        text(
+                            f'DELETE FROM {LEAF_CATALOG} '
+                            "WHERE class_key = 'forever' "
+                            'AND detached_at IS NULL '
+                            'AND dropped_at IS NULL '
+                            'RETURNING leaf_name'
+                        )
+                    )
+                ).first()
+                assert removed is not None
+                validation = await validate_cutover(connection)
+                assert isinstance(validation, CutoverInvalid)
+                assert any(
+                    'forever history leaves are absent' in violation
+                    for violation in validation.violations
+                )
+                assert await cutover_complete(connection) is False
+        finally:
+            await engine.dispose()
+
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(scratch_database))
+        )
+        try:
+            initialized = await broker.ensure_schema_initialized()
+            assert initialized.is_err()
+            assert (
+                'offline task-history cutover is incomplete'
+                in initialized.unwrap_err().message
+            )
+        finally:
+            await broker.close_async()
+
     async def test_v34_forever_leaf_converts_without_rewriting_old_rows(
         self,
         scratch_database: str,
@@ -660,7 +760,6 @@ class TestUpgradePaths:
 
         from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
         from horsies.core.history.names import (
-            LEAF_CATALOG,
             TASK_HISTORY_FOREVER,
             TASK_HISTORY_PARENT,
         )
@@ -682,40 +781,7 @@ class TestUpgradePaths:
         current_anchor = today + timedelta(hours=1)
         try:
             async with engine.begin() as connection:
-                await connection.execute(
-                    text(
-                        f"DELETE FROM {LEAF_CATALOG} "
-                        "WHERE class_key = 'forever'"
-                    )
-                )
-                await connection.execute(
-                    text(
-                        f'ALTER TABLE {TASK_HISTORY_PARENT} '
-                        f'DETACH PARTITION {TASK_HISTORY_FOREVER}'
-                    )
-                )
-                await connection.execute(
-                    text(f'DROP TABLE {TASK_HISTORY_FOREVER} CASCADE')
-                )
-                await connection.execute(
-                    text(
-                        f'CREATE TABLE {TASK_HISTORY_FOREVER} '
-                        f'PARTITION OF {TASK_HISTORY_PARENT} '
-                        "FOR VALUES IN ('forever')"
-                    )
-                )
-                await connection.execute(
-                    text(
-                        f'CREATE INDEX {TASK_HISTORY_FOREVER}_task_idx '
-                        f'ON {TASK_HISTORY_FOREVER} (task_id)'
-                    )
-                )
-                await connection.execute(
-                    text(
-                        f'CREATE INDEX {TASK_HISTORY_FOREVER}_enqueued_idx '
-                        f'ON {TASK_HISTORY_FOREVER} (enqueued_at)'
-                    )
-                )
+                await _restore_v34_forever_shape(connection)
                 archive_defaults = {
                     'attempt_archive_version': '1',
                     'attempt_snapshot_codec': "'json-utf8'",
@@ -810,6 +876,92 @@ class TestUpgradePaths:
                     ).all()
                 )
                 assert FOREVER_LEGACY_LEAF not in plan
+        finally:
+            await engine.dispose()
+
+    async def test_v34_conversion_and_classless_relocation_compose(
+        self,
+        scratch_database: str,
+    ) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        from horsies.core.history.cutover.identity import (
+            normalize_attempt_identity,
+        )
+        from horsies.core.history.cutover.program import install_programs
+        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+        from horsies.core.history.cutover.relocation import RelocationComplete
+        from horsies.core.history.partitions.forever import FOREVER_LEGACY_LEAF
+        from tests.integration.test_task_history_preparation import (
+            run_preparation_to_complete,
+        )
+        from tests.integration.test_task_history_relocation import (
+            demote_to_upgraded_world,
+            insert_legacy_task,
+            relocate_all,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        old_anchor = datetime.now(timezone.utc) - timedelta(days=30)
+        try:
+            async with engine.begin() as connection:
+                await demote_to_upgraded_world(connection)
+                await _restore_v34_forever_shape(connection)
+                task_id = await insert_legacy_task(
+                    connection,
+                    status='COMPLETED',
+                    kind=None,
+                    class_key=None,
+                    disposition=None,
+                    retain=None,
+                    fingerprinted=False,
+                )
+                await connection.execute(
+                    text(
+                        'UPDATE horsies_tasks SET terminal_at = :terminal_at '
+                        'WHERE id = CAST(:task_id AS varchar)'
+                    ),
+                    {'terminal_at': old_anchor, 'task_id': task_id},
+                )
+                await connection.execute(
+                    text(f'DELETE FROM {CUTOVER_STATE_TABLE}')
+                )
+                await connection.execute(
+                    text(
+                        'DELETE FROM horsies_schema_version WHERE version > 34'
+                    )
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version (version) '
+                        'VALUES (34) ON CONFLICT DO NOTHING'
+                    )
+                )
+
+            await _migrate_pre_cutover(scratch_database)
+
+            async with engine.begin() as connection:
+                await normalize_attempt_identity(connection)
+                installed = await install_programs(connection)
+                assert isinstance(installed, int), installed
+                await run_preparation_to_complete(
+                    connection, retain_default=True
+                )
+                relocated = await relocate_all(connection)
+                assert isinstance(relocated, RelocationComplete)
+                assert relocated.rows_relocated == 1
+                relation = (
+                    await connection.execute(
+                        text(
+                            'SELECT tableoid::regclass::text '
+                            'FROM horsies_task_history '
+                            'WHERE task_id = CAST(:task_id AS uuid)'
+                        ),
+                        {'task_id': task_id},
+                    )
+                ).scalar_one()
+                assert relation == FOREVER_LEGACY_LEAF
         finally:
             await engine.dispose()
 

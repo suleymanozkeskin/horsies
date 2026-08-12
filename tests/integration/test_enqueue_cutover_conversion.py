@@ -234,7 +234,7 @@ class TestKeyedEnqueue:
             ).scalar_one()
         assert count == 1
 
-    async def test_task_id_conflict_rolls_back_the_new_reservation(
+    async def test_task_id_conflict_binds_the_verified_task_to_the_key(
         self, broker: PostgresBroker
     ) -> None:
         existing = make_send()
@@ -245,6 +245,62 @@ class TestKeyedEnqueue:
 
         assert is_ok(conflicted_insert)
         assert conflicted_insert.ok_value == existing.task_id
+        async with broker.session_factory() as session:
+            binding = (
+                await session.execute(
+                    text(
+                        'SELECT r.disposition, '
+                        'r.idempotency_key_digest = t.idempotency_key_digest '
+                        'AS digests_match '
+                        'FROM horsies_key_reservations r '
+                        'JOIN horsies_tasks t ON t.id = r.task_id '
+                        'WHERE r.task_id = CAST(:id AS uuid)'
+                    ),
+                    {'id': existing.task_id},
+                )
+            ).one()
+        assert binding.disposition == 'LIVE'
+        assert binding.digests_match is True
+
+        fresh = Send(
+            task_id=mint_task_id(),
+            enqueue_sha=existing.enqueue_sha,
+            kwargs_json=existing.kwargs_json,
+            sent_at=existing.sent_at,
+        )
+        retried = await enqueue_keyed(broker, fresh, key)
+        assert is_ok(retried)
+        assert retried.ok_value == existing.task_id
+        async with broker.session_factory() as session:
+            task_count = int(
+                (
+                    await session.execute(
+                        text(
+                            'SELECT count(*) FROM horsies_tasks '
+                            'WHERE id IN (CAST(:existing AS uuid), '
+                            'CAST(:fresh AS uuid))'
+                        ),
+                        {'existing': existing.task_id, 'fresh': fresh.task_id},
+                    )
+                ).scalar_one()
+            )
+        assert task_count == 1
+
+    async def test_task_id_cannot_be_bound_to_a_second_key(
+        self, broker: PostgresBroker
+    ) -> None:
+        existing = make_send()
+        first_key = f'first-key-{uuid4()}'
+        second_key = f'second-key-{uuid4()}'
+        assert is_ok(await enqueue_keyed(broker, existing, first_key))
+
+        second_binding = await enqueue_keyed(broker, existing, second_key)
+
+        assert is_err(second_binding)
+        assert (
+            second_binding.err_value.code
+            is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        )
         async with broker.session_factory() as session:
             reservations = int(
                 (
@@ -257,17 +313,41 @@ class TestKeyedEnqueue:
                     )
                 ).scalar_one()
             )
-        assert reservations == 0
+        assert reservations == 1
 
-        fresh = Send(
-            task_id=mint_task_id(),
+    async def test_key_binding_verifies_the_canonical_command_fingerprint(
+        self, broker: PostgresBroker
+    ) -> None:
+        existing = make_send(kwargs_json='{"x":1}')
+        assert is_ok(await enqueue(broker, existing))
+        key = f'fingerprint-key-{uuid4()}'
+        tampered = Send(
+            task_id=existing.task_id,
             enqueue_sha=existing.enqueue_sha,
-            kwargs_json=existing.kwargs_json,
+            kwargs_json='{"x":2}',
             sent_at=existing.sent_at,
         )
-        retried = await enqueue_keyed(broker, fresh, key)
-        assert is_ok(retried)
-        assert retried.ok_value == fresh.task_id
+
+        binding = await enqueue_keyed(broker, tampered, key)
+
+        assert is_err(binding)
+        assert binding.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
+        async with broker.session_factory() as session:
+            reservation_count, bound_digest = (
+                await session.execute(
+                    text(
+                        'SELECT '
+                        '(SELECT count(*) FROM horsies_key_reservations '
+                        'WHERE task_id = CAST(:id AS uuid)), '
+                        'idempotency_key_digest '
+                        'FROM horsies_tasks '
+                        'WHERE id = CAST(:id AS uuid)'
+                    ),
+                    {'id': existing.task_id},
+                )
+            ).one()
+        assert int(reservation_count) == 0
+        assert bound_digest is None
 
     async def test_same_key_different_command_conflicts_with_zero_rows(
         self, broker: PostgresBroker

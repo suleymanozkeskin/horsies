@@ -2,8 +2,8 @@
 
 The integer schema version records which idempotent migration chain ran.
 It cannot also represent completion of the separately operated offline
-cutover.  This singleton marker is written only after the database reaches
-the frozen structural posture.
+cutover. This singleton marker is written only after the database reaches
+the frozen structural posture and stage-6 validation proves it.
 """
 
 from __future__ import annotations
@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 
 CUTOVER_STATE_TABLE = 'horsies_cutover_state'
-CUTOVER_NAME = 'task_history_v1'
+LEGACY_CUTOVER_NAME = 'task_history_v1'
+"""Marker written by tighten before validation became the attestation owner."""
+
+CUTOVER_NAME = 'task_history_v1_validated_v1'
+"""Versioned attestation written only by successful structural validation."""
 
 CREATE_CUTOVER_STATE_TABLE_DDL = f"""
 CREATE TABLE IF NOT EXISTS {CUTOVER_STATE_TABLE} (
@@ -30,6 +34,9 @@ ON CONFLICT (cutover_name) DO NOTHING
 
 CREATE_CUTOVER_STATE_TABLE_SQL = text(CREATE_CUTOVER_STATE_TABLE_DDL)
 MARK_CUTOVER_COMPLETE_SQL = text(MARK_CUTOVER_COMPLETE_DDL)
+CLEAR_CUTOVER_COMPLETE_SQL = text(
+    f'DELETE FROM {CUTOVER_STATE_TABLE} WHERE cutover_name = :cutover_name'
+)
 CUTOVER_STATE_TABLE_EXISTS_SQL = text(
     f"SELECT to_regclass('{CUTOVER_STATE_TABLE}') IS NOT NULL"
 )

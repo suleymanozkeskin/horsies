@@ -9,12 +9,11 @@ Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
 
 Load characteristics: ``task_stats``, ``task_facets`` and ``task_breakdown``
-are aggregates over ``horsies_tasks``. Unfiltered, each facet dimension
-rides its column index (schema v16 added ``task_name``; queue, worker and
-error_code were already indexed) as an index-only scan, so aggregate cost is
-bounded by index size, not heap size. Filtered variants may still walk the
-heap. Retention keeps the table bounded and the UI's refresh cadences are
-deliberately spaced; each open dashboard multiplies the load.
+aggregate the live table plus the bounded history window. Each facet dimension
+groups both lifecycle sides and applies its cap only after their counts are
+summed. Retention and the explicit history window bound the visited partitions;
+the UI's refresh cadences are deliberately spaced because each open dashboard
+multiplies the load.
 """
 
 from __future__ import annotations
@@ -73,9 +72,7 @@ from horsies.core.history.reads.detail import (
 )
 from horsies.core.history.reads.pages import (
     HistoryFacet,
-    HistoryFacetQuery,
     HistoryPageQuery,
-    history_facet_statement,
     HistoryWindow,
     history_page_statement,
     history_sort_expression,
@@ -678,6 +675,97 @@ def facet_statement(
     )
 
 
+def combined_facet_statement(
+    *,
+    window: HistoryWindow,
+    facet: HistoryFacet,
+    statuses: list[TaskStatus],
+    error_categories: list[ErrorCategory],
+    retried_only: bool,
+    limit: int,
+) -> tuple[str, dict[str, object]]:
+    """Globally rank one facet after summing live and history counts."""
+    match facet:
+        case HistoryFacet.WORKER:
+            live_column = 'claimed_by_worker_id'
+            history_column = 'last_claimed_worker_id'
+        case HistoryFacet.TASK_NAME:
+            live_column = history_column = 'task_name'
+        case HistoryFacet.QUEUE_NAME:
+            live_column = history_column = 'queue_name'
+        case HistoryFacet.ERROR_CODE:
+            live_column = history_column = 'error_code'
+        case _:
+            raise ValueError(f'unsupported combined facet {facet!r}')
+
+    parameters: dict[str, object] = {
+        'window_lower': window.lower,
+        'window_upper': window.upper,
+        'facet_limit': limit,
+    }
+    common: list[str] = []
+    if statuses:
+        common.append('status = ANY(CAST(:status_filter AS text[]))')
+        parameters['status_filter'] = [status.value for status in statuses]
+    if retried_only:
+        common.append('retry_count > 0')
+    if facet is HistoryFacet.ERROR_CODE and error_categories:
+        category_arms: list[str] = []
+        for index, category in enumerate(error_categories):
+            if category is ErrorCategory.DOMAIN:
+                category_arms.append(
+                    "(error_code IS NOT NULL AND error_code <> '' "
+                    'AND error_code <> ALL('
+                    'CAST(:builtin_code_filter AS text[])))'
+                )
+                parameters['builtin_code_filter'] = list(_BUILTIN_CODES)
+            else:
+                parameter = f'category_{index}_filter'
+                category_arms.append(
+                    f'error_code = ANY(CAST(:{parameter} AS text[]))'
+                )
+                parameters[parameter] = list(_CATEGORY_TO_CODES[category])
+        common.append('(' + ' OR '.join(category_arms) + ')')
+
+    live_conditions = [*common, f'{live_column} IS NOT NULL']
+    history_conditions = [
+        'retention_anchor_at >= :window_lower',
+        'retention_anchor_at < :window_upper',
+        *common,
+        f'{history_column} IS NOT NULL',
+    ]
+    if facet is HistoryFacet.ERROR_CODE:
+        live_conditions.append("error_code <> ''")
+        history_conditions.append("error_code <> ''")
+
+    sql = f"""
+        WITH live_facet AS (
+            SELECT {live_column} AS facet_value, count(*) AS facet_count
+            FROM horsies_tasks
+            WHERE {' AND '.join(live_conditions)}
+            GROUP BY {live_column}
+        ), history_facet AS (
+            SELECT {history_column} AS facet_value, count(*) AS facet_count
+            FROM horsies_task_history
+            WHERE {' AND '.join(history_conditions)}
+            GROUP BY {history_column}
+        ), combined AS (
+            SELECT facet_value, sum(facet_count) AS facet_count
+            FROM (
+                SELECT facet_value, facet_count FROM live_facet
+                UNION ALL
+                SELECT facet_value, facet_count FROM history_facet
+            ) AS lifecycle_facets
+            GROUP BY facet_value
+        )
+        SELECT facet_value, facet_count
+        FROM combined
+        ORDER BY facet_count DESC, facet_value
+        LIMIT :facet_limit
+    """
+    return sql, parameters
+
+
 def _facet_values(rows: Sequence[tuple[str | None, int]]) -> list[FacetValue]:
     """Map facet rows to values.
 
@@ -792,15 +880,9 @@ async def task_facets(
         error_categories=[],
         retried_only=retried_only,
     )
-    workers_stmt = facet_statement(
-        TaskModel.claimed_by_worker_id,
-        scope,
-        TaskModel.claimed_by_worker_id.is_not(None),
-    )
-    names_stmt = facet_statement(TaskModel.task_name, scope)
-    queues_stmt = facet_statement(TaskModel.queue_name, scope)
     # Error codes are not capped in SQL: every distinct code is needed for an
-    # accurate per-category rollup. The dropdown list is sliced afterwards.
+    # accurate live-side per-category rollup. The combined dropdown query is
+    # independently and globally capped after summing both lifecycle sides.
     error_count = func.count().label('n')
     errors_stmt = (
         select(TaskModel.error_code, error_count)
@@ -809,36 +891,33 @@ async def task_facets(
         .order_by(error_count.desc())
     )
 
-    coarse_statuses = tuple(status.value for status in statuses)
-
-    def _history_facet_sql(
-        facet: HistoryFacet,
-    ) -> tuple[str, dict[str, object]]:
-        return history_facet_statement(
-            HistoryFacetQuery(
-                window=window,
-                facet=facet,
-                limit=200,
-                statuses=coarse_statuses,
-                retried_only=retried_only,
-            )
-        )
-
     try:
         async with broker.session_factory() as session:
-            worker_rows = (await session.execute(workers_stmt)).tuples().all()
-            name_rows = (await session.execute(names_stmt)).tuples().all()
-            queue_rows = (await session.execute(queues_stmt)).tuples().all()
-            error_rows = (await session.execute(errors_stmt)).tuples().all()
-            history_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
+            live_error_rows = (await session.execute(errors_stmt)).tuples().all()
+            combined_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
             for facet in (
                 HistoryFacet.WORKER,
                 HistoryFacet.TASK_NAME,
                 HistoryFacet.QUEUE_NAME,
                 HistoryFacet.ERROR_CODE,
             ):
-                sql, params = _history_facet_sql(facet)
-                history_facets[facet] = [
+                sql, params = combined_facet_statement(
+                    window=window,
+                    facet=facet,
+                    statuses=statuses,
+                    error_categories=(
+                        error_categories
+                        if facet is HistoryFacet.ERROR_CODE
+                        else []
+                    ),
+                    retried_only=retried_only,
+                    limit=(
+                        _ERROR_FACET_CAP
+                        if facet is HistoryFacet.ERROR_CODE
+                        else _FACET_VALUE_CAP
+                    ),
+                )
+                combined_facets[facet] = [
                     (str(row.facet_value), int(row.facet_count))
                     for row in (
                         await session.execute(text(sql), params)
@@ -870,22 +949,10 @@ async def task_facets(
     except SQLAlchemyError as exc:
         return _db_err('task facets query', exc)
 
-    def _merged(
-        live: Sequence[tuple[str | None, int]],
-        facet: HistoryFacet,
-    ) -> list[tuple[str, int]]:
-        counts: dict[str, int] = {
-            value: count for value, count in live if value is not None
-        }
-        for value, count in history_facets[facet]:
-            counts[value] = counts.get(value, 0) + count
-        return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-
-    live_error_rows = error_rows
-    worker_rows = _merged(worker_rows, HistoryFacet.WORKER)
-    name_rows = _merged(name_rows, HistoryFacet.TASK_NAME)
-    queue_rows = _merged(queue_rows, HistoryFacet.QUEUE_NAME)
-    error_rows = _merged(error_rows, HistoryFacet.ERROR_CODE)
+    worker_rows = combined_facets[HistoryFacet.WORKER]
+    name_rows = combined_facets[HistoryFacet.TASK_NAME]
+    queue_rows = combined_facets[HistoryFacet.QUEUE_NAME]
+    error_rows = combined_facets[HistoryFacet.ERROR_CODE]
 
     # error_code is non-null and non-empty here, so categorization never
     # returns None; DOMAIN is the fallback for user-defined codes.
@@ -908,19 +975,12 @@ async def task_facets(
             category_totals.get(category, 0) + count
         )
 
-    selected = {category.value for category in error_categories}
-    listed = (
-        error_facets
-        if not selected
-        else [facet for facet in error_facets if facet.category in selected]
-    )
-
     return Ok(
         Facets(
             workers=_facet_values(worker_rows),
             task_names=_facet_values(name_rows),
             queues=_facet_values(queue_rows),
-            error_codes=listed[:_ERROR_FACET_CAP],
+            error_codes=error_facets,
             error_category_totals=category_totals,
         )
     )
