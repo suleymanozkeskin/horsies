@@ -451,7 +451,7 @@ async fn pause_workflow_inner(pool: &PgPool, workflow_id: &str) -> Result<bool, 
     .map_err(WorkflowError::Broker)?;
     let abandoned: Vec<String> = outcomes
         .iter()
-        .map(|outcome| outcome.task_id().to_owned())
+        .map(|outcome| outcome.task_id().to_string())
         .collect();
     if !abandoned.is_empty() {
         sqlx::query(RESET_ABANDONED_NODES_SQL)

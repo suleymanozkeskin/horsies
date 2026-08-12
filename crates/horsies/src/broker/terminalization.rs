@@ -28,37 +28,36 @@ use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, Termin
 use super::error::BrokerError;
 
 const COMPLETE_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_complete_locked_task($1::varchar, $2, $3)";
+    "SELECT * FROM horsies_complete_locked_task($1::text::uuid, $2, $3)";
 const COMPLETE_TASK_FUSED_SQL: &str =
-    "SELECT * FROM horsies_complete_task_fused($1::varchar, $2, $3::timestamptz, $4, $5, $6)";
+    "SELECT * FROM horsies_complete_task_fused($1::text::uuid, $2, $3::timestamptz, $4, $5, $6)";
 const FAIL_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_fail_locked_task($1::varchar, $2, $3, $4, $5)";
+    "SELECT * FROM horsies_fail_locked_task($1::text::uuid, $2, $3, $4, $5)";
 const FAIL_STALE_TASK_SQL: &str =
-    "SELECT * FROM horsies_fail_stale_task($1::varchar, $2::integer, $3::integer, $4, $5, $6)";
+    "SELECT * FROM horsies_fail_stale_task($1::text::uuid, $2::integer, $3::integer, $4, $5, $6)";
 const EXPIRE_OWNED_CLAIM_SQL: &str =
-    "SELECT * FROM horsies_expire_owned_claim($1::varchar, $2, $3, $4)";
+    "SELECT * FROM horsies_expire_owned_claim($1::text::uuid, $2, $3, $4)";
 const EXPIRE_PENDING_TASKS_SQL: &str =
     "SELECT * FROM horsies_expire_pending_tasks($1::integer, $2, $3)";
 const CANCEL_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_cancel_locked_task($1::varchar, $2::text[])";
+    "SELECT * FROM horsies_cancel_locked_task($1::text::uuid, $2::text[])";
 const CANCEL_OWNED_ORPHAN_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_orphan($1::varchar, $2, $3::timestamptz)";
-const CANCEL_ORPHANED_TASKS_SQL: &str =
-    "SELECT * FROM horsies_cancel_orphaned_tasks($1::integer)";
+    "SELECT * FROM horsies_cancel_owned_orphan($1::text::uuid, $2, $3::timestamptz)";
+const CANCEL_ORPHANED_TASKS_SQL: &str = "SELECT * FROM horsies_cancel_orphaned_tasks($1::integer)";
 const ABANDON_OWNED_NODE_SQL: &str =
-    "SELECT * FROM horsies_abandon_owned_node($1::varchar, $2, $3::timestamptz)";
+    "SELECT * FROM horsies_abandon_owned_node($1::text::uuid, $2, $3::timestamptz)";
 const ABANDON_OWNED_NODES_SQL: &str =
-    "SELECT * FROM horsies_abandon_owned_nodes($1::varchar[], $2::timestamptz[], $3)";
+    "SELECT * FROM horsies_abandon_owned_nodes($1::text[]::uuid[], $2::timestamptz[], $3)";
 const ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL: &str =
-    "SELECT * FROM horsies_abandon_nodes_of_paused_workflows($1::varchar[])";
+    "SELECT * FROM horsies_abandon_nodes_of_paused_workflows($1::text[]::uuid[])";
 const CANCEL_OWNED_NODE_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_node($1::varchar, $2, $3::timestamptz, $4::boolean)";
+    "SELECT * FROM horsies_cancel_owned_node($1::text::uuid, $2, $3::timestamptz, $4::boolean)";
 const CANCEL_OWNED_NODES_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_nodes($1::varchar[], $2::timestamptz[], $3)";
+    "SELECT * FROM horsies_cancel_owned_nodes($1::text[]::uuid[], $2::timestamptz[], $3)";
 const CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL: &str =
-    "SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow($1::varchar[])";
+    "SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow($1::text[]::uuid[])";
 const LOCKED_READ_MISS_SQL: &str =
-    "SELECT * FROM horsies_terminalization_miss($1::varchar, $2::text[], $3, $4::timestamptz)";
+    "SELECT * FROM horsies_terminalization_miss($1::text::uuid, $2::text[], $3, $4::timestamptz)";
 
 /// How many rows the command's function must report, per the wire contract.
 #[derive(Clone, Copy)]
@@ -68,9 +67,18 @@ enum Cardinality {
     PerTransition,
 }
 
-fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Postgres, sqlx::postgres::PgArguments>, Cardinality) {
+fn fetch_query(
+    command: &TerminalizationCommand,
+) -> (
+    sqlx::query::Query<'_, Postgres, sqlx::postgres::PgArguments>,
+    Cardinality,
+) {
     match command {
-        TerminalizationCommand::CompleteLockedTask { task_id, fence, result_json } => (
+        TerminalizationCommand::CompleteLockedTask {
+            task_id,
+            fence,
+            result_json,
+        } => (
             sqlx::query(COMPLETE_LOCKED_TASK_SQL)
                 .bind(task_id)
                 .bind(&fence.worker_id)
@@ -125,7 +133,12 @@ fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Post
                 .bind(failed_reason),
             Cardinality::ExactlyOne,
         ),
-        TerminalizationCommand::ExpireOwnedClaim { task_id, fence, result_json, error_code } => (
+        TerminalizationCommand::ExpireOwnedClaim {
+            task_id,
+            fence,
+            result_json,
+            error_code,
+        } => (
             sqlx::query(EXPIRE_OWNED_CLAIM_SQL)
                 .bind(task_id)
                 .bind(&fence.worker_id)
@@ -133,7 +146,11 @@ fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Post
                 .bind(error_code),
             Cardinality::ExactlyOne,
         ),
-        TerminalizationCommand::ExpirePendingTasks { batch_size, result_json, error_code } => (
+        TerminalizationCommand::ExpirePendingTasks {
+            batch_size,
+            result_json,
+            error_code,
+        } => (
             sqlx::query(EXPIRE_PENDING_TASKS_SQL)
                 .bind(batch_size.get())
                 .bind(result_json)
@@ -176,7 +193,9 @@ fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Post
                 .bind(fence.task_ids())
                 .bind(fence.generations())
                 .bind(fence.worker_id().to_owned()),
-            Cardinality::IdKeyedBatch { expected: fence.len() },
+            Cardinality::IdKeyedBatch {
+                expected: fence.len(),
+            },
         ),
         TerminalizationCommand::AbandonNodesOfPausedWorkflows { workflow_ids } => (
             sqlx::query(ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL).bind(workflow_ids),
@@ -199,7 +218,9 @@ fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Post
                 .bind(fence.task_ids())
                 .bind(fence.generations())
                 .bind(fence.worker_id().to_owned()),
-            Cardinality::IdKeyedBatch { expected: fence.len() },
+            Cardinality::IdKeyedBatch {
+                expected: fence.len(),
+            },
         ),
         TerminalizationCommand::CancelNodesOfCancelledWorkflow { workflow_ids } => (
             sqlx::query(CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL).bind(workflow_ids),
@@ -208,10 +229,7 @@ fn fetch_query(command: &TerminalizationCommand) -> (sqlx::query::Query<'_, Post
     }
 }
 
-fn decode_all(
-    rows: &[PgRow],
-    operation: &str,
-) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
+fn decode_all(rows: &[PgRow], operation: &str) -> Result<Vec<TerminalizationOutcome>, BrokerError> {
     rows.iter()
         .map(|row| {
             decode_outcome_row(row)
@@ -235,9 +253,7 @@ fn enforce_cardinality(
             }
             Ok(outcomes)
         }
-        Cardinality::IdKeyedBatch { expected } => {
-            reorder_by_ordinal(outcomes, expected, operation)
-        }
+        Cardinality::IdKeyedBatch { expected } => reorder_by_ordinal(outcomes, expected, operation),
         Cardinality::PerTransition => Ok(outcomes),
     }
 }
@@ -294,10 +310,16 @@ fn reorder_by_ordinal(
 /// diagnosis that will ever exist for that moment.
 pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOutcome) {
     match outcome {
-        TerminalizationOutcome::Applied { task_id, ordinality, terminal_at, kind, observed } => {
+        TerminalizationOutcome::Applied {
+            task_id,
+            ordinality,
+            terminal_at,
+            kind,
+            observed,
+        } => {
             tracing::debug!(
                 operation,
-                task_id,
+                %task_id,
                 ?ordinality,
                 %terminal_at,
                 kind = kind.as_str(),
@@ -314,7 +336,7 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
         } => {
             tracing::warn!(
                 operation,
-                task_id,
+                %task_id,
                 ?ordinality,
                 %terminal_at,
                 kind = kind.as_str(),
@@ -322,21 +344,33 @@ pub fn log_terminalization_outcome(operation: &str, outcome: &TerminalizationOut
                 "terminalization already applied"
             );
         }
-        TerminalizationOutcome::LostClaim { task_id, ordinality, observed } => {
-            tracing::warn!(operation, task_id, ?ordinality, ?observed, "terminalization lost claim");
+        TerminalizationOutcome::LostClaim {
+            task_id,
+            ordinality,
+            observed,
+        } => {
+            tracing::warn!(operation, %task_id, ?ordinality, ?observed, "terminalization lost claim");
         }
-        TerminalizationOutcome::SourceStateConflict { task_id, ordinality, observed, evidence } => {
+        TerminalizationOutcome::SourceStateConflict {
+            task_id,
+            ordinality,
+            observed,
+            evidence,
+        } => {
             tracing::warn!(
                 operation,
-                task_id,
+                %task_id,
                 ?ordinality,
                 ?observed,
                 ?evidence,
                 "terminalization source-state conflict"
             );
         }
-        TerminalizationOutcome::TaskAbsent { task_id, ordinality } => {
-            tracing::warn!(operation, task_id, ?ordinality, "terminalization task absent");
+        TerminalizationOutcome::TaskAbsent {
+            task_id,
+            ordinality,
+        } => {
+            tracing::warn!(operation, %task_id, ?ordinality, "terminalization task absent");
         }
     }
 }
@@ -427,115 +461,122 @@ mod catalog_tests {
     use serial_test::serial;
     use sqlx::Row;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn migrated_pool() -> PgPool {
-        let broker = crate::broker::postgres::PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
-        broker.ensure_schema_initialized().await.expect("schema");
-        broker.pool().clone()
+        crate::broker::terminalization_matrix::migrated_pool().await
     }
 
-    /// (function, rendered argument list, rendered result type).
-    pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str); 16] = [
+    /// (function, rendered argument list, rendered result type, language).
+    ///
+    /// The P0 renderer freezes nineteen terminalization fragments: the
+    /// outcome composite plus these eighteen functions.
+    pub(super) const EXPECTED_SIGNATURES: [(&str, &str, &str, &str); 18] = [
+        (
+            "horsies_encode_task_attempts",
+            "p_task_id uuid",
+            "bytea",
+            "sql",
+        ),
+        (
+            "horsies_move_task_to_history",
+            "p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text",
+            "void",
+            "plpgsql",
+        ),
         (
             "horsies_terminalization_miss",
-            "p_task_id character varying, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone",
+            "p_task_id uuid, p_equivalent_kinds text[], p_worker_id text, p_claimed_at timestamp with time zone",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_complete_locked_task",
-            "p_task_id character varying, p_worker_id text, p_result text",
+            "p_task_id uuid, p_worker_id text, p_result text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_complete_task_fused",
-            "p_task_id character varying, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_notify_channel text, p_notify_payload text",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_result text, p_notify_channel text, p_notify_payload text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_fail_locked_task",
-            "p_task_id character varying, p_worker_id text, p_result text, p_error_code text, p_failed_reason text",
+            "p_task_id uuid, p_worker_id text, p_result text, p_error_code text, p_failed_reason text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_fail_stale_task",
-            "p_task_id character varying, p_stale_after_ms integer, p_finalizing_stale_after_ms integer, p_result text, p_error_code text, p_failed_reason text",
+            "p_task_id uuid, p_stale_after_ms integer, p_finalizing_stale_after_ms integer, p_result text, p_error_code text, p_failed_reason text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_expire_owned_claim",
-            "p_task_id character varying, p_worker_id text, p_result text, p_error_code text",
+            "p_task_id uuid, p_worker_id text, p_result text, p_error_code text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_expire_pending_tasks",
             "p_batch_size integer, p_result text, p_error_code text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_locked_task",
-            "p_task_id character varying, p_permitted_source_statuses text[]",
+            "p_task_id uuid, p_permitted_source_statuses text[]",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_owned_orphan",
-            "p_task_id character varying, p_worker_id text, p_claimed_at timestamp with time zone",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_orphaned_tasks",
             "p_batch_size integer",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_abandon_owned_node",
-            "p_task_id character varying, p_worker_id text, p_claimed_at timestamp with time zone",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_abandon_owned_nodes",
-            "p_ids character varying[], p_claimed_ats timestamp with time zone[], p_worker_id text",
+            "p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_abandon_nodes_of_paused_workflows",
-            "p_workflow_ids character varying[]",
+            "p_workflow_ids uuid[]",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_owned_node",
-            "p_task_id character varying, p_worker_id text, p_claimed_at timestamp with time zone, p_accepts_requeued_pending boolean",
+            "p_task_id uuid, p_worker_id text, p_claimed_at timestamp with time zone, p_accepts_requeued_pending boolean",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_owned_nodes",
-            "p_ids character varying[], p_claimed_ats timestamp with time zone[], p_worker_id text",
+            "p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
         (
             "horsies_cancel_nodes_of_cancelled_workflow",
-            "p_workflow_ids character varying[]",
+            "p_workflow_ids uuid[]",
             "SETOF horsies_terminalization_outcome",
+            "plpgsql",
         ),
     ];
 
@@ -545,7 +586,7 @@ mod catalog_tests {
         let pool = migrated_pool().await;
         let names: Vec<String> = EXPECTED_SIGNATURES
             .iter()
-            .map(|(name, _, _)| (*name).to_owned())
+            .map(|(name, _, _, _)| (*name).to_owned())
             .collect();
         let rows = sqlx::query(
             "SELECT p.proname,
@@ -568,14 +609,14 @@ mod catalog_tests {
             EXPECTED_SIGNATURES.len(),
             "one installed definition per function, no stale overloads"
         );
-        let mut expected: Vec<(&str, &str, &str)> = EXPECTED_SIGNATURES.to_vec();
-        expected.sort_by_key(|(name, _, _)| *name);
-        for (row, (name, args, result)) in rows.iter().zip(expected) {
+        let mut expected: Vec<(&str, &str, &str, &str)> = EXPECTED_SIGNATURES.to_vec();
+        expected.sort_by_key(|(name, _, _, _)| *name);
+        for (row, (name, args, result, language)) in rows.iter().zip(expected) {
             assert_eq!(row.get::<String, _>("proname"), name);
             assert_eq!(row.get::<String, _>("args"), args, "{name} arguments");
             assert_eq!(row.get::<String, _>("result"), result, "{name} result");
             assert_eq!(row.get::<String, _>("prokind"), "f", "{name} prokind");
-            assert_eq!(row.get::<String, _>("lanname"), "plpgsql", "{name} language");
+            assert_eq!(row.get::<String, _>("lanname"), language, "{name} language");
         }
     }
 
@@ -599,7 +640,7 @@ mod catalog_tests {
             .map(|r| (r.get("attname"), r.get("type")))
             .collect();
         let expected: Vec<(String, String)> = [
-            ("task_id", "character varying"),
+            ("task_id", "uuid"),
             ("ordinality", "bigint"),
             ("outcome", "text"),
             ("terminal_at", "timestamp with time zone"),
@@ -622,7 +663,7 @@ mod catalog_tests {
         let pool = migrated_pool().await;
         let fused: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_complete_task_fused(varchar, text, timestamptz, text, text, text)'::regprocedure
+                'horsies_complete_task_fused(uuid, text, timestamptz, text, text, text)'::regprocedure
              )",
         )
         .fetch_one(&pool)
@@ -635,12 +676,15 @@ mod catalog_tests {
             "ARRAY['COMPLETE_FUSED', 'COMPLETE_LOCKED']::text[]",
             "pg_notify(p_notify_channel, p_notify_payload)",
         ] {
-            assert!(fused.contains(fragment), "fused body must contain {fragment:?}");
+            assert!(
+                fused.contains(fragment),
+                "fused body must contain {fragment:?}"
+            );
         }
 
         let miss: String = sqlx::query_scalar(
             "SELECT pg_get_functiondef(
-                'horsies_terminalization_miss(varchar, text[], text, timestamptz)'::regprocedure
+                'horsies_terminalization_miss(uuid, text[], text, timestamptz)'::regprocedure
              )",
         )
         .fetch_one(&pool)
@@ -653,48 +697,35 @@ mod catalog_tests {
             "'TASK_ABSENT'",
             "'LOST_CLAIM'",
         ] {
-            assert!(miss.contains(fragment), "miss body must contain {fragment:?}");
+            assert!(
+                miss.contains(fragment),
+                "miss body must contain {fragment:?}"
+            );
         }
     }
 
     #[tokio::test]
     #[serial]
-    async fn kind_domain_check_rejects_unknown_kinds() {
+    async fn kind_domain_check_pins_the_frozen_vocabulary() {
         let pool = migrated_pool().await;
-        let id = uuid::Uuid::new_v4().to_string();
-        let insert = "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                terminalization_kind, retry_count, max_retries, enqueue_sha
-            ) VALUES (
-                $1, 'kind_domain_task', 'default', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), NOW(), $2, 0, 0, $1
-            )";
-
-        let err = sqlx::query(insert)
-            .bind(&id)
-            .bind(Some("NOT_A_KIND"))
-            .execute(&pool)
-            .await
-            .expect_err("unknown kind must be rejected");
-        let sqlx::Error::Database(db_err) = err else {
-            panic!("expected database error, got {err:?}");
-        };
-        assert_eq!(db_err.code().as_deref(), Some("23514"));
-
-        for kind in [None, Some("COMPLETE_FUSED")] {
-            sqlx::query(insert)
-                .bind(&id)
-                .bind(kind)
-                .execute(&pool)
-                .await
-                .expect("NULL and known kinds pass the domain check");
-            sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
-                .execute(&pool)
-                .await
-                .expect("cleanup");
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_constraintdef(oid)
+             FROM pg_constraint
+             WHERE conrelid = 'horsies_task_history'::regclass
+               AND contype = 'c'
+               AND pg_get_constraintdef(oid) LIKE '%COMPLETE_LOCKED%'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("kind-domain constraint");
+        for kind in TerminalizationKind::ALL {
+            assert!(
+                definition.contains(kind.as_str()),
+                "constraint omits {}",
+                kind.as_str()
+            );
         }
+        assert!(!definition.contains("NOT_A_KIND"));
     }
 
     #[tokio::test]
@@ -712,8 +743,9 @@ mod catalog_tests {
 
 #[cfg(test)]
 mod anchor_tests {
-    //! The count pin: fifteen lifecycle commands, fifteen kinds, sixteen
-    //! installed functions (the operations plus the shared miss classifier).
+    //! The count pin: fifteen lifecycle commands, sixteen kinds including
+    //! relocation-only `LEGACY_TERMINAL`, and eighteen installed functions
+    //! across nineteen DDL fragments.
     //! `catalog_tests` ties EXPECTED_SIGNATURES to the installed database
     //! program; the vocabulary unit tests tie `function_name_of` to the
     //! variant names; this anchor ties the two ends together so a command,
@@ -741,19 +773,39 @@ mod anchor_tests {
 
     #[test]
     fn commands_functions_and_kinds_agree() {
-        assert_eq!(COMMAND_FUNCTIONS.len(), TerminalizationKind::ALL.len());
+        assert_eq!(
+            COMMAND_FUNCTIONS.len() + 1,
+            TerminalizationKind::ALL.len(),
+            "LEGACY_TERMINAL is relocation-only and has no wire command"
+        );
 
         let mut expected: Vec<&str> = EXPECTED_SIGNATURES
             .iter()
-            .map(|(name, _, _)| *name)
+            .map(|(name, _, _, _)| *name)
             .collect();
-        assert_eq!(expected.len(), COMMAND_FUNCTIONS.len() + 1, "operations + miss classifier");
+        assert_eq!(
+            expected.len(),
+            COMMAND_FUNCTIONS.len() + 3,
+            "wire operations + miss classifier + attempt encoder + shared move"
+        );
         assert!(expected.contains(&"horsies_terminalization_miss"));
-        expected.retain(|name| *name != "horsies_terminalization_miss");
+        assert!(expected.contains(&"horsies_encode_task_attempts"));
+        assert!(expected.contains(&"horsies_move_task_to_history"));
+        expected.retain(|name| {
+            !matches!(
+                *name,
+                "horsies_terminalization_miss"
+                    | "horsies_encode_task_attempts"
+                    | "horsies_move_task_to_history"
+            )
+        });
         expected.sort_unstable();
 
         let mut commands: Vec<&str> = COMMAND_FUNCTIONS.to_vec();
         commands.sort_unstable();
-        assert_eq!(expected, commands, "catalog signatures name exactly the command functions");
+        assert_eq!(
+            expected, commands,
+            "catalog signatures name exactly the command functions"
+        );
     }
 }

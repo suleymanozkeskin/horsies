@@ -17,6 +17,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::postgres::PgRow;
 use sqlx::{Column, Row};
+use uuid::Uuid;
 
 use crate::core::types::status::TaskStatus;
 
@@ -161,7 +162,7 @@ pub enum GuardEvidence {
 pub enum TerminalizationOutcome {
     /// The transition committed. `terminal_at` and `kind` are the row's now.
     Applied {
-        task_id: String,
+        task_id: Uuid,
         ordinality: Option<i64>,
         terminal_at: DateTime<Utc>,
         kind: TerminalizationKind,
@@ -173,7 +174,7 @@ pub enum TerminalizationOutcome {
     /// CANCELLED, and only a kind in the same class proves the coupled
     /// workflow-node write committed too.
     AlreadyApplied {
-        task_id: String,
+        task_id: Uuid,
         ordinality: Option<i64>,
         terminal_at: DateTime<Utc>,
         kind: TerminalizationKind,
@@ -185,7 +186,7 @@ pub enum TerminalizationOutcome {
     /// the generation that held it is gone, which is what the caller must
     /// act on.
     LostClaim {
-        task_id: String,
+        task_id: Uuid,
         ordinality: Option<i64>,
         observed: ObservedTaskState,
     },
@@ -194,7 +195,7 @@ pub enum TerminalizationOutcome {
     /// Carries the guard's own evidence, so a refusal is diagnosable from
     /// the log without re-reading the row — by which time it has moved on.
     SourceStateConflict {
-        task_id: String,
+        task_id: Uuid,
         ordinality: Option<i64>,
         observed: ObservedTaskState,
         evidence: GuardEvidence,
@@ -202,19 +203,19 @@ pub enum TerminalizationOutcome {
     /// No such row. Observed columns are empty because there was nothing to
     /// see.
     TaskAbsent {
-        task_id: String,
+        task_id: Uuid,
         ordinality: Option<i64>,
     },
 }
 
 impl TerminalizationOutcome {
-    pub fn task_id(&self) -> &str {
+    pub fn task_id(&self) -> Uuid {
         match self {
             Self::Applied { task_id, .. }
             | Self::AlreadyApplied { task_id, .. }
             | Self::LostClaim { task_id, .. }
             | Self::SourceStateConflict { task_id, .. }
-            | Self::TaskAbsent { task_id, .. } => task_id,
+            | Self::TaskAbsent { task_id, .. } => *task_id,
         }
     }
 
@@ -252,7 +253,7 @@ const ROW_COLUMNS: [&str; 10] = [
 /// without a database round trip.
 #[derive(Debug, Clone)]
 pub struct RawOutcomeRow {
-    pub task_id: String,
+    pub task_id: Uuid,
     pub ordinality: Option<i64>,
     pub outcome: String,
     pub terminal_at: Option<DateTime<Utc>>,
@@ -322,28 +323,28 @@ pub fn decode_raw(raw: RawOutcomeRow) -> Result<TerminalizationOutcome, OutcomeD
 
     match raw.outcome.as_str() {
         "APPLIED" => Ok(TerminalizationOutcome::Applied {
-            task_id: raw.task_id.clone(),
+            task_id: raw.task_id,
             ordinality: raw.ordinality,
             terminal_at: require_terminal_at(&raw)?,
             kind: require_kind(&raw)?,
             observed,
         }),
         "ALREADY_APPLIED" => Ok(TerminalizationOutcome::AlreadyApplied {
-            task_id: raw.task_id.clone(),
+            task_id: raw.task_id,
             ordinality: raw.ordinality,
             terminal_at: require_terminal_at(&raw)?,
             kind: require_kind(&raw)?,
             observed,
         }),
         "LOST_CLAIM" => Ok(TerminalizationOutcome::LostClaim {
-            task_id: raw.task_id.clone(),
+            task_id: raw.task_id,
             ordinality: raw.ordinality,
             observed,
         }),
         "SOURCE_STATE_CONFLICT" => {
             let evidence = decode_evidence(&raw, &observed)?;
             Ok(TerminalizationOutcome::SourceStateConflict {
-                task_id: raw.task_id.clone(),
+                task_id: raw.task_id,
                 ordinality: raw.ordinality,
                 observed,
                 evidence,
@@ -595,9 +596,9 @@ fn require_integer(
     key: &str,
 ) -> Result<i64, OutcomeDecodeError> {
     match payload.get(key) {
-        Some(serde_json::Value::Number(value)) => value.as_i64().ok_or_else(|| {
-            OutcomeDecodeError(format!("{key} must be an integer, got {value}"))
-        }),
+        Some(serde_json::Value::Number(value)) => value
+            .as_i64()
+            .ok_or_else(|| OutcomeDecodeError(format!("{key} must be an integer, got {value}"))),
         other => Err(OutcomeDecodeError(format!(
             "{key} must be an integer, got {other:?}"
         ))),
@@ -636,7 +637,7 @@ mod tests {
 
     fn base_raw(outcome: &str) -> RawOutcomeRow {
         RawOutcomeRow {
-            task_id: "t1".to_owned(),
+            task_id: Uuid::nil(),
             ordinality: None,
             outcome: outcome.to_owned(),
             terminal_at: None,
@@ -670,7 +671,10 @@ mod tests {
         let decoded = decode_raw(raw).unwrap();
         assert!(matches!(
             decoded,
-            TerminalizationOutcome::Applied { kind: TerminalizationKind::CompleteFused, .. }
+            TerminalizationOutcome::Applied {
+                kind: TerminalizationKind::CompleteFused,
+                ..
+            }
         ));
     }
 

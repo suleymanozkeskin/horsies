@@ -1741,7 +1741,7 @@ impl PostgresBroker {
                 .filter(|o| {
                     matches!(o, crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
                 })
-                .map(|o| o.task_id().to_owned())
+                .map(|o| o.task_id().to_string())
                 .collect();
 
             if !owned.is_empty() {
@@ -1781,7 +1781,7 @@ impl PostgresBroker {
                 .filter(|o| {
                     matches!(o, crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
                 })
-                .map(|o| o.task_id().to_owned())
+                .map(|o| o.task_id().to_string())
                 .collect();
 
             if !owned.is_empty() {
