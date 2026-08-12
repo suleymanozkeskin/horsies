@@ -234,6 +234,41 @@ class TestKeyedEnqueue:
             ).scalar_one()
         assert count == 1
 
+    async def test_task_id_conflict_rolls_back_the_new_reservation(
+        self, broker: PostgresBroker
+    ) -> None:
+        existing = make_send()
+        assert is_ok(await enqueue(broker, existing))
+        key = f'late-key-{uuid4()}'
+
+        conflicted_insert = await enqueue_keyed(broker, existing, key)
+
+        assert is_ok(conflicted_insert)
+        assert conflicted_insert.ok_value == existing.task_id
+        async with broker.session_factory() as session:
+            reservations = int(
+                (
+                    await session.execute(
+                        text(
+                            'SELECT count(*) FROM horsies_key_reservations '
+                            'WHERE task_id = CAST(:id AS uuid)'
+                        ),
+                        {'id': existing.task_id},
+                    )
+                ).scalar_one()
+            )
+        assert reservations == 0
+
+        fresh = Send(
+            task_id=mint_task_id(),
+            enqueue_sha=existing.enqueue_sha,
+            kwargs_json=existing.kwargs_json,
+            sent_at=existing.sent_at,
+        )
+        retried = await enqueue_keyed(broker, fresh, key)
+        assert is_ok(retried)
+        assert retried.ok_value == fresh.task_id
+
     async def test_same_key_different_command_conflicts_with_zero_rows(
         self, broker: PostgresBroker
     ) -> None:

@@ -1503,7 +1503,16 @@ class PostgresBroker:
                             pass
                 result = await session.execute(stmt)
                 row = result.fetchone()
-                await session.commit()
+                if row is None:
+                    # The reservation claim and task insert are one unit. A
+                    # task-ID conflict means this transaction did not create
+                    # the task whose idempotency digest would later
+                    # terminalize the reservation, so committing here would
+                    # leave an immortal LIVE reservation. Roll the claim back
+                    # before verifying the existing task's exact-ID payload.
+                    await session.rollback()
+                else:
+                    await session.commit()
 
             if row is not None:
                 # Row inserted — fresh enqueue succeeded.
