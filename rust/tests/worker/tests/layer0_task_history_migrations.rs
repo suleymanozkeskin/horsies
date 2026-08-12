@@ -53,6 +53,65 @@ const REQUIRED_FUNCTION_SIGNATURES: &[&str] = &[
     "horsies_archive_replacement_note_mutation()",
 ];
 
+const MONITORING_TRIGGER_BINDINGS: &[(&str, &str, &str)] = &[
+    (
+        "horsies_task_notify_insert_trigger",
+        "horsies_tasks",
+        "horsies_notify_task_changes",
+    ),
+    (
+        "horsies_task_notify_update_trigger",
+        "horsies_tasks",
+        "horsies_notify_task_changes",
+    ),
+    (
+        "horsies_task_status_notify_insert_trigger",
+        "horsies_tasks",
+        "horsies_notify_task_status_change",
+    ),
+    (
+        "horsies_task_status_notify_update_trigger",
+        "horsies_tasks",
+        "horsies_notify_task_status_change",
+    ),
+    (
+        "horsies_workflow_status_notify_insert_trigger",
+        "horsies_workflows",
+        "horsies_notify_workflow_status_change",
+    ),
+    (
+        "horsies_workflow_notify_trigger",
+        "horsies_workflows",
+        "horsies_notify_workflow_changes",
+    ),
+    (
+        "horsies_workflow_status_notify_update_trigger",
+        "horsies_workflows",
+        "horsies_notify_workflow_status_change",
+    ),
+    (
+        "horsies_worker_state_notify_trigger",
+        "horsies_worker_states",
+        "horsies_notify_worker_state_change",
+    ),
+];
+
+const LEGACY_MONITORING_TRIGGERS: &[&str] = &[
+    "task_status_change_notify",
+    "task_status_change_insert_notify",
+    "task_status_change_update_notify",
+    "workflow_status_change_notify",
+    "workflow_status_change_insert_notify",
+    "workflow_status_change_update_notify",
+    "worker_state_insert_notify",
+];
+
+const LEGACY_MONITORING_FUNCTIONS: &[&str] = &[
+    "notify_task_status_change()",
+    "notify_workflow_status_change()",
+    "notify_worker_state_insert()",
+];
+
 async fn relation_kind(pool: &PgPool, relation: &str) -> String {
     sqlx::query_scalar("SELECT relkind::text FROM pg_class WHERE oid = to_regclass($1)")
         .bind(relation)
@@ -69,6 +128,52 @@ async fn cutover_attested(pool: &PgPool) -> bool {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+async fn assert_monitoring_trigger_parity(pool: &PgPool) {
+    for &(trigger, relation, function) in MONITORING_TRIGGER_BINDINGS {
+        let bound: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1
+                 FROM pg_trigger AS trigger
+                 JOIN pg_proc AS function ON function.oid = trigger.tgfoid
+                 WHERE trigger.tgname = $1
+                   AND trigger.tgrelid = to_regclass($2)
+                   AND function.proname = $3
+                   AND NOT trigger.tgisinternal
+             )",
+        )
+        .bind(trigger)
+        .bind(relation)
+        .bind(function)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(bound, "missing monitoring binding {trigger} -> {function}");
+    }
+
+    for trigger in LEGACY_MONITORING_TRIGGERS {
+        let present: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM pg_trigger
+                 WHERE tgname = $1 AND NOT tgisinternal
+             )",
+        )
+        .bind(trigger)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(!present, "legacy monitoring trigger remains: {trigger}");
+    }
+
+    for function in LEGACY_MONITORING_FUNCTIONS {
+        let present: bool = sqlx::query_scalar("SELECT to_regprocedure($1) IS NOT NULL")
+            .bind(function)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert!(!present, "legacy monitoring function remains: {function}");
+    }
 }
 
 async fn apply_through_v26(pool: &PgPool) {
@@ -156,6 +261,8 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
     let pool = PgPool::connect(&db_url).await.unwrap();
 
     run_horsies_migrations(&pool).await.unwrap();
+
+    assert_monitoring_trigger_parity(&pool).await;
 
     for &(relation, column) in UUID_COLUMNS {
         let is_uuid: bool = sqlx::query_scalar(
@@ -275,6 +382,8 @@ async fn populated_v26_database_stays_transitional_and_refuses_fleet_start() {
     apply_through_v26(&pool).await;
     seed_every_fork_relation(&pool).await;
     run_horsies_migrations(&pool).await.unwrap();
+
+    assert_monitoring_trigger_parity(&pool).await;
 
     let task_identity_is_varchar: bool = sqlx::query_scalar(
         "SELECT atttypid = 'character varying'::regtype
