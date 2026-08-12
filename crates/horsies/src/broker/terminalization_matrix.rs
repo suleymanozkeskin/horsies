@@ -7,9 +7,9 @@
 //! (e) the revert-proof properties. This module is the behavioral safety
 //! net that must be green before any call site moves.
 //!
-//! Shared-DB hygiene: global discovery batches (pending expiry, orphan
-//! sweep) are pre-drained before seeding so leftovers from earlier runs
-//! cannot enter an assertion.
+//! Each test process owns a UUID-named disposable database. Within that
+//! process, global discovery batches (pending expiry, orphan sweep) are
+//! pre-drained before seeding so one serial test cannot affect another.
 
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
@@ -72,43 +72,77 @@ fn test_db_url() -> String {
     format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
 }
 
-static P5_DATABASE: OnceCell<()> = OnceCell::const_new();
+struct P5TestDatabase {
+    name: String,
+    _anchor: PgPool,
+}
+
+static P5_DATABASE: OnceCell<P5TestDatabase> = OnceCell::const_new();
 
 pub(super) async fn migrated_pool() -> PgPool {
-    P5_DATABASE
+    let database = P5_DATABASE
         .get_or_init(|| async {
             let base_options =
                 PgConnectOptions::from_str(&test_db_url()).expect("invalid P5 database URL");
             let admin_options = base_options.clone().database("postgres");
-            let database_name = "horsies_p5_matrix";
+            let database_name = format!("horsies_p5_matrix_{}", Uuid::new_v4().simple());
             let mut admin = PgConnection::connect_with(&admin_options)
                 .await
                 .expect("connect to P5 admin database");
-            sqlx::query(
-                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-                 WHERE datname = $1 AND pid <> pg_backend_pid()",
-            )
-            .bind(database_name)
-            .execute(&mut admin)
-            .await
-            .expect("terminate stale P5 sessions");
-            sqlx::query(&format!("DROP DATABASE IF EXISTS \"{database_name}\""))
+            sqlx::query("SELECT pg_advisory_lock(hashtext('horsies_p5_matrix_setup'))")
                 .execute(&mut admin)
                 .await
-                .expect("drop stale P5 database");
+                .expect("lock P5 database setup");
+            let stale_databases: Vec<String> = sqlx::query_scalar(
+                "SELECT d.datname
+                 FROM pg_database d
+                 WHERE left(d.datname, length('horsies_p5_matrix_')) =
+                       'horsies_p5_matrix_'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM pg_stat_activity a
+                       WHERE a.datname = d.datname
+                   )
+                 ORDER BY d.datname",
+            )
+            .fetch_all(&mut admin)
+            .await
+            .expect("list inactive P5 databases");
+            for stale_database in stale_databases {
+                let suffix = stale_database
+                    .strip_prefix("horsies_p5_matrix_")
+                    .expect("query enforces P5 database prefix");
+                assert!(
+                    suffix.len() == 32 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                    "refuse to drop non-generated P5 database {stale_database:?}"
+                );
+                sqlx::query(&format!("DROP DATABASE \"{stale_database}\""))
+                    .execute(&mut admin)
+                    .await
+                    .expect("drop inactive P5 database");
+            }
             sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
                 .execute(&mut admin)
                 .await
                 .expect("create P5 database");
-            let pool = PgPoolOptions::new()
-                .max_connections(8)
-                .connect_with(base_options.database(database_name))
+            let anchor = PgPoolOptions::new()
+                .min_connections(1)
+                .max_connections(1)
+                .max_lifetime(None)
+                .idle_timeout(None)
+                .connect_with(base_options.database(&database_name))
                 .await
                 .expect("connect P5 database");
-            run_horsies_migrations(&pool)
+            let unlocked: bool = sqlx::query_scalar(
+                "SELECT pg_advisory_unlock(hashtext('horsies_p5_matrix_setup'))",
+            )
+            .fetch_one(&mut admin)
+            .await
+            .expect("unlock P5 database setup");
+            assert!(unlocked, "P5 database setup lock was held");
+            run_horsies_migrations(&anchor)
                 .await
                 .expect("migrate P5 database");
-            let mut transaction = pool.begin().await.expect("coverage transaction");
+            let mut transaction = anchor.begin().await.expect("coverage transaction");
             let coverage =
                 ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
                     .await
@@ -118,12 +152,15 @@ pub(super) async fn migrated_pool() -> PgPool {
                 "{coverage:?}"
             );
             transaction.commit().await.expect("commit coverage");
-            pool.close().await;
+            P5TestDatabase {
+                name: database_name,
+                _anchor: anchor,
+            }
         })
         .await;
     let base_options = PgConnectOptions::from_str(&test_db_url())
         .expect("invalid P5 database URL")
-        .database("horsies_p5_matrix");
+        .database(&database.name);
     PgPoolOptions::new()
         .max_connections(5)
         .connect_with(base_options)
