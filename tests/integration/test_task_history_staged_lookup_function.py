@@ -1,8 +1,8 @@
 """The generated staged lookup against real PostgreSQL.
 
-Covers the qualified probe order end to end — live short-circuits forever,
-forever short-circuits finite, v7 pruning and the legacy walk both find
-retained rows, absence is absence — and carries the reviewer-required
+Covers the qualified probe order end to end — live short-circuits cataloged
+history leaves, v7 likely/fallback probes and the legacy walk find retained
+rows, absence is absence — and carries the reviewer-required
 revert-proof regression for the false-absence seam: republishing from a
 manifest scoped to one retention class must demonstrably lose the other
 class's retained rows, and the publisher must demonstrably not.
@@ -137,7 +137,7 @@ class TestLookupOutcomes:
                 frozen_history_row(
                     task_id=forever_id,
                     class_key='forever',
-                    terminal_at=datetime.now(UTC) - timedelta(days=399),
+                    terminal_at=datetime.now(UTC),
                 ),
             )
 
@@ -162,6 +162,28 @@ class TestLookupOutcomes:
                 await lookup_task_identity(connection, never_seen_v7)
                 == TaskIdentityAbsent()
             )
+
+    @pytest.mark.asyncio
+    async def test_future_birth_hint_cannot_hide_a_retained_row(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            row_a, _ = await seed_two_classes(connection)
+            future_id = v7_with_birth(datetime.now(UTC) + timedelta(days=365))
+            await connection.execute(
+                text(
+                    'UPDATE horsies_task_history '
+                    'SET task_id = CAST(:future_id AS uuid) '
+                    'WHERE task_id = CAST(:row_a AS uuid)'
+                ),
+                {'future_id': future_id, 'row_a': row_a},
+            )
+            await StagedLoaderPublisher().republish(connection)
+
+            assert isinstance(
+                await lookup_task_identity(connection, future_id),
+                HistoryTaskIdentity,
+            )
             assert (
                 await lookup_task_identity(connection, str(uuid4()))
                 == TaskIdentityAbsent()
@@ -183,13 +205,18 @@ class TestLookupOutcomes:
                     )
                 ).all()
             }
-            assert manifest_names == {
+            expected_finite = {
                 daily_leaf_name(
                     f'horsies_task_history_{class_key}',
                     day_bounds(datetime.now(UTC) - timedelta(days=1))[0],
                 )
                 for class_key in (CLASS_A, CLASS_B)
             }
+            assert expected_finite <= manifest_names
+            assert any(
+                name.startswith('horsies_task_history_forever_')
+                for name in manifest_names
+            )
             publisher = StagedLoaderPublisher()
             for leaf_name in manifest_names:
                 assert await publisher.references_leaf(connection, leaf_name)

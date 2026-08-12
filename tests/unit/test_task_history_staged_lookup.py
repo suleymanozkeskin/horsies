@@ -1,11 +1,11 @@
 """The staged lookup generator: manifest arithmetic and rendered structure.
 
 The rendered function is what qualification measured, so these tests pin
-its structural properties: probe order (live, forever, then finite),
-oldest-first pruned probes against newest-first legacy probes, the
-five-second clock-bound subtraction, the birth-floor fast path's presence
-rules, and — the rejection basis of the union form — that no statement
-ever references the partitioned parent.
+its structural properties: live before cataloged history leaves,
+oldest-first likely probes plus newest-first fallback and legacy probes, the
+five-second ordering hint, the birth-floor fast path's presence rules, and
+— the rejection basis of the union form — that no statement ever references
+a partitioned parent.
 """
 
 from __future__ import annotations
@@ -238,29 +238,31 @@ class TestRenderedFunction:
     def render(self, *rows: LeafCatalogRow) -> str:
         return render_staged_lookup_function(manifest_from_catalog(list(rows)))
 
-    def test_empty_manifest_probes_live_and_forever_only(self) -> None:
+    def test_empty_manifest_probes_live_only(self) -> None:
         body = self.render()
         assert 'FROM horsies_tasks\n' in body
-        assert 'FROM horsies_task_history_forever\n' in body
+        assert 'FROM horsies_task_history_forever\n' not in body
         assert 'uuid_send' not in body
 
     def test_never_references_the_partitioned_parent(self) -> None:
         body = self.render(make_catalog_row(0), make_catalog_row(1))
         assert re.search(r'FROM horsies_task_history\s', body) is None
 
-    def test_each_leaf_is_probed_in_both_walks(self) -> None:
+    def test_each_leaf_is_probed_in_likely_fallback_and_legacy_walks(self) -> None:
         rows = [make_catalog_row(offset) for offset in range(3)]
         body = self.render(*rows)
         for row in rows:
-            assert body.count(f'FROM {row.leaf_name}\n') == 2
+            assert body.count(f'FROM {row.leaf_name}\n') == 3
 
-    def test_live_probes_before_forever_before_finite(self) -> None:
-        row = make_catalog_row(0)
-        body = self.render(row)
+    def test_live_probes_before_cataloged_forever_and_finite_leaves(self) -> None:
+        rows = (
+            make_catalog_row(0, class_key='forever'),
+            make_catalog_row(1),
+        )
+        body = self.render(*rows)
         live = body.index('FROM horsies_tasks\n')
-        forever = body.index('FROM horsies_task_history_forever\n')
-        finite = body.index(f'FROM {row.leaf_name}\n')
-        assert live < forever < finite
+        assert all(live < body.index(f'FROM {row.leaf_name}\n') for row in rows)
+        assert 'FROM horsies_task_history_forever\n' not in body
 
     def test_pruned_walk_is_oldest_first_legacy_walk_newest_first(self) -> None:
         old, new = make_catalog_row(0), make_catalog_row(1)
@@ -302,7 +304,7 @@ class TestRenderedFunction:
         body = self.render(*rows)
         assert body.count('IF v_effective_birth <') == 512
         for row in (rows[0], rows[255], rows[511]):
-            assert body.count(f'FROM {row.leaf_name}\n') == 2
+            assert body.count(f'FROM {row.leaf_name}\n') == 3
 
 
 class TestRenderedProvenanceFunction:
@@ -325,7 +327,7 @@ class TestRenderedProvenanceFunction:
         row = make_catalog_row(0)
         body = self.render(row)
         assert 'status, terminal_at, terminalization_kind' in body
-        assert body.count(f'FROM {row.leaf_name}\n') == 2
+        assert body.count(f'FROM {row.leaf_name}\n') == 3
 
     def test_probe_order_matches_the_identity_variant(self) -> None:
         rows = (make_catalog_row(0), make_catalog_row(1))
@@ -335,9 +337,8 @@ class TestRenderedProvenanceFunction:
         provenance_body = self.render(*rows)
         for body in (identity_body, provenance_body):
             live = body.index('FROM horsies_tasks\n')
-            forever = body.index('FROM horsies_task_history_forever\n')
             oldest = body.index(f'FROM {rows[0].leaf_name}\n')
-            assert live < forever < oldest
+            assert live < oldest
         assert "v_birth_at - INTERVAL '5 seconds'" in provenance_body
 
     def test_floor_check_shares_the_manifest_rule(self) -> None:
@@ -362,8 +363,8 @@ class TestRenderedProvenanceFunction:
         assert 'IF p_include_live THEN' in body
         live_guard = body.index('IF p_include_live THEN')
         live_probe = body.index('FROM horsies_tasks\n')
-        forever_probe = body.index('FROM horsies_task_history_forever\n')
-        assert live_guard < live_probe < forever_probe
+        history_probe = body.index('FROM horsies_task_history_finite_30d_v1')
+        assert live_guard < live_probe < history_probe
 
     def test_identity_variant_keeps_the_single_parameter(self) -> None:
         rows = (make_catalog_row(0),)

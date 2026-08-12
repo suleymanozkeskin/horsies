@@ -7,8 +7,8 @@ splits, which is the recorded rejection of within-ms randomness. When the
 counter is exhausted the generator waits for the clock to advance; it never
 falls back to random order. A clock that steps backwards is absorbed by
 continuing on the last observed millisecond, so minted IDs remain monotonic
-even then; the database's five-second forward-clock bound provides the
-headroom that absorption spends.
+even then. Staged history readers treat the embedded time only as a probe-order
+hint and still search every retained leaf before reporting absence.
 
 Monotonicity holds across threads and async tasks sharing the process
 generator. No cross-process total order is promised.
