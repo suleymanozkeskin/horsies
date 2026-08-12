@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any, AsyncGenerator, Generator
 import pytest
 import pytest_asyncio
@@ -40,7 +41,13 @@ async def _initialize_session_broker(
     Sync facades subsequently fall back to polling instead of claiming the
     shared listener from their LoopRunner. Session-loop listener tests then
     receive the same uncontaminated owner regardless of collection order.
+
+    The PgBouncer-only lane has no default PostgreSQL service on port 5432.
+    Its marked smoke test constructs and initializes a dedicated split-URL
+    broker, so the default-topology singletons must remain untouched there.
     """
+    if os.environ.get('HORSIES_PGBOUNCER_TEST') == '1':
+        return
     schema = await brk.ensure_schema_initialized()
     assert schema.is_ok(), schema
     listener = await brk.listener.start()
