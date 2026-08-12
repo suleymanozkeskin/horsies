@@ -52,6 +52,10 @@ export function useTaskStats(filters: TaskFilters): {
     queryFn: () => getTaskStats(filters),
     refetchInterval: POLL_STATS_MS,
     staleTime: POLL_STATS_MS,
+    // The filters are part of the key, so every filter change starts a new
+    // query. Without this the cards would blank between scopes and the page
+    // below them would reflow twice.
+    placeholderData: keepPreviousData,
   });
   return {
     stats: data ?? [],
@@ -80,6 +84,9 @@ export function useFacets(scope: {
       }),
     refetchInterval: POLL_FACETS_MS,
     staleTime: POLL_FACETS_MS,
+    // Scope is part of the key: keep the taxonomy strip and the facet option
+    // lists populated across a scope change instead of emptying them.
+    placeholderData: keepPreviousData,
   });
   return { facets: data, isError };
 }

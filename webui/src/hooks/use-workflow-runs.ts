@@ -1,4 +1,4 @@
-import { useQuery } from '@tanstack/react-query';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 
 import { fallbackInterval, useLiveMode } from '@/events/live-provider';
 import { queryKeys } from '@/lib/query-keys';
@@ -37,6 +37,9 @@ export function useWorkflowRuns(
       hasActiveRun(query.state.data)
         ? fallbackInterval(mode, POLL_WHILE_ACTIVE_MS)
         : false,
+    // The filters are part of the key: keep the rail populated across a filter
+    // change so it does not blank and lose its scroll position.
+    placeholderData: keepPreviousData,
   });
   return { runs: data ?? [], isLoading, isError };
 }
