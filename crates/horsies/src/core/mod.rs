@@ -5,6 +5,7 @@ pub mod codec;
 pub mod config;
 pub mod defaults;
 pub mod error;
+pub(crate) mod history;
 pub mod lifecycle;
 pub mod registry;
 pub mod task;

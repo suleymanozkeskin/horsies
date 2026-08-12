@@ -35,6 +35,8 @@ pub enum TerminalizationKind {
     WorkflowCancelClaim,
     WorkflowCancelClaimBatch,
     WorkflowCancelWorkflow,
+    /// Relocated by the one-time cutover without recorded wire provenance.
+    LegacyTerminal,
 }
 
 impl TerminalizationKind {
@@ -56,6 +58,7 @@ impl TerminalizationKind {
             Self::WorkflowCancelClaim => "WORKFLOW_CANCEL_CLAIM",
             Self::WorkflowCancelClaimBatch => "WORKFLOW_CANCEL_CLAIM_BATCH",
             Self::WorkflowCancelWorkflow => "WORKFLOW_CANCEL_WORKFLOW",
+            Self::LegacyTerminal => "LEGACY_TERMINAL",
         }
     }
 
@@ -78,12 +81,13 @@ impl TerminalizationKind {
             "WORKFLOW_CANCEL_CLAIM" => Some(Self::WorkflowCancelClaim),
             "WORKFLOW_CANCEL_CLAIM_BATCH" => Some(Self::WorkflowCancelClaimBatch),
             "WORKFLOW_CANCEL_WORKFLOW" => Some(Self::WorkflowCancelWorkflow),
+            "LEGACY_TERMINAL" => Some(Self::LegacyTerminal),
             _ => None,
         }
     }
 
     /// Every kind, for domain tests and rendering.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::CompleteLocked,
         Self::CompleteFused,
         Self::FailRunning,
@@ -99,6 +103,7 @@ impl TerminalizationKind {
         Self::WorkflowCancelClaim,
         Self::WorkflowCancelClaimBatch,
         Self::WorkflowCancelWorkflow,
+        Self::LegacyTerminal,
     ];
 }
 
@@ -112,7 +117,7 @@ impl TerminalizationKind {
 /// commit the same effect on the row they touch. Families do: an orphan
 /// sweep and a workflow cancellation reaching the same row are different
 /// events.
-pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 8] = [
+pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 9] = [
     &[
         TerminalizationKind::CompleteLocked,
         TerminalizationKind::CompleteFused,
@@ -138,6 +143,7 @@ pub const EQUIVALENCE_CLASSES: [&[TerminalizationKind]; 8] = [
         TerminalizationKind::WorkflowCancelClaimBatch,
         TerminalizationKind::WorkflowCancelWorkflow,
     ],
+    &[TerminalizationKind::LegacyTerminal],
 ];
 
 /// The kinds interchangeable with this one, including itself.
@@ -164,6 +170,7 @@ pub fn equivalence_class_of(kind: TerminalizationKind) -> &'static [Terminalizat
         TerminalizationKind::WorkflowCancelClaim
         | TerminalizationKind::WorkflowCancelClaimBatch
         | TerminalizationKind::WorkflowCancelWorkflow => EQUIVALENCE_CLASSES[7],
+        TerminalizationKind::LegacyTerminal => EQUIVALENCE_CLASSES[8],
     }
 }
 
@@ -194,7 +201,9 @@ pub fn kind_of(command: &TerminalizationCommand) -> TerminalizationKind {
         TerminalizationCommand::ExpirePendingTasks { .. } => TerminalizationKind::ExpirePending,
         TerminalizationCommand::CancelLockedTask { .. } => TerminalizationKind::CancelAdmin,
         TerminalizationCommand::CancelOwnedOrphan { .. } => TerminalizationKind::CancelOrphan,
-        TerminalizationCommand::CancelOrphanedTasks { .. } => TerminalizationKind::CancelOrphanSweep,
+        TerminalizationCommand::CancelOrphanedTasks { .. } => {
+            TerminalizationKind::CancelOrphanSweep
+        }
         TerminalizationCommand::AbandonOwnedNode { .. } => TerminalizationKind::PauseAbandonClaim,
         TerminalizationCommand::AbandonOwnedNodes { .. } => {
             TerminalizationKind::PauseAbandonClaimBatch
