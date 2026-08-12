@@ -32,6 +32,8 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.codec.typed import encode_task_error
+from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
@@ -1390,7 +1392,22 @@ async def expire_paused_workflows(
     task_terminal_values = [
         status.value for status in TASK_TERMINAL_STATES
     ]
-    error_text = f'paused_workflow_auto_cancel_after: {older_than}'
+    error_text = f'paused_workflow_auto_cancel_after elapsed: {older_than}'
+    error_json = _ser_or_raise(
+        dumps_json(
+            encode_task_error(
+                TaskError(
+                    error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                    message=error_text,
+                    data={
+                        'policy': 'paused_workflow_auto_cancel_after',
+                        'older_than_seconds': older_than.total_seconds(),
+                    },
+                )
+            )
+        ),
+        'expired workflow error',
+    )
     expired_count = 0
     async with session_factory() as candidate_session:
         candidate_rows = (
@@ -1441,7 +1458,7 @@ async def expire_paused_workflows(
                     """),
                     {
                         'wf_id': workflow_id,
-                        'error': error_text,
+                        'error': error_json,
                         'age': older_than,
                     },
                 )

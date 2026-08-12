@@ -695,22 +695,31 @@ class WorkflowHandle(Generic[OutT]):
 
                 status = status_r.ok_value
 
-                if status == WorkflowStatus.COMPLETED:
-                    return await self._get_result()
-
-                if status in (WorkflowStatus.FAILED, WorkflowStatus.CANCELLED):
-                    return await self._get_error()
-
-                if status == WorkflowStatus.PAUSED:
-                    return cast(
-                        'TaskResult[OutT, TaskError]',
-                        TaskResult(
-                            err=TaskError(
-                                error_code=OutcomeCode.WORKFLOW_PAUSED,
-                                message='Workflow is paused awaiting intervention',
-                            )
-                        ),
-                    )
+                match status:
+                    case WorkflowStatus.COMPLETED:
+                        return await self._get_result()
+                    case (
+                        WorkflowStatus.FAILED
+                        | WorkflowStatus.CANCELLED
+                        | WorkflowStatus.EXPIRED
+                    ):
+                        return await self._get_error()
+                    case WorkflowStatus.PAUSED:
+                        return cast(
+                            'TaskResult[OutT, TaskError]',
+                            TaskResult(
+                                err=TaskError(
+                                    error_code=OutcomeCode.WORKFLOW_PAUSED,
+                                    message=(
+                                        'Workflow is paused awaiting intervention'
+                                    ),
+                                )
+                            ),
+                        )
+                    case WorkflowStatus.PENDING | WorkflowStatus.RUNNING:
+                        pass
+                    case _ as unreachable:
+                        assert_never(unreachable)
 
                 # Check timeout
                 elapsed = time.monotonic() - start
@@ -816,6 +825,27 @@ class WorkflowHandle(Generic[OutT]):
                 if row and row.error:
                     loads_r = loads_json(row.error)
                     if is_err(loads_r):
+                        if (
+                            row.status == WorkflowStatus.EXPIRED.value
+                            and str(row.error).startswith(
+                                'paused_workflow_auto_cancel_after:'
+                            )
+                        ):
+                            # 0.5.0/0.5.1 stored this policy outcome as plain
+                            # text. Preserve readability of already-expired
+                            # workflows without treating arbitrary corrupt
+                            # JSON as a valid terminal error.
+                            return cast(
+                                'TaskResult[OutT, TaskError]',
+                                TaskResult(
+                                    err=TaskError(
+                                        error_code=(
+                                            OutcomeCode.WORKFLOW_EXPIRED
+                                        ),
+                                        message=str(row.error),
+                                    )
+                                ),
+                            )
                         logger.warning(
                             'Workflow %s error payload corrupt: %s',
                             self.workflow_id,
@@ -860,13 +890,17 @@ class WorkflowHandle(Generic[OutT]):
                             TaskResult(err=validated_err),
                         )
                 status_str = row.status if row else 'FAILED'
-                _TERMINAL_STATUS_CODES: dict[str, OutcomeCode] = {
-                    'FAILED': OutcomeCode.WORKFLOW_FAILED,
-                    'CANCELLED': OutcomeCode.WORKFLOW_CANCELLED,
-                }
-                fallback_code: OutcomeCode | str = _TERMINAL_STATUS_CODES.get(
-                    status_str, f'WORKFLOW_{status_str}',
-                )
+                match status_str:
+                    case WorkflowStatus.FAILED.value:
+                        fallback_code: OutcomeCode | str = (
+                            OutcomeCode.WORKFLOW_FAILED
+                        )
+                    case WorkflowStatus.CANCELLED.value:
+                        fallback_code = OutcomeCode.WORKFLOW_CANCELLED
+                    case WorkflowStatus.EXPIRED.value:
+                        fallback_code = OutcomeCode.WORKFLOW_EXPIRED
+                    case _:
+                        fallback_code = f'WORKFLOW_{status_str}'
                 return cast(
                     'TaskResult[OutT, TaskError]',
                     TaskResult(

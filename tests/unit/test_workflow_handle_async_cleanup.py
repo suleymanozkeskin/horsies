@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.models.tasks import RetrievalCode, TaskResult
+from horsies.core.models.tasks import OutcomeCode, RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import Ok
@@ -94,3 +94,21 @@ class TestWorkflowHandleZeroTimeout:
         result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
 
         assert result is expected
+
+    @pytest.mark.asyncio
+    async def test_zero_timeout_returns_persisted_expired_error(self) -> None:
+        handle = _make_handle()
+        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.EXPIRED))
+        expected: TaskResult[Any, TaskError] = TaskResult(
+            err=TaskError(
+                error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                message='paused workflow expiry elapsed',
+            )
+        )
+        handle._get_error = AsyncMock(return_value=expected)
+
+        result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
+
+        assert result is expected
+        handle._get_error.assert_awaited_once_with()

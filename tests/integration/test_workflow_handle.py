@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from datetime import timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,6 +27,7 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.workflows.engine import on_workflow_task_complete
+from horsies.core.workflows.lifecycle import expire_paused_workflows
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 
@@ -298,6 +300,60 @@ class TestWorkflowHandleGet:
         result = await handle.get_async(timeout_ms=1000)
         assert result.is_err()
         assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_PAUSED
+
+    async def test_auto_expired_pause_returns_workflow_expired_error(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        task = make_failing_task(app, 'get_expired_pause')
+        node = TaskNode(fn=task)
+        spec = make_workflow_spec(
+            broker=broker,
+            name='get_expired_pause',
+            tasks=[node],
+            on_error=OnError.PAUSE,
+        )
+        handle = await start_ok(spec, broker)
+        await _complete_task(
+            session,
+            broker,
+            handle.workflow_id,
+            0,
+            TaskResult(err=TaskError(error_code='FAIL', message='pause')),
+        )
+
+        expired = await expire_paused_workflows(
+            broker.session_factory,
+            older_than=timedelta(0),
+            batch_size=1,
+        )
+
+        assert expired == 1
+        status_result = await handle.status_async()
+        assert is_ok(status_result)
+        assert status_result.ok_value is WorkflowStatus.EXPIRED
+        result = await handle.get_async(timeout_ms=0)
+        assert result.is_err()
+        assert result.unwrap_err().error_code is OutcomeCode.WORKFLOW_EXPIRED
+
+        legacy_error = 'paused_workflow_auto_cancel_after: 1 day, 0:00:00'
+        await session.execute(
+            text(
+                'UPDATE horsies_workflows SET error = :error '
+                'WHERE id = :workflow_id'
+            ),
+            {'error': legacy_error, 'workflow_id': handle.workflow_id},
+        )
+        await session.commit()
+
+        legacy_result = await handle.get_async(timeout_ms=0)
+        assert legacy_result.is_err()
+        legacy_task_error = legacy_result.unwrap_err()
+        assert legacy_task_error.error_code is OutcomeCode.WORKFLOW_EXPIRED
+        assert legacy_task_error.message == legacy_error
 
     async def test_get_timeout(
         self,
