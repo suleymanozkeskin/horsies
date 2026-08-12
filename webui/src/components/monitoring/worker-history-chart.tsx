@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 
 import {
   Area,
@@ -27,6 +27,41 @@ const tooltipStyle = {
 const timeLabel = (iso: string): string =>
   new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+const CHART_HEIGHT = 140;
+
+/**
+ * A titled chart slot of fixed height. The body holds that height whether it
+ * carries a chart or a message, so focusing another worker — which starts a
+ * fresh query with nothing cached — does not collapse the panel around it.
+ * Keeping the previous worker's series would be the wrong repair: it would
+ * caption one worker's data with another's name.
+ */
+function ChartSlot({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div>
+      <span className="text-xs uppercase tracking-wide text-foreground">
+        {title}
+      </span>
+      <div style={{ height: CHART_HEIGHT }}>{children}</div>
+    </div>
+  );
+}
+
+/** Fills a slot while it has no series to draw. */
+function SlotMessage({ text }: { text: string }) {
+  return (
+    <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
+      {text}
+    </p>
+  );
+}
+
 /** Two stacked timeseries charts (load + CPU/mem) for one worker. */
 export function WorkerHistoryChart({ workerId }: { workerId: string }) {
   const { history, isLoading } = useWorkerHistory(workerId);
@@ -44,87 +79,83 @@ export function WorkerHistoryChart({ workerId }: { workerId: string }) {
     [history]
   );
 
-  if (isLoading && points.length === 0) {
-    return <p className="text-xs text-muted-foreground">Loading history…</p>;
-  }
-  if (points.length === 0) {
-    return (
-      <p className="text-xs text-muted-foreground">No history recorded yet.</p>
-    );
-  }
+  const empty =
+    points.length === 0 ? (
+      <SlotMessage
+        text={isLoading ? 'Loading history…' : 'No history recorded yet.'}
+      />
+    ) : null;
 
   return (
     <div className="flex flex-col gap-4">
-      <div>
-        <span className="text-xs uppercase tracking-wide text-foreground">
-          Load (running / claimed)
-        </span>
-        <ResponsiveContainer width="100%" height={140}>
-          <AreaChart
-            data={points}
-            margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
-            <YAxis allowDecimals={false} tick={axisStyle} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Area
-              type="monotone"
-              dataKey="running"
-              name="running"
-              stroke="var(--chart-1)"
-              fill="var(--chart-1)"
-              fillOpacity={0.2}
-              isAnimationActive={false}
-            />
-            <Area
-              type="monotone"
-              dataKey="claimed"
-              name="claimed"
-              stroke="var(--chart-3)"
-              fill="var(--chart-3)"
-              fillOpacity={0.15}
-              isAnimationActive={false}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
-      <div>
-        <span className="text-xs uppercase tracking-wide text-foreground">
-          CPU % / Memory %
-        </span>
-        <ResponsiveContainer width="100%" height={140}>
-          <LineChart
-            data={points}
-            margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
-            <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
-            <YAxis domain={[0, 100]} tick={axisStyle} />
-            <Tooltip contentStyle={tooltipStyle} />
-            <Legend wrapperStyle={{ fontSize: 11 }} />
-            <Line
-              type="monotone"
-              dataKey="cpu"
-              name="CPU %"
-              stroke="var(--chart-5)"
-              dot={false}
-              connectNulls
-              isAnimationActive={false}
-            />
-            <Line
-              type="monotone"
-              dataKey="mem"
-              name="Memory %"
-              stroke="var(--chart-2)"
-              dot={false}
-              connectNulls
-              isAnimationActive={false}
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
+      <ChartSlot title="Load (running / claimed)">
+        {empty ?? (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart
+              data={points}
+              margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
+              <YAxis allowDecimals={false} tick={axisStyle} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Area
+                type="monotone"
+                dataKey="running"
+                name="running"
+                stroke="var(--chart-1)"
+                fill="var(--chart-1)"
+                fillOpacity={0.2}
+                isAnimationActive={false}
+              />
+              <Area
+                type="monotone"
+                dataKey="claimed"
+                name="claimed"
+                stroke="var(--chart-3)"
+                fill="var(--chart-3)"
+                fillOpacity={0.15}
+                isAnimationActive={false}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        )}
+      </ChartSlot>
+      <ChartSlot title="CPU % / Memory %">
+        {empty ?? (
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart
+              data={points}
+              margin={{ top: 8, right: 8, bottom: 0, left: -20 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" />
+              <XAxis dataKey="t" tick={axisStyle} minTickGap={32} />
+              <YAxis domain={[0, 100]} tick={axisStyle} />
+              <Tooltip contentStyle={tooltipStyle} />
+              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Line
+                type="monotone"
+                dataKey="cpu"
+                name="CPU %"
+                stroke="var(--chart-5)"
+                dot={false}
+                connectNulls
+                isAnimationActive={false}
+              />
+              <Line
+                type="monotone"
+                dataKey="mem"
+                name="Memory %"
+                stroke="var(--chart-2)"
+                dot={false}
+                connectNulls
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </ChartSlot>
     </div>
   );
 }

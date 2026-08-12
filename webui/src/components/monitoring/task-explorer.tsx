@@ -15,9 +15,8 @@ import { StatusChip } from '@/components/ui/status-chip';
 import { Button } from '@/components/ui/button';
 import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
-import { useBreakdown, useFacets, useTasks, useTaskStats } from '@/hooks/use-tasks';
+import { useBreakdown, useFacets, useTasks } from '@/hooks/use-tasks';
 import { formatDuration, formatRelative, formatTime } from '@/lib/format-duration';
-import { statusColorVar } from '@/lib/status-utils';
 import { cn } from '@/lib/utils';
 import {
   DEFAULT_DIR,
@@ -30,13 +29,14 @@ import {
   type TaskSearchPatch,
   type TaskView,
 } from '@/routes/search';
-import type { TaskFilters, TaskSummary } from '@/types/tasks';
+import type { TaskSummary } from '@/types/tasks';
 
 import { AttemptHistory, DetailRow } from './detail';
 import { ErrorChip } from './error-chip';
 import { errorCategoryColorVar } from './error-taxonomy';
 import { FacetCombobox, type FacetOption } from './facet-combobox';
 import { ErrorState } from './states';
+import { StatsBar } from './stats-bar';
 import { TaskBreakdown } from './task-breakdown';
 import { TaxonomyStrip } from './taxonomy-strip';
 
@@ -53,62 +53,6 @@ export interface TaskExplorerProps {
   search: TaskSearch;
   /** Merge patch. A key set to `undefined` is removed from the URL. */
   onSearchChange: (patch: TaskSearchPatch) => void;
-}
-
-/** Clickable status overview cards — each toggles membership in the (multi-
- * select) status filter. Counts are scoped by every other active filter so they
- * stay coherent with the table. */
-function StatsBar({
-  filters,
-  onToggle,
-}: {
-  filters: TaskFilters;
-  onToggle: (status: string) => void;
-}) {
-  const { stats, isError, refetch } = useTaskStats(filters);
-  if (isError) {
-    return (
-      <ErrorState compact message="Could not load status counts." onRetry={refetch} />
-    );
-  }
-  if (stats.length === 0) {
-    return null;
-  }
-  const active = new Set(filters.status ?? []);
-  return (
-    <div className="flex flex-wrap gap-2">
-      {stats.map(stat => {
-        const isActive = active.has(stat.status);
-        return (
-          <button
-            key={stat.status}
-            type="button"
-            aria-pressed={isActive}
-            onClick={() => onToggle(stat.status)}
-            className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors',
-              isActive
-                ? 'border-primary ring-1 ring-primary'
-                : 'border-border hover:bg-muted'
-            )}
-            style={{
-              background: `color-mix(in oklab, ${statusColorVar(stat.status)} 6%, var(--card))`,
-            }}
-          >
-            <span
-              className="size-2.5 rounded-full"
-              style={{ background: statusColorVar(stat.status) }}
-              aria-hidden
-            />
-            <span className="text-sm font-semibold tabular-nums">{stat.count}</span>
-            <span className="text-xs text-muted-foreground">
-              {stat.status.toLowerCase()}
-            </span>
-          </button>
-        );
-      })}
-    </div>
-  );
 }
 
 function TaskDetailPanel({

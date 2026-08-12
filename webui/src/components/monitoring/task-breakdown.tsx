@@ -7,19 +7,33 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { statusColorVar } from '@/lib/status-utils';
+import {
+  statusColorVar,
+  statusLabel,
+  TASK_STATUS_ORDER,
+  type LifecycleStatus,
+} from '@/lib/status-utils';
 import { cn } from '@/lib/utils';
 import type { Breakdown, GroupBy, GroupRow } from '@/types/tasks';
 
-const STATUS_COLS: { key: keyof GroupRow; label: string; status: string }[] = [
-  { key: 'pending', label: 'pending', status: 'PENDING' },
-  { key: 'claimed', label: 'claimed', status: 'CLAIMED' },
-  { key: 'running', label: 'running', status: 'RUNNING' },
-  { key: 'completed', label: 'completed', status: 'COMPLETED' },
-  { key: 'failed', label: 'failed', status: 'FAILED' },
-  { key: 'cancelled', label: 'cancelled', status: 'CANCELLED' },
-  { key: 'expired', label: 'expired', status: 'EXPIRED' },
-];
+/** The count field each status occupies on a group row. Keyed by the closed
+ * status union, so a new status cannot be added without a column for it. */
+const STATUS_FIELD: Record<LifecycleStatus, keyof GroupRow> = {
+  PENDING: 'pending',
+  CLAIMED: 'claimed',
+  RUNNING: 'running',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+  EXPIRED: 'expired',
+};
+
+const STATUS_COLS: { key: keyof GroupRow; label: string; status: string }[] =
+  TASK_STATUS_ORDER.map(status => ({
+    key: STATUS_FIELD[status],
+    label: statusLabel(status),
+    status,
+  }));
 
 const GROUP_HEADING: Record<GroupBy, string> = {
   worker: 'Worker',

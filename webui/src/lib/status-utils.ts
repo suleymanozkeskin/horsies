@@ -34,3 +34,23 @@ export function statusColorVar(status: string): string {
 
 /** Lowercased label for chips/legend. */
 export const statusLabel = (status: string): string => status.toLowerCase();
+
+/**
+ * The task lifecycle statuses, in the order the monitoring API reports them.
+ * The stats and breakdown endpoints always emit all seven, zeros included, so
+ * a shorter list means "not loaded yet" — never "these statuses are absent".
+ * That makes the row geometry of a status strip known before its counts are.
+ */
+export const TASK_STATUS_ORDER = [
+  'PENDING',
+  'CLAIMED',
+  'RUNNING',
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'EXPIRED',
+] as const;
+
+/** One of the seven lifecycle statuses — closed, unlike the open `TaskStatus`
+ * response union, so a mapping over it can be checked for exhaustiveness. */
+export type LifecycleStatus = (typeof TASK_STATUS_ORDER)[number];
