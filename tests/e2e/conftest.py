@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Generator
-import os
 import pytest
 import pytest_asyncio
 
@@ -31,15 +30,33 @@ from tests.e2e.helpers.env import e2e_database_url
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
 
-@pytest_asyncio.fixture(scope='session', loop_scope='session')
-async def broker() -> AsyncGenerator[PostgresBroker, None]:
-    """Broker instance used by e2e tasks."""
-    brk = default_instance.broker
-    await brk.ensure_schema_initialized()
-    from tests.integration.history_seeding import ensure_history_seedable
+async def _initialize_session_broker(
+    brk: PostgresBroker,
+    *,
+    seed_history: bool = False,
+) -> None:
+    """Initialize and bind listener ownership to the session loop.
 
-    async with brk.async_engine.begin() as connection:
-        await ensure_history_seedable(connection)
+    Sync facades subsequently fall back to polling instead of claiming the
+    shared listener from their LoopRunner. Session-loop listener tests then
+    receive the same uncontaminated owner regardless of collection order.
+    """
+    schema = await brk.ensure_schema_initialized()
+    assert schema.is_ok(), schema
+    listener = await brk.listener.start()
+    assert listener.is_ok(), listener
+    if seed_history:
+        from tests.integration.history_seeding import ensure_history_seedable
+
+        async with brk.async_engine.begin() as connection:
+            await ensure_history_seedable(connection)
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session', autouse=True)
+async def broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker used by e2e tasks, bound before any sync test can claim it."""
+    brk = default_instance.broker
+    await _initialize_session_broker(brk, seed_history=True)
     yield brk
     try:
         await brk.close_async()
@@ -53,7 +70,7 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
 async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Custom-queue broker instance for e2e tasks."""
     brk = instance_custom.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -66,7 +83,7 @@ async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for the subworkflow priority-binding claim-order e2e."""
     brk = instance_priority_binding.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -78,7 +95,7 @@ async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with cluster_wide_cap for e2e tasks."""
     brk = instance_cluster_cap.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -91,7 +108,7 @@ async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with fast recovery thresholds for crash-detection tests."""
     brk = instance_recovery.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -103,7 +120,7 @@ async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with soft cap (prefetch_buffer > 0) for lease contention tests."""
     brk = instance_softcap.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -115,7 +132,7 @@ async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker for requeue-guard age-guard e2e tests."""
     brk = instance_requeue_guard.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -127,7 +144,7 @@ async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance for scheduler e2e tests."""
     brk = instance_scheduler.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
@@ -139,12 +156,39 @@ async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def retry_precedence_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance for retry-precedence e2e tests."""
     brk = instance_retry_precedence.broker
-    await brk.ensure_schema_initialized()
+    await _initialize_session_broker(brk)
     yield brk
     try:
         await brk.close_async()
     except RuntimeError:
         pass
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session', autouse=True)
+async def bind_all_session_brokers(
+    broker: PostgresBroker,
+    custom_broker: PostgresBroker,
+    priority_binding_broker: PostgresBroker,
+    cluster_cap_broker: PostgresBroker,
+    recovery_broker: PostgresBroker,
+    softcap_broker: PostgresBroker,
+    requeue_guard_broker: PostgresBroker,
+    scheduler_broker: PostgresBroker,
+    retry_precedence_broker: PostgresBroker,
+) -> AsyncGenerator[None, None]:
+    """Bind every singleton broker before any sync facade can claim it."""
+    _ = (
+        broker,
+        custom_broker,
+        priority_binding_broker,
+        cluster_cap_broker,
+        recovery_broker,
+        softcap_broker,
+        requeue_guard_broker,
+        scheduler_broker,
+        retry_precedence_broker,
+    )
+    yield
 
 
 @pytest_asyncio.fixture(loop_scope='session')
@@ -168,7 +212,8 @@ async def clean_db(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]
         yield
         return
 
-    await default_instance.broker.ensure_schema_initialized()
+    schema = await default_instance.broker.ensure_schema_initialized()
+    assert schema.is_ok(), schema
     async with default_instance.broker.session_factory() as session:
         await cleanup_tables(session)
     try:
