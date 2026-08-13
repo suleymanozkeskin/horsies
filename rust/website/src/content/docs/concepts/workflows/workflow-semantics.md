@@ -49,6 +49,20 @@ Terminal workflow-task statuses:
 - `Failed`
 - `Skipped`
 
+## Workflow-node timestamps
+
+A regular node is not started when its backing task is enqueued. Its
+`started_at` stays `NULL` in `ENQUEUED`.
+
+The first worker ownership handoff to `RUNNING` stamps `started_at`. A replay
+against an already-running node preserves the first value.
+
+A pause or recovery reset clears `started_at` when it returns the node to
+`READY`. Resume then creates a fresh backing task.
+
+A sub-workflow node has no worker claim. It stamps `started_at` when child
+workflow launch begins.
+
 ## `OnError`
 
 Rust currently supports two workflow error policies:

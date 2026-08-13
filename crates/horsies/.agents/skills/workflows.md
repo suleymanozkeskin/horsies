@@ -1,6 +1,6 @@
 ---
 name: horsies-rust-workflows
-description: Workflow DAG guidance for horsies-rust, including unified `horsies::Horsies`, `WorkflowFunction`, `WorkflowSpec`, `TaskNode`, `SubWorkflowNode`, `WorkflowHandle`, failure semantics, and validation. Use when building, starting, or troubleshooting workflows.
+description: Workflow DAG guidance for horsies-rust, including builders, UUID handles, node timing, pause relocation, paused expiry, failure semantics, and validation. Use when building, starting, or troubleshooting workflows.
 ---
 
 # horsies-rust — Workflows
@@ -649,7 +649,7 @@ Uses the internal `validate_start_retry()` helper in `horsies::core::workflow::s
 ### Reconnect to an existing workflow
 
 ```rust
-let handle = workflow.handle("known-workflow-uuid").await?;
+let handle = workflow.handle(known_workflow_uuid).await?;
 let status = handle.status().await?;
 ```
 
@@ -674,7 +674,7 @@ async fn pause(&self) -> HandleResult<bool>   // Ok(true)=paused
 async fn resume(&self) -> HandleResult<bool>  // Ok(true)=resumed
 
 // Identity
-fn workflow_id(&self) -> &str
+fn workflow_id(&self) -> uuid::Uuid
 ```
 
 ### `get()` semantics
@@ -683,6 +683,7 @@ fn workflow_id(&self) -> &str
 - `COMPLETED` with an explicit `builder.output(...)` → returns that output task's `TaskResult`.
 - `COMPLETED` without an explicit output → returns `TaskResult::Ok` containing a JSON object of terminal output task results keyed by `node_id`.
 - `FAILED` / `CANCELLED` → returns `TaskResult::Err(TaskError(...))`.
+- `EXPIRED` → returns the stored structured `WORKFLOW_EXPIRED` error.
 - `PAUSED` → returns immediately with `TaskError(WorkflowPaused)`.
 - Timeout → returns `TaskError(WaitTimeout)`.
 - Infrastructure/query failures are folded into `TaskResult::Err(TaskError(BROKER_ERROR | WORKFLOW_NOT_FOUND, ...))`.
@@ -695,7 +696,7 @@ pub struct WorkflowStartError {
     pub message: String,
     pub retryable: bool,
     pub workflow_name: String,
-    pub workflow_id: String,
+    pub workflow_id: Option<uuid::Uuid>,
 }
 ```
 
@@ -713,7 +714,7 @@ pub struct HandleOperationError {
     pub code: HandleErrorCode,
     pub message: String,
     pub retryable: bool,
-    pub workflow_id: String,
+    pub workflow_id: uuid::Uuid,
 }
 ```
 
@@ -728,11 +729,18 @@ pub struct HandleOperationError {
 
 ### `WorkflowStatus`
 
-```
-PENDING → RUNNING → COMPLETED | FAILED | PAUSED | CANCELLED
+```text
+PENDING → RUNNING → COMPLETED | FAILED | CANCELLED
+                  → PAUSED → EXPIRED
 ```
 
-Terminal: `COMPLETED`, `FAILED`, `CANCELLED`. **`PAUSED` is NOT terminal.**
+Terminal: `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
+`PAUSED` is not terminal.
+
+Set `AppConfig.retention.paused_workflow_auto_cancel_after` to expire old
+paused workflows. `None` disables the policy. The stored error names the policy
+and configured age. An expired child propagates to its parent like a cancelled
+child.
 
 ### `WorkflowTaskStatus`
 
@@ -748,6 +756,13 @@ Terminal: `COMPLETED`, `FAILED`, `SKIPPED`.
 |---|---|
 | `Fail` (default) | DAG continues; failed dependents are SKIPPED; workflow becomes FAILED when all tasks terminal |
 | `Pause` | Workflow immediately becomes PAUSED on first task failure |
+
+A claimed backing task is abandoned as `CANCELLED` during pause. Its terminal
+record moves to task history. The node returns to `READY` and clears its task
+ID and `started_at`. Resume creates a fresh backing task.
+
+A `PENDING` backing task stays live. A task that is already executing is not
+interrupted.
 
 ### `JoinType`
 
@@ -768,10 +783,17 @@ pub struct WorkflowTaskInfo {
     pub result: Option<TaskResult<serde_json::Value>>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    pub sub_workflow_id: Option<String>,
+    pub sub_workflow_id: Option<uuid::Uuid>,
     pub sub_workflow_summary: Option<String>,
 }
 ```
+
+For a regular task node, `started_at` stays `None` while the node is
+`ENQUEUED`. The first ownership handoff to `RUNNING` stamps it. A replay against
+an already-running node preserves the value. A requeue or pause reset clears
+it before the node returns to `READY`.
+
+A sub-workflow node stamps `started_at` when child launch begins.
 
 ## `SuccessPolicy` / `SuccessCase`
 

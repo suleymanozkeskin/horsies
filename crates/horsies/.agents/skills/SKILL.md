@@ -14,9 +14,9 @@ skill files in this directory:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `#[horsies::task]`, `TaskFunction`, `my_task::register()`, send/schedule/retry APIs, serialization |
-| `workflows.md` | unified `horsies::Horsies`, `WorkflowFunction`, `WorkflowTemplate`, `TaskRuntime`, checked workflow builders, DAG construction, failure semantics |
-| `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, scheduling, `Horsies::check()`, `check_live()`, workflow builders, PgBouncer transaction-pool deployments (`from_pgbouncer_urls`, `session_database_url`) |
+| `tasks.md` | `#[horsies::task]`, send and schedule options, UUID task IDs, idempotency, retention, history reads, and rerun |
+| `workflows.md` | workflow builders, DAG behavior, `EXPIRED`, pause relocation, and node timing |
+| `configs.md` | `AppConfig`, `RetentionConfig`, recovery, queues, scheduling, checks, and PgBouncer split URLs |
 
 ## Package architecture
 
@@ -28,6 +28,28 @@ skill files in this directory:
 | `horsies::broker` | Internal broker implementation and row/handle types, re-exported via `horsies::`. |
 | `horsies::workflow_engine` | Internal workflow runtime, binding, start/query/lifecycle, re-exported via `horsies::`. |
 | `horsies::worker` | Internal worker runtime, recovery, scheduler service, re-exported via `horsies::`. |
+
+## Alpha.26 storage model
+
+`horsies_tasks` stores live work only. Its statuses are `PENDING`, `CLAIMED`,
+and `RUNNING`.
+
+A terminal task moves to partitioned `horsies_task_history`. The move and the
+terminal outcome use one transaction. Result and task-info APIs read both
+locations.
+
+Task and workflow IDs are `uuid::Uuid`. New task IDs use UUIDv7.
+
+Each enqueue fixes a retention class. The default is `standard_30d`. An
+explicit forever choice prevents pruning. Idempotency keys deduplicate equal
+requests and reject unequal requests under the same key.
+
+Rerun creates a new task from retained terminal input. It records source and
+root lineage. It never edits the terminal source.
+
+Existing databases at migration 0032 need the offline cutover. Stop all
+processes and take a named backup first. Follow the
+[cutover runbook](https://suleymanozkeskin.github.io/horsies-rust/operations/cutover-runbook/).
 
 ## Define a Task
 
@@ -102,6 +124,26 @@ match add_numbers_task.send(args).await {
     Err(err) => { /* permanent failure */ }
 }
 ```
+
+### Send with identity and retention controls
+
+```rust
+use horsies::TaskSendOptions;
+
+let handle = add_numbers_task
+    .with_options(
+        TaskSendOptions::new()
+            .idempotency_key("request:42")
+            .retention_class("audit_7d"),
+    )
+    .send(args)
+    .await?;
+
+let task_id: uuid::Uuid = handle.task_id();
+```
+
+Use `.retain_forever()` instead of `.retention_class(...)` when the terminal
+record must not age out.
 
 ## Define and Start a Workflow
 
@@ -379,7 +421,7 @@ match workflow.start().await {
 ### Reconnect to an existing workflow
 
 ```rust
-let handle = workflow.handle("known-workflow-uuid").await?;
+let handle = workflow.handle(known_workflow_uuid).await?;
 let status = handle.status().await?;
 ```
 

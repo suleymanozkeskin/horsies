@@ -29,7 +29,9 @@ let app = Horsies::new(config)?;
 | `prefetch_buffer` | `u32` | `0` | 0 = hard cap; >0 = soft cap with lease |
 | `claim_lease_ms` | `Option<u32>` | `None` | Claim lease duration; None = default 60s |
 | `max_claim_renew_age_ms` | `u32` | `180_000` | Max age of CLAIMED task for heartbeat renewal |
-| `recovery` | `RecoveryConfig` | `RecoveryConfig::default()` | Stale task detection and retention |
+| `payload` | `PayloadPolicy` | `PayloadPolicy::default()` | Payload-size warning and rejection limits |
+| `recovery` | `RecoveryConfig` | `RecoveryConfig::default()` | Stale task and workflow recovery |
+| `retention` | `RetentionConfig` | `RetentionConfig::default()` | Task-history classes, partition coverage, and retained-row cleanup |
 | `resilience` | `WorkerResilienceConfig` | default | Worker retry behavior |
 | `schedule` | `Option<ScheduleConfig>` | `None` | Recurring task schedules |
 | `resend_on_transient_err` | `bool` | `false` | Auto-retry transient ENQUEUE_FAILED for sends and starts |
@@ -58,6 +60,7 @@ let config = PostgresConfig::from_url("postgresql://user:pass@localhost:5432/myd
 | `pool_pre_ping` | `bool` | `true` | Pre-ping each connection before use. |
 | `pool_size` | `u32` | `30` | Runtime connection pool size. |
 | `max_overflow` | `u32` | `30` | Additional runtime connections beyond `pool_size`. |
+| `retain_rerun_input_default` | `bool` | `false` | Keep canonical enqueue input for eligible terminal-task reruns by default. A task without retained input cannot be rerun. |
 | `pool_timeout` | `u32` | `30` | Seconds to wait for acquiring a pooled connection. |
 | `pool_recycle` | `u32` | `1800` | Seconds before a connection is recycled. |
 | `echo` | `bool` | `false` | Log SQL statements. |
@@ -154,22 +157,23 @@ Lower priority number = claimed first.
 
 ## `RecoveryConfig`
 
-Controls stale task detection and retention.
+Controls stale task detection and workflow recovery. Retention belongs under
+`AppConfig.retention`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `auto_requeue_stale_claimed` | `bool` | `true` | Requeue tasks stuck in CLAIMED |
 | `claimed_stale_threshold_ms` | `u64` | `120_000` | Ms before CLAIMED is stale |
 | `auto_fail_stale_running` | `bool` | `true` | Fail tasks stuck in RUNNING |
+| `auto_terminate_orphaned_workflow_tasks` | `bool` | `true` | Cancel task rows with no runnable workflow-node link |
 | `running_stale_threshold_ms` | `u64` | `300_000` | Ms before RUNNING is stale |
 | `finalizing_stale_threshold_ms` | `u64` | `300_000` | Ms before a task whose two-phase finalize stalled is recovered |
-| `crashed_worker_recovery_grace_ms` | `u64` | `10_000` | Grace before the reaper recovers a just-terminal workflow task whose Phase 2 may still be in flight; `0` disables, max `3_600_000` |
+| `crashed_worker_recovery_grace_ms` | `u64` | `10_000` | Grace before the reaper recovers a just-terminal workflow task whose Phase 2 may still be in flight; `0` means immediate recovery, max `3_600_000` |
+| `phase2_quarantine_after_attempts` | `u32` | `25` | Failed phase-2 recovery passes before evidence moves to quarantine; range 3–1000 |
 | `check_interval_ms` | `u64` | `30_000` | Reaper poll cadence |
 | `runner_heartbeat_interval_ms` | `u64` | `30_000` | Heartbeat from running task |
 | `claimer_heartbeat_interval_ms` | `u64` | `30_000` | Heartbeat for CLAIMED tasks |
-| `heartbeat_retention_hours` | `Option<u32>` | `Some(24)` | Prune old heartbeat rows |
-| `worker_state_retention_hours` | `Option<u32>` | `Some(168)` | Prune old worker_state rows |
-| `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` | Prune terminal task/workflow rows |
+| `worker_state_snapshot_interval_ms` | `u64` | `30_000` | Worker-state snapshot cadence |
 
 ### Constraints
 
@@ -177,9 +181,63 @@ Controls stale task detection and retention.
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 - `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - All `*_ms` fields must be `>= 1000`.
-- `crashed_worker_recovery_grace_ms <= 3_600_000` (`0` disables it; no minimum).
+- `crashed_worker_recovery_grace_ms <= 3_600_000` (`0` runs recovery immediately; no minimum).
 
 The 2x factor ensures a task can miss one heartbeat cycle without being incorrectly marked stale.
+
+### Retention field migration
+
+Four alpha.25 fields moved from `RecoveryConfig` to `AppConfig.retention`:
+
+- `worker_state_retention_hours`
+- `terminal_record_retention_hours`
+- `retention_sweep_interval_s`
+- `retention_delete_batch_size`
+
+Five fields are new in alpha.26:
+
+- `retention_classes`
+- `history_leaf_horizon_days`
+- `heartbeat_leaf_horizon_hours`
+- `partition_maintenance_interval_s`
+- `paused_workflow_auto_cancel_after`
+
+`RecoveryConfig` refuses all nine names. Each error names
+`AppConfig.retention.<field>`.
+
+`heartbeat_retention_hours` was removed. Heartbeats now age by dropping hourly
+partitions. Use `heartbeat_leaf_horizon_hours` only to set future coverage.
+
+`queue_terminal_record_retention_hours` was removed. Use
+`AppConfig.retention.queue_retention`.
+
+## `RetentionConfig`
+
+Controls task-history storage and retained workflow data.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `worker_state_retention_hours` | `Option<u32>` | `Some(168)` | Retain worker-state rows; `None` disables cleanup |
+| `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` | Retain terminal workflow rows; task history uses classes instead |
+| `paused_workflow_auto_cancel_after` | `Option<chrono::Duration>` | `None` | Expire workflows that remain PAUSED past this positive duration |
+| `history_leaf_horizon_days` | `u32` | `3` | Complete future daily history leaves; range 2–14 |
+| `heartbeat_leaf_horizon_hours` | `u32` | `6` | Complete future hourly heartbeat leaves; range 2–48 |
+| `retention_classes` | `Vec<RetentionClassConfig>` | empty | Extra immutable finite classes |
+| `queue_retention` | `HashMap<String, Option<chrono::Duration>>` | empty | Queue duration or `None` for forever |
+| `partition_maintenance_interval_s` | `u64` | `900` | Partition coverage and pruning cadence; range 60–3600 |
+| `retention_sweep_interval_s` | `u64` | `300` | Workflow and worker-state cleanup cadence; range 30–86400 |
+| `retention_delete_batch_size` | `u32` | `500` | Rows per retained-row cleanup batch; range 50–10000 |
+
+`RetentionClassConfig` has a `key` and a positive `duration`. Class keys are
+safe identifiers with at most 18 characters. Library-owned keys and the `q_`
+prefix are reserved. A duration is a minimum because leaves span one UTC day.
+
+`queue_retention` creates a stable `q_<queue>_<duration>` class. The duration
+is part of the key. Changing a mapping affects later enqueues only.
+
+Retention choice precedence is explicit send choice, queue mapping, then
+`standard_30d`. Use `RetentionChoice::Forever` or
+`TaskSendOptions::retain_forever()` for no pruning.
 
 ## `WorkerResilienceConfig`
 
@@ -391,7 +449,8 @@ Advanced: direct `horsies::Worker` construction is available for custom runtime 
 ```rust
 use horsies::{
     Horsies, AppConfig, PostgresConfig, QueueMode, CustomQueueConfig,
-    RecoveryConfig, WorkerResilienceConfig,
+    RecoveryConfig, RetentionChoice, RetentionClassConfig, RetentionConfig,
+    WorkerResilienceConfig,
     ScheduleConfig, TaskSchedule, SchedulePattern,
     IntervalSchedule, HourlySchedule, DailySchedule,
     WeeklySchedule, MonthlySchedule, Weekday,

@@ -136,8 +136,9 @@ Schema initialization uses a fast path when the embedded migrations are already 
 
 Use an explicit broker call when you want a preflight step outside those paths, or when you're working with `PostgresBroker` directly:
 
-- `horsies_tasks` - Task storage
-- `horsies_task_attempts` - Per-attempt execution history
+- `horsies_tasks` - Live task storage
+- `horsies_task_history` - Partitioned terminal task storage
+- `horsies_task_attempts` - Live per-attempt rows before terminal archival
 - `horsies_heartbeats` - Liveness tracking
 - `horsies_worker_states` - Worker monitoring
 - `horsies_schedule_state` - Scheduler state

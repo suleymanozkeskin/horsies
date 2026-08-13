@@ -32,7 +32,7 @@ Producer                  PostgreSQL                    Worker(s)
    │                         │                             │
    │                         │                             │ Execute
    │                         │                             │
-   │                         │<──────── UPDATE result ─────┤
+   │                         │<──────── MOVE terminal row ─┤
    │                         │                             │
    │  .get()                 │ NOTIFY task_done            │
    │<────────────────────────│                             │
@@ -44,7 +44,8 @@ Producer                  PostgreSQL                    Worker(s)
 
 Unlike systems that require a separate message broker (RabbitMQ, Redis, NATS), horsies uses PostgreSQL for everything:
 
-- **Task storage**: The `horsies_tasks` table holds all task data
+- **Task storage**: `horsies_tasks` holds live work. Partitioned
+  `horsies_task_history` holds immutable terminal records
 - **Message passing**: LISTEN/NOTIFY replaces a separate message broker
 - **Coordination**: Advisory locks prevent race conditions
 - **State tracking**: Heartbeats and worker states are database tables
@@ -102,14 +103,16 @@ Workers primarily receive tasks via NOTIFY, not polling:
 2. Worker claims task atomically via `FOR UPDATE SKIP LOCKED`
 3. Task dispatched via `tokio::spawn` (async) or `spawn_blocking` (blocking)
 4. Task function executes
-5. Result stored in database, status updated to `COMPLETED` or `FAILED`
+5. Terminalization writes the result and terminal status to task history
+6. The same transaction removes the live task row
 
 ### Result Retrieval
 
 1. Producer calls `handle.get(timeout).await`
 2. If result cached on handle, return immediately
 3. Otherwise, listen for `task_done` notification or poll database
-4. Return `TaskResult<T>` with success value or error
+4. Resolve the result from live or history storage
+5. Return `TaskResult<T>` with success value or error
 
 ## Concurrency Model
 

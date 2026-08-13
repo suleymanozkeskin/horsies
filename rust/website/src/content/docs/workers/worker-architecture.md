@@ -122,8 +122,9 @@ After task completes:
 
 1. Parse result (Ok or Err)
 2. Check for retry eligibility
-3. Update task status (COMPLETED or FAILED)
-4. Send NOTIFY for result waiters
+3. For a retry, update the live task and keep it pending
+4. For a terminal outcome, write task history and remove the live row atomically
+5. Send NOTIFY for result waiters
 
 ## Worker Configuration
 

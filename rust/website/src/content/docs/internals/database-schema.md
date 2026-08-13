@@ -165,13 +165,19 @@ Workflow status accepts `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `PAUSED`,
 The workflow-node status domain is `PENDING`, `READY`, `ENQUEUED`, `RUNNING`,
 `COMPLETED`, `FAILED`, and `SKIPPED`.
 
+For a regular workflow node, `started_at` is `NULL` in `ENQUEUED`. The worker
+sets it on the first transition to `RUNNING`. A replay preserves the value.
+A reset to `READY` clears it. Sub-workflow nodes set it when child launch
+begins.
+
 ## Other tables
 
 `horsies_worker_states` stores monitoring snapshots. Retention deletes old
 rows in batches.
 
-`horsies_schedule_state.last_task_id` uses `uuid`. The table stores the last
-and next schedule times, run count, and config hash.
+`horsies_schedule_state.last_task_id` uses `VARCHAR(36)`. Runtime code converts
+between this scheduler text field and typed UUID task identities. The table
+also stores the last and next schedule times, run count, and config hash.
 
 ## Notifications
 

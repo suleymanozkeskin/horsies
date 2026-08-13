@@ -140,7 +140,7 @@ Important fields on `WorkflowStartError`:
 | `message` | `String` |
 | `retryable` | `bool` |
 | `workflow_name` | `String` |
-| `workflow_id` | `String` |
+| `workflow_id` | `Option<Uuid>` |
 
 Main codes:
 
@@ -159,7 +159,7 @@ Rust uses a split error model here:
 
 | Method | Signature | Description |
 |---|---|---|
-| `workflow_id()` | `&str` | Workflow instance ID |
+| `workflow_id()` | `Uuid` | Workflow instance ID |
 | `get(timeout)` | `async -> TaskResult<T>` | Wait for completion |
 | `result_for(node_id)` | `async -> TaskResult<V>` | Get one node result by node ID |
 | `result_for_key(key)` | `async -> TaskResult<V>` | Get one node result by typed `NodeKey<V>` |

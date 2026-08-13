@@ -24,15 +24,15 @@ to roughly 20% of its row count before vacuum starts.
 
 - Every task row is rewritten several times between enqueue and terminal
   state — claim, start, finalize each produce a dead tuple under MVCC.
-- Retention deletes remove terminal rows in bulk on a fixed cadence, leaving
-  dead tuples proportional to throughput, not to table size.
+- The terminal move deletes the live row after inserting its immutable history
+  row. The live-table delete also produces a dead tuple.
 
-With 30 days of retained history (`terminal_record_retention_hours`
-default), the live row count is dominated by finished tasks that never
-change. A 1M-row table waits for ~200k dead tuples before vacuum runs; in
-the meantime the dead tuples sit in exactly the pages and indexes the claim
-path reads, and index-only scans fall back to heap fetches as the visibility
-map goes stale.
+The live table contains only `PENDING`, `CLAIMED`, and `RUNNING` tasks. Its row
+count follows active backlog and concurrency. It does not follow history
+retention. A 1M-row live table waits for about 200k dead tuples before the
+default vacuum runs. Those dead tuples sit in the pages and indexes used by
+the claim path. Index-only scans also fall back to heap fetches while the
+visibility map is stale.
 
 Tune when `horsies_tasks` holds more than ~10⁵ rows or the dead-tuple ratio
 from the monitoring query below stays above a few percent between vacuums.
@@ -55,9 +55,9 @@ ALTER TABLE horsies_tasks SET (
 );
 ```
 
-For larger tables, a proportional trigger still stretches as history
-accumulates: 1% of 50M rows is 500k dead tuples. Switch to a fixed
-threshold so vacuum cadence is set by churn alone:
+For larger live tables, a proportional trigger still stretches with the
+backlog: 1% of 50M rows is 500k dead tuples. Switch to a fixed threshold so
+vacuum cadence is set by churn alone:
 
 ```sql
 ALTER TABLE horsies_tasks SET (

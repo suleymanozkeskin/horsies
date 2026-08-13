@@ -36,8 +36,10 @@ boundary. The final table shape matches task-history schema v35.
 - Terminal tasks now move from `horsies_tasks` to partitioned
   `horsies_task_history` in the terminalization transaction.
 - `horsies_tasks` now accepts only `PENDING`, `CLAIMED`, and `RUNNING`.
-- Task, workflow, workflow-node, heartbeat, and schedule task identities now use
-  PostgreSQL `uuid`. New task IDs use UUIDv7.
+- Task, workflow, workflow-node, and heartbeat identities now use PostgreSQL
+  `uuid`. Public task and workflow handles expose `uuid::Uuid`. New task IDs
+  use UUIDv7. Scheduler state keeps its compatibility link in `VARCHAR(36)` and
+  converts it at the runtime boundary.
 - Terminal attempt rows now become a verified snapshot in the history row.
   Live attempt rows are deleted in the same transaction.
 - Task retention now drops whole partitions. It no longer deletes terminal task
@@ -51,6 +53,9 @@ boundary. The final table shape matches task-history schema v35.
   `task_history_v1_validated_v1` cutover attestation.
 - Pausing a workflow now relocates claimed backing tasks to history. Resume
   creates fresh backing task rows.
+- A regular workflow node now records `started_at` when it first reaches
+  `RUNNING`, not when its backing task is enqueued. A replay preserves the
+  first timestamp. A requeue or pause reset clears it.
 - Retention fields moved from `RecoveryConfig` to `AppConfig.retention`:
   `terminal_record_retention_hours`, `worker_state_retention_hours`,
   `retention_sweep_interval_s`, and `retention_delete_batch_size`.
@@ -72,3 +77,9 @@ boundary. The final table shape matches task-history schema v35.
   attestation.
 - Fresh databases start at migration 0042 and need no cutover.
 - See the [task-history cutover runbook](https://suleymanozkeskin.github.io/horsies-rust/operations/cutover-runbook/).
+
+### Known incompatibilities
+
+- The current Syce release does not support the task-history schema. A
+  compatible Syce release is required for complete terminal task and result
+  views.

@@ -19,6 +19,10 @@ tags: [concepts, tasks, states]
 
 **Terminal states:** `Completed`, `Failed`, `Cancelled`, `Expired`.
 
+Terminal states do not remain in `horsies_tasks`. Terminalization inserts the
+immutable record into `horsies_task_history` and deletes the live row in one
+transaction.
+
 ## Status Enum
 
 ```rust
@@ -86,8 +90,8 @@ pub const TASK_TERMINAL_STATES: &[TaskStatus] = &[
 ### Running → Completed
 
 - Task returns `Ok(value)`
-- Worker stores serialized result
-- Sets `completed_at=NOW()`
+- Worker stores the serialized result and `completed_at` in task history
+- The terminalization transaction removes the live row
 
 `Completed` means the task succeeded (returned `Ok`). Execution that ends with `Err(TaskError)` or a panic is `Failed`, not `Completed`.
 
@@ -96,7 +100,7 @@ pub const TASK_TERMINAL_STATES: &[TaskStatus] = &[
 - Task returns `Err(TaskError { ... })` **or**
 - Task panics (caught, wrapped as `UnhandledError`) **or**
 - Worker crashes (detected via missing heartbeats)
-- Sets `failed_at=NOW()`, stores error in `result`
+- Worker stores `failed_at` and the structured error in task history
 
 ### Running → Pending (retry)
 
@@ -107,12 +111,12 @@ pub const TASK_TERMINAL_STATES: &[TaskStatus] = &[
 ### Pending → Expired
 
 - Task has `good_until` set and deadline has passed before it was claimed
-- Reaper transitions to Expired with `TaskExpired` outcome code
+- Reaper moves it to history with the `TaskExpired` outcome code
 
 ### Claimed → Expired
 
 - Worker claimed the task, but `good_until` passed before user code started
-- Worker transitions to Expired with `TaskExpired`
+- Worker moves it to history with `TaskExpired`
 - No attempt row is written because the task body did not run
 
 ### Claimed → Pending (stale recovery)

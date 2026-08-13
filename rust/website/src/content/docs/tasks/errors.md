@@ -17,9 +17,13 @@ Horsies has three relevant error surfaces:
 
 Runtime errors are returned via `TaskResult<T>`. The `TaskError.error_code` field contains either a `TaskErrorCode::BuiltIn(BuiltInTaskCode)` or a `TaskErrorCode::User(String)`.
 
-When a task reaches a terminal `Failed` state, the `error_code` is persisted to `horsies_tasks.error_code` for queryability. Access it via `TaskInfo.error_code` from `handle.info()`.
+When a task reaches terminal `Failed`, its `error_code` moves to
+`horsies_task_history`. Access it through `TaskInfo.error_code` from
+`handle.info()`. The API resolves live and history storage.
 
-Each execution attempt is also recorded in `horsies_task_attempts` with per-attempt `error_code`, `error_message`, and outcome.
+Each execution attempt is first recorded in `horsies_task_attempts`. The
+terminal move archives the attempt snapshot in the history row and removes the
+live attempt rows in the same transaction.
 
 ### TaskError
 
@@ -111,7 +115,7 @@ Send errors are returned via `TaskSendResult<TaskHandle<T>>`. These are separate
 | `code` | `TaskSendErrorCode` | Failure category |
 | `message` | `String` | Human-readable description |
 | `retryable` | `bool` | Whether the caller can retry with the same payload |
-| `task_id` | `Option<String>` | Generated task ID |
+| `task_id` | `Option<Uuid>` | Generated task ID |
 | `payload` | `Option<TaskSendPayload>` | Serialized envelope for idempotent retry |
 
 #### TaskSendErrorCode

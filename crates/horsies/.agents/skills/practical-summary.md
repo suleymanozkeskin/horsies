@@ -64,6 +64,24 @@ match add_numbers::schedule(Duration::from_secs(30), AddNumbersInput { a: 3, b: 
 }
 ```
 
+**Idempotent and retained dispatch:**
+
+```rust
+let handle = add_numbers::with_options(
+    TaskSendOptions::new()
+        .idempotency_key("invoice:42")
+        .retention_class("audit_7d"),
+)
+.send(AddNumbersInput { a: 3, b: 4 })
+.await?;
+
+let task_id: uuid::Uuid = handle.task_id();
+```
+
+Use `.retain_forever()` for a terminal record that must not be pruned.
+`PostgresConfig::retain_rerun_input_default` decides whether eligible terminal
+input is available for a later rerun.
+
 **Explicit path (testing/advanced):**
 
 ```rust
@@ -272,6 +290,40 @@ app.check()?;
 
 ---
 
+## Alpha.26 operations
+
+- `horsies_tasks` contains only live tasks.
+- Terminal tasks move to `horsies_task_history` atomically.
+- Task result and info APIs read both locations.
+- Task and workflow IDs are `uuid::Uuid`.
+- `AppConfig.retention` owns task-history classes and partition maintenance.
+- `RecoveryConfig` owns stale-work recovery and phase-2 quarantine.
+- `WorkflowStatus::Expired` is terminal.
+- A paused workflow can expire after
+  `retention.paused_workflow_auto_cancel_after`.
+- Pause can move a claimed backing task to history. Resume creates a new task.
+- Regular workflow nodes stamp `started_at` on the first RUNNING transition.
+- A node reset to READY clears `started_at`.
+
+Rerun creates a fresh lineage-bearing task:
+
+```rust
+let outcome = horsies::rerun_task(
+    &broker,
+    RerunTask::new(source_task_id, None, caller_key),
+    RerunEnqueuePolicy::standard(true),
+)
+.await?;
+```
+
+Match every `RerunOutcome` variant.
+
+An existing migration-0032 database needs the offline cutover. Stop workers
+and schedulers. Take a named backup. Follow the
+[cutover runbook](https://suleymanozkeskin.github.io/horsies-rust/operations/cutover-runbook/).
+
+---
+
 ## Mental Model
 
 - Definitions stay explicit and typed
@@ -287,6 +339,6 @@ app.check()?;
 
 ## See Also
 
-- **Scheduling** (recurring tasks: `ScheduleConfig`/`TaskSchedule`, interval/daily/weekly/monthly and `CronSchedule` patterns) and the full config/recovery/queue surface live in `configs.md`.
-- **Task attributes** (`queue`, `retry_policy`, `auto_retry_for`, `timeout_ms`, `workflow_ctx`) and error types live in `tasks.md`.
-- **Workflow node wiring** (`args_from`, `workflow_ctx`, sub-workflows, queue/priority resolution, `check()` validation) lives in `workflows.md`.
+- **Configuration:** retention, recovery, scheduling, queues, and PgBouncer live in `configs.md`.
+- **Tasks:** send options, idempotency, history reads, and rerun live in `tasks.md`.
+- **Workflows:** node wiring, `EXPIRED`, pause behavior, and node timing live in `workflows.md`.

@@ -104,7 +104,10 @@ async fn api_call() -> Result<ApiResponse, TaskError> {
 5. Task not claimable until `next_retry_at` passes
 6. Worker sends delayed notification to trigger claiming
 
-Each step writes an immutable attempt row to `horsies_task_attempts`. A retried failure creates an attempt with `will_retry=true` and `outcome=Failed`. The final attempt (whether success or terminal failure) has `will_retry=false`.
+Each execution writes an attempt row to `horsies_task_attempts`. A retried
+failure has `will_retry=true` and `outcome=Failed`. The final attempt has
+`will_retry=false`. Terminalization archives the full attempt snapshot in the
+history row and removes the live attempt rows in the same transaction.
 
 Use `handle.info(false, false, true)` to inspect the full attempt timeline.
 

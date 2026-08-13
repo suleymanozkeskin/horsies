@@ -1,6 +1,6 @@
 ---
 name: horsies-rust-tasks
-description: Task authoring, registration, and producing guidance for horsies-rust, including #[horsies::task] proc macro, unified `horsies::Horsies`, `TaskFunction`, send/schedule/retry APIs, retry policy, and serialization rules. Use when implementing, debugging, or reviewing task-related code.
+description: Task authoring, registration, and producing guidance for horsies-rust, including #[horsies::task], send and schedule options, retries, idempotency, retention, task history, and rerun. Use when implementing, debugging, or reviewing task-related code.
 ---
 
 # horsies-rust — Tasks
@@ -212,9 +212,9 @@ fn task_options(&self) -> Option<&TaskOptions>
 
 Same as `send()` but with `enqueued_at = now() + delay`. The scheduled time is fixed at the first attempt, not recomputed on retry.
 
-### Per-send `good_until`
+### Per-send options
 
-Use `TaskSendOptions` for ad-hoc dynamic deadlines:
+Use `TaskSendOptions` for deadlines, idempotency, and retention:
 
 ```rust
 use chrono::{Duration, Utc};
@@ -223,7 +223,12 @@ use horsies::TaskSendOptions;
 let deadline = Utc::now() + Duration::minutes(5);
 
 let handle = my_task
-    .with_options(TaskSendOptions::new().good_until(deadline))
+    .with_options(
+        TaskSendOptions::new()
+            .good_until(deadline)
+            .idempotency_key("order:123")
+            .retention_class("audit_7d"),
+    )
     .send(input)
     .await?;
 ```
@@ -240,6 +245,24 @@ let handle = my_task::with_options(
 
 For workflow tasks, prefer node-level `.good_until(deadline)` while building
 the workflow spec.
+
+An idempotency key is scoped to the task name. The same key and same canonical
+request replay the first task. The same key with a different request returns a
+typed conflict.
+
+Retention precedence is explicit send choice, queue mapping, then
+`standard_30d`.
+
+```rust
+let finite = TaskSendOptions::new().retention_class("audit_7d");
+let forever = TaskSendOptions::new().retain_forever();
+```
+
+The class must be `standard_30d`, a declared class, or a queue-derived class.
+`retain_forever()` stores the terminal record in the non-pruned class.
+
+The resolved choice is stored as `retention_class_key` on the live task and
+its history record. `retain_forever()` resolves that field to `forever`.
 
 ### `retry_send()` / `retry_schedule()` guards
 
@@ -303,8 +326,17 @@ They fail if `add_numbers::register(&mut app)?` has not populated the generated 
 ## `TaskHandle<T>`
 
 ```rust
+fn task_id(&self) -> uuid::Uuid
 async fn get(&self, timeout: Option<Duration>) -> TaskResult<T>
+async fn info(
+    &self,
+    include_result: bool,
+    include_failed_reason: bool,
+    include_attempts: bool,
+) -> BrokerResult<Option<TaskInfo>>
 ```
+
+Task IDs are `uuid::Uuid` values. New task IDs are UUIDv7.
 
 Task handles do **not** return `HandleResult`. Retrieval outcomes are represented as `TaskResult<T>`:
 
@@ -396,7 +428,7 @@ pub struct TaskSendError {
     pub code: TaskSendErrorCode,
     pub message: String,
     pub retryable: bool,
-    pub task_id: Option<String>,
+    pub task_id: Option<uuid::Uuid>,
     pub payload: Option<TaskSendPayload>,
 }
 ```
@@ -449,6 +481,45 @@ PENDING → CLAIMED → RUNNING → COMPLETED | FAILED | CANCELLED | EXPIRED
 
 Terminal: `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`.
 
+A terminal task leaves `horsies_tasks` in the same transaction that records
+its outcome. Its immutable record lives in `horsies_task_history`.
+
+`TaskHandle::get()`, `TaskHandle::info()`, `PostgresBroker::get_result()`, and
+`PostgresBroker::get_task_info()` resolve live and history storage. Callers do
+not need to select the table.
+
+## Rerun a terminal task
+
+Rerun creates a new task. It never changes the source history row.
+
+```rust
+use chrono::Duration;
+use horsies::{rerun_task, RerunEnqueuePolicy, RerunOutcome, RerunTask};
+
+let command = RerunTask::new(source_task_id, None, Some("case:123".into()));
+let policy = RerunEnqueuePolicy::new(
+    "standard_30d",
+    true,
+    Duration::hours(24),
+)?;
+
+match rerun_task(&broker, command, policy).await? {
+    RerunOutcome::Enqueued { new_task_id, .. } => use_task(new_task_id),
+    RerunOutcome::SourceLive { .. }
+    | RerunOutcome::SourceAbsent { .. }
+    | RerunOutcome::NotEligible { .. }
+    | RerunOutcome::InputUnavailable { .. }
+    | RerunOutcome::InputCorrupt { .. }
+    | RerunOutcome::KeyConflict { .. }
+    | RerunOutcome::KeyReplay { .. } => handle_refusal(),
+}
+```
+
+Match every `RerunOutcome` variant. A completed source and a workflow backing
+task are not eligible. Other terminal sources require retained canonical
+input. `PostgresConfig::retain_rerun_input_default` controls that enqueue-time
+choice.
+
 ## All Key Imports
 
 ```rust
@@ -469,6 +540,9 @@ use horsies::{
     OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
     // Status
     TaskStatus, TaskAttemptOutcome, TaskAttemptInfo,
+    // History rerun
+    rerun_task, NotEligibleReason, RerunEnqueuePolicy, RerunError,
+    RerunOutcome, RerunTask,
     // Broker result (for handle.info())
     BrokerResult, BrokerOperationError, BrokerErrorCode,
 };
