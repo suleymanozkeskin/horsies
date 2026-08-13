@@ -731,31 +731,10 @@ mod wait_tests {
     use serial_test::serial;
     use std::sync::Arc;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     #[tokio::test]
     async fn get_workflow_result_no_timeout_returns_not_found_for_missing_workflow() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let listener = broker.workflow_done_listener().await.expect("listener");
         let missing = Uuid::new_v4();
@@ -779,11 +758,9 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_handle_get_returns_immediately_for_paused_workflow() {
-        let broker = Arc::new(
-            PostgresBroker::connect(&test_db_url())
-                .await
-                .expect("connect"),
-        );
+        let broker = Arc::new(PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
         sqlx::query(
@@ -825,11 +802,9 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_handle_get_preserves_structured_expiry_error() {
-        let broker = Arc::new(
-            PostgresBroker::connect(&test_db_url())
-                .await
-                .expect("connect"),
-        );
+        let broker = Arc::new(PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
         let persisted = TaskError {
@@ -878,11 +853,9 @@ mod wait_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_handle_get_fails_closed_on_malformed_expiry_error() {
-        let broker = Arc::new(
-            PostgresBroker::connect(&test_db_url())
-                .await
-                .expect("connect"),
-        );
+        let broker = Arc::new(PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        ));
         broker.ensure_schema_initialized().await.expect("schema");
         let workflow_id = Uuid::new_v4();
         sqlx::query(

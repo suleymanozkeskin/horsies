@@ -40,6 +40,11 @@ use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::worker::heartbeat::spawn_runner_heartbeat;
 use crate::worker::retry::{calculate_retry_delay, parse_timeout_ms, should_retry};
 
+#[cfg(test)]
+fn test_uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).expect("test identity must be UUID")
+}
+
 // Re-export for worker.rs orchestrator.
 pub(crate) use self::parse::parse_workflow_ctx;
 
@@ -2093,30 +2098,14 @@ mod set_running_gate_tests {
     //! P1: `confirm_ownership_and_set_running` gates the workflow_task RUNNING
     //! UPDATE on `is_workflow_task` to drop a per-task-start round trip for plain
     //! tasks. Cross-check: the update must STILL happen for workflow tasks.
-    use super::{confirm_ownership_and_set_running, OwnershipOutcome};
+    use super::{confirm_ownership_and_set_running, test_uuid, OwnershipOutcome};
     use crate::broker::PostgresBroker;
     use serial_test::serial;
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    async fn test_broker() -> PostgresBroker {
+        PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await)
     }
 
     async fn seed_claimed(pool: &PgPool, task_id: &str, is_wf: bool) {
@@ -2132,7 +2121,7 @@ mod set_running_gate_tests {
                       1, decode(repeat('00', 32), 'hex'), 'standard_30d',
                       FALSE, 'NEVER_ELIGIBLE')",
         )
-        .bind(task_id)
+        .bind(test_uuid(task_id))
         .bind(is_wf)
         .execute(pool)
         .await
@@ -2142,9 +2131,7 @@ mod set_running_gate_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_task_still_transitions_node_to_running() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker = test_broker().await;
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -2156,7 +2143,7 @@ mod set_running_gate_tests {
             ) VALUES ($1, 'p1_wf', 'RUNNING', 'fail', NULL, 'test.p1.v1', 0, $1,
                       NOW(), NOW(), NOW(), NOW())",
         )
-        .bind(&wf_id)
+        .bind(test_uuid(&wf_id))
         .execute(&pool)
         .await
         .expect("insert workflow");
@@ -2168,9 +2155,9 @@ mod set_running_gate_tests {
             ) VALUES ($1, $2, 0, 'node_0', 'p1_task', '[]', '{}',
                       'default', 100, '{}', FALSE, 'all', 'ENQUEUED', FALSE, $3, NOW())",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&wf_id)
-        .bind(&task_id)
+        .bind(Uuid::new_v4())
+        .bind(test_uuid(&wf_id))
+        .bind(test_uuid(&task_id))
         .execute(&pool)
         .await
         .expect("insert node");
@@ -2191,7 +2178,7 @@ mod set_running_gate_tests {
 
         let node_status: String =
             sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1")
-                .bind(&wf_id)
+                .bind(test_uuid(&wf_id))
                 .fetch_one(&pool)
                 .await
                 .unwrap();
@@ -2201,17 +2188,17 @@ mod set_running_gate_tests {
         );
 
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
-            .bind(&wf_id)
+            .bind(test_uuid(&wf_id))
             .execute(&pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+            .bind(test_uuid(&task_id))
             .execute(&pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
-            .bind(&wf_id)
+            .bind(test_uuid(&wf_id))
             .execute(&pool)
             .await
             .ok();
@@ -2220,9 +2207,7 @@ mod set_running_gate_tests {
     #[tokio::test]
     #[serial]
     async fn plain_task_starts_running_without_workflow_update() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker = test_broker().await;
         let pool = broker.pool().clone();
         let task_id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &task_id, false).await;
@@ -2241,14 +2226,14 @@ mod set_running_gate_tests {
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+            .bind(test_uuid(&task_id))
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(status, "RUNNING");
 
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+            .bind(test_uuid(&task_id))
             .execute(&pool)
             .await
             .ok();

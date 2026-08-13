@@ -313,34 +313,12 @@ mod shared_listener_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     #[tokio::test]
     #[serial]
     async fn many_waiting_handles_share_one_listener() {
-        let broker = Arc::new(
-            PostgresBroker::connect(&test_db_url())
-                .await
-                .expect("connect"),
-        );
+        let broker = Arc::new(PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        ));
         let pool = broker.pool().clone();
         let registry = Arc::new(WorkflowSpecRegistry::new());
         let wf_id = Uuid::new_v4();

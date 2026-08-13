@@ -18,7 +18,7 @@ const UPSERT_STATE_SQL: &str = "\
 INSERT INTO horsies_schedule_state (
     schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
     updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+) VALUES ($1, $2, $3, $4::uuid::text, $5, $6, NOW())
 ON CONFLICT (schedule_name) DO UPDATE SET
     last_run_at = $2,
     next_run_at = $3,
@@ -28,7 +28,8 @@ ON CONFLICT (schedule_name) DO UPDATE SET
     updated_at = NOW()";
 
 const GET_STATE_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at,
+       last_task_id::uuid AS last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 WHERE schedule_name = $1";
 
@@ -37,7 +38,8 @@ WHERE schedule_name = $1";
 /// This matches Python's `get_due_states(schedule_names, now)` which filters
 /// to only the provided schedule names at the database level.
 const GET_DUE_SCHEDULES_FILTERED_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at,
+       last_task_id::uuid AS last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 WHERE schedule_name = ANY($2)
   AND next_run_at IS NOT NULL
@@ -49,7 +51,8 @@ const DELETE_STATE_SQL: &str = "\
 DELETE FROM horsies_schedule_state WHERE schedule_name = $1";
 
 const GET_ALL_STATES_SQL: &str = "\
-SELECT schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash
+SELECT schedule_name, last_run_at, next_run_at,
+       last_task_id::uuid AS last_task_id, run_count, config_hash
 FROM horsies_schedule_state
 ORDER BY schedule_name ASC";
 
@@ -65,7 +68,7 @@ const INSERT_STATE_IF_ABSENT_SQL: &str = "\
 INSERT INTO horsies_schedule_state (
     schedule_name, last_run_at, next_run_at, last_task_id, run_count, config_hash,
     updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+) VALUES ($1, $2, $3, $4::uuid::text, $5, $6, NOW())
 ON CONFLICT (schedule_name) DO NOTHING";
 
 /// Transaction-scoped per-schedule advisory lock. Auto-released on
@@ -264,32 +267,12 @@ mod tests {
         assert!(!INSERT_STATE_IF_ABSENT_SQL.contains("DO UPDATE"));
     }
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     #[tokio::test]
     #[serial_test::serial]
     async fn get_existing_names_returns_inserted_rows() {
-        let broker = crate::broker::PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker = crate::broker::PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let name = format!("qw_exist_{}", uuid::Uuid::new_v4());
@@ -307,9 +290,9 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial]
     async fn insert_state_if_absent_inserts_then_preserves() {
-        let broker = crate::broker::PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker = crate::broker::PostgresBroker::from_pool(
+            crate::broker::terminalization_matrix::migrated_pool().await,
+        );
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let name = format!("qw_absent_{}", uuid::Uuid::new_v4());

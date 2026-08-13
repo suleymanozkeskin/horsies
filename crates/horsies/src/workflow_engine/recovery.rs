@@ -927,26 +927,6 @@ mod cap_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn insert_orphaned_workflow(pool: &PgPool, id: Uuid) {
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -996,7 +976,8 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn case0_advances_the_selected_root_without_touching_unready_siblings() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.unwrap();
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.unwrap();
         let pool = broker.pool().clone();
         let workflow_id = Uuid::new_v4();
@@ -1075,7 +1056,8 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn recovery_cap_limits_rows_then_uncapped_processes_rest() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.unwrap();
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         let pool = broker.pool().clone();
 
         // Isolate: remove any pre-existing orphaned workflows.

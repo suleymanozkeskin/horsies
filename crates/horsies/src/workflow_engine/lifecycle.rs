@@ -14,6 +14,11 @@ use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::parse_good_until_from_options;
 use crate::workflow_engine::start::{materialize_child_spec, start_child_workflow_in_tx};
 
+#[cfg(test)]
+fn test_uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).expect("test identity must be UUID")
+}
+
 // ---------------------------------------------------------------------------
 // SQL constants
 // ---------------------------------------------------------------------------
@@ -1180,26 +1185,6 @@ mod resume_idempotency_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn insert_workflow(pool: &PgPool, id: &str, status: &str, parent: Option<&str>) {
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -1212,10 +1197,10 @@ mod resume_idempotency_tests {
                 NOW(), NOW(), NOW(), NOW()
             )",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .bind(status)
-        .bind(parent.unwrap_or(id))
-        .bind(parent)
+        .bind(test_uuid(parent.unwrap_or(id)))
+        .bind(parent.map(test_uuid))
         .execute(pool)
         .await
         .expect("insert workflow");
@@ -1234,8 +1219,8 @@ mod resume_idempotency_tests {
                 'RUNNING', FALSE, NOW()
             )",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(wf_id)
+        .bind(Uuid::new_v4())
+        .bind(test_uuid(wf_id))
         .execute(pool)
         .await
         .expect("insert task");
@@ -1243,7 +1228,7 @@ mod resume_idempotency_tests {
 
     async fn status_of(pool: &PgPool, id: &str) -> String {
         sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .fetch_one(pool)
             .await
             .expect("status")
@@ -1252,7 +1237,7 @@ mod resume_idempotency_tests {
     async fn cleanup(pool: &PgPool, ids: &[&str]) {
         for id in ids {
             sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
-                .bind(id)
+                .bind(test_uuid(id))
                 .execute(pool)
                 .await
                 .ok();
@@ -1260,7 +1245,7 @@ mod resume_idempotency_tests {
         // Delete children before parents (FK).
         for id in ids.iter().rev() {
             sqlx::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
-                .bind(id)
+                .bind(test_uuid(id))
                 .execute(pool)
                 .await
                 .ok();
@@ -1270,9 +1255,8 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_on_running_parent_recovers_stranded_paused_child() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
@@ -1310,9 +1294,8 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
@@ -1954,26 +1937,6 @@ mod cancel_lock_order_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn insert_running_workflow(pool: &PgPool, id: &str) {
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -1986,7 +1949,7 @@ mod cancel_lock_order_tests {
                 NOW(), NOW(), NOW(), NOW()
             )",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .execute(pool)
         .await
         .expect("insert workflow");
@@ -2004,8 +1967,8 @@ mod cancel_lock_order_tests {
                 'RUNNING', FALSE, NOW()
             )",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(wf_id)
+        .bind(Uuid::new_v4())
+        .bind(test_uuid(wf_id))
         .execute(pool)
         .await
         .expect("insert workflow_task");
@@ -2013,12 +1976,12 @@ mod cancel_lock_order_tests {
 
     async fn cleanup(pool: &PgPool, id: &str) {
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .ok();
@@ -2034,9 +1997,8 @@ mod cancel_lock_order_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
@@ -2048,7 +2010,7 @@ mod cancel_lock_order_tests {
         // workflow row (COMPLETE_WORKFLOW_TASK_SQL's `FOR UPDATE OF w`).
         let mut conn_a = pool.begin().await.expect("begin conn A");
         sqlx::query("SELECT id FROM horsies_workflows WHERE id = $1 FOR UPDATE")
-            .bind(&wf)
+            .bind(test_uuid(&wf))
             .execute(&mut *conn_a)
             .await
             .expect("conn A locks the workflow row");
@@ -2077,7 +2039,7 @@ mod cancel_lock_order_tests {
             "SELECT task_index FROM horsies_workflow_tasks
              WHERE workflow_id = $1 AND task_index = 0 FOR UPDATE",
         )
-        .bind(&wf)
+        .bind(test_uuid(&wf))
         .execute(&mut *conn_a)
         .await;
 
@@ -2105,7 +2067,7 @@ mod cancel_lock_order_tests {
 
     async fn status_of(pool: &PgPool, id: &str) -> String {
         sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .fetch_one(pool)
             .await
             .expect("status")

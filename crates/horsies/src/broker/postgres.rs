@@ -44,7 +44,13 @@ use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
     TaskInfoRow, TaskResultRow, TaskRunningContextRow,
 };
+
 use crate::broker::shared_listener::SharedNotifyListener;
+
+#[cfg(test)]
+fn test_uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).expect("test identity must be UUID")
+}
 
 // ---------------------------------------------------------------------------
 // SQL constants
@@ -2296,7 +2302,7 @@ impl PostgresBroker {
         worker_id: &str,
         claimed_at: Option<DateTime<Utc>>,
     ) -> Result<bool, BrokerError> {
-        let row: Option<(String,)> = sqlx::query_as(UNCLAIM_TASK_SQL)
+        let row: Option<(Uuid,)> = sqlx::query_as(UNCLAIM_TASK_SQL)
             .bind(task_id)
             .bind(worker_id)
             .bind(claimed_at)
@@ -3911,31 +3917,10 @@ mod horsies_claim_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     /// Connect and ensure migrations (incl. `horsies_claim`) are applied.
     async fn connect_migrated() -> PostgresBroker {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.migrate().await.expect("migrate");
         broker
     }
@@ -4364,26 +4349,6 @@ mod fused_finalize_tests {
         matches!(outcomes, [TerminalizationOutcome::Applied { .. }])
     }
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     /// Seed a task in `status`, optionally claimed by `worker`, with `retry_count`.
     async fn seed(pool: &sqlx::PgPool, id: &str, status: &str, worker: Option<&str>, retry: i32) {
         sqlx::query(
@@ -4396,7 +4361,7 @@ mod fused_finalize_tests {
                 command_fingerprint, retention_class_key, retain_rerun_input,
                 prepared_rerun_input_disposition
             ) VALUES (
-                $1, 'fused_task', 'default', 0, '[]', '{}',
+                $1, 'fused_task', 'default', 100, '[]', '{}',
                 $2, NOW(), NOW(), NOW(), 3, $4,
                 $1, $3, CASE WHEN $3 IS NOT NULL THEN NOW() END, 'host1',
                 123, 'worker-123', FALSE, NOW(),
@@ -4406,7 +4371,7 @@ mod fused_finalize_tests {
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .bind(status)
         .bind(worker)
         .bind(retry)
@@ -4417,23 +4382,27 @@ mod fused_finalize_tests {
 
     async fn cleanup(pool: &sqlx::PgPool, id: &str) {
         sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .expect("cleanup");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(test_uuid(id))
+            .execute(pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]
     #[serial]
     async fn fused_finalize_completes_running_task() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4442,25 +4411,21 @@ mod fused_finalize_tests {
         let outcomes = fused(&pool, &id, "w1", None, "{\"Ok\":7}").await;
         assert!(applied(&outcomes), "RUNNING owned task must finalize");
 
-        let (status, result): (String, Option<String>) =
-            sqlx::query_as("SELECT status, result FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .expect("read task");
+        let (status, result, attempt_snapshot): (String, Option<String>, Vec<u8>) = sqlx::query_as(
+            "SELECT status, convert_from(result_payload, 'UTF8'), attempt_snapshot
+                 FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(test_uuid(&id))
+        .fetch_one(&pool)
+        .await
+        .expect("read archived task");
         assert_eq!(status, "COMPLETED");
         assert_eq!(result.as_deref(), Some("{\"Ok\":7}"));
 
-        let (attempt, outcome, will_retry): (i32, String, bool) = sqlx::query_as(
-            "SELECT attempt, outcome, will_retry FROM horsies_task_attempts WHERE task_id = $1",
-        )
-        .bind(&id)
-        .fetch_one(&pool)
-        .await
-        .expect("read attempt");
-        assert_eq!(attempt, 2, "attempt = retry_count(1) + 1");
-        assert_eq!(outcome, "COMPLETED");
-        assert!(!will_retry);
+        let attempt: serde_json::Value = serde_json::from_slice(&attempt_snapshot).unwrap();
+        assert_eq!(attempt[0][0], 2, "attempt = retry_count(1) + 1");
+        assert_eq!(attempt[0][1], "COMPLETED");
+        assert_eq!(attempt[0][2], false);
 
         cleanup(&pool, &id).await;
     }
@@ -4468,20 +4433,19 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_noop_when_not_running() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
-        seed(&pool, &id, "COMPLETED", Some("w1"), 0).await;
+        seed(&pool, &id, "PENDING", Some("w1"), 0).await;
 
         let outcomes = fused(&pool, &id, "w1", None, "{\"Ok\":1}").await;
         assert!(!applied(&outcomes), "non-RUNNING row must not be touched");
 
         let attempts: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("count attempts");
@@ -4493,9 +4457,8 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_noop_on_wrong_worker() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4511,7 +4474,7 @@ mod fused_finalize_tests {
         );
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&id)
+            .bind(test_uuid(&id))
             .fetch_one(&pool)
             .await
             .expect("status");
@@ -4527,9 +4490,8 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn fused_finalize_fenced_by_claimed_at() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4538,7 +4500,7 @@ mod fused_finalize_tests {
         // The current claim generation is the row's actual claimed_at.
         let current: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("claimed_at");
@@ -4554,7 +4516,7 @@ mod fused_finalize_tests {
             "stale claimed_at must be fenced out"
         );
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&id)
+            .bind(test_uuid(&id))
             .fetch_one(&pool)
             .await
             .expect("status");
@@ -4566,11 +4528,12 @@ mod fused_finalize_tests {
         // Current generation: finalizes.
         let outcomes = fused(&pool, &id, "w1", Some(current), "{\"Ok\":2}").await;
         assert!(applied(&outcomes), "matching claimed_at must finalize");
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .expect("status");
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                .bind(test_uuid(&id))
+                .fetch_one(&pool)
+                .await
+                .expect("status");
         assert_eq!(status, "COMPLETED");
 
         cleanup(&pool, &id).await;
@@ -4581,9 +4544,8 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn load_buffered_claimed_respects_limit() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let mut ids = Vec::new();
@@ -4609,9 +4571,8 @@ mod fused_finalize_tests {
     #[tokio::test]
     #[serial]
     async fn requeue_in_tx_fenced_by_started_at() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4619,7 +4580,7 @@ mod fused_finalize_tests {
 
         let current: DateTime<Utc> =
             sqlx::query_scalar("SELECT started_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("started_at");
@@ -4655,7 +4616,7 @@ mod fused_finalize_tests {
         tx.commit().await.expect("commit");
         assert!(applied, "matching started_at must requeue");
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(&id)
+            .bind(test_uuid(&id))
             .fetch_one(&pool)
             .await
             .expect("status");
@@ -4676,26 +4637,6 @@ mod set_running_heartbeat_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn seed_claimed(pool: &sqlx::PgPool, id: &str, worker: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
@@ -4705,13 +4646,13 @@ mod set_running_heartbeat_tests {
                 command_fingerprint_version, command_fingerprint, retention_class_key,
                 retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
-                $1, 'hb_task', 'default', 0, '[]', '{}',
+                $1, 'hb_task', 'default', 100, '[]', '{}',
                 'CLAIMED', NOW(), NOW(), TRUE, NOW(), $2,
                 3, $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
                 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .bind(worker)
         .execute(pool)
         .await
@@ -4722,7 +4663,7 @@ mod set_running_heartbeat_tests {
         sqlx::query_scalar(
             "SELECT COUNT(*) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .fetch_one(pool)
         .await
         .expect("count beats")
@@ -4730,12 +4671,12 @@ mod set_running_heartbeat_tests {
 
     async fn cleanup(pool: &sqlx::PgPool, id: &str) {
         sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .expect("cleanup");
@@ -4744,9 +4685,8 @@ mod set_running_heartbeat_tests {
     #[tokio::test]
     #[serial]
     async fn running_transition_writes_first_heartbeat() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4776,9 +4716,8 @@ mod set_running_heartbeat_tests {
     #[tokio::test]
     #[serial]
     async fn non_applied_transition_writes_no_heartbeat() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4816,9 +4755,8 @@ mod set_running_heartbeat_tests {
     #[tokio::test]
     #[serial]
     async fn set_running_returns_attempt_context() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
@@ -4837,14 +4775,14 @@ mod set_running_heartbeat_tests {
                 command_fingerprint_version, command_fingerprint, retention_class_key,
                 retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
-                $1, 'hb_task', 'default', 0, '[]', '{}',
+                $1, 'hb_task', 'default', 100, '[]', '{}',
                 'CLAIMED', NOW(), NOW(), TRUE, NOW(), 'w1',
                 2, 7, $2,
                 $1, FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
                 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(&id)
+        .bind(test_uuid(&id))
         .bind(good_until)
         .execute(&pool)
         .await
@@ -4875,16 +4813,15 @@ mod set_running_heartbeat_tests {
     #[tokio::test]
     #[serial]
     async fn claimed_row_statements_fenced_by_claimed_at() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &id, "w1").await;
         let live_generation: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("read claimed_at");
@@ -4925,7 +4862,7 @@ mod set_running_heartbeat_tests {
         sqlx::query(
             "UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 second' WHERE id = $1",
         )
-        .bind(&id)
+        .bind(test_uuid(&id))
         .execute(&pool)
         .await
         .expect("age good_until");
@@ -4946,9 +4883,8 @@ mod set_running_heartbeat_tests {
     #[tokio::test]
     #[serial]
     async fn claimed_at_fence_admits_live_generation() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 
@@ -4956,7 +4892,7 @@ mod set_running_heartbeat_tests {
         seed_claimed(&pool, &id, "w1").await;
         let live_generation: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("read claimed_at");
@@ -4972,7 +4908,7 @@ mod set_running_heartbeat_tests {
         seed_claimed(&pool, &id, "w1").await;
         let live_generation: DateTime<Utc> =
             sqlx::query_scalar("SELECT claimed_at FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
+                .bind(test_uuid(&id))
                 .fetch_one(&pool)
                 .await
                 .expect("read claimed_at");
@@ -5000,9 +4936,8 @@ mod set_running_heartbeat_tests {
     async fn heartbeat_row_decodes_bigint_id() {
         use crate::broker::row::heartbeat::HeartbeatRow;
 
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let big_id: i64 = 3_000_000_000; // > i32::MAX
@@ -5013,7 +4948,7 @@ mod set_running_heartbeat_tests {
              VALUES ($1, $2, 'w1', 'runner', NOW(), 'h1', 1)",
         )
         .bind(big_id)
-        .bind(&task_id)
+        .bind(test_uuid(&task_id))
         .execute(&pool)
         .await
         .expect("insert heartbeat");
@@ -5087,32 +5022,11 @@ mod filter_non_runnable_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     #[tokio::test]
     #[serial]
     async fn paused_workflow_cancels_task_and_resets_node() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4();
@@ -5223,30 +5137,9 @@ mod terminal_at_stamp_tests {
     use serial_test::serial;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
-    }
-
     async fn connect() -> PostgresBroker {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
+        let broker =
+            PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);
         broker.ensure_schema_initialized().await.expect("schema");
         broker
     }
@@ -5269,14 +5162,14 @@ mod terminal_at_stamp_tests {
                 command_fingerprint, retention_class_key, retain_rerun_input,
                 prepared_rerun_input_disposition
             ) VALUES (
-                $1, 'terminal_at_task', 'default', 0, '[]', '{}',
+                $1, 'terminal_at_task', 'default', 100, '[]', '{}',
                 $2, NOW(), NOW(), NOW(), 3, 0,
                 $1, $3, $3 IS NOT NULL, NOW() + $4 * INTERVAL '1 second',
                 FALSE, NOW(), NOW(), 1, decode(repeat('00', 32), 'hex'),
                 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(id)
+        .bind(test_uuid(id))
         .bind(status)
         .bind(worker)
         .bind(good_until_offset_s)
@@ -5286,24 +5179,33 @@ mod terminal_at_stamp_tests {
     }
 
     async fn terminal_at_of(pool: &sqlx::PgPool, id: &str) -> (String, Option<DateTime<Utc>>) {
-        sqlx::query_as("SELECT status, terminal_at FROM horsies_tasks WHERE id = $1")
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .expect("read task")
+        sqlx::query_as(
+            "SELECT status, terminal_at FROM horsies_tasks WHERE id = $1
+             UNION ALL
+             SELECT status, terminal_at FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(test_uuid(id))
+        .fetch_one(pool)
+        .await
+        .expect("read task")
     }
 
     async fn cleanup(pool: &sqlx::PgPool, id: &str) {
         sqlx::query("DELETE FROM horsies_task_attempts WHERE task_id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(id)
+            .bind(test_uuid(id))
             .execute(pool)
             .await
             .expect("cleanup");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(test_uuid(id))
+            .execute(pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]

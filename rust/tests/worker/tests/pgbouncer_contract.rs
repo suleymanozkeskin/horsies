@@ -27,6 +27,7 @@ use horsies_test_support::{
 use horsies_test_worker::tasks::{wf_double, wf_produce_int, DoubleInput};
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 fn skip_if_disabled() -> bool {
     if !pgbouncer::enabled() {
@@ -83,7 +84,7 @@ fn prefer_current_test_worker_binary() {
 async fn enqueue_contract_task(
     broker: &PostgresBroker,
     label: &str,
-) -> Result<String, horsies::BrokerError> {
+) -> Result<Uuid, horsies::BrokerError> {
     broker
         .enqueue(
             "pgbouncer_contract_task",
@@ -103,7 +104,6 @@ async fn enqueue_contract_task(
             None,
         )
         .await
-        .map(|task_id| task_id.to_string())
 }
 
 #[tokio::test]
@@ -130,10 +130,34 @@ async fn transaction_pool_split_urls_migrate_health_check_and_enqueue() -> Resul
         }
         let pool = PgPool::connect(&urls.direct).await?;
         let persisted: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1::TEXT[])")
+            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1::uuid[])")
                 .bind(&task_ids)
                 .fetch_one(&pool)
                 .await?;
+
+        let unclaimed_id = task_ids[0];
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = 'CLAIMED', claimed = TRUE,
+                 claimed_at = NOW(), claimed_by_worker_id = 'pgbouncer-contract'
+             WHERE id = $1",
+        )
+        .bind(unclaimed_id)
+        .execute(&pool)
+        .await?;
+        assert!(
+            broker
+                .unclaim_task(unclaimed_id, "pgbouncer-contract", None)
+                .await?,
+            "UUID RETURNING rows must decode through the transaction pool",
+        );
+        let unclaimed_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+                .bind(unclaimed_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(unclaimed_status, "PENDING");
+
         pool.close().await;
         assert_eq!(persisted, 30);
         Ok::<(), Box<dyn Error>>(())

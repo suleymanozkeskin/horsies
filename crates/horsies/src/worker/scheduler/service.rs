@@ -1061,43 +1061,8 @@ mod tests {
 
     // ---- DB-backed: slot-anchored advancement (parity with horsies PR #46) ----
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        if let Some(root) = root {
-            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
-                for line in contents.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((key, value)) = line.split_once('=') {
-                        if key.trim() == "DB_PASSWORD" {
-                            return format!(
-                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
-                                value.trim(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
-    }
-
     async fn test_pool() -> sqlx::PgPool {
-        let pool = sqlx::PgPool::connect(&test_db_url())
-            .await
-            .expect("failed to connect");
-        crate::broker::migrations::run_horsies_migrations(&pool)
-            .await
-            .expect("migrations failed");
-        pool
+        crate::broker::terminalization_matrix::migrated_pool().await
     }
 
     fn interval_schedule_secs(name: &str, seconds: u32) -> TaskSchedule {

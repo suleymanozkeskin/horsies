@@ -354,6 +354,21 @@ fn try_enqueue_healthcheck(
 
         rt.block_on(async {
             let pool = connect_readiness_pool(&url, pgbouncer_transaction_mode).await?;
+            let cutover_attested: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                     SELECT 1
+                     FROM horsies_cutover_state
+                     WHERE cutover_name = 'task_history_v1_validated_v1'
+                       AND completed_at IS NOT NULL
+                 )",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| ())?;
+            if !cutover_attested {
+                pool.close().await;
+                return Err(());
+            }
             let task_id = uuid::Uuid::new_v4();
             let sha = format!("healthcheck-{}", task_id);
             sqlx::query(
