@@ -100,7 +100,9 @@ async fn worker_start_auto_initializes_empty_database() {
     assert!(table_exists(&pool, "horsies_tasks").await);
 
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE task_name = 'e2e_healthcheck' AND status = 'COMPLETED'",
+        "SELECT COUNT(*)
+         FROM horsies_task_history
+         WHERE task_name = 'e2e_healthcheck' AND status = 'COMPLETED'",
     )
     .fetch_one(&pool)
     .await

@@ -708,7 +708,7 @@ async fn test_workflow_task_expired_while_claimed_before_start() {
 
     let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < claim_deadline {
-        let row: (Option<String>, Option<String>) = sqlx::query_as(
+        let row: (Option<Uuid>, Option<String>) = sqlx::query_as(
             "SELECT wt.task_id, t.status \
              FROM horsies_workflow_tasks wt \
              LEFT JOIN horsies_tasks t ON t.id = wt.task_id \
@@ -762,10 +762,13 @@ async fn test_workflow_task_expired_while_claimed_before_start() {
         Option<String>,
         Option<String>,
     ) = sqlx::query_as(
-        "SELECT t.status, t.started_at, t.claimed_by_worker_id, t.claimed, t.error_code, wt.status \
+        "SELECT (detail.task_row).status, (detail.task_row).started_at, \
+                (detail.task_row).last_claimed_worker_id, FALSE, \
+                (detail.task_row).error_code, wt.status \
          FROM horsies_workflow_tasks wt \
-         JOIN horsies_tasks t ON t.id = wt.task_id \
-         WHERE wt.workflow_id = $1 AND wt.task_index = 0",
+         JOIN LATERAL horsies_task_detail_staged(wt.task_id) AS detail ON TRUE \
+         WHERE wt.workflow_id = $1 AND wt.task_index = 0 \
+           AND detail.location = 'HISTORY'",
     )
     .bind(&wf_id)
     .fetch_one(&pool)

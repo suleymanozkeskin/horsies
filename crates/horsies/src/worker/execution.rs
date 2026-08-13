@@ -224,7 +224,9 @@ pub(crate) async fn confirm_ownership_and_set_running(
 ) -> OwnershipOutcome {
     // Workflow tasks: the node RUNNING handoff precedes the task transition,
     // while the row is still CLAIMED. The match set is idempotent across
-    // crash-replays (a node already RUNNING matches again). Zero matched rows
+    // crash-replays (a node already RUNNING matches again). The first handoff
+    // stamps `started_at`; a RUNNING replay preserves the original timestamp.
+    // Zero matched rows
     // is the free orphan signal: no workflow_task linkage in a runnable state
     // means this row can never legitimately progress — with self-heal on, the
     // still-CLAIMED row is cancelled through `horsies_cancel_owned_orphan`,
@@ -237,7 +239,11 @@ pub(crate) async fn confirm_ownership_and_set_running(
     if is_workflow_task {
         match sqlx::query(
             "UPDATE horsies_workflow_tasks \
-             SET status = 'RUNNING' \
+             SET status = 'RUNNING', \
+                 started_at = CASE \
+                     WHEN status = 'RUNNING' THEN started_at \
+                     ELSE NOW() \
+                 END \
              WHERE task_id = $1 \
                AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')",
         )
@@ -2176,15 +2182,21 @@ mod set_running_gate_tests {
         .await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
-        let node_status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1")
-                .bind(test_uuid(&wf_id))
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let (node_status, node_started_at): (String, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT status, started_at FROM horsies_workflow_tasks WHERE workflow_id = $1",
+            )
+            .bind(test_uuid(&wf_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
         assert_eq!(
             node_status, "RUNNING",
             "workflow node must transition to RUNNING (gate must not skip it)"
+        );
+        assert!(
+            node_started_at.is_some(),
+            "first RUNNING handoff must stamp workflow-node started_at",
         );
 
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
@@ -2199,6 +2211,77 @@ mod set_running_gate_tests {
             .ok();
         sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
             .bind(test_uuid(&wf_id))
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn running_replay_preserves_the_first_node_start() {
+        let broker = test_broker().await;
+        let pool = broker.pool().clone();
+        let wf_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        let first_started_at = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            chrono::Utc::now().timestamp_micros() - 3_600_000_000,
+        )
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index, definition_key, depth,
+                root_workflow_id, sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'p1_replay_wf', 'RUNNING', 'fail', NULL,
+                      'test.p1.replay.v1', 0, $1, NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(wf_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, task_id, started_at, created_at
+            ) VALUES ($1, $2, 0, 'node_0', 'p1_task', '[]', '{}',
+                      'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, $4, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(wf_id)
+        .bind(task_id)
+        .bind(first_started_at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        seed_claimed(&pool, &task_id.to_string(), true).await;
+
+        let outcome =
+            confirm_ownership_and_set_running(&broker, task_id, "w1", 1, "h1", true, None, false)
+                .await;
+        assert!(matches!(outcome, OwnershipOutcome::Running(_)));
+
+        let persisted: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT started_at FROM horsies_workflow_tasks WHERE workflow_id = $1",
+        )
+        .bind(wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(persisted, first_started_at);
+
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(wf_id)
             .execute(&pool)
             .await
             .ok();

@@ -66,7 +66,7 @@ VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
 
 const LINK_WORKFLOW_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
+SET task_id = $1::uuid, status = 'ENQUEUED'
 WHERE workflow_id = $2::uuid AND task_index = $3";
 
 const LINK_ROOT_SUBWORKFLOW_SQL: &str = "\
@@ -532,12 +532,8 @@ fn insert_workflow_tasks<'a>(
                 .push_bind(p.node.sub_definition_key.clone())
                 .push_bind(p.task_id.clone())
                 .push_unseparated("::uuid");
-            // started_at: NOW() for the ENQUEUED fast path, NULL otherwise.
-            if p.fast_path {
-                b.push("NOW()");
-            } else {
-                b.push("NULL");
-            }
+            // A regular task starts at its first RUNNING ownership handoff.
+            b.push("NULL");
             b.push("NOW()"); // created_at
         });
         qb.build().execute(&mut **tx).await?;

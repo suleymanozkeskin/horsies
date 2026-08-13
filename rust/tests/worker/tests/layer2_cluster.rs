@@ -194,8 +194,8 @@ async fn test_multi_worker_distribution() {
 
     // Verify at least 2 distinct workers claimed tasks.
     let worker_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT claimed_by_worker_id FROM horsies_tasks \
-         WHERE id = ANY($1) AND claimed_by_worker_id IS NOT NULL",
+        "SELECT DISTINCT last_claimed_worker_id FROM horsies_task_history \
+         WHERE task_id = ANY($1) AND last_claimed_worker_id IS NOT NULL",
     )
     .bind(&task_ids)
     .fetch_all(&pool)
@@ -211,11 +211,12 @@ async fn test_multi_worker_distribution() {
 
     // Verify all completed.
     for task_id in &task_ids {
-        let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(status, "COMPLETED", "task {} should be COMPLETED", task_id);
     }
 }
@@ -253,19 +254,17 @@ async fn test_multi_worker_no_double_execution() {
 
     wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(30)).await;
 
-    // Verify each task has exactly one completion — no RUNNING or CLAIMED leftovers.
-    let non_terminal: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')",
-    )
-    .bind(&task_ids)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(non_terminal, 0, "all tasks should be in terminal state");
+    // Verify terminalization removed every task from the live-only table.
+    let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1)")
+        .bind(&task_ids)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(live, 0, "terminal tasks must leave the live-only table");
 
     // Verify all completed (not failed).
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&task_ids)
     .fetch_one(&pool)
@@ -315,12 +314,14 @@ async fn test_stale_running_marked_failed_on_crash() {
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(15)).await;
 
     // Verify the error code is WORKER_CRASHED.
-    let result_json: Option<String> =
-        sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let result_json: Option<String> = sqlx::query_scalar(
+        "SELECT convert_from(result_payload, 'UTF8') \
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let result: TaskResult<serde_json::Value> =
         serde_json::from_str(&result_json.unwrap()).unwrap();
@@ -426,13 +427,11 @@ async fn test_retry_works_across_multiple_workers() {
     // Wait for all to reach terminal (each retries 3 times then fails).
     wait_for_all_terminal(&pool, &task_ids, Duration::from_secs(40)).await;
 
-    // Each task: exactly 3 retries, and exactly 4 recorded attempts
-    // (initial attempt + 3 retries). Assert via the immutable
-    // horsies_task_attempts history rather than the mutable task-row owner
-    // (parity with horsies PR #38).
+    // Each task: exactly 3 retries, and exactly 4 archived attempts
+    // (initial attempt + 3 retries).
     for task_id in &task_ids {
         let retry_count: i32 =
-            sqlx::query_scalar("SELECT retry_count FROM horsies_tasks WHERE id = $1")
+            sqlx::query_scalar("SELECT retry_count FROM horsies_task_history WHERE task_id = $1")
                 .bind(task_id)
                 .fetch_one(&pool)
                 .await
@@ -442,23 +441,28 @@ async fn test_retry_works_across_multiple_workers() {
             "task {task_id}: expected 3 retries before final failure",
         );
 
-        let attempt_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
-                .bind(task_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let attempt_count: i32 = sqlx::query_scalar(
+            "SELECT jsonb_array_length(convert_from(attempt_snapshot, 'UTF8')::jsonb) \
+             FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             attempt_count, 4,
             "task {task_id}: expected 4 attempts (initial + 3 retries)",
         );
     }
 
-    // Prove multiple workers participated, using the attempt history's worker_id
-    // (the task row's claimed_by_worker_id is only the last owner).
+    // Prove multiple workers participated, using the archived attempt worker ID
+    // at positional field 8 (the task row keeps only the last owner).
     let worker_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT worker_id FROM horsies_task_attempts \
-         WHERE task_id = ANY($1) AND worker_id IS NOT NULL",
+        "SELECT DISTINCT attempt.row ->> 8 \
+         FROM horsies_task_history \
+         CROSS JOIN LATERAL \
+             jsonb_array_elements(convert_from(attempt_snapshot, 'UTF8')::jsonb) AS attempt(row) \
+         WHERE task_id = ANY($1) AND attempt.row ->> 8 IS NOT NULL",
     )
     .bind(&task_ids)
     .fetch_all(&pool)
@@ -514,7 +518,7 @@ async fn test_concurrent_enqueue_during_processing() {
 
     // All should be completed.
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&all_ids)
     .fetch_one(&pool)
@@ -620,7 +624,7 @@ async fn test_cluster_wide_cap() {
 
     // Verify all completed.
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&task_ids)
     .fetch_one(&pool)
@@ -671,12 +675,13 @@ async fn test_stale_claimed_requeued_and_completed() {
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(15)).await;
 
     // Verify reclaimed by a different worker.
-    let new_owner: Option<String> =
-        sqlx::query_scalar("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let new_owner: Option<String> = sqlx::query_scalar(
+        "SELECT last_claimed_worker_id FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_ne!(
         new_owner.as_deref(),
@@ -746,7 +751,7 @@ async fn test_single_worker_crash_remaining_continue() {
 
     // Query completed tasks.
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&task_ids)
     .fetch_one(&pool)
@@ -761,8 +766,8 @@ async fn test_single_worker_crash_remaining_continue() {
 
     // At least 2 distinct workers contributed.
     let worker_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT claimed_by_worker_id FROM horsies_tasks \
-         WHERE id = ANY($1) AND status = 'COMPLETED' AND claimed_by_worker_id IS NOT NULL",
+        "SELECT DISTINCT last_claimed_worker_id FROM horsies_task_history \
+         WHERE task_id = ANY($1) AND status = 'COMPLETED' AND last_claimed_worker_id IS NOT NULL",
     )
     .bind(&task_ids)
     .fetch_all(&pool)
@@ -934,7 +939,7 @@ async fn test_per_queue_concurrency_cap() {
     );
 
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&task_ids)
     .fetch_one(&pool)
@@ -1070,15 +1075,16 @@ async fn test_queue_priority_ordering() {
         &config_path,
         &["--concurrency", "1", "--queues", "high,normal,low"],
         "worker started",
-        Duration::from_secs(10),
+        // Ten pre-seeded tasks can precede the functional readiness task.
+        Duration::from_secs(30),
     );
 
     wait_for_all_terminal(&pool, &all_ids, Duration::from_secs(30)).await;
 
     // Query completion order.
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, queue_name FROM horsies_tasks WHERE id = ANY($1) \
-         ORDER BY completed_at ASC",
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT task_id, queue_name FROM horsies_task_history WHERE task_id = ANY($1) \
+         ORDER BY terminal_at ASC",
     )
     .bind(&all_ids)
     .fetch_all(&pool)
@@ -1094,7 +1100,7 @@ async fn test_queue_priority_ordering() {
         "expected at least 4 high-priority tasks in first 5 completions, got {}. Order: {:?}",
         high_in_first_5,
         rows.iter()
-            .map(|(id, q)| (&id[..8], q.as_str()))
+            .map(|(id, q)| (id, q.as_str()))
             .collect::<Vec<_>>(),
     );
 }
@@ -1141,7 +1147,7 @@ async fn test_softcap_lease_no_double_execution() {
 
     // All should succeed (no DOUBLE_EXECUTION).
     let completed: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE id = ANY($1) AND status = 'COMPLETED'",
+        "SELECT COUNT(*) FROM horsies_task_history WHERE task_id = ANY($1) AND status = 'COMPLETED'",
     )
     .bind(&task_ids)
     .fetch_one(&pool)
@@ -1204,12 +1210,13 @@ async fn test_softcap_expired_claim_requeued() {
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(15)).await;
 
     // Verify reclaimed by live worker.
-    let new_owner: Option<String> =
-        sqlx::query_scalar("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let new_owner: Option<String> = sqlx::query_scalar(
+        "SELECT last_claimed_worker_id FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_ne!(
         new_owner.as_deref(),
         Some(dead_worker_id),
@@ -1404,12 +1411,13 @@ async fn test_softcap_owner_transition_after_worker_crash() {
 
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(30)).await;
 
-    let final_owner: Option<String> =
-        sqlx::query_scalar("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let final_owner: Option<String> = sqlx::query_scalar(
+        "SELECT last_claimed_worker_id FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     assert_ne!(
         final_owner.as_deref(),
@@ -1520,12 +1528,13 @@ async fn test_requeue_db_error_age_guard_recovery() {
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(15)).await;
 
     // Verify owner transition.
-    let final_owner: Option<String> =
-        sqlx::query_scalar("SELECT claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let final_owner: Option<String> = sqlx::query_scalar(
+        "SELECT last_claimed_worker_id FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_ne!(
         final_owner.as_deref(),
         Some(dead_worker_id),
@@ -1533,12 +1542,14 @@ async fn test_requeue_db_error_age_guard_recovery() {
     );
 
     // Verify result.
-    let result_json: Option<String> =
-        sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let result_json: Option<String> = sqlx::query_scalar(
+        "SELECT convert_from(result_payload, 'UTF8') \
+         FROM horsies_task_history WHERE task_id = $1",
+    )
+    .bind(&task_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     let result: horsies::TaskResult<serde_json::Value> =
         serde_json::from_str(&result_json.unwrap()).unwrap();
     assert!(result.is_ok());

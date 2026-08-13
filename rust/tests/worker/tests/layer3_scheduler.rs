@@ -205,6 +205,7 @@ async fn test_schedule_executes_after_due_time() {
     let config_path = config_file.path().to_str().unwrap().to_owned();
 
     let start_time = chrono::Utc::now();
+    let task_floor = start_time - chrono::Duration::seconds(1);
 
     let _scheduler = start_scheduler(&config_path, "scheduler started", Duration::from_secs(10));
     let _worker = start_worker(
@@ -219,8 +220,17 @@ async fn test_schedule_executes_after_due_time() {
     let mut task_found = false;
     while tokio::time::Instant::now() < deadline {
         let created: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-            "SELECT created_at FROM horsies_tasks WHERE task_name = 'e2e_scheduled_simple' ORDER BY created_at ASC LIMIT 1",
+            "SELECT created_at \
+             FROM ( \
+                 SELECT created_at FROM horsies_tasks \
+                 WHERE task_name = 'e2e_scheduled_simple' AND created_at >= $1 \
+                 UNION ALL \
+                 SELECT created_at FROM horsies_task_history \
+                 WHERE task_name = 'e2e_scheduled_simple' AND created_at >= $1 \
+             ) AS scheduled_tasks \
+             ORDER BY created_at ASC LIMIT 1",
         )
+        .bind(task_floor)
         .fetch_optional(&pool)
         .await
         .unwrap()
@@ -282,6 +292,7 @@ async fn test_schedule_does_not_execute_early() {
 async fn test_repeating_schedule() {
     let pool = pool().await;
     db::clean_tables(&pool).await;
+    let task_floor = chrono::Utc::now() - chrono::Duration::seconds(1);
 
     let config_file = write_scheduler_config();
     let config_path = config_file.path().to_str().unwrap().to_owned();
@@ -308,8 +319,13 @@ async fn test_repeating_schedule() {
     );
 
     let task_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE task_name = 'e2e_scheduled_simple'",
+        "SELECT \
+             (SELECT COUNT(*) FROM horsies_tasks \
+              WHERE task_name = 'e2e_scheduled_simple' AND created_at >= $1) + \
+             (SELECT COUNT(*) FROM horsies_task_history \
+              WHERE task_name = 'e2e_scheduled_simple' AND created_at >= $1)",
     )
+    .bind(task_floor)
     .fetch_one(&pool)
     .await
     .unwrap();
@@ -388,7 +404,10 @@ async fn test_schedule_with_args_passes_arguments() {
     let mut found = false;
     while tokio::time::Instant::now() < deadline {
         let result: Option<String> = sqlx::query_scalar(
-            "SELECT result FROM horsies_tasks WHERE task_name = 'e2e_scheduled_with_args' AND status = 'COMPLETED' LIMIT 1",
+            "SELECT convert_from(result_payload, 'UTF8') \
+             FROM horsies_task_history \
+             WHERE task_name = 'e2e_scheduled_with_args' AND status = 'COMPLETED' \
+             ORDER BY terminal_at DESC LIMIT 1",
         )
         .fetch_optional(&pool)
         .await
@@ -510,7 +529,11 @@ async fn test_catch_up_missed_enqueues_missed_runs() {
         .unwrap();
 
     let tasks_before: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM horsies_tasks WHERE task_name = 'e2e_catch_up_task'",
+        "SELECT \
+             (SELECT COUNT(*) FROM horsies_tasks \
+              WHERE task_name = 'e2e_catch_up_task') + \
+             (SELECT COUNT(*) FROM horsies_task_history \
+              WHERE task_name = 'e2e_catch_up_task')",
     )
     .fetch_one(&pool)
     .await
@@ -550,7 +573,11 @@ async fn test_catch_up_missed_enqueues_missed_runs() {
         assert!(advanced, "scheduler should advance next_run_at");
 
         let tasks_after: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_tasks WHERE task_name = 'e2e_catch_up_task'",
+            "SELECT \
+                 (SELECT COUNT(*) FROM horsies_tasks \
+                  WHERE task_name = 'e2e_catch_up_task') + \
+                 (SELECT COUNT(*) FROM horsies_task_history \
+                  WHERE task_name = 'e2e_catch_up_task')",
         )
         .fetch_one(&pool)
         .await

@@ -458,18 +458,32 @@ mod tests {
             Phase2DispositionKind::AppliedToNode
         );
 
-        let statuses: Vec<(i32, String, Option<Uuid>)> = sqlx::query_as(
-            "SELECT task_index, status, task_id FROM horsies_workflow_tasks
+        let statuses: Vec<(
+            i32,
+            String,
+            Option<Uuid>,
+            Option<chrono::DateTime<chrono::Utc>>,
+            Option<chrono::DateTime<chrono::Utc>>,
+        )> = sqlx::query_as(
+            "SELECT task_index, status, task_id, started_at, completed_at
+             FROM horsies_workflow_tasks
              WHERE workflow_id = $1 ORDER BY task_index",
         )
         .bind(workflow_id)
         .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(statuses[0], (0, "COMPLETED".to_owned(), Some(task_id)));
+        assert_eq!(statuses[0].0, 0);
+        assert_eq!(statuses[0].1, "COMPLETED");
+        assert_eq!(statuses[0].2, Some(task_id));
         assert_eq!(statuses[1].0, 1);
         assert_eq!(statuses[1].1, "ENQUEUED");
         assert_eq!(statuses[1].2.expect("dependent task").get_version_num(), 7);
+        assert!(statuses[0].4.is_some(), "source completion must be stamped");
+        assert!(
+            statuses[1].3.is_none(),
+            "ENQUEUED is not a workflow-node start",
+        );
 
         let replay = finalize_phase2(
             &pool,
