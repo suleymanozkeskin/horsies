@@ -84,8 +84,12 @@ pub type Broker = PostgresBroker;
 
 // worker re-exports
 pub use crate::worker::{
-    cli::{init_tracing, LogLevel},
+    cli::{
+        cutover::{execute_cutover, CutoverArgs, CutoverCliError, CutoverCommand},
+        init_tracing, Cli, Command, LogLevel,
+    },
     config::WorkerConfig,
+    docs_fetcher::fetch_docs,
     error::WorkerError,
     scheduler::service::spawn_scheduler,
     worker::Worker,

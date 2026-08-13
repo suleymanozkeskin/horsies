@@ -1,4 +1,5 @@
 pub mod banner;
+pub mod cutover;
 
 use std::fmt;
 use std::str::FromStr;
@@ -94,6 +95,8 @@ pub enum Command {
     Check(CheckArgs),
     /// Fetch documentation locally for AI agents.
     GetDocs(GetDocsArgs),
+    /// Operate the offline task-history cutover.
+    Cutover(cutover::CutoverArgs),
 }
 
 /// Arguments for the `worker` subcommand.
@@ -289,7 +292,10 @@ mod color_tests {
     #[test]
     fn force_color_on_wins_regardless_of_tty_or_no_color() {
         assert!(resolve_color(Some("1"), false, false));
-        assert!(resolve_color(Some("1"), true, false), "FORCE_COLOR wins over NO_COLOR");
+        assert!(
+            resolve_color(Some("1"), true, false),
+            "FORCE_COLOR wins over NO_COLOR"
+        );
         assert!(resolve_color(Some("yes"), true, false));
     }
 
@@ -298,7 +304,10 @@ mod color_tests {
         // Falls through to NO_COLOR / TTY.
         assert!(!resolve_color(Some("0"), false, false));
         assert!(!resolve_color(Some(""), false, false));
-        assert!(resolve_color(Some("0"), false, true), "falls through to TTY");
+        assert!(
+            resolve_color(Some("0"), false, true),
+            "falls through to TTY"
+        );
     }
 
     #[test]

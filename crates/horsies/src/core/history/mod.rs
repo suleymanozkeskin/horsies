@@ -7,6 +7,7 @@
 
 pub mod archive;
 pub mod commands;
+pub mod cutover;
 pub mod ddl;
 pub mod enqueue;
 pub mod errors;
@@ -17,6 +18,7 @@ pub mod names;
 pub mod outcomes;
 pub mod partitions;
 pub mod phase2;
+pub mod projection;
 pub mod reads;
 pub mod rerun;
 

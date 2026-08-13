@@ -121,6 +121,14 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
         return Ok(());
     }
 
+    run_inner_through(conn, migrator, i64::MAX).await
+}
+
+async fn run_inner_through(
+    conn: &mut PgConnection,
+    migrator: &Migrator,
+    maximum_version: i64,
+) -> Result<(), BrokerError> {
     ensure_migrations_table(conn).await?;
     backfill_from_sqlx_migrations(conn, migrator).await?;
 
@@ -153,7 +161,7 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
     }
 
     for migration in migrator.iter() {
-        if migration.migration_type.is_down_migration() {
+        if migration.migration_type.is_down_migration() || migration.version > maximum_version {
             continue;
         }
         match applied.get(&migration.version) {
@@ -169,6 +177,31 @@ async fn run_inner(conn: &mut PgConnection, migrator: &Migrator) -> Result<(), B
     }
 
     Ok(())
+}
+
+/// Apply the embedded journal only through `maximum_version`.
+///
+/// This exists solely for the cutover pipeline, which must construct the
+/// exact pre-emission database before seeding legacy rows. Production callers
+/// can only use [`run_horsies_migrations`], which always applies the full
+/// append-only journal.
+#[cfg(test)]
+pub(crate) async fn run_horsies_migrations_through(
+    pool: &PgPool,
+    maximum_version: i64,
+) -> Result<(), BrokerError> {
+    let migrator = sqlx::migrate!();
+    let mut conn = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(ADVISORY_LOCK_KEY)
+        .execute(&mut *conn)
+        .await?;
+    let outcome = run_inner_through(&mut conn, &migrator, maximum_version).await;
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(ADVISORY_LOCK_KEY)
+        .execute(&mut *conn)
+        .await;
+    outcome
 }
 
 async fn migrations_are_current(pool: &PgPool, migrator: &Migrator) -> Result<bool, BrokerError> {
