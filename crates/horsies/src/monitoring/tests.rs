@@ -598,6 +598,54 @@ struct TaskSeed {
     workflow_task: bool,
 }
 
+#[derive(Debug, Clone)]
+struct TestScope {
+    prefix: String,
+    queue: String,
+    worker: String,
+}
+
+impl TestScope {
+    fn new(label: &str) -> Self {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let prefix = format!("w2_{label}_{suffix}_");
+        Self {
+            queue: format!("{prefix}queue"),
+            worker: "w2-worker".to_owned(),
+            prefix,
+        }
+    }
+
+    fn task(&self, suffix: impl std::fmt::Display) -> String {
+        format!("{}task_{suffix}", self.prefix)
+    }
+
+    fn workflow(&self, suffix: impl std::fmt::Display) -> String {
+        format!("{}workflow_{suffix}", self.prefix)
+    }
+
+    fn schedule(&self, suffix: impl std::fmt::Display) -> String {
+        format!("{}schedule_{suffix}", self.prefix)
+    }
+
+    fn pattern(&self) -> String {
+        format!("{}%", self.prefix)
+    }
+
+    fn pending(&self, suffix: impl std::fmt::Display) -> TaskSeed {
+        let mut seed = TaskSeed::pending(self.task(suffix));
+        seed.queue = self.queue.clone();
+        seed
+    }
+
+    fn running(&self, suffix: impl std::fmt::Display) -> TaskSeed {
+        let mut seed = TaskSeed::running(self.task(suffix));
+        seed.queue = self.queue.clone();
+        seed.worker = Some(self.worker.clone());
+        seed
+    }
+}
+
 impl TaskSeed {
     fn pending(name: impl Into<String>) -> Self {
         Self {
@@ -717,14 +765,16 @@ async fn fail_task(pool: &PgPool, task_id: Uuid, code: &str) {
     ));
 }
 
-async fn clean_w2(pool: &PgPool) {
+async fn clean_w2(pool: &PgPool, scope: &TestScope) {
+    let pattern = scope.pattern();
     for statement in [
-        "DELETE FROM horsies_workflows WHERE name LIKE 'w2_%'",
-        "DELETE FROM horsies_schedule_state WHERE schedule_name LIKE 'w2_%'",
-        "DELETE FROM horsies_task_history WHERE task_name LIKE 'w2_%'",
-        "DELETE FROM horsies_tasks WHERE task_name LIKE 'w2_%'",
+        "DELETE FROM horsies_workflows WHERE name LIKE $1",
+        "DELETE FROM horsies_schedule_state WHERE schedule_name LIKE $1",
+        "DELETE FROM horsies_task_history WHERE task_name LIKE $1",
+        "DELETE FROM horsies_tasks WHERE task_name LIKE $1",
     ] {
         sqlx::query(statement)
+            .bind(&pattern)
             .execute(pool)
             .await
             .expect("clean W2 rows");
@@ -743,7 +793,8 @@ fn test_window() -> crate::core::history::reads::pages::HistoryWindow {
 #[serial]
 async fn live_and_history_aggregates_merge_before_caps() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("aggregate");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
 
     sqlx::query(
@@ -755,39 +806,42 @@ async fn live_and_history_aggregates_merge_before_caps() {
              retention_class_key, retain_rerun_input,
              prepared_rerun_input_disposition, created_at, updated_at
          )
-         SELECT gen_random_uuid(), 'w2_competitor_' || lpad((g % 50)::text, 3, '0'),
-                'default', 100, '[]', '{}', 'PENDING', NOW(),
+         SELECT gen_random_uuid(), $1 || lpad((g % 50)::text, 3, '0'),
+                $2, 100, '[]', '{}', 'PENDING', NOW(),
                 NOW() - make_interval(secs => g), FALSE, FALSE, 0, 3,
                 gen_random_uuid()::text, 1, decode(repeat('0b', 32), 'hex'),
                 'forever', FALSE, 'DECLINED_BY_POLICY', NOW(), NOW()
          FROM generate_series(1, 100) AS g",
     )
+    .bind(scope.task("competitor_"))
+    .bind(&scope.queue)
     .execute(&pool)
     .await
     .expect("seed W2 facet competitors");
 
-    let shared_live = TaskSeed::pending("w2_shared_target");
+    let shared_name = scope.task("shared_target");
+    let shared_live = scope.pending("shared_target");
     seed_task(&pool, &shared_live).await;
     for _ in 0..2 {
-        let shared_history = TaskSeed::running("w2_shared_target");
+        let shared_history = scope.running("shared_target");
         seed_task(&pool, &shared_history).await;
         complete_task(&pool, shared_history.id).await;
     }
     for index in 0..35 {
-        let mut failed = TaskSeed::running(format!("w2_domain_{index:03}"));
+        let mut failed = scope.running(format!("domain_{index:03}"));
         failed.error_code = Some(format!("W2_DOMAIN_{index:03}"));
         seed_task(&pool, &failed).await;
         fail_task(&pool, failed.id, failed.error_code.as_deref().unwrap()).await;
     }
-    let mut claimed = TaskSeed::pending("w2_claimed_status");
+    let mut claimed = scope.pending("claimed_status");
     claimed.status = "CLAIMED";
-    claimed.worker = Some("w2-worker".to_owned());
+    claimed.worker = Some(scope.worker.clone());
     seed_task(&pool, &claimed).await;
 
-    let running = TaskSeed::running("w2_running_status");
+    let running = scope.running("running_status");
     seed_task(&pool, &running).await;
 
-    let cancelled = TaskSeed::pending("w2_cancelled_status");
+    let cancelled = scope.pending("cancelled_status");
     seed_task(&pool, &cancelled).await;
     let cancelled_outcome = terminalize(
         &pool,
@@ -804,9 +858,9 @@ async fn live_and_history_aggregates_merge_before_caps() {
         [TerminalizationOutcome::Applied { .. }]
     ));
 
-    let mut expired = TaskSeed::pending("w2_expired_status");
+    let mut expired = scope.pending("expired_status");
     expired.status = "CLAIMED";
-    expired.worker = Some("w2-worker".to_owned());
+    expired.worker = Some(scope.worker.clone());
     seed_task(&pool, &expired).await;
     sqlx::query("UPDATE horsies_tasks SET good_until = NOW() - INTERVAL '1 minute' WHERE id = $1")
         .bind(expired.id)
@@ -818,7 +872,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
         &TerminalizationCommand::ExpireOwnedClaim {
             task_id: expired.id,
             fence: WorkerOwned {
-                worker_id: "w2-worker".to_owned(),
+                worker_id: scope.worker.clone(),
             },
             result_json: "{\"Err\":{}}".to_owned(),
             error_code: "TASK_EXPIRED".to_owned(),
@@ -831,7 +885,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
         [TerminalizationOutcome::Applied { .. }]
     ));
 
-    let mut outside_window = TaskSeed::running("w2_outside_window");
+    let mut outside_window = scope.running("outside_window");
     outside_window.error_code = Some("W2_OUTSIDE_WINDOW".to_owned());
     seed_task(&pool, &outside_window).await;
     fail_task(&pool, outside_window.id, "W2_OUTSIDE_WINDOW").await;
@@ -855,9 +909,16 @@ async fn live_and_history_aggregates_merge_before_caps() {
         Utc::now() + Duration::hours(1),
     )
     .expect("bounded W2 aggregate window");
-    let stats = task_stats(&broker, &TaskStatsQuery::new(bounded_window))
-        .await
-        .expect("W2 stats");
+    let scoped_filters = TaskFilters {
+        queues: vec![scope.queue.clone()],
+        ..TaskFilters::default()
+    };
+    let stats = task_stats(
+        &broker,
+        &TaskStatsQuery::new(bounded_window).with_filters(scoped_filters.clone()),
+    )
+    .await
+    .expect("W2 stats");
     let counts: BTreeMap<_, _> = stats
         .into_iter()
         .map(|row| (row.status, row.count))
@@ -870,15 +931,18 @@ async fn live_and_history_aggregates_merge_before_caps() {
     assert_eq!(counts["CANCELLED"], 1);
     assert_eq!(counts["EXPIRED"], 1);
 
-    let facets = task_facets(&broker, &TaskFacetsQuery::new(bounded_window))
-        .await
-        .expect("W2 facets");
+    let facets = task_facets(
+        &broker,
+        &TaskFacetsQuery::new(bounded_window).with_filters(scoped_filters.clone()),
+    )
+    .await
+    .expect("W2 facets");
     assert_eq!(facets.task_names.len(), 50);
     assert_eq!(
         facets
             .task_names
             .iter()
-            .find(|facet| facet.value == "w2_shared_target")
+            .find(|facet| facet.value == shared_name)
             .map(|facet| facet.count),
         Some(3)
     );
@@ -887,7 +951,9 @@ async fn live_and_history_aggregates_merge_before_caps() {
 
     let outcome_only = task_facets(
         &broker,
-        &TaskFacetsQuery::new(bounded_window).with_error_categories(vec![ErrorCategory::Outcome]),
+        &TaskFacetsQuery::new(bounded_window)
+            .with_filters(scoped_filters.clone())
+            .with_error_categories(vec![ErrorCategory::Outcome]),
     )
     .await
     .expect("W2 category facet");
@@ -905,6 +971,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
     let breakdown = task_breakdown(
         &broker,
         &TaskBreakdownQuery::new(bounded_window, TaskGroupBy::TaskName)
+            .with_filters(scoped_filters)
             .with_limit(2)
             .expect("W2 breakdown limit"),
     )
@@ -913,26 +980,27 @@ async fn live_and_history_aggregates_merge_before_caps() {
     assert_eq!(breakdown.groups.len(), 2);
     assert_eq!(breakdown.group_count, 90);
     assert_eq!(breakdown.total.total, 142);
-    assert_eq!(breakdown.groups[0].group, "w2_shared_target");
+    assert_eq!(breakdown.groups[0].group, shared_name);
     assert_eq!(breakdown.groups[0].total, 3);
     assert_eq!(breakdown.groups[0].pending, 1);
     assert_eq!(breakdown.groups[0].completed, 2);
 
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("list");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
 
     for index in 0..5 {
-        let mut live = TaskSeed::pending(format!("w2_estimate_live_{index}"));
+        let mut live = scope.pending(format!("estimate_live_{index}"));
         live.enqueued_seconds_ago = 100 - index;
         seed_task(&pool, &live).await;
-        let mut history = TaskSeed::running(format!("w2_estimate_history_{index}"));
+        let mut history = scope.running(format!("estimate_history_{index}"));
         history.enqueued_seconds_ago = 200 - index;
         seed_task(&pool, &history).await;
         complete_task(&pool, history.id).await;
@@ -942,10 +1010,10 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         .await
         .expect("sample W2 lifecycle tables");
     for index in 5..8 {
-        let mut live = TaskSeed::pending(format!("w2_estimate_live_{index}"));
+        let mut live = scope.pending(format!("estimate_live_{index}"));
         live.enqueued_seconds_ago = 100 - index;
         seed_task(&pool, &live).await;
-        let mut history = TaskSeed::running(format!("w2_estimate_history_{index}"));
+        let mut history = scope.running(format!("estimate_history_{index}"));
         history.enqueued_seconds_ago = 200 - index;
         seed_task(&pool, &history).await;
         complete_task(&pool, history.id).await;
@@ -979,19 +1047,13 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         crate::core::history::reads::aggregates::plan_rows_from_explain(&history_payload)
             .expect("decode history estimate");
     assert_eq!(unfiltered.total, live_estimate + history_estimate);
-    assert_ne!(
-        unfiltered.total, 16,
-        "unfiltered total must not count exactly"
-    );
-    assert_eq!(unfiltered.rows.len(), 16);
-    assert!(unfiltered.rows[0]
-        .task_name
-        .starts_with("w2_estimate_history_"));
-
     let pending = list_tasks(
         &broker,
         &TaskListQuery::new(test_window()).with_filters(TaskFilters {
             statuses: vec![crate::TaskStatus::Pending],
+            task_names: (0..8)
+                .map(|index| scope.task(format!("estimate_live_{index}")))
+                .collect(),
             ..TaskFilters::default()
         }),
     )
@@ -1004,6 +1066,9 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         &TaskListQuery::new(test_window())
             .with_filters(TaskFilters {
                 statuses: vec![crate::TaskStatus::Completed],
+                task_names: (0..8)
+                    .map(|index| scope.task(format!("estimate_history_{index}")))
+                    .collect(),
                 ..TaskFilters::default()
             })
             .with_sort(TaskSortField::CompletedAt, SortDirection::Ascending),
@@ -1019,8 +1084,8 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
             &TaskListQuery::new(test_window())
                 .with_filters(TaskFilters {
                     task_names: vec![
-                        "w2_estimate_live_0".to_owned(),
-                        "w2_estimate_history_0".to_owned(),
+                        scope.task("estimate_live_0"),
+                        scope.task("estimate_history_0"),
                     ],
                     ..TaskFilters::default()
                 })
@@ -1029,8 +1094,8 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         .await
         .expect("nullable lifecycle sort");
         assert_eq!(mixed.rows.len(), 2);
-        assert_eq!(mixed.rows[0].task_name, "w2_estimate_history_0");
-        assert_eq!(mixed.rows[1].task_name, "w2_estimate_live_0");
+        assert_eq!(mixed.rows[0].task_name, scope.task("estimate_history_0"));
+        assert_eq!(mixed.rows[1].task_name, scope.task("estimate_live_0"));
     }
 
     let page = list_tasks(
@@ -1038,9 +1103,9 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
         &TaskListQuery::new(test_window())
             .with_filters(TaskFilters {
                 task_names: vec![
-                    "w2_estimate_history_0".to_owned(),
-                    "w2_estimate_history_1".to_owned(),
-                    "w2_estimate_live_0".to_owned(),
+                    scope.task("estimate_history_0"),
+                    scope.task("estimate_history_1"),
+                    scope.task("estimate_live_0"),
                 ],
                 ..TaskFilters::default()
             })
@@ -1052,20 +1117,21 @@ async fn list_merge_sorts_nulls_last_and_uses_estimate_or_exact_totals() {
     .expect("merged page query");
     assert_eq!(page.total, 3);
     assert_eq!(page.rows.len(), 1);
-    assert_eq!(page.rows[0].task_name, "w2_estimate_history_1");
+    assert_eq!(page.rows[0].task_name, scope.task("estimate_history_1"));
 
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("filters");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
 
-    let mut live_match = TaskSeed::running("w2_filter_match");
-    live_match.queue = "w2-fast".to_owned();
+    let match_name = scope.task("filter_match");
+    let mut live_match = scope.running("filter_match");
     live_match.error_code = Some("TASK_ERROR".to_owned());
     live_match.retry_count = 2;
     live_match.enqueued_seconds_ago = 60;
@@ -1081,43 +1147,47 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
 
     for (name, queue, worker, code, retry_count) in [
         (
-            "w2_wrong_name",
-            "w2-fast",
+            "wrong_name",
+            "matching",
             Some("w2-worker"),
             Some("TASK_ERROR"),
             2,
         ),
         (
-            "w2_filter_match",
-            "w2-slow",
+            "filter_match",
+            "wrong_queue",
             Some("w2-worker"),
             Some("TASK_ERROR"),
             2,
         ),
         (
-            "w2_filter_match",
-            "w2-fast",
+            "filter_match",
+            "matching",
             Some("another-worker"),
             Some("TASK_ERROR"),
             2,
         ),
         (
-            "w2_filter_match",
-            "w2-fast",
+            "filter_match",
+            "matching",
             Some("w2-worker"),
             Some("WAIT_TIMEOUT"),
             2,
         ),
         (
-            "w2_filter_match",
-            "w2-fast",
+            "filter_match",
+            "matching",
             Some("w2-worker"),
             Some("TASK_ERROR"),
             0,
         ),
     ] {
-        let mut decoy = TaskSeed::running(name);
-        decoy.queue = queue.to_owned();
+        let mut decoy = scope.running(name);
+        decoy.queue = if queue == "matching" {
+            scope.queue.clone()
+        } else {
+            format!("{}wrong-queue", scope.prefix)
+        };
         decoy.worker = worker.map(str::to_owned);
         decoy.error_code = code.map(str::to_owned);
         decoy.retry_count = retry_count;
@@ -1125,8 +1195,8 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     }
 
     let filters = TaskFilters {
-        task_names: vec!["w2_filter_match".to_owned()],
-        queues: vec!["w2-fast".to_owned()],
+        task_names: vec![match_name.clone()],
+        queues: vec![scope.queue.clone()],
         workers: vec!["w2-worker".to_owned()],
         error_codes: vec!["TASK_ERROR".to_owned()],
         error_categories: vec![ErrorCategory::Operational],
@@ -1164,7 +1234,7 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     assert_eq!(rows.rows[1].queue_s, Some(20));
     assert!(rows.rows[1].exec_s.is_some_and(|seconds| seconds >= 40));
 
-    let mut pending = TaskSeed::pending("w2_pending_duration");
+    let mut pending = scope.pending("pending_duration");
     pending.enqueued_seconds_ago = 30;
     seed_task(&pool, &pending).await;
     let pending_row = list_tasks(
@@ -1184,9 +1254,13 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
 
     let failed_facets = task_facets(
         &broker,
-        &TaskFacetsQuery::new(test_window())
-            .with_statuses(vec![crate::TaskStatus::Failed])
-            .retried_only(true),
+        &TaskFacetsQuery::new(test_window()).with_filters(TaskFilters {
+            statuses: vec![crate::TaskStatus::Failed],
+            task_names: vec![match_name.clone()],
+            queues: vec![scope.queue.clone()],
+            retried_only: true,
+            ..TaskFilters::default()
+        }),
     )
     .await
     .expect("status/retry facets");
@@ -1194,12 +1268,12 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
         failed_facets
             .task_names
             .iter()
-            .find(|facet| facet.value == "w2_filter_match")
+            .find(|facet| facet.value == match_name)
             .map(|facet| facet.count),
         Some(1)
     );
 
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }
 
 async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, name: &str, status: &str) {
@@ -1223,6 +1297,7 @@ async fn seed_workflow(pool: &PgPool, workflow_id: Uuid, name: &str, status: &st
 
 async fn seed_node(
     pool: &PgPool,
+    scope: &TestScope,
     workflow_id: Uuid,
     task_index: i32,
     status: &str,
@@ -1237,7 +1312,7 @@ async fn seed_node(
              task_id, is_subworkflow, sub_workflow_id, created_at,
              started_at, completed_at
          ) VALUES (
-             $1, $2, $3, 'w2-node-' || $3, 'w2_node_task', 'default',
+             $1, $2, $3, $8 || $3, $8 || 'node_task', $9,
              100, $4, FALSE, 'all', $5, $6, $7 IS NOT NULL, $7, NOW(),
              CASE WHEN $5 IN ('RUNNING', 'COMPLETED', 'FAILED')
                   THEN NOW() - INTERVAL '30 seconds' ELSE NULL END,
@@ -1252,6 +1327,8 @@ async fn seed_node(
     .bind(status)
     .bind(task_id)
     .bind(child_id)
+    .bind(&scope.prefix)
+    .bind(&scope.queue)
     .execute(pool)
     .await
     .expect("seed W2 workflow node");
@@ -1261,17 +1338,28 @@ async fn seed_node(
 #[serial]
 async fn task_detail_uses_live_attempts_then_digest_verified_history() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("detail");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let workflow_id = Uuid::new_v4();
-    seed_workflow(&pool, workflow_id, "w2_detail_workflow", "RUNNING").await;
-    let mut task = TaskSeed::running("w2_detail_task");
+    seed_workflow(&pool, workflow_id, &scope.workflow("detail"), "RUNNING").await;
+    let mut task = scope.running("detail_task");
     task.workflow_task = true;
     task.error_code = Some("TASK_ERROR".to_owned());
     seed_task(&pool, &task).await;
     seed_attempt(&pool, task.id, 1, "TASK_ERROR").await;
     seed_attempt(&pool, task.id, 2, "TASK_ERROR").await;
-    seed_node(&pool, workflow_id, 3, "RUNNING", &[], Some(task.id), None).await;
+    seed_node(
+        &pool,
+        &scope,
+        workflow_id,
+        3,
+        "RUNNING",
+        &[],
+        Some(task.id),
+        None,
+    )
+    .await;
 
     let live = get_task_detail(&broker, task.id)
         .await
@@ -1336,19 +1424,22 @@ async fn task_detail_uses_live_attempts_then_digest_verified_history() {
         get_task_detail(&broker, Uuid::new_v4()).await.unwrap(),
         None
     );
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }
 
 #[tokio::test]
 #[serial]
 async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("workflow");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
     let root = Uuid::new_v4();
     let child = Uuid::new_v4();
-    seed_workflow(&pool, root, "w2_root_flow", "RUNNING").await;
-    seed_workflow(&pool, child, "w2_child_flow", "FAILED").await;
+    let root_name = scope.workflow("root");
+    let child_name = scope.workflow("child");
+    seed_workflow(&pool, root, &root_name, "RUNNING").await;
+    seed_workflow(&pool, child, &child_name, "FAILED").await;
     sqlx::query(
         "UPDATE horsies_workflows
          SET parent_workflow_id = $1, root_workflow_id = $1, depth = 1
@@ -1360,11 +1451,21 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     .await
     .expect("link W2 child workflow");
 
-    seed_node(&pool, root, 0, "COMPLETED", &[], None, None).await;
-    seed_node(&pool, root, 1, "FAILED", &[0], None, None).await;
-    seed_node(&pool, root, 2, "RUNNING", &[0, 1, 99], None, Some(child)).await;
-    seed_node(&pool, child, 0, "COMPLETED", &[], None, None).await;
-    seed_node(&pool, child, 1, "FAILED", &[0], None, None).await;
+    seed_node(&pool, &scope, root, 0, "COMPLETED", &[], None, None).await;
+    seed_node(&pool, &scope, root, 1, "FAILED", &[0], None, None).await;
+    seed_node(
+        &pool,
+        &scope,
+        root,
+        2,
+        "RUNNING",
+        &[0, 1, 99],
+        None,
+        Some(child),
+    )
+    .await;
+    seed_node(&pool, &scope, child, 0, "COMPLETED", &[], None, None).await;
+    seed_node(&pool, &scope, child, 1, "FAILED", &[0], None, None).await;
     sqlx::query(
         "UPDATE horsies_workflow_tasks
          SET sub_workflow_id = $1
@@ -1376,14 +1477,14 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     .await
     .expect("seed non-subworkflow child reference");
 
-    assert_eq!(
-        list_workflow_names(&broker).await.unwrap(),
-        vec!["w2_root_flow"]
-    );
+    assert!(list_workflow_names(&broker)
+        .await
+        .unwrap()
+        .contains(&root_name));
     let runs = list_workflow_runs(
         &broker,
         &WorkflowRunsQuery::new()
-            .with_name(Some("w2_root_flow".to_owned()))
+            .with_name(Some(root_name.clone()))
             .with_status(Some("RUNNING".to_owned())),
     )
     .await
@@ -1449,9 +1550,9 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
 
     let now = Utc::now();
     for (name, next, count) in [
-        ("w2_schedule_later", Some(now + Duration::hours(3)), 1),
-        ("w2_schedule_none", None, 2),
-        ("w2_schedule_soon", Some(now + Duration::minutes(5)), 3),
+        (scope.schedule("later"), Some(now + Duration::hours(3)), 1),
+        (scope.schedule("none"), None, 2),
+        (scope.schedule("soon"), Some(now + Duration::minutes(5)), 3),
     ] {
         sqlx::query(
             "INSERT INTO horsies_schedule_state (
@@ -1466,16 +1567,21 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         .expect("seed W2 schedule");
     }
     let schedules = list_schedules(&broker).await.expect("W2 schedules");
-    assert_eq!(
-        schedules
-            .iter()
-            .map(|schedule| schedule.schedule_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["w2_schedule_soon", "w2_schedule_later", "w2_schedule_none"]
-    );
-    assert_eq!(schedules[0].run_count, 3);
+    let soon = scope.schedule("soon");
+    let later = scope.schedule("later");
+    let none = scope.schedule("none");
+    let scoped_schedules = schedules
+        .iter()
+        .filter(|schedule| {
+            [soon.as_str(), later.as_str(), none.as_str()]
+                .contains(&schedule.schedule_name.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(scoped_schedules.len(), 3);
+    assert_eq!(scoped_schedules[0].schedule_name, soon);
+    assert_eq!(scoped_schedules[0].run_count, 3);
 
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }
 
 #[tokio::test]
@@ -1497,9 +1603,10 @@ async fn database_failure_is_typed_and_retryable() {
 #[serial]
 async fn unpublished_staged_detail_preserves_absent_semantics() {
     let pool = migrated_pool().await;
-    clean_w2(&pool).await;
+    let scope = TestScope::new("unpublished");
+    clean_w2(&pool, &scope).await;
     let broker = PostgresBroker::from_pool(pool.clone());
-    let task = TaskSeed::running("w2_unpublished_detail");
+    let task = scope.running("unpublished_detail");
     seed_task(&pool, &task).await;
     complete_task(&pool, task.id).await;
     assert!(get_task_detail(&broker, task.id).await.unwrap().is_some());
@@ -1520,5 +1627,5 @@ async fn unpublished_staged_detail_preserves_absent_semantics() {
         .expect("restore staged readers");
     transaction.commit().await.expect("commit staged readers");
     assert!(get_task_detail(&broker, task.id).await.unwrap().is_some());
-    clean_w2(&pool).await;
+    clean_w2(&pool, &scope).await;
 }

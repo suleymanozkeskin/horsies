@@ -808,13 +808,18 @@ async fn missing_embedded_index_is_a_factual_503_while_api_still_answers() {
     );
 }
 
-async fn clean_w4(pool: &PgPool) {
+async fn clean_w4(pool: &PgPool, prefix: &str) {
+    let pattern = format!("{prefix}%");
     for statement in [
-        "DELETE FROM horsies_task_history WHERE task_name LIKE 'w4_%'",
-        "DELETE FROM horsies_tasks WHERE task_name LIKE 'w4_%'",
-        "DELETE FROM horsies_workflows WHERE name LIKE 'w4_%'",
+        "DELETE FROM horsies_task_history WHERE task_name LIKE $1",
+        "DELETE FROM horsies_tasks WHERE task_name LIKE $1",
+        "DELETE FROM horsies_workflows WHERE name LIKE $1",
     ] {
-        sqlx::query(statement).execute(pool).await.unwrap();
+        sqlx::query(statement)
+            .bind(&pattern)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 }
 
@@ -841,7 +846,7 @@ async fn migrated_state() -> WebState {
     }
 }
 
-async fn seed_pending(pool: &PgPool) -> Uuid {
+async fn seed_pending(pool: &PgPool, prefix: &str) -> Uuid {
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (
@@ -859,7 +864,7 @@ async fn seed_pending(pool: &PgPool) -> Uuid {
          )",
     )
     .bind(id)
-    .bind(format!("w4_task_{}", id.simple()))
+    .bind(format!("{prefix}task_{}", id.simple()))
     .execute(pool)
     .await
     .unwrap();
@@ -870,8 +875,9 @@ async fn seed_pending(pool: &PgPool) -> Uuid {
 #[serial]
 async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
     let state = migrated_state().await;
-    clean_w4(state.broker.pool()).await;
-    let task_id = seed_pending(state.broker.pool()).await;
+    let prefix = format!("w4_http_{}__", Uuid::new_v4().simple());
+    clean_w4(state.broker.pool(), &prefix).await;
+    let task_id = seed_pending(state.broker.pool(), &prefix).await;
     let router = build_router(state.clone());
 
     let checks = [
@@ -947,7 +953,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
             "warning": null
         })
     );
-    clean_w4(state.broker.pool()).await;
+    clean_w4(state.broker.pool(), &prefix).await;
 }
 
 #[tokio::test]

@@ -536,7 +536,7 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(stored, 42);
+    assert_eq!(stored, crate::broker::migrations::expected_schema_version());
     let transitional: (bool, i64, i64) = sqlx::query_as(
         "SELECT
              (SELECT atttypid = 'varchar'::regtype FROM pg_attribute

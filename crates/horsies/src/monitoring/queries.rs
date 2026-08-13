@@ -239,33 +239,34 @@ impl TaskStatsQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskFacetsQuery {
     window: HistoryWindow,
-    statuses: Vec<TaskStatus>,
-    error_categories: Vec<ErrorCategory>,
-    retried_only: bool,
+    filters: TaskFilters,
 }
 
 impl TaskFacetsQuery {
     pub fn new(window: HistoryWindow) -> Self {
         Self {
             window,
-            statuses: Vec::new(),
-            error_categories: Vec::new(),
-            retried_only: false,
+            filters: TaskFilters::default(),
         }
     }
 
+    pub fn with_filters(mut self, filters: TaskFilters) -> Self {
+        self.filters = filters;
+        self
+    }
+
     pub fn with_statuses(mut self, statuses: Vec<TaskStatus>) -> Self {
-        self.statuses = statuses;
+        self.filters.statuses = statuses;
         self
     }
 
     pub fn with_error_categories(mut self, categories: Vec<ErrorCategory>) -> Self {
-        self.error_categories = categories;
+        self.filters.error_categories = categories;
         self
     }
 
     pub fn retried_only(mut self, enabled: bool) -> Self {
-        self.retried_only = enabled;
+        self.filters.retried_only = enabled;
         self
     }
 }
@@ -832,8 +833,8 @@ impl CombinedFacet {
 fn push_facet_scope(
     builder: &mut QueryBuilder<'_, Postgres>,
     window: Option<HistoryWindow>,
-    statuses: &[TaskStatus],
-    retried_only: bool,
+    filters: &TaskFilters,
+    worker_column: &str,
     error_categories: &[ErrorCategory],
 ) {
     builder.push(" WHERE TRUE");
@@ -844,14 +845,35 @@ fn push_facet_scope(
             .push(" AND retention_anchor_at < ")
             .push_bind(window.upper());
     }
-    if !statuses.is_empty() {
+    if !filters.statuses.is_empty() {
         builder
             .push(" AND status = ANY(")
-            .push_bind(statuses.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .push_bind(
+                filters
+                    .statuses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+            )
             .push("::text[])");
     }
-    if retried_only {
+    if filters.retried_only {
         builder.push(" AND retry_count > 0");
+    }
+    for (column, values) in [
+        ("task_name", &filters.task_names),
+        ("queue_name", &filters.queues),
+        (worker_column, &filters.workers),
+        ("error_code", &filters.error_codes),
+    ] {
+        if !values.is_empty() {
+            builder
+                .push(" AND ")
+                .push(column)
+                .push(" = ANY(")
+                .push_bind(values.clone())
+                .push("::text[])");
+        }
     }
     push_error_categories(builder, error_categories);
 }
@@ -872,8 +894,8 @@ async fn combined_facet_rows(
     push_facet_scope(
         &mut builder,
         None,
-        &query.statuses,
-        query.retried_only,
+        &query.filters,
+        "claimed_by_worker_id",
         error_categories,
     );
     builder.push(" AND ").push(live_column).push(" IS NOT NULL");
@@ -890,8 +912,8 @@ async fn combined_facet_rows(
     push_facet_scope(
         &mut builder,
         Some(query.window),
-        &query.statuses,
-        query.retried_only,
+        &query.filters,
+        "last_claimed_worker_id",
         error_categories,
     );
     builder
@@ -969,7 +991,7 @@ pub async fn task_facets(
         query,
         CombinedFacet::ErrorCode,
         Some(ERROR_FACET_CAP),
-        &query.error_categories,
+        &query.filters.error_categories,
     )
     .await
     .map_err(|error| MonitoringQueryError::database(operation, error))?;
