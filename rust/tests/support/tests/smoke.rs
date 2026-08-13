@@ -41,15 +41,24 @@ fn ensure_tasks_registered() {
 }
 
 async fn ensure_history_runtime(pool: &sqlx::PgPool) {
-    let published: bool = sqlx::query_scalar(
+    let ready: bool = sqlx::query_scalar(
         "SELECT to_regprocedure(
              'horsies_task_provenance_staged(uuid,boolean)'
-         ) IS NOT NULL",
+         ) IS NOT NULL
+         AND EXISTS (
+             SELECT 1
+             FROM horsies_task_history_leaf_catalog
+             WHERE class_key = 'heartbeats'
+               AND detached_at IS NULL
+               AND dropped_at IS NULL
+               AND lower_anchor <= statement_timestamp()
+               AND upper_anchor > statement_timestamp()
+         )",
     )
     .fetch_one(pool)
     .await
     .unwrap();
-    if published {
+    if ready {
         return;
     }
 
@@ -67,15 +76,24 @@ async fn ensure_history_runtime(pool: &sqlx::PgPool) {
     let handle = tokio::spawn(async move { running.run().await });
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let published: bool = sqlx::query_scalar(
+            let ready: bool = sqlx::query_scalar(
                 "SELECT to_regprocedure(
                      'horsies_task_provenance_staged(uuid,boolean)'
-                 ) IS NOT NULL",
+                 ) IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1
+                     FROM horsies_task_history_leaf_catalog
+                     WHERE class_key = 'heartbeats'
+                       AND detached_at IS NULL
+                       AND dropped_at IS NULL
+                       AND lower_anchor <= statement_timestamp()
+                       AND upper_anchor > statement_timestamp()
+                 )",
             )
             .fetch_one(pool)
             .await
             .unwrap();
-            if published {
+            if ready {
                 break;
             }
             tokio::task::yield_now().await;
@@ -472,6 +490,7 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_tables(&pool).await;
+    ensure_history_runtime(&pool).await;
 
     let stale_threshold_secs: f64 = 5.0;
 
@@ -533,7 +552,7 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
         .await
         .unwrap();
 
-    let row_after_delete: Option<(String,)> = sqlx::query_as(
+    let row_after_delete: Option<(uuid::Uuid,)> = sqlx::query_as(
         "SELECT t.id FROM horsies_tasks t \
          WHERE t.id = $1 AND t.status = 'RUNNING' \
            AND NOT EXISTS ( \
@@ -548,8 +567,9 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
     .await
     .unwrap();
 
-    assert!(
-        row_after_delete.is_some(),
-        "Phase 2 should return the task when no fresh heartbeat exists"
+    assert_eq!(
+        row_after_delete,
+        Some((task_id,)),
+        "Phase 2 should return the typed task identity when no fresh heartbeat exists"
     );
 }
