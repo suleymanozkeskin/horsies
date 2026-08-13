@@ -21,6 +21,7 @@ web = [
     "dep:mime_guess",
     "dep:percent-encoding",
     "dep:tower",
+    "tokio/net",
 ]
 
 [dependencies]

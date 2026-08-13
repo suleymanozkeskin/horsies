@@ -92,6 +92,7 @@ pub use crate::worker::{
         cutover::{execute_cutover, CutoverArgs, CutoverCliError, CutoverCommand},
         init_tracing,
         transcode::{execute_transcode, TranscodeArgs, TranscodeCliError, TranscodeCommand},
+        web::{execute_web, WebArgs, WebAuthMode, WebCliError},
         Cli, Command, LogLevel,
     },
     config::WorkerConfig,

@@ -33,7 +33,7 @@ use super::events::{
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
-use super::spa::{inject, safe_asset_path, MemoryAssets, MonitoringUiConfig};
+use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
 
 fn lazy_pool() -> PgPool {
     PgPoolOptions::new()
@@ -721,6 +721,61 @@ async fn spa_is_public_mountable_injected_and_traversal_safe() {
     }
     let mixed_head = inject("<HTML><HEAD></HeAd   ><BODY>", "/x", None);
     assert!(mixed_head.find("window.__HORSIES_UI__").unwrap() < mixed_head.find("</HeAd").unwrap());
+}
+
+#[tokio::test]
+#[serial]
+async fn embedded_spa_and_each_primary_view_api_roundtrip_against_postgres() {
+    let mut state = migrated_state().await;
+    state.assets = Arc::new(EmbeddedAssets);
+    let router = build_router(state);
+
+    let page = router
+        .clone()
+        .oneshot(request(Method::GET, "/"))
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let page = String::from_utf8(
+        to_bytes(page.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(page.contains("<base href=\"/\">"));
+    assert!(page.contains("window.__HORSIES_UI__"));
+
+    let asset_start = page.find("./assets/").expect("built JavaScript asset") + 1;
+    let asset_end = page[asset_start..]
+        .find('"')
+        .map(|offset| asset_start + offset)
+        .expect("asset URL terminator");
+    let asset = router
+        .clone()
+        .oneshot(request(Method::GET, &page[asset_start..asset_end]))
+        .await
+        .unwrap();
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_eq!(asset.headers()["content-type"], "text/javascript");
+    assert!(!to_bytes(asset.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .is_empty());
+
+    for path in [
+        "/api/tasks?limit=1",
+        "/api/workflows?limit=1",
+        "/api/workers?limit=1",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let _ = json(response).await;
+    }
 }
 
 #[tokio::test]

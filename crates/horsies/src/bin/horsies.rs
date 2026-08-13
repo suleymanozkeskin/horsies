@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use horsies::{execute_cutover, execute_transcode, Cli, Command};
+use horsies::{execute_cutover, execute_transcode, execute_web, Cli, Command};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -19,6 +19,18 @@ async fn main() -> ExitCode {
             Err(error) => {
                 eprintln!("transcode failed: {error}");
                 ExitCode::FAILURE
+            }
+        },
+        Command::Web(args) => match execute_web(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let code = error.exit_code();
+                if code == 2 {
+                    eprintln!("horsies web: error: {error}");
+                } else {
+                    eprintln!("{error}");
+                }
+                ExitCode::from(code)
             }
         },
         Command::GetDocs(args) => match horsies::fetch_docs(&args.output) {

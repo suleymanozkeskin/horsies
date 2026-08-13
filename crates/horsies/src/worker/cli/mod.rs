@@ -1,6 +1,7 @@
 pub mod banner;
 pub mod cutover;
 pub mod transcode;
+pub mod web;
 
 use std::fmt;
 use std::str::FromStr;
@@ -100,6 +101,8 @@ pub enum Command {
     Cutover(cutover::CutoverArgs),
     /// Operate replacement-partition archive transcodes.
     Transcode(transcode::TranscodeArgs),
+    /// Serve the monitoring web UI.
+    Web(web::WebArgs),
 }
 
 /// Arguments for the `worker` subcommand.
