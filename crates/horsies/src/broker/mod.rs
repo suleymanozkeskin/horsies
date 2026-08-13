@@ -7,6 +7,8 @@ pub mod error;
 pub mod health;
 pub mod listener;
 pub mod migrations;
+#[cfg(test)]
+mod monitoring_schema_tests;
 pub mod postgres;
 pub mod result_types;
 pub mod row;
