@@ -29,6 +29,16 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    pub const ALL: [Self; 7] = [
+        Self::Pending,
+        Self::Claimed,
+        Self::Running,
+        Self::Completed,
+        Self::Failed,
+        Self::Cancelled,
+        Self::Expired,
+    ];
+
     /// Whether this status represents a final state (no further transitions).
     pub fn is_terminal(self) -> bool {
         matches!(
@@ -143,16 +153,7 @@ mod tests {
         for &s in TASK_TERMINAL_STATES {
             assert!(s.is_terminal(), "{:?} should be terminal", s);
         }
-        let all = [
-            TaskStatus::Pending,
-            TaskStatus::Claimed,
-            TaskStatus::Running,
-            TaskStatus::Completed,
-            TaskStatus::Failed,
-            TaskStatus::Cancelled,
-            TaskStatus::Expired,
-        ];
-        for s in all {
+        for s in TaskStatus::ALL {
             assert_eq!(
                 s.is_terminal(),
                 TASK_TERMINAL_STATES.contains(&s),

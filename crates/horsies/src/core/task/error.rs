@@ -36,6 +36,20 @@ pub enum OperationalErrorCode {
     SubworkflowLoadFailed,
 }
 
+impl OperationalErrorCode {
+    pub const ALL: [Self; 9] = [
+        Self::UnhandledError,
+        Self::TaskError,
+        Self::WorkerCrashed,
+        Self::BrokerError,
+        Self::WorkerResolutionError,
+        Self::WorkerSerializationError,
+        Self::ResultDeserializationError,
+        Self::WorkflowEnqueueFailed,
+        Self::SubworkflowLoadFailed,
+    ];
+}
+
 /// A code/typing/usage contract was violated.
 ///
 /// Typical caller behavior: fix code or type assumptions, do not blindly retry.
@@ -45,6 +59,14 @@ pub enum ContractCode {
     ArgumentTypeMismatch,
     ReturnTypeMismatch,
     WorkflowCtxMissingId,
+}
+
+impl ContractCode {
+    pub const ALL: [Self; 3] = [
+        Self::ArgumentTypeMismatch,
+        Self::ReturnTypeMismatch,
+        Self::WorkflowCtxMissingId,
+    ];
 }
 
 /// The caller cannot get the value right now or cannot locate it.
@@ -58,6 +80,16 @@ pub enum RetrievalCode {
     WorkflowNotFound,
     ResultNotAvailable,
     ResultNotReady,
+}
+
+impl RetrievalCode {
+    pub const ALL: [Self; 5] = [
+        Self::WaitTimeout,
+        Self::TaskNotFound,
+        Self::WorkflowNotFound,
+        Self::ResultNotAvailable,
+        Self::ResultNotReady,
+    ];
 }
 
 /// A non-bug execution outcome or control-flow result.
@@ -78,6 +110,23 @@ pub enum OutcomeCode {
     WorkflowSuccessCaseNotMet,
     WorkflowStopped,
     SendSuppressed,
+}
+
+impl OutcomeCode {
+    pub const ALL: [Self; 12] = [
+        Self::TaskCancelled,
+        Self::TaskExpired,
+        Self::TaskTimeout,
+        Self::WorkflowPaused,
+        Self::WorkflowFailed,
+        Self::WorkflowCancelled,
+        Self::WorkflowExpired,
+        Self::UpstreamSkipped,
+        Self::SubworkflowFailed,
+        Self::WorkflowSuccessCaseNotMet,
+        Self::WorkflowStopped,
+        Self::SendSuppressed,
+    ];
 }
 
 impl std::fmt::Display for OperationalErrorCode {

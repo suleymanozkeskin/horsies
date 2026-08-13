@@ -9,6 +9,7 @@ extern crate self as horsies;
 pub(crate) mod broker;
 #[doc(hidden)]
 pub mod core;
+pub mod monitoring;
 pub(crate) mod worker;
 pub(crate) mod workflow_engine;
 
