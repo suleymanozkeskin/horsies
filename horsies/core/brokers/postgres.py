@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from sqlalchemy import text, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.result_types import (
@@ -27,7 +26,7 @@ from horsies.core.models.workflow_pg import (
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
-from horsies.core.codec.json_io import loads_json, dumps_json
+from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
@@ -476,6 +475,45 @@ REQUEUE_STALE_CLAIMED_SQL = text("""
         FOR UPDATE OF t2 SKIP LOCKED
     ) s
     WHERE t.id = s.id
+""")
+
+# One constant statement for every fresh enqueue. The PostgreSQL dialect
+# Insert construct carries `inherit_cache = False` (SQLAlchemy 2.0.51), so
+# a per-call `pg_insert(...).values(...)` is rebuilt AND recompiled on
+# every send; a constant text statement compiles as a passthrough and its
+# constant query string lets the driver reuse its server-side prepared
+# statement. enqueued_at resolves in SQL: explicit value, else NOW() plus
+# the optional delay interval. The unit suite pins bind-name parity with
+# `_enqueue_insert_params`.
+ENQUEUE_INSERT_SQL = text("""
+    INSERT INTO horsies_tasks (
+        idempotency_key_digest, id, task_name, queue_name, priority,
+        args, kwargs, status, sent_at, enqueued_at, good_until,
+        claimed, retry_count, max_retries, task_options, enqueue_sha,
+        is_workflow_task, created_at, updated_at,
+        command_fingerprint_version, command_fingerprint,
+        retention_class_key, retain_rerun_input, input_digest,
+        prepared_rerun_input_disposition, prepared_rerun_input_version,
+        prepared_rerun_input_codec, prepared_rerun_input_content_type,
+        prepared_rerun_input_digest, prepared_rerun_input_inline
+    ) VALUES (
+        :idempotency_key_digest, :id, :task_name, :queue_name, :priority,
+        :args, :kwargs, 'PENDING', :sent_at,
+        COALESCE(
+            :enqueued_at,
+            NOW() + COALESCE(:enqueue_delay, INTERVAL '0 seconds')
+        ),
+        :good_until,
+        FALSE, 0, :max_retries, :task_options, :enqueue_sha,
+        FALSE, NOW(), NOW(),
+        :command_fingerprint_version, :command_fingerprint,
+        :retention_class_key, :retain_rerun_input, :input_digest,
+        :prepared_rerun_input_disposition, :prepared_rerun_input_version,
+        :prepared_rerun_input_codec, :prepared_rerun_input_content_type,
+        :prepared_rerun_input_digest, :prepared_rerun_input_inline
+    )
+    ON CONFLICT (id) DO NOTHING
+    RETURNING id
 """)
 
 
@@ -1203,6 +1241,7 @@ class PostgresBroker:
         good_until: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         task_options: Optional[str],
+        task_options_value: Any,
         retention_class_key: str,
         retain_rerun_input: bool,
     ) -> BrokerResult[dict[str, Any]]:
@@ -1245,14 +1284,15 @@ class PostgresBroker:
         kwargs_r = parsed('kwargs', kwargs_json)
         if is_err(kwargs_r):
             return kwargs_r
-        options_r = parsed('task_options', task_options)
-        if is_err(options_r):
-            return options_r
 
+        # task_options arrives both as the stored string (fingerprint
+        # input) and as the value the caller already parsed once for
+        # retry-policy extraction; parsing it again here would be the
+        # second parse of the same string on every enqueue.
         payload = encode_input_envelope_v1(
             args=args_r.ok_value or [],
             kwargs=kwargs_r.ok_value or {},
-            options=options_r.ok_value,
+            options=task_options_value,
         )
         digest = sha256(payload).digest()
         fingerprint = EnqueueCommandV1(
@@ -1299,6 +1339,79 @@ class PostgresBroker:
                 **disposition,
             }
         )
+
+    @staticmethod
+    def _enqueue_insert_params(
+        *,
+        task_id: str,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        args_json: str | None,
+        kwargs_json: str | None,
+        call_site_sent_at: datetime,
+        enqueued_at: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        good_until: Optional[datetime],
+        max_retries: Json,
+        task_options: Optional[str],
+        enqueue_sha: str,
+        scoped_key_digest: Optional[bytes],
+        cutover_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Bind parameters for ``ENQUEUE_INSERT_SQL``, one entry per bind.
+
+        The prepared-rerun-input columns are always bound: absent
+        disposition fields bind NULL, which is identical to omitting the
+        nullable, default-free columns. ``enqueued_at`` and
+        ``enqueue_delay`` drive the statement's COALESCE — explicit
+        timestamp wins, else NOW() plus the delay, else NOW().
+        """
+        return {
+            'idempotency_key_digest': scoped_key_digest,
+            'id': task_id,
+            'task_name': task_name,
+            'queue_name': queue_name,
+            'priority': priority,
+            'args': args_json,
+            'kwargs': kwargs_json,
+            'sent_at': call_site_sent_at,
+            'enqueued_at': enqueued_at,
+            'enqueue_delay': (
+                timedelta(seconds=enqueue_delay_seconds)
+                if enqueue_delay_seconds is not None
+                else None
+            ),
+            'good_until': good_until,
+            'max_retries': max_retries,
+            'task_options': task_options,
+            'enqueue_sha': enqueue_sha,
+            'command_fingerprint_version': (
+                cutover_values['command_fingerprint_version']
+            ),
+            'command_fingerprint': cutover_values['command_fingerprint'],
+            'retention_class_key': cutover_values['retention_class_key'],
+            'retain_rerun_input': cutover_values['retain_rerun_input'],
+            'input_digest': cutover_values['input_digest'],
+            'prepared_rerun_input_disposition': (
+                cutover_values['prepared_rerun_input_disposition']
+            ),
+            'prepared_rerun_input_version': (
+                cutover_values.get('prepared_rerun_input_version')
+            ),
+            'prepared_rerun_input_codec': (
+                cutover_values.get('prepared_rerun_input_codec')
+            ),
+            'prepared_rerun_input_content_type': (
+                cutover_values.get('prepared_rerun_input_content_type')
+            ),
+            'prepared_rerun_input_digest': (
+                cutover_values.get('prepared_rerun_input_digest')
+            ),
+            'prepared_rerun_input_inline': (
+                cutover_values.get('prepared_rerun_input_inline')
+            ),
+        }
 
     async def enqueue_async(
         self,
@@ -1359,10 +1472,13 @@ class PostgresBroker:
 
             call_site_sent_at = sent_at or datetime.now(timezone.utc)
 
-            # Parse retry configuration from task_options.
+            # Parse retry configuration from task_options; the parsed value
+            # is reused by the cutover computation below so the string is
+            # decoded exactly once per enqueue.
             # task_options is always produced by serialize_task_options() — malformed JSON
             # is a bug, not a runtime condition, and must not be silently swallowed.
             max_retries = 0
+            task_options_value: Json = None
             if task_options:
                 opts_r = loads_json(task_options)
                 if is_err(opts_r):
@@ -1371,24 +1487,11 @@ class PostgresBroker:
                         f'task_options JSON corrupt: {opts_r.err_value}',
                         opts_r.err_value,
                     )
-                options_data = opts_r.ok_value
-                if isinstance(options_data, dict):
-                    retry_policy = options_data.get('retry_policy')
+                task_options_value = opts_r.ok_value
+                if isinstance(task_options_value, dict):
+                    retry_policy = task_options_value.get('retry_policy')
                     if isinstance(retry_policy, dict):
                         max_retries = retry_policy.get('max_retries', 3)
-
-            # Determine enqueued_at value for the INSERT.
-            # enqueue_delay_seconds: DB-side NOW() + interval.
-            # explicit enqueued_at: caller-provided value.
-            # default: DB-side NOW() via text('NOW()').
-            if enqueue_delay_seconds is not None:
-                enqueued_at_value = text(
-                    "NOW() + CAST(:delay || ' seconds' AS INTERVAL)",
-                ).bindparams(delay=str(enqueue_delay_seconds))
-            elif enqueued_at is not None:
-                enqueued_at_value = enqueued_at
-            else:
-                enqueued_at_value = text('NOW()')
 
             # The cutover payload: command fingerprint, retention
             # snapshot, and the prepared rerun-input envelope, computed
@@ -1405,6 +1508,7 @@ class PostgresBroker:
                 good_until=good_until,
                 enqueue_delay_seconds=enqueue_delay_seconds,
                 task_options=task_options,
+                task_options_value=task_options_value,
                 retention_class_key=resolved_retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             )
@@ -1421,36 +1525,26 @@ class PostgresBroker:
                     task_name=task_name, key=idempotency_key
                 ).digest
 
-            # Single SQLAlchemy Core INSERT ... ON CONFLICT DO NOTHING ... RETURNING id.
-            # Replaces both the ORM session.add() and raw SQL paths.
-            stmt = (
-                pg_insert(TaskModel)
-                .values(
-                    idempotency_key_digest=scoped_key_digest,
-                    id=task_id,
-                    task_name=task_name,
-                    queue_name=queue_name,
-                    priority=priority,
-                    args=args_json,
-                    kwargs=kwargs_json,
-                    status=TaskStatus.PENDING,
-                    sent_at=call_site_sent_at,
-                    enqueued_at=enqueued_at_value,
-                    good_until=good_until,
-                    max_retries=max_retries,
-                    task_options=task_options,
-                    enqueue_sha=enqueue_sha,
-                    is_workflow_task=False,
-                    created_at=text('NOW()'),
-                    updated_at=text('NOW()'),
-                    **cutover.ok_value,
-                )
-                .on_conflict_do_nothing(index_elements=['id'])
-                .returning(TaskModel.id)
+            insert_params = self._enqueue_insert_params(
+                task_id=task_id,
+                task_name=task_name,
+                queue_name=queue_name,
+                priority=priority,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                call_site_sent_at=call_site_sent_at,
+                enqueued_at=enqueued_at,
+                enqueue_delay_seconds=enqueue_delay_seconds,
+                good_until=good_until,
+                max_retries=max_retries,
+                task_options=task_options,
+                enqueue_sha=enqueue_sha,
+                scoped_key_digest=scoped_key_digest,
+                cutover_values=cutover.ok_value,
             )
 
-            async with self.session_factory() as session:
-                if scoped_key_digest is not None:
+            if scoped_key_digest is not None:
+                async with self.session_factory() as session:
                     # Claim and insert in ONE transaction: the claim
                     # reuses the command fingerprint computed for the
                     # cutover columns, and a replayed key returns the
@@ -1501,10 +1595,11 @@ class PostgresBroker:
                             )
                         case ReservationApplied():
                             pass
-                result = await session.execute(stmt)
-                row = result.fetchone()
-                if row is None:
-                    if scoped_key_digest is not None:
+                    result = await session.execute(
+                        ENQUEUE_INSERT_SQL, insert_params
+                    )
+                    row = result.fetchone()
+                    if row is None:
                         return await self._bind_key_after_task_id_conflict(
                             session,
                             task_id=task_id,
@@ -1515,12 +1610,20 @@ class PostgresBroker:
                                 'command_fingerprint'
                             ],
                         )
-                    # An unkeyed exact-ID retry owns no additional state.
-                    # Roll back before verifying the existing payload in a
-                    # separate read transaction.
-                    await session.rollback()
-                else:
                     await session.commit()
+            else:
+                # Unkeyed enqueue is one atomic INSERT; autocommit skips
+                # the BEGIN/COMMIT round trips a session transaction pays.
+                # The connection-level isolation override is reset when
+                # the connection returns to the pool.
+                async with self.async_engine.connect() as conn:
+                    autocommit_conn = await conn.execution_options(
+                        isolation_level='AUTOCOMMIT',
+                    )
+                    result = await autocommit_conn.execute(
+                        ENQUEUE_INSERT_SQL, insert_params
+                    )
+                    row = result.fetchone()
 
             if row is not None:
                 # Row inserted — fresh enqueue succeeded.
