@@ -438,7 +438,7 @@ async fn schema_state_matrix_controls_meta_and_actions_without_blocking_reads() 
         ),
         (
             SchemaState::Mismatch,
-            Some(42),
+            Some(crate::expected_schema_version() - 1),
             false,
             Some(SCHEMA_INCOMPATIBLE),
         ),
@@ -523,7 +523,7 @@ async fn schema_probe_caches_successes_and_never_caches_a_cold_failure() {
     let expected = crate::expected_schema_version();
     let reader = SequenceReader::new([
         ReaderAnswer::Failure,
-        ReaderAnswer::Status(status(SchemaState::Mismatch, Some(42))),
+        ReaderAnswer::Status(status(SchemaState::Mismatch, Some(expected - 1))),
         ReaderAnswer::Failure,
     ]);
     let probe = SchemaProbe::with_reader(reader.clone(), expected, Duration::ZERO);

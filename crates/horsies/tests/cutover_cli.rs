@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 use std::str::FromStr;
 
-use horsies::PostgresBroker;
+use horsies::{expected_schema_version, PostgresBroker};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{ConnectOptions, Connection, Executor, PgConnection};
 use uuid::Uuid;
@@ -221,7 +221,8 @@ async fn database_commands_print_facts_and_refuse_invalid_postures() {
         .contains("unfingerprinted=0, unprepared=0, unclassified=0 (0 bytes), class-days=0"));
     let status = run(&["cutover", "--database-url", &url, "status"]);
     assert!(status.status.success(), "{}", stderr(&status));
-    assert!(stdout(&status).contains("stored-schema=42, attested=true"));
+    let expected_status = format!("stored-schema={}, attested=true", expected_schema_version());
+    assert!(stdout(&status).contains(&expected_status));
     assert!(!stdout(&status).contains("CutoverStatus"));
     let prepare = run(&["cutover", "--database-url", &url, "prepare"]);
     assert!(prepare.status.success(), "{}", stderr(&prepare));
