@@ -4977,6 +4977,7 @@ mod get_result_wait_tests {
     //! that does not exist (pruned by retention, or a bogus id) returns a typed
     //! `TaskNotFound` outcome from the initial poll instead of hanging.
     use super::*;
+    use serial_test::serial;
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -4990,6 +4991,7 @@ mod get_result_wait_tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn get_result_no_timeout_returns_not_found_for_missing_task() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let broker = PostgresBroker::from_pool(pool);
@@ -5091,7 +5093,7 @@ mod filter_non_runnable_tests {
         );
 
         let task_status: String =
-            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
+            sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
                 .bind(&task_id)
                 .fetch_one(&pool)
                 .await
@@ -5114,6 +5116,11 @@ mod filter_non_runnable_tests {
             .await
             .ok();
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
             .bind(&task_id)
             .execute(&pool)
             .await

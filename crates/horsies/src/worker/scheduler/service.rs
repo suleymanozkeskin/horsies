@@ -1086,6 +1086,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn process_schedule_single_late_tick_anchors_to_slot() {
         // A late tick still within one period must fire the stored slot and
         // advance one period from it (slot-anchored, not wall-clock; horsies
@@ -1152,6 +1153,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn process_schedule_skips_to_latest_due_slot_when_catch_up_disabled() {
         // C5: catch_up_missed=false with a backlog more than one period deep must
         // fire ONLY the latest due slot and persist a strictly-future next_run,
@@ -1262,6 +1264,7 @@ mod tests {
     /// (with a strictly-future next_run), leaves an existing row's next_run
     /// untouched, and skips disabled schedules. Parity with horsies PR #123.
     #[tokio::test]
+    #[serial]
     async fn ensure_states_exist_heals_missing_and_preserves_existing() {
         let pool = test_pool().await;
         let missing = format!("qw123_missing_{}", uuid::Uuid::new_v4());

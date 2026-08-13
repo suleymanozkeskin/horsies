@@ -732,6 +732,7 @@ mod wait_tests {
     use std::sync::Arc;
 
     #[tokio::test]
+    #[serial]
     async fn get_workflow_result_no_timeout_returns_not_found_for_missing_workflow() {
         let broker =
             PostgresBroker::from_pool(crate::broker::terminalization_matrix::migrated_pool().await);

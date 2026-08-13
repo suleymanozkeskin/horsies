@@ -1,4 +1,4 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, DurationRound, Utc};
 use serial_test::serial;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -270,7 +270,9 @@ async fn failed_cancelled_and_expired_sources_enqueue_fresh_lineage() {
         .await
         .unwrap();
     drop(registration);
-    let deadline = Utc::now() + Duration::hours(2);
+    let deadline = (Utc::now() + Duration::hours(2))
+        .duration_trunc(Duration::microseconds(1))
+        .expect("truncate PostgreSQL timestamp expectation to microseconds");
     let mut ids = Vec::new();
     for (index, kind) in [
         TerminalSource::Failed,

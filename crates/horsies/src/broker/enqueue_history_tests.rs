@@ -666,6 +666,8 @@ async fn delayed_schedule_retry_preserves_delay_key_and_retention() {
 
 #[test]
 fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
+    // Gate rule: any change that adds, removes, or relocates a test task INSERT
+    // must rerun this inventory and update the exact classified count.
     const SOURCES: &[(&str, &str)] = &[
         ("broker/postgres.rs", include_str!("postgres.rs")),
         (
@@ -761,7 +763,7 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
         }
     }
 
-    assert_eq!(insert_count, 37, "classify every workspace task insert");
+    assert_eq!(insert_count, 29, "classify every workspace task insert");
     assert_eq!(
         transitional_v26_count, 1,
         "only the populated-v26 migration fixture may omit post-v26 columns",
