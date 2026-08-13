@@ -1038,41 +1038,8 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        if let Some(root) = root {
-            if let Ok(contents) = std::fs::read_to_string(root.join(".env")) {
-                for line in contents.lines() {
-                    let line = line.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    if let Some((key, value)) = line.split_once('=') {
-                        if key.trim() == "DB_PASSWORD" {
-                            return format!(
-                                "postgresql://postgres:{}@localhost:5432/horsies-rust-port",
-                                value.trim(),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        panic!("database URL not found: set DATABASE_URL or add DB_PASSWORD to .env");
-    }
-
     async fn test_pool() -> PgPool {
-        let url = test_db_url();
-        let pool = PgPool::connect(&url).await.expect("failed to connect");
-        crate::broker::migrations::run_horsies_migrations(&pool)
-            .await
-            .expect("migrations failed");
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let mut transaction = pool.begin().await.expect("coverage transaction");
         let coverage =
             ensure_startup_coverage(transaction.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
@@ -1094,8 +1061,7 @@ mod tests {
     }
 
     async fn test_broker() -> Arc<PostgresBroker> {
-        let url = test_db_url();
-        Arc::new(PostgresBroker::connect(&url).await.unwrap())
+        Arc::new(PostgresBroker::from_pool(test_pool().await))
     }
 
     async fn insert_claimed_task(
@@ -2522,7 +2488,7 @@ mod tests {
 
         // Distinct session URL (same DB, extra query param) so the session pool
         // is separate from the main pool.
-        let main_url = test_db_url();
+        let main_url = crate::broker::terminalization_matrix::migrated_database_url().await;
         let sep = if main_url.contains('?') { '&' } else { '?' };
         let session_url = format!("{main_url}{sep}application_name=c11_session");
         let pg_config = PostgresConfig {
@@ -2645,7 +2611,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig {
-                database_url: test_db_url(),
+                database_url: crate::broker::terminalization_matrix::migrated_database_url().await,
                 session_database_url: None,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,

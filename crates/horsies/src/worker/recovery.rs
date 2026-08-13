@@ -1730,10 +1730,7 @@ mod tests {
     }
 
     async fn test_pool() -> PgPool {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
-        crate::broker::migrations::run_horsies_migrations(&pool)
-            .await
-            .expect("migrations");
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         let mut coverage = pool.begin().await.expect("begin startup coverage");
         let outcome = ensure_startup_coverage(
             coverage.as_mut(),

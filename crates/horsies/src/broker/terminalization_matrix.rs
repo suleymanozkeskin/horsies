@@ -14,7 +14,7 @@
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Connection, PgConnection, PgPool};
+use sqlx::{ConnectOptions, Connection, PgConnection, PgPool};
 use std::str::FromStr;
 use tokio::sync::OnceCell;
 use uuid::Uuid;
@@ -78,6 +78,7 @@ fn test_db_url() -> String {
 
 struct P5TestDatabase {
     name: String,
+    url: String,
     _anchor: PgPool,
 }
 
@@ -128,12 +129,14 @@ pub(crate) async fn migrated_pool() -> PgPool {
                 .execute(&mut admin)
                 .await
                 .expect("create P5 database");
+            let generated_options = base_options.database(&database_name);
+            let database_url = generated_options.to_url_lossy().to_string();
             let anchor = PgPoolOptions::new()
                 .min_connections(1)
                 .max_connections(1)
                 .max_lifetime(None)
                 .idle_timeout(None)
-                .connect_with(base_options.database(&database_name))
+                .connect_with(generated_options)
                 .await
                 .expect("connect P5 database");
             let unlocked: bool = sqlx::query_scalar(
@@ -157,6 +160,7 @@ pub(crate) async fn migrated_pool() -> PgPool {
             );
             transaction.commit().await.expect("commit coverage");
             P5TestDatabase {
+                url: database_url,
                 name: database_name,
                 _anchor: anchor,
             }
@@ -170,6 +174,16 @@ pub(crate) async fn migrated_pool() -> PgPool {
         .connect_with(base_options)
         .await
         .expect("connect current P5 test runtime")
+}
+
+pub(crate) async fn migrated_database_url() -> String {
+    let pool = migrated_pool().await;
+    drop(pool);
+    P5_DATABASE
+        .get()
+        .expect("migrated_pool initializes the P5 database")
+        .url
+        .clone()
 }
 
 struct Seed {
