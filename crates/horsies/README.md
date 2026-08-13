@@ -23,6 +23,7 @@ Rust port of [horsies](https://github.com/suleymanozkeskin/horsies) (Python).
 - Automatic schema initialization on normal startup paths
 - Worker heartbeats and stale-task recovery
 - Recurring scheduler for interval, hourly, daily, weekly, and monthly jobs
+- Optional axum monitoring API and embedded browser dashboard
 - `app.check()` / `app.check_live()` validation before runtime
 
 ## Quick Start
@@ -122,12 +123,25 @@ impl WorkflowDefinition for ExampleWorkflow {
 - [Defining Workflows](https://suleymanozkeskin.github.io/horsies-rust/quick-start/03-defining-workflows/)
 - [Workflow API](https://suleymanozkeskin.github.io/horsies-rust/concepts/workflows/workflow-api/)
 - [Scheduler Overview](https://suleymanozkeskin.github.io/horsies-rust/scheduling/scheduler-overview/)
+- [Web UI Overview](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-overview/)
 
 ## Monitoring
 
-Horsies includes **Syce**, a terminal UI for monitoring your cluster in real time.
+Enable the `web` feature to use the embedded browser dashboard and axum API.
 
-![Syce Dashboard](https://suleymanozkeskin.github.io/horsies-rust/images/syce/dashboard.png)
+```bash
+cargo build --release --features web
+horsies web ./config/horsies.toml
+```
+
+The dashboard merges live tasks with retained task history. It also shows
+workflows, workers, and schedules. Deployments can remain view-only or enable
+task and workflow actions behind an auth policy.
+
+[**Web UI Setup & Authentication**](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-deployment/)
+
+Horsies also includes **Syce**, a terminal UI. The current Syce release does
+not support the task-history schema.
 
 [**Syce Setup & Usage**](https://suleymanozkeskin.github.io/horsies-rust/monitoring/syce-overview/)
 

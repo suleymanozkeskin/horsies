@@ -9,6 +9,36 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: Web UI Contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.23
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun run test
+
+      - name: Check design tokens
+        run: bun run lint:tokens
+
+      - name: Check committed distribution
+        run: bun run check:dist
+
   pgbouncer:
     name: PgBouncer Contracts
     runs-on: ubuntu-latest

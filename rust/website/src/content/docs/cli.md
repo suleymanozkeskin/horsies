@@ -1,8 +1,8 @@
 ---
 title: CLI Reference
-summary: Command-line interface for running workers and the scheduler.
-related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
-tags: [cli, worker, scheduler, commands]
+summary: Command-line interface for workers, the scheduler, and monitoring.
+related: [../workers/worker-architecture, ../scheduling/scheduler-overview, ./monitoring/web-ui-deployment]
+tags: [cli, worker, scheduler, monitoring, commands]
 ---
 
 Horsies provides a clap-based CLI (`horsies`) for running workers, the scheduler, and validation checks. In Rust, tasks are registered at compile time, so the CLI takes a configuration source (config file path or database URL) instead of a Python module path.
@@ -167,6 +167,61 @@ app.check()?;
 app.check_live().await?;
 ```
 
+### horsies web
+
+Start the optional monitoring dashboard. Build the binary with the `web` Cargo
+feature first.
+
+```bash
+horsies web CONFIG [OPTIONS]
+horsies web --database-url URL [OPTIONS]
+```
+
+`CONFIG` is a TOML application configuration. `--database-url` selects the
+standalone database-URL form. The two forms are mutually exclusive.
+
+The server is observe-only. It does not run migrations or the task-history
+fleet gate.
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--database-url URL` | -- | Runtime query URL instead of `CONFIG` |
+| `--session-database-url URL` | -- | Direct or session URL for `LISTEN/NOTIFY` |
+| `--pgbouncer-transaction-mode` | false | Treat the runtime URL as a PgBouncer transaction pool |
+| `--host HOST` | `127.0.0.1` | Bind interface or host |
+| `--port PORT` | `8600` | Bind port; zero requests an assigned port |
+| `--auth MODE` | `none` | `none` or `trusted-header` |
+| `--trusted-header NAME` | `X-Forwarded-User` | Trusted proxy identity header |
+| `--enable-actions` | false | Enable task and workflow actions |
+| `--custom-css-url URL` | -- | Load a stylesheet after the bundled styles |
+| `--loglevel LEVEL` | `info` | debug, info, warning, error |
+
+`--auth none` requires a loopback host. Trusted-header mode requires a reverse
+proxy that strips or overwrites the identity header on every request.
+
+```bash
+# Local view-only dashboard
+horsies web ./config/horsies.toml
+
+# Trusted proxy with actions
+horsies web ./config/horsies.toml \
+  --host 127.0.0.1 \
+  --auth trusted-header \
+  --trusted-header X-Forwarded-User \
+  --enable-actions
+
+# PgBouncer transaction-pool deployment
+horsies web \
+  --database-url postgresql://app:secret@pool.example.com/horsies \
+  --session-database-url postgresql://app:secret@db.example.com/horsies \
+  --pgbouncer-transaction-mode
+```
+
+See [Deployment and Authentication](./monitoring/web-ui-deployment/) for the
+router factory, auth policies, custom CSS, and schema states.
+
 ### horsies get-docs
 
 Fetch the full documentation locally as markdown files. Useful for AI agents (Claude Code, Cursor, Copilot, etc.) that need to read docs without web requests.
@@ -230,6 +285,7 @@ Workers wait for running tasks to complete before exiting.
 | ---- | ------- |
 | 0 | Clean shutdown |
 | 1 | Error (check logs) |
+| 2 | Unsafe or invalid `horsies web` security arguments |
 
 ## Environment Variables
 

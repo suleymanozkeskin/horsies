@@ -5,6 +5,58 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.27] - 2026-08-13
+
+This release adds the browser monitoring dashboard and its transport-free read
+and action API. The migration chain advances from 0042 to 0043.
+
+### Added
+
+- Added the optional `web` Cargo feature. It provides an axum router and an
+  embedded React dashboard for tasks, workflows, workers, and schedules.
+- Added the transport-free `horsies::monitoring` module. It provides typed
+  live-plus-history reads and task or workflow action decisions.
+- Added `horsies web` with TOML and database-URL modes. The command supports
+  view-only service, trusted proxy headers, actions, custom CSS, and PgBouncer
+  split URLs.
+- Added migration 0043 with the task `enqueued_at` and `task_name` monitoring
+  indexes.
+- Added server-sent invalidation events for task, workflow, and worker changes.
+
+### Changed
+
+- Dashboard task lists and aggregates now merge live tasks with a bounded
+  retained-history window. The default window is 24 hours. The maximum window
+  is 30 days.
+- Dashboard actions require authorization, `X-Horsies-Intent: action`, an exact
+  schema version, and the task-history cutover attestation.
+- The standalone dashboard uses observe-only startup. It never applies
+  migrations or writes cutover state.
+- Monitoring task actions now cancel eligible live tasks. Workflow actions now
+  pause, resume, or cancel eligible workflows.
+
+### Removed
+
+- Removed the stale manual-retry control from the vendored dashboard. Use the
+  programmatic `rerun_task` API to create a new lineage-bearing task from an
+  eligible retained source.
+
+### Security
+
+- `--auth none` now requires a loopback bind. Network deployments must use a
+  trusted proxy or mount a custom `MonitoringAuthPolicy`.
+- Trusted-header mode requires the proxy to strip or overwrite the configured
+  identity header. The CLI prints this requirement at startup.
+- Schema mismatch, absent schema, incomplete cutover, and unknown schema states
+  disable actions without running DDL.
+
+### Upgrade
+
+- Apply migration 0043 before enabling actions. Reads can remain available
+  while the schema probe reports a version mismatch.
+- Rebuild with `--features web` to include the monitoring router and dashboard.
+- See the [web UI deployment guide](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-deployment/).
+
 ## [0.1.0-alpha.26] - 2026-08-13
 
 This release adds the task-history live/archive split. The Rust migration chain

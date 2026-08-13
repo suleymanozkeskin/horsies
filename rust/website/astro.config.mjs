@@ -107,6 +107,9 @@ export default defineConfig({
 				{
 					label: 'Monitoring',
 					items: [
+						{ label: 'Web UI Overview', slug: 'monitoring/web-ui-overview' },
+						{ label: 'Deployment & Authentication', slug: 'monitoring/web-ui-deployment' },
+						{ label: 'Action Semantics', slug: 'monitoring/action-semantics' },
 						{ label: 'Syce Overview', slug: 'monitoring/syce-overview' },
 						{ label: 'Broker Methods', slug: 'monitoring/broker-methods' },
 					],
