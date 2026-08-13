@@ -24,7 +24,7 @@ pub use health::{
 pub use listener::NotifyListener;
 pub use migrations::{expected_schema_version, run_horsies_migrations, MIGRATIONS_TABLE};
 pub use postgres::{compute_enqueue_sha, ClaimPassParams, PostgresBroker, UPSERT_TASK_ATTEMPT_SQL};
-pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
+pub use result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord};
 pub use row::heartbeat::HeartbeatRow;
 pub use row::task::{
     ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow, TaskInfoRow,

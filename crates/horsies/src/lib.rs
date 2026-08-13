@@ -74,10 +74,10 @@ pub use crate::core::{AppConfig, HorsiesError};
 pub use crate::broker::{
     compute_enqueue_sha, expected_schema_version, run_horsies_migrations, BrokerError,
     BrokerErrorCode, BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing,
-    ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker, SharedNotifyListener,
-    StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow, TaskRunningContextRow,
-    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot,
-    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker, RawResultRecord,
+    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
+    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
+    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 /// Alias for [`PostgresBroker`].
 pub type Broker = PostgresBroker;
@@ -91,11 +91,23 @@ pub use crate::worker::{
     worker::Worker,
 };
 
+pub use crate::core::history::rerun::{
+    NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+};
 pub use crate::workflow_engine::bound_handle::WorkflowHandle;
 pub use crate::workflow_engine::engine::{on_subworkflow_complete, on_workflow_task_complete};
 pub use crate::workflow_engine::error::WorkflowError;
 pub use crate::workflow_engine::info::WorkflowTaskInfo;
 pub use crate::workflow_engine::lifecycle::{cancel_workflow, pause_workflow, resume_workflow};
+
+/// Rerun a retained terminal task as a fresh request.
+pub async fn rerun_task(
+    broker: &PostgresBroker,
+    command: RerunTask,
+    policy: RerunEnqueuePolicy,
+) -> Result<RerunOutcome, RerunError> {
+    broker.rerun_task(command, policy).await
+}
 pub use crate::workflow_engine::query::get_workflow_result;
 pub use crate::workflow_engine::recovery::recover_stuck_workflows;
 

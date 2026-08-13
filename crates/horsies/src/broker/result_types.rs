@@ -2,6 +2,10 @@
 ///
 /// Mirrors Python's `horsies/core/brokers/result_types.py`.
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+use uuid::Uuid;
+
+use crate::core::TaskStatus;
 
 /// Categorized broker operation failure codes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -19,6 +23,7 @@ pub enum BrokerErrorCode {
     ListenerStartFailed,
     ListenerSubscribeFailed,
     NoBroker,
+    InvalidJsonPayload,
 }
 
 impl std::fmt::Display for BrokerErrorCode {
@@ -57,6 +62,19 @@ impl std::error::Error for BrokerOperationError {}
 ///
 /// `Ok(T)` on success, `Err(BrokerOperationError)` on infrastructure failure.
 pub type BrokerResult<T> = Result<T, BrokerOperationError>;
+
+/// Raw broker-level snapshot of a task's stored result envelope.
+///
+/// The broker verifies history envelopes and parses the outer JSON object but
+/// deliberately performs no task-specific `Ok` decoding. Typed handles layer
+/// their task result type on top of this record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawResultRecord {
+    pub task_id: Uuid,
+    pub task_name: String,
+    pub status: TaskStatus,
+    pub raw_result: Option<Map<String, Value>>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -99,6 +117,7 @@ mod tests {
             BrokerErrorCode::ListenerStartFailed,
             BrokerErrorCode::ListenerSubscribeFailed,
             BrokerErrorCode::NoBroker,
+            BrokerErrorCode::InvalidJsonPayload,
         ];
         for code in codes {
             let json = serde_json::to_string(&code).unwrap();

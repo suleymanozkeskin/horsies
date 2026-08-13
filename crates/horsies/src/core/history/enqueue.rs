@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 use super::archive::rerun_input::RerunInputDisposition;
 use super::ddl::classes::resolve_retention_class_key;
@@ -74,6 +75,41 @@ pub fn prepare_enqueue_facts(
     idempotency_key: Option<&str>,
     eligibility: EnqueueInputEligibility,
 ) -> Result<PreparedEnqueueFacts, EnqueuePreparationError> {
+    prepare_enqueue_facts_with_lineage(
+        task_name,
+        queue_name,
+        priority,
+        args_json,
+        kwargs_json,
+        good_until,
+        enqueue_delay_seconds,
+        task_options_json,
+        retention_class_key,
+        retain_rerun_input,
+        idempotency_key,
+        eligibility,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_enqueue_facts_with_lineage(
+    task_name: &str,
+    queue_name: &str,
+    priority: i32,
+    args_json: Option<&str>,
+    kwargs_json: Option<&str>,
+    good_until: Option<DateTime<Utc>>,
+    enqueue_delay_seconds: Option<i64>,
+    task_options_json: Option<&str>,
+    retention_class_key: Option<&str>,
+    retain_rerun_input: bool,
+    idempotency_key: Option<&str>,
+    eligibility: EnqueueInputEligibility,
+    rerun_of_task_id: Option<Uuid>,
+    rerun_root_task_id: Option<Uuid>,
+) -> Result<PreparedEnqueueFacts, EnqueuePreparationError> {
     let args = parse_args(args_json)?;
     let kwargs = parse_object(
         "kwargs",
@@ -95,8 +131,8 @@ pub fn prepare_enqueue_facts(
         task_options_json.map(str::to_owned),
         &retention_class_key,
         retain_rerun_input,
-        None,
-        None,
+        rerun_of_task_id,
+        rerun_root_task_id,
     )?;
     let idempotency_key_digest = idempotency_key
         .map(|key| ScopedIdempotencyKey::new(task_name, key).map(|scoped| scoped.digest()))

@@ -76,55 +76,17 @@ impl<T: DeserializeOwned + Clone> TaskHandle<T> {
         include_failed_reason: bool,
         include_attempts: bool,
     ) -> crate::broker::result_types::BrokerResult<Option<TaskInfo>> {
-        let mut info = self
+        let info = self
             .broker
-            .get_task_info(self.task_id, include_result, include_failed_reason)
+            .get_task_info_with_attempts(
+                self.task_id,
+                include_result,
+                include_failed_reason,
+                include_attempts,
+            )
             .await?;
 
-        if include_attempts {
-            if let Some(ref mut task_info) = info {
-                let rows = self
-                    .broker
-                    .get_task_attempts(self.task_id)
-                    .await
-                    .map_err(|e| crate::broker::result_types::BrokerOperationError {
-                        code: crate::broker::result_types::BrokerErrorCode::TaskInfoQueryFailed,
-                        message: format!("{}", e),
-                        retryable: e.is_retryable(),
-                    })?;
-                let attempts: Vec<crate::core::TaskAttemptInfo> = rows
-                    .into_iter()
-                    .map(|row| crate::core::TaskAttemptInfo {
-                        task_id: row.task_id,
-                        attempt: row.attempt,
-                        outcome: parse_attempt_outcome(&row.outcome),
-                        will_retry: row.will_retry,
-                        started_at: row.started_at,
-                        finished_at: row.finished_at,
-                        error_code: row.error_code,
-                        error_message: row.error_message,
-                        failed_reason: row.failed_reason,
-                        worker_id: row.worker_id,
-                        worker_hostname: row.worker_hostname,
-                        worker_pid: row.worker_pid,
-                        worker_process_name: row.worker_process_name,
-                    })
-                    .collect();
-                task_info.attempts = Some(attempts);
-            }
-        }
-
         Ok(info)
-    }
-}
-
-/// Parse an attempt outcome string from the database into a `TaskAttemptOutcome`.
-fn parse_attempt_outcome(s: &str) -> crate::core::TaskAttemptOutcome {
-    match s {
-        "COMPLETED" => crate::core::TaskAttemptOutcome::Completed,
-        "FAILED" => crate::core::TaskAttemptOutcome::Failed,
-        "WORKER_FAILURE" => crate::core::TaskAttemptOutcome::WorkerFailure,
-        _ => crate::core::TaskAttemptOutcome::Failed,
     }
 }
 

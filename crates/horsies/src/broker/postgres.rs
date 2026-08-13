@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
-use sqlx::{ConnectOptions, Postgres, Transaction};
+use sqlx::{ConnectOptions, FromRow, Postgres, Transaction};
 use std::str::FromStr;
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -23,6 +23,9 @@ use crate::core::history::identity::reservations::{claim_key_reservation, Reserv
 use crate::core::history::reads::detail::{
     read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
 };
+use crate::core::history::rerun::operations::{
+    rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+};
 use crate::core::{
     OutcomeCode, PostgresConfig, ResolvedEnqueue, RetrievalCode, TaskError, TaskInfo, TaskOptions,
     TaskResult, TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult,
@@ -34,7 +37,9 @@ use crate::broker::health::{
     DatabasePing, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot,
     WORKER_PING_CHANNEL,
 };
-use crate::broker::result_types::{BrokerErrorCode, BrokerOperationError, BrokerResult};
+use crate::broker::result_types::{
+    BrokerErrorCode, BrokerOperationError, BrokerResult, RawResultRecord,
+};
 use crate::broker::row::task::{
     ClaimedId, ClaimedTaskRow, ExpiredTaskRow, SetRunningRow, StaleTaskRow, TaskAttemptRow,
     TaskInfoRow, TaskResultRow, TaskRunningContextRow,
@@ -220,6 +225,16 @@ RETURNING id";
 
 const GET_RESULT_SQL: &str = "\
 SELECT id, status, result, failed_reason
+FROM horsies_tasks
+WHERE id = $1";
+
+const GET_RAW_RESULT_PROBE_SQL: &str = "\
+SELECT id, task_name, status
+FROM horsies_tasks
+WHERE id = $1";
+
+const GET_RAW_RESULT_RECORD_SQL: &str = "\
+SELECT id, task_name, status, result
 FROM horsies_tasks
 WHERE id = $1";
 
@@ -798,6 +813,18 @@ impl PostgresBroker {
     /// transaction pooling.
     pub fn pgbouncer_transaction_mode(&self) -> bool {
         self.pgbouncer_transaction_mode
+    }
+
+    /// Rerun one retained terminal task in a broker-owned transaction.
+    pub async fn rerun_task(
+        &self,
+        command: RerunTask,
+        policy: RerunEnqueuePolicy,
+    ) -> Result<RerunOutcome, RerunError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome = rerun_task_in_tx(transaction.as_mut(), &command, &policy).await?;
+        transaction.commit().await?;
+        Ok(outcome)
     }
 
     /// Shared listener for the `task_done` NOTIFY channel.
@@ -1785,6 +1812,67 @@ impl PostgresBroker {
         }
     }
 
+    /// Fetch the verified outer result envelope without task-specific decoding.
+    ///
+    /// A terminal history row is resolved through the staged detail reader.
+    /// When `timeout` expires for a live non-terminal task, the latest status is
+    /// returned with no result. A task absent from both live and retained
+    /// history returns `Ok(None)`.
+    pub async fn get_raw_result_record(
+        &self,
+        task_id: Uuid,
+        timeout: Option<Duration>,
+    ) -> BrokerResult<Option<RawResultRecord>> {
+        match self.raw_result_probe(task_id).await? {
+            RawResultProbe::Record(record) => return Ok(Some(record)),
+            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
+        }
+
+        let shared = self
+            .task_done_listener()
+            .await
+            .map_err(raw_result_operation_error)?;
+        let task_id_text = task_id.to_string();
+        let mut subscription = shared.subscribe(&task_id_text);
+
+        match self.raw_result_probe(task_id).await? {
+            RawResultProbe::Record(record) => return Ok(Some(record)),
+            RawResultProbe::Absent => return Ok(None),
+            RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
+        }
+
+        let deadline = timeout.map(|duration| Instant::now() + duration);
+        loop {
+            if deadline.is_some_and(|at| Instant::now() >= at) {
+                return match self.raw_result_probe(task_id).await? {
+                    RawResultProbe::Record(record) | RawResultProbe::Waiting(record) => {
+                        Ok(Some(record))
+                    }
+                    RawResultProbe::Absent => Ok(None),
+                    RawResultProbe::Retry => {
+                        tokio::task::yield_now().await;
+                        continue;
+                    }
+                };
+            }
+            let wait = deadline
+                .map(|at| {
+                    at.saturating_duration_since(Instant::now())
+                        .min(RESULT_WAIT_REPOLL)
+                })
+                .unwrap_or(RESULT_WAIT_REPOLL);
+            match tokio::time::timeout(wait, subscription.recv()).await {
+                Ok(Ok(())) | Err(_) => match self.raw_result_probe(task_id).await? {
+                    RawResultProbe::Record(record) => return Ok(Some(record)),
+                    RawResultProbe::Absent => return Ok(None),
+                    RawResultProbe::Waiting(_) | RawResultProbe::Retry => {}
+                },
+                Ok(Err(error)) => return Err(raw_result_operation_error(error)),
+            }
+        }
+    }
+
     /// Fetch task metadata.
     ///
     /// By default, the `result` and `failed_reason` fields are excluded
@@ -1796,6 +1884,19 @@ impl PostgresBroker {
         task_id: Uuid,
         include_result: bool,
         include_failed_reason: bool,
+    ) -> BrokerResult<Option<TaskInfo>> {
+        self.get_task_info_with_attempts(task_id, include_result, include_failed_reason, false)
+            .await
+    }
+
+    /// Fetch task metadata and optionally compose execution attempts from the
+    /// live attempt table or the immutable history snapshot.
+    pub async fn get_task_info_with_attempts(
+        &self,
+        task_id: Uuid,
+        include_result: bool,
+        include_failed_reason: bool,
+        include_attempts: bool,
     ) -> BrokerResult<Option<TaskInfo>> {
         let sql = match (include_result, include_failed_reason) {
             (true, true) => GET_TASK_INFO_SQL,
@@ -1815,24 +1916,35 @@ impl PostgresBroker {
             })?;
 
         match row {
-            Some(r) => Ok(Some(r.into_task_info().map_err(|e| {
-                BrokerOperationError {
-                    code: BrokerErrorCode::TaskInfoQueryFailed,
-                    message: format!("{}", e),
-                    retryable: false,
+            Some(r) => {
+                let mut info = r.into_task_info().map_err(task_info_history_error)?;
+                if include_attempts {
+                    info.attempts = Some(
+                        self.get_task_attempts(task_id)
+                            .await
+                            .map_err(task_info_history_error)?
+                            .into_iter()
+                            .map(task_attempt_info_from_row)
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(task_info_history_error)?,
+                    );
                 }
-            })?)),
+                Ok(Some(info))
+            }
             None => {
                 let detail = self
                     .fetch_history_detail(task_id)
                     .await
                     .map_err(task_info_history_error)?;
                 match detail {
-                    Some(TaskDetailResult::History(detail)) => {
-                        history_task_info(detail, include_result, include_failed_reason)
-                            .map(Some)
-                            .map_err(task_info_history_error)
-                    }
+                    Some(TaskDetailResult::History(detail)) => history_task_info(
+                        detail,
+                        include_result,
+                        include_failed_reason,
+                        include_attempts,
+                    )
+                    .map(Some)
+                    .map_err(task_info_history_error),
                     Some(TaskDetailResult::Live { .. }) | None => Ok(None),
                     Some(TaskDetailResult::Absent { .. }) => Ok(None),
                 }
@@ -2532,6 +2644,66 @@ impl PostgresBroker {
         }
     }
 
+    async fn raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+        let live: Option<RawResultProbeRow> = sqlx::query_as(GET_RAW_RESULT_PROBE_SQL)
+            .bind(task_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
+        if let Some(row) = live {
+            let status: crate::core::TaskStatus = row
+                .status
+                .parse()
+                .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+            if matches!(
+                status,
+                crate::core::TaskStatus::Completed
+                    | crate::core::TaskStatus::Failed
+                    | crate::core::TaskStatus::Expired
+            ) {
+                let terminal: Option<RawResultDbRow> = sqlx::query_as(GET_RAW_RESULT_RECORD_SQL)
+                    .bind(task_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|error| raw_result_operation_error(BrokerError::Database(error)))?;
+                let Some(terminal) = terminal else {
+                    return self.history_raw_result_probe(task_id).await;
+                };
+                let terminal_status: crate::core::TaskStatus =
+                    terminal.status.parse().map_err(|error| {
+                        raw_result_operation_error(BrokerError::InvalidStatus(error))
+                    })?;
+                return Ok(RawResultProbe::Record(RawResultRecord {
+                    task_id: terminal.id,
+                    task_name: terminal.task_name,
+                    status: terminal_status,
+                    raw_result: decode_raw_result_object(terminal.result.as_deref())?,
+                }));
+            }
+            let record = RawResultRecord {
+                task_id: row.id,
+                task_name: row.task_name,
+                status,
+                raw_result: None,
+            };
+            return Ok(if status == crate::core::TaskStatus::Cancelled {
+                RawResultProbe::Record(record)
+            } else {
+                RawResultProbe::Waiting(record)
+            });
+        }
+
+        self.history_raw_result_probe(task_id).await
+    }
+
+    async fn history_raw_result_probe(&self, task_id: Uuid) -> BrokerResult<RawResultProbe> {
+        let detail = self
+            .fetch_history_detail(task_id)
+            .await
+            .map_err(raw_result_operation_error)?;
+        raw_result_from_history_detail(task_id, detail)
+    }
+
     async fn fetch_history_detail(
         &self,
         task_id: Uuid,
@@ -2619,8 +2791,14 @@ fn map_history_read_error(error: HistoryError) -> BrokerError {
 }
 
 fn task_info_history_error(error: BrokerError) -> BrokerOperationError {
+    let code = match &error {
+        BrokerError::Serialization(_)
+        | BrokerError::HistoryReadContract(_)
+        | BrokerError::InvalidStatus(_) => BrokerErrorCode::InvalidJsonPayload,
+        _ => BrokerErrorCode::TaskInfoQueryFailed,
+    };
     BrokerOperationError {
-        code: BrokerErrorCode::TaskInfoQueryFailed,
+        code,
         message: error.to_string(),
         retryable: error.is_retryable(),
     }
@@ -2630,6 +2808,119 @@ enum ResultRowProbe {
     Row(TaskResultRow),
     Live,
     Absent,
+}
+
+#[derive(Debug, FromRow)]
+struct RawResultProbeRow {
+    id: Uuid,
+    task_name: String,
+    status: String,
+}
+
+#[derive(Debug, FromRow)]
+struct RawResultDbRow {
+    id: Uuid,
+    task_name: String,
+    status: String,
+    result: Option<String>,
+}
+
+enum RawResultProbe {
+    Record(RawResultRecord),
+    Waiting(RawResultRecord),
+    Retry,
+    Absent,
+}
+
+fn raw_result_from_history_detail(
+    task_id: Uuid,
+    detail: Option<TaskDetailResult>,
+) -> BrokerResult<RawResultProbe> {
+    match detail {
+        None | Some(TaskDetailResult::Absent { .. }) => Ok(RawResultProbe::Absent),
+        Some(TaskDetailResult::Live { .. }) => Ok(RawResultProbe::Retry),
+        Some(TaskDetailResult::History(detail)) => {
+            let status: crate::core::TaskStatus = detail
+                .status
+                .parse()
+                .map_err(|error| raw_result_operation_error(BrokerError::InvalidStatus(error)))?;
+            if !status.is_terminal() {
+                return Err(raw_result_operation_error(BrokerError::InvalidStatus(
+                    format!("history task {task_id} has non-terminal status {status}"),
+                )));
+            }
+            let raw_result = decode_history_result_value(&detail)
+                .map_err(raw_result_operation_error)?
+                .map(decode_raw_result_value)
+                .transpose()?
+                .flatten();
+            Ok(RawResultProbe::Record(RawResultRecord {
+                task_id: detail.task_id,
+                task_name: detail.task_name,
+                status,
+                raw_result,
+            }))
+        }
+    }
+}
+
+fn decode_raw_result_object(
+    raw_result: Option<&str>,
+) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
+    raw_result
+        .map(|raw| {
+            serde_json::from_str(raw)
+                .map_err(|error| invalid_raw_result(format!("result JSON is invalid: {error}")))
+                .and_then(decode_raw_result_value)
+        })
+        .transpose()
+        .map(Option::flatten)
+}
+
+fn decode_raw_result_value(
+    value: serde_json::Value,
+) -> BrokerResult<Option<serde_json::Map<String, serde_json::Value>>> {
+    match value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(object) => Ok(Some(object)),
+        other => Err(invalid_raw_result(format!(
+            "result JSON must be an object, got {}",
+            json_value_kind(&other),
+        ))),
+    }
+}
+
+fn json_value_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+fn invalid_raw_result(message: String) -> BrokerOperationError {
+    BrokerOperationError {
+        code: BrokerErrorCode::InvalidJsonPayload,
+        message,
+        retryable: false,
+    }
+}
+
+fn raw_result_operation_error(error: BrokerError) -> BrokerOperationError {
+    let code = match &error {
+        BrokerError::Serialization(_)
+        | BrokerError::HistoryReadContract(_)
+        | BrokerError::InvalidStatus(_) => BrokerErrorCode::InvalidJsonPayload,
+        _ => BrokerErrorCode::TaskInfoQueryFailed,
+    };
+    BrokerOperationError {
+        code,
+        message: error.to_string(),
+        retryable: error.is_retryable(),
+    }
 }
 
 fn decode_history_result_value(
@@ -2671,6 +2962,7 @@ fn history_task_info(
     detail: HistoryTaskDetail,
     include_result: bool,
     include_failed_reason: bool,
+    include_attempts: bool,
 ) -> Result<TaskInfo, BrokerError> {
     let status = crate::broker::row::task::parse_task_status(&detail.status)?;
     let result = if include_result {
@@ -2681,6 +2973,15 @@ fn history_task_info(
         None
     };
     let terminal_at = detail.terminal_at;
+    let attempts = include_attempts
+        .then(|| {
+            detail
+                .attempts
+                .iter()
+                .map(|record| task_attempt_info_from_record(detail.task_id, record))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()?;
     Ok(TaskInfo {
         task_id: detail.task_id,
         task_name: detail.task_name,
@@ -2706,8 +3007,60 @@ fn history_task_info(
             .then_some(detail.final_failed_reason)
             .flatten(),
         result,
-        attempts: None,
+        attempts,
     })
+}
+
+fn task_attempt_info_from_row(
+    row: TaskAttemptRow,
+) -> Result<crate::core::TaskAttemptInfo, BrokerError> {
+    Ok(crate::core::TaskAttemptInfo {
+        task_id: row.task_id,
+        attempt: row.attempt,
+        outcome: parse_task_attempt_outcome(&row.outcome)?,
+        will_retry: row.will_retry,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        error_code: row.error_code,
+        error_message: row.error_message,
+        failed_reason: row.failed_reason,
+        worker_id: row.worker_id,
+        worker_hostname: row.worker_hostname,
+        worker_pid: row.worker_pid,
+        worker_process_name: row.worker_process_name,
+    })
+}
+
+fn task_attempt_info_from_record(
+    task_id: Uuid,
+    record: &crate::core::history::archive::attempts::AttemptRecord,
+) -> Result<crate::core::TaskAttemptInfo, BrokerError> {
+    Ok(crate::core::TaskAttemptInfo {
+        task_id,
+        attempt: record.attempt(),
+        outcome: parse_task_attempt_outcome(record.outcome())?,
+        will_retry: record.will_retry(),
+        started_at: record.started_at(),
+        finished_at: record.finished_at(),
+        error_code: record.error_code().map(str::to_owned),
+        error_message: record.error_message().map(str::to_owned),
+        failed_reason: record.failed_reason().map(str::to_owned),
+        worker_id: record.worker_id().map(str::to_owned),
+        worker_hostname: record.worker_hostname().map(str::to_owned),
+        worker_pid: record.worker_pid(),
+        worker_process_name: record.worker_process_name().map(str::to_owned),
+    })
+}
+
+fn parse_task_attempt_outcome(value: &str) -> Result<crate::core::TaskAttemptOutcome, BrokerError> {
+    match value {
+        "COMPLETED" => Ok(crate::core::TaskAttemptOutcome::Completed),
+        "FAILED" => Ok(crate::core::TaskAttemptOutcome::Failed),
+        "WORKER_FAILURE" => Ok(crate::core::TaskAttemptOutcome::WorkerFailure),
+        other => Err(BrokerError::HistoryReadContract(format!(
+            "unknown task-attempt outcome {other:?}"
+        ))),
+    }
 }
 
 fn task_send_error_code(error: &BrokerError) -> TaskSendErrorCode {
@@ -4692,32 +5045,19 @@ mod get_result_wait_tests {
     use std::time::Duration;
     use uuid::Uuid;
 
-    fn test_db_url() -> String {
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            return url;
-        }
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let root = std::path::Path::new(manifest_dir)
-            .ancestors()
-            .find(|p| p.join(".env").exists());
-        let pw = root
-            .and_then(|r| std::fs::read_to_string(r.join(".env")).ok())
-            .and_then(|c| {
-                c.lines()
-                    .filter_map(|l| l.trim().split_once('='))
-                    .find(|(k, _)| k.trim() == "DB_PASSWORD")
-                    .map(|(_, v)| v.trim().to_owned())
-            })
-            .unwrap_or_else(|| "W0rklane".to_owned());
-        format!("postgresql://postgres:{pw}@localhost:5432/horsies-rust-port")
+    #[test]
+    fn staged_detail_live_race_retries_instead_of_reporting_absence() {
+        let task_id = Uuid::new_v4();
+        let probe =
+            raw_result_from_history_detail(task_id, Some(TaskDetailResult::Live { task_id }))
+                .unwrap();
+        assert!(matches!(probe, RawResultProbe::Retry));
     }
 
     #[tokio::test]
     async fn get_result_no_timeout_returns_not_found_for_missing_task() {
-        let broker = PostgresBroker::connect(&test_db_url())
-            .await
-            .expect("connect");
-        broker.ensure_schema_initialized().await.expect("schema");
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let broker = PostgresBroker::from_pool(pool);
         let missing = Uuid::new_v4();
 
         // Wrap in an outer timeout: before the fix, a no-timeout wait on a
