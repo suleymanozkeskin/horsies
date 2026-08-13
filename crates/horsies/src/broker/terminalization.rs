@@ -27,37 +27,33 @@ use crate::core::lifecycle::{TerminalizationCommand, TerminalizationKind, Termin
 
 use super::error::BrokerError;
 
-const COMPLETE_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_complete_locked_task($1::text::uuid, $2, $3)";
+const COMPLETE_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_complete_locked_task($1, $2, $3)";
 const COMPLETE_TASK_FUSED_SQL: &str =
-    "SELECT * FROM horsies_complete_task_fused($1::text::uuid, $2, $3::timestamptz, $4, $5, $6)";
-const FAIL_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_fail_locked_task($1::text::uuid, $2, $3, $4, $5)";
+    "SELECT * FROM horsies_complete_task_fused($1, $2, $3::timestamptz, $4, $5, $6)";
+const FAIL_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_fail_locked_task($1, $2, $3, $4, $5)";
 const FAIL_STALE_TASK_SQL: &str =
-    "SELECT * FROM horsies_fail_stale_task($1::text::uuid, $2::integer, $3::integer, $4, $5, $6)";
-const EXPIRE_OWNED_CLAIM_SQL: &str =
-    "SELECT * FROM horsies_expire_owned_claim($1::text::uuid, $2, $3, $4)";
+    "SELECT * FROM horsies_fail_stale_task($1, $2::integer, $3::integer, $4, $5, $6)";
+const EXPIRE_OWNED_CLAIM_SQL: &str = "SELECT * FROM horsies_expire_owned_claim($1, $2, $3, $4)";
 const EXPIRE_PENDING_TASKS_SQL: &str =
     "SELECT * FROM horsies_expire_pending_tasks($1::integer, $2, $3)";
-const CANCEL_LOCKED_TASK_SQL: &str =
-    "SELECT * FROM horsies_cancel_locked_task($1::text::uuid, $2::text[])";
+const CANCEL_LOCKED_TASK_SQL: &str = "SELECT * FROM horsies_cancel_locked_task($1, $2::text[])";
 const CANCEL_OWNED_ORPHAN_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_orphan($1::text::uuid, $2, $3::timestamptz)";
+    "SELECT * FROM horsies_cancel_owned_orphan($1, $2, $3::timestamptz)";
 const CANCEL_ORPHANED_TASKS_SQL: &str = "SELECT * FROM horsies_cancel_orphaned_tasks($1::integer)";
 const ABANDON_OWNED_NODE_SQL: &str =
-    "SELECT * FROM horsies_abandon_owned_node($1::text::uuid, $2, $3::timestamptz)";
+    "SELECT * FROM horsies_abandon_owned_node($1, $2, $3::timestamptz)";
 const ABANDON_OWNED_NODES_SQL: &str =
-    "SELECT * FROM horsies_abandon_owned_nodes($1::text[]::uuid[], $2::timestamptz[], $3)";
+    "SELECT * FROM horsies_abandon_owned_nodes($1, $2::timestamptz[], $3)";
 const ABANDON_NODES_OF_PAUSED_WORKFLOWS_SQL: &str =
-    "SELECT * FROM horsies_abandon_nodes_of_paused_workflows($1::text[]::uuid[])";
+    "SELECT * FROM horsies_abandon_nodes_of_paused_workflows($1)";
 const CANCEL_OWNED_NODE_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_node($1::text::uuid, $2, $3::timestamptz, $4::boolean)";
+    "SELECT * FROM horsies_cancel_owned_node($1, $2, $3::timestamptz, $4::boolean)";
 const CANCEL_OWNED_NODES_SQL: &str =
-    "SELECT * FROM horsies_cancel_owned_nodes($1::text[]::uuid[], $2::timestamptz[], $3)";
+    "SELECT * FROM horsies_cancel_owned_nodes($1, $2::timestamptz[], $3)";
 const CANCEL_NODES_OF_CANCELLED_WORKFLOW_SQL: &str =
-    "SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow($1::text[]::uuid[])";
+    "SELECT * FROM horsies_cancel_nodes_of_cancelled_workflow($1)";
 const LOCKED_READ_MISS_SQL: &str =
-    "SELECT * FROM horsies_terminalization_miss($1::text::uuid, $2::text[], $3, $4::timestamptz)";
+    "SELECT * FROM horsies_terminalization_miss($1, $2::text[], $3, $4::timestamptz)";
 
 /// How many rows the command's function must report, per the wire contract.
 #[derive(Clone, Copy)]
@@ -422,7 +418,7 @@ pub async fn terminalize_in_tx(
 /// terminal-before-fence ordering identical to every operation function.
 pub async fn classify_locked_read_miss_in_tx(
     tx: &mut Transaction<'_, Postgres>,
-    task_id: &str,
+    task_id: uuid::Uuid,
     requested: TerminalizationKind,
     worker_id: &str,
     claimed_at: Option<DateTime<Utc>>,

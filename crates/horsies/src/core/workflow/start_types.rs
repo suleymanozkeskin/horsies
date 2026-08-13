@@ -1,6 +1,8 @@
 /// Typed error types for workflow start operations.
 ///
 /// Mirrors Python's `horsies/core/workflows/start_types.py`.
+use uuid::Uuid;
+
 /// Categorized workflow start failure codes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WorkflowStartErrorCode {
@@ -38,8 +40,8 @@ pub struct WorkflowStartError {
     pub retryable: bool,
     /// Workflow spec name (always available).
     pub workflow_name: String,
-    /// Generated workflow ID (always populated before DB work).
-    pub workflow_id: String,
+    /// Generated workflow ID (`None` when validation failed before minting).
+    pub workflow_id: Option<Uuid>,
 }
 
 impl std::fmt::Display for WorkflowStartError {
@@ -47,7 +49,12 @@ impl std::fmt::Display for WorkflowStartError {
         write!(
             f,
             "[{}] {} (workflow={}, id={}, retryable={})",
-            self.code, self.message, self.workflow_name, self.workflow_id, self.retryable,
+            self.code,
+            self.message,
+            self.workflow_name,
+            self.workflow_id
+                .map_or_else(|| "<unminted>".to_owned(), |id| id.to_string()),
+            self.retryable,
         )
     }
 }
@@ -72,7 +79,7 @@ pub type WorkflowStartResult<T> = Result<T, WorkflowStartError>;
 pub fn validate_start_retry(
     error: &WorkflowStartError,
     spec_name: &str,
-) -> Result<String, WorkflowStartError> {
+) -> Result<Uuid, WorkflowStartError> {
     if error.code != WorkflowStartErrorCode::EnqueueFailed {
         return Err(WorkflowStartError {
             code: WorkflowStartErrorCode::ValidationFailed,
@@ -99,7 +106,13 @@ pub fn validate_start_retry(
         });
     }
 
-    Ok(error.workflow_id.clone())
+    error.workflow_id.ok_or_else(|| WorkflowStartError {
+        code: WorkflowStartErrorCode::ValidationFailed,
+        message: "retry_start requires an error with a minted workflow ID".to_owned(),
+        retryable: false,
+        workflow_name: spec_name.to_owned(),
+        workflow_id: None,
+    })
 }
 
 #[cfg(test)]
@@ -120,33 +133,35 @@ mod tests {
 
     #[test]
     fn workflow_start_error_display() {
+        let workflow_id = Uuid::new_v4();
         let err = WorkflowStartError {
             code: WorkflowStartErrorCode::EnqueueFailed,
             message: "connection refused".to_owned(),
             retryable: true,
             workflow_name: "my_pipeline".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(workflow_id),
         };
         let s = format!("{}", err);
         assert!(s.contains("ENQUEUE_FAILED"));
         assert!(s.contains("my_pipeline"));
-        assert!(s.contains("wf-123"));
+        assert!(s.contains(&workflow_id.to_string()));
     }
 
     // -- validate_start_retry (ported from Python test_workflow_retry_start.py) --
 
     #[test]
     fn validate_retry_accepts_enqueue_failed() {
+        let workflow_id = Uuid::new_v4();
         let error = WorkflowStartError {
             code: WorkflowStartErrorCode::EnqueueFailed,
             message: "DB connection lost".to_owned(),
             retryable: true,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(workflow_id),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "wf-123");
+        assert_eq!(result.unwrap(), workflow_id);
     }
 
     #[test]
@@ -156,7 +171,7 @@ mod tests {
             message: "No broker".to_owned(),
             retryable: false,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(Uuid::new_v4()),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
@@ -172,7 +187,7 @@ mod tests {
             message: "Bad DAG".to_owned(),
             retryable: false,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(Uuid::new_v4()),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
@@ -189,7 +204,7 @@ mod tests {
             message: "Bug".to_owned(),
             retryable: false,
             workflow_name: "test-wf".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(Uuid::new_v4()),
         };
         let result = validate_start_retry(&error, "test-wf");
         assert!(result.is_err());
@@ -206,7 +221,7 @@ mod tests {
             message: "DB connection lost".to_owned(),
             retryable: true,
             workflow_name: "other-workflow".to_owned(),
-            workflow_id: "wf-123".to_owned(),
+            workflow_id: Some(Uuid::new_v4()),
         };
         let result = validate_start_retry(&error, "my-workflow");
         assert!(result.is_err());

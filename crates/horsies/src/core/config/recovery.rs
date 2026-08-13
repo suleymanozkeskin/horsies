@@ -39,14 +39,11 @@ pub struct RecoveryConfig {
     #[serde(default = "default_finalizing_stale_threshold")]
     pub finalizing_stale_threshold_ms: u64,
 
-    /// Grace before the workflow reaper (Case 1.7) recovers a task that is
-    /// terminal but whose workflow_task is not yet advanced. Finalize is two
-    /// transactions (Phase 1 marks the task terminal; Phase 2 advances the DAG);
-    /// without a grace the reaper recovers a task whose Phase 2 is merely in
-    /// flight, adding latency and "recovered" log noise (recovery is idempotent,
-    /// so this is not a correctness issue). Decoupled from the heartbeat-validated
-    /// thresholds so it can be tuned independently. `0` disables (immediate
-    /// recovery, legacy behavior); range 0–3_600_000.
+    /// Grace before the workflow reaper consumes a phase-2 outbox row. Finalize
+    /// writes the terminal history row and outbox evidence in Phase 1, then
+    /// advances the DAG in Phase 2; the grace leaves an in-flight healthy
+    /// finalizer alone. Decoupled from heartbeat-validated thresholds so it can
+    /// be tuned independently. `0` means immediate recovery; range 0–3_600_000.
     #[serde(default = "default_crashed_worker_recovery_grace")]
     pub crashed_worker_recovery_grace_ms: u64,
 

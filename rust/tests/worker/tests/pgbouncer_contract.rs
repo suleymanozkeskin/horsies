@@ -347,13 +347,7 @@ async fn worker_processes_task_and_workflow_through_pgbouncer_split_urls(
                 None,
             )
             .await?;
-        wait_for_task_status(
-            &pool,
-            &task_id.to_string(),
-            "COMPLETED",
-            Duration::from_secs(15),
-        )
-        .await;
+        wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(15)).await;
 
         let mut app = Horsies::new(config)?;
         horsies_test_worker::tasks::register(&mut app).unwrap();
@@ -374,7 +368,7 @@ async fn worker_processes_task_and_workflow_through_pgbouncer_split_urls(
         let spec = builder.build().unwrap();
         let handle = app.start::<i64>(spec).await?;
         let status =
-            wait_for_workflow_completion(&pool, handle.workflow_id(), Duration::from_secs(20))
+            wait_for_workflow_completion(&pool, &handle.workflow_id(), Duration::from_secs(20))
                 .await;
         assert_eq!(status, "COMPLETED");
 

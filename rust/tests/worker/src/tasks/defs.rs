@@ -196,7 +196,7 @@ pub async fn dynamic_rt_start(
         .start::<serde_json::Value>(spec)
         .await
         .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
-    Ok(handle.workflow_id().to_owned())
+    Ok(handle.workflow_id().to_string())
 }
 
 #[task("e2e_runtime_helper_dispatch")]
@@ -251,7 +251,7 @@ pub async fn dynamic_rt_start_no_args(rt: horsies::TaskRuntime) -> Result<String
         .start::<serde_json::Value>(spec)
         .await
         .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
-    Ok(handle.workflow_id().to_owned())
+    Ok(handle.workflow_id().to_string())
 }
 
 // =============================================================================

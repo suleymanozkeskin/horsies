@@ -23,6 +23,10 @@ pub enum BrokerError {
     )]
     IncompleteTaskHistoryCutover,
 
+    /// The database migration ledger does not end at this binary's exact schema.
+    #[error("schema version mismatch: binary requires {expected}, database reports {actual:?}")]
+    SchemaVersionMismatch { expected: i64, actual: Option<i64> },
+
     /// JSON serialization/deserialization error.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -70,6 +74,11 @@ pub enum BrokerError {
     /// failure, never a task outcome.
     #[error("terminalization contract violation: {0}")]
     TerminalizationContract(String),
+
+    /// A staged task-history row or archive envelope violated its frozen
+    /// read contract.
+    #[error("task-history read contract violation: {0}")]
+    HistoryReadContract(String),
 }
 
 impl BrokerError {
@@ -86,6 +95,7 @@ impl BrokerError {
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::Migration(_)
             | Self::IncompleteTaskHistoryCutover
+            | Self::SchemaVersionMismatch { .. }
             | Self::Serialization(_)
             | Self::InvalidStatus(_)
             | Self::PayloadMismatch { .. }
@@ -93,7 +103,8 @@ impl BrokerError {
             | Self::IdempotencyKeyConflict { .. }
             | Self::EnqueueContract(_)
             | Self::InvalidIdempotencyReservationWindow(_)
-            | Self::TerminalizationContract(_) => false,
+            | Self::TerminalizationContract(_)
+            | Self::HistoryReadContract(_) => false,
         }
     }
 }

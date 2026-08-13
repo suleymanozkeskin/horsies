@@ -7,13 +7,12 @@ pub mod engine;
 pub mod error;
 pub mod info;
 pub mod lifecycle;
+pub mod phase2_recovery;
 pub mod query;
 pub mod recovery;
 pub mod start;
 
-pub use engine::on_workflow_task_complete;
 pub use error::WorkflowError;
-pub use recovery::recover_stuck_workflows;
 
 /// Parse `good_until` from a serialized task_options JSON string.
 ///

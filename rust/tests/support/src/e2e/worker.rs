@@ -276,7 +276,7 @@ pub fn start_worker(
 
     // Functional readiness: enqueue a healthcheck task and poll until COMPLETED.
     let deadline = Instant::now() + timeout;
-    let mut healthcheck_id: Option<String> = None;
+    let mut healthcheck_id: Option<uuid::Uuid> = None;
 
     while Instant::now() < deadline {
         // Check if the process exited.
@@ -343,7 +343,7 @@ fn try_enqueue_healthcheck(
     db_url: &str,
     pgbouncer_transaction_mode: bool,
     queue: &str,
-) -> Result<String, ()> {
+) -> Result<uuid::Uuid, ()> {
     let url = db_url.to_owned();
     let queue = queue.to_owned();
     run_on_dedicated_thread(move || {
@@ -354,7 +354,7 @@ fn try_enqueue_healthcheck(
 
         rt.block_on(async {
             let pool = connect_readiness_pool(&url, pgbouncer_transaction_mode).await?;
-            let task_id = uuid::Uuid::new_v4().to_string();
+            let task_id = uuid::Uuid::new_v4();
             let sha = format!("healthcheck-{}", task_id);
             sqlx::query(
                 "INSERT INTO horsies_tasks (
@@ -367,7 +367,7 @@ fn try_enqueue_healthcheck(
                           1, decode(repeat('00', 32), 'hex'), 'standard_30d',
                           FALSE, 'NEVER_ELIGIBLE')",
             )
-            .bind(&task_id)
+            .bind(task_id)
             .bind(&sha)
             .bind(&queue)
             .execute(&pool)
@@ -381,9 +381,9 @@ fn try_enqueue_healthcheck(
 }
 
 /// Check if a task has reached COMPLETED status.
-fn is_task_completed(db_url: &str, pgbouncer_transaction_mode: bool, task_id: &str) -> bool {
+fn is_task_completed(db_url: &str, pgbouncer_transaction_mode: bool, task_id: &uuid::Uuid) -> bool {
     let url = db_url.to_owned();
-    let id = task_id.to_owned();
+    let id = *task_id;
     run_on_dedicated_thread(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -396,13 +396,19 @@ fn is_task_completed(db_url: &str, pgbouncer_transaction_mode: bool, task_id: &s
             let Ok(pool) = connect_readiness_pool(&url, pgbouncer_transaction_mode).await else {
                 return false;
             };
-            let status: Option<String> =
-                sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-                    .bind(&id)
-                    .fetch_optional(&pool)
-                    .await
-                    .ok()
-                    .flatten();
+            let status: Option<String> = sqlx::query_scalar(
+                "SELECT CASE
+                     WHEN detail.location = 'LIVE' THEN live.status
+                     ELSE (detail.task_row).status
+                 END
+                 FROM horsies_task_detail_staged($1) AS detail
+                 LEFT JOIN horsies_tasks AS live ON live.id = $1",
+            )
+            .bind(&id)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
             pool.close().await;
             status.as_deref() == Some("COMPLETED")
         })

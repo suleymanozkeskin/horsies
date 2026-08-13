@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Summary of a completed sub-workflow, stored as the parent workflow_task result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +38,7 @@ pub struct SubWorkflowSummary {
     pub error_summary: Option<String>,
 
     /// Child workflow ID for tracing.
-    pub child_workflow_id: String,
+    pub child_workflow_id: Uuid,
 }
 
 #[cfg(test)]
@@ -56,7 +57,7 @@ mod tests {
             failed_tasks: 0,
             skipped_tasks: 0,
             error_summary: None,
-            child_workflow_id: "child-123".to_owned(),
+            child_workflow_id: Uuid::new_v4(),
         };
 
         let json = serde_json::to_string(&summary).unwrap();
@@ -65,7 +66,7 @@ mod tests {
         assert!(back.is_success);
         assert_eq!(back.success_case.as_deref(), Some("primary_path"));
         assert_eq!(back.total_tasks, 3);
-        assert_eq!(back.child_workflow_id, "child-123");
+        assert_eq!(back.child_workflow_id, summary.child_workflow_id);
     }
 
     #[test]
@@ -80,7 +81,7 @@ mod tests {
             failed_tasks: 1,
             skipped_tasks: 1,
             error_summary: Some("task 'process' failed: timeout".to_owned()),
-            child_workflow_id: "child-456".to_owned(),
+            child_workflow_id: Uuid::new_v4(),
         };
 
         let json = serde_json::to_string(&summary).unwrap();
@@ -102,7 +103,7 @@ mod tests {
             failed_tasks: 0,
             skipped_tasks: 0,
             error_summary: None,
-            child_workflow_id: "child-789".to_owned(),
+            child_workflow_id: Uuid::nil(),
         };
 
         let json = serde_json::to_string(&summary).unwrap();
@@ -122,7 +123,7 @@ mod tests {
             "completed_tasks": 2,
             "failed_tasks": 0,
             "skipped_tasks": 0,
-            "child_workflow_id": "legacy-1"
+            "child_workflow_id": "00000000-0000-0000-0000-000000000000"
         }"#;
         let summary: SubWorkflowSummary = serde_json::from_str(json).unwrap();
         assert!(summary.is_success);

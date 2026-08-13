@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use std::sync::Arc;
 
@@ -87,7 +88,7 @@ fn write_prefetch_config() -> tempfile::NamedTempFile {
     f
 }
 
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
     let handle: WorkflowHandle<serde_json::Value> = app
@@ -97,7 +98,7 @@ async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
     handle.workflow_id().to_owned()
 }
 
-async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> String {
+async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> Uuid {
     let broker = PostgresBroker::from_pool(pool.clone());
     broker
         .enqueue(
@@ -119,7 +120,6 @@ async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> String {
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -666,7 +666,7 @@ async fn test_workflow_cancellation() {
     }
 
     // Cancel the workflow.
-    horsies::cancel_workflow(&pool, &wf_id).await.unwrap();
+    horsies::cancel_workflow(&pool, wf_id).await.unwrap();
 
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(&wf_id)

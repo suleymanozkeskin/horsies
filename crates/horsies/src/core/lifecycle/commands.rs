@@ -18,6 +18,7 @@
 //! drift.
 
 use crate::core::types::status::TaskStatus;
+use uuid::Uuid;
 
 use super::fences::{
     CallerHoldsRowLock, OwnedClaim, OwnedClaimBatch, PriorLockedRead, TerminalFence, WorkerOwned,
@@ -54,7 +55,7 @@ pub enum TerminalizationCommand {
     /// The attempt row is written separately by the caller in the same
     /// transaction, from the context that locked read produced.
     CompleteLockedTask {
-        task_id: String,
+        task_id: Uuid,
         fence: PriorLockedRead,
         result_json: String,
     },
@@ -64,7 +65,7 @@ pub enum TerminalizationCommand {
     /// round trip. The fence lives in the locking read ahead of the update,
     /// not in the update's predicate.
     CompleteTaskFused {
-        task_id: String,
+        task_id: Uuid,
         fence: OwnedClaim,
         result_json: String,
         notify_channel: String,
@@ -80,7 +81,7 @@ pub enum TerminalizationCommand {
     /// attempt left on the row. Per-attempt history lives in
     /// `horsies_task_attempts`.
     FailLockedTask {
-        task_id: String,
+        task_id: Uuid,
         fence: PriorLockedRead,
         result_json: String,
         error_code: Option<String>,
@@ -94,7 +95,7 @@ pub enum TerminalizationCommand {
     /// policy is evaluated before this command is built — a task that will be
     /// retried is never terminalized.
     FailStaleTask {
-        task_id: String,
+        task_id: Uuid,
         stale_after_ms: i32,
         finalizing_stale_after_ms: i32,
         result_json: String,
@@ -108,7 +109,7 @@ pub enum TerminalizationCommand {
     /// once the deadline has passed, expiry is the correct outcome for
     /// whichever generation holds the row.
     ExpireOwnedClaim {
-        task_id: String,
+        task_id: Uuid,
         fence: WorkerOwned,
         result_json: String,
         error_code: String,
@@ -133,7 +134,7 @@ pub enum TerminalizationCommand {
     /// and the command carries it explicitly rather than leaving it implicit
     /// in a caller-supplied predicate.
     CancelLockedTask {
-        task_id: String,
+        task_id: Uuid,
         fence: CallerHoldsRowLock,
         permitted_source_statuses: Vec<TaskStatus>,
     },
@@ -143,7 +144,7 @@ pub enum TerminalizationCommand {
     /// An orphan has no workflow-task row in a runnable state, so its
     /// transition to running can never succeed. Left alone it holds a claim
     /// forever.
-    CancelOwnedOrphan { task_id: String, fence: OwnedClaim },
+    CancelOwnedOrphan { task_id: Uuid, fence: OwnedClaim },
 
     /// The same condition, swept in bounded batches across all workers.
     CancelOrphanedTasks { batch_size: BatchSize },
@@ -155,7 +156,7 @@ pub enum TerminalizationCommand {
     /// resumable, which is why the node is readied rather than skipped — the
     /// disposition follows from which command this is, and cannot be set to
     /// disagree with it.
-    AbandonOwnedNode { task_id: String, fence: OwnedClaim },
+    AbandonOwnedNode { task_id: Uuid, fence: OwnedClaim },
 
     /// The same, for a batch this worker just claimed.
     AbandonOwnedNodes { fence: OwnedClaimBatch },
@@ -164,7 +165,7 @@ pub enum TerminalizationCommand {
     ///
     /// Reaches claims other workers hold, which is the point: a claim taken
     /// after the pause is exactly what must be abandoned.
-    AbandonNodesOfPausedWorkflows { workflow_ids: Vec<String> },
+    AbandonNodesOfPausedWorkflows { workflow_ids: Vec<Uuid> },
 
     /// One node cancelled because its workflow was cancelled.
     ///
@@ -174,7 +175,7 @@ pub enum TerminalizationCommand {
     /// is the guard there, and it is final, so it cannot go stale the way a
     /// pause can.
     CancelOwnedNode {
-        task_id: String,
+        task_id: Uuid,
         fence: OwnedClaim,
         accepts_requeued_pending: bool,
     },
@@ -187,7 +188,7 @@ pub enum TerminalizationCommand {
     /// Reaches a backing row that is briefly running: user code starts only
     /// after the node's own transition to running, so a node still enqueued
     /// has not begun executing whatever its task row says.
-    CancelNodesOfCancelledWorkflow { workflow_ids: Vec<String> },
+    CancelNodesOfCancelledWorkflow { workflow_ids: Vec<Uuid> },
 }
 
 impl TerminalizationCommand {

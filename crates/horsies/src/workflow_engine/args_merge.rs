@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
 use crate::core::{OperationalErrorCode, OutcomeCode, RetrievalCode, TaskError};
@@ -61,7 +62,7 @@ struct DepRow {
 /// wrapping logic as the synchronous variant.
 pub async fn merge_args_from_async(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
     existing_kwargs: Option<&str>,
     args_from: &Option<serde_json::Value>,
     dep_indices: &[i32],

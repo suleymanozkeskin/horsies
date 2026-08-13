@@ -86,7 +86,7 @@ mod tests {
     use crate::core::registry::workflow::WorkflowSpecRegistry;
     use crate::worker::config::WorkerConfig;
     use crate::worker::heartbeat::spawn_claimer_heartbeat;
-    use crate::worker::recovery::{spawn_reaper, spawn_workflow_recovery};
+    use crate::worker::recovery::{new_reaper_health, spawn_reaper};
     use crate::worker::worker_state::spawn_worker_state_loop;
 
     fn test_db_url() -> String {
@@ -232,32 +232,14 @@ mod tests {
         };
         let handle = spawn_reaper(
             pool,
-            config,
-            crate::core::RetentionConfig::default(),
-            cancel.clone(),
-        );
-        run_loop_death_case("reaper", cancel, handle).await;
-    }
-
-    /// C11-inverse regression, workflow recovery: a dead recovery loop must
-    /// stop the worker.
-    #[tokio::test]
-    async fn workflow_recovery_death_stops_worker() {
-        let pool = PgPool::connect(&test_db_url()).await.expect("connect");
-        let cancel = CancellationToken::new();
-        let config = RecoveryConfig {
-            check_interval_ms: 3_600_000,
-            ..RecoveryConfig::default()
-        };
-        let handle = spawn_workflow_recovery(
-            pool,
             Arc::new(WorkflowSpecRegistry::new()),
             config,
             crate::core::config::payload::PayloadPolicy::default(),
             crate::core::RetentionConfig::default(),
+            new_reaper_health(),
             cancel.clone(),
         );
-        run_loop_death_case("workflow-recovery", cancel, handle).await;
+        run_loop_death_case("reaper", cancel, handle).await;
     }
 
     /// C11-inverse regression, worker-state snapshot: a dead snapshot loop
@@ -273,6 +255,7 @@ mod tests {
             std::process::id() as i32,
             WorkerConfig::default(),
             test_app_config(),
+            new_reaper_health(),
             Arc::new(tokio::sync::Semaphore::new(1)),
             Utc::now(),
             cancel.clone(),

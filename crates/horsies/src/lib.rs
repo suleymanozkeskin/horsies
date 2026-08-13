@@ -72,12 +72,12 @@ pub use crate::core::{AppConfig, HorsiesError};
 
 // broker re-exports
 pub use crate::broker::{
-    compute_enqueue_sha, run_horsies_migrations, BrokerError, BrokerErrorCode,
-    BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing, ExpiredTaskRow, HeartbeatRow,
-    NotifyListener, PostgresBroker, SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle,
-    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
-    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
-    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    compute_enqueue_sha, expected_schema_version, run_horsies_migrations, BrokerError,
+    BrokerErrorCode, BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing,
+    ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker, SharedNotifyListener,
+    StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow, TaskRunningContextRow,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot,
+    WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 /// Alias for [`PostgresBroker`].
 pub type Broker = PostgresBroker;
@@ -133,7 +133,7 @@ where
                 ),
                 retryable: false,
                 workflow_name: D::name().to_owned(),
-                workflow_id: String::new(),
+                workflow_id: None,
             }
         })?;
     wf.start().await
@@ -162,7 +162,7 @@ where
                 ),
                 retryable: false,
                 workflow_name: D::name().to_owned(),
-                workflow_id: String::new(),
+                workflow_id: None,
             },
         )?;
     template.start(params).await
@@ -394,7 +394,7 @@ impl Horsies {
                 message: err.to_string(),
                 retryable: false,
                 workflow_name,
-                workflow_id: String::new(),
+                workflow_id: None,
             })?;
         wf.start().await
     }

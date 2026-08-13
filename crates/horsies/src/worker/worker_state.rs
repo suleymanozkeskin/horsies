@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::core::config::app::AppConfig;
 
 use crate::worker::config::WorkerConfig;
+use crate::worker::recovery::ReaperHealth;
 
 const INSERT_WORKER_STATE_SQL: &str = "\
 INSERT INTO horsies_worker_states (
@@ -93,6 +94,7 @@ pub fn spawn_worker_state_loop(
     pid: i32,
     worker_config: WorkerConfig,
     app_config: AppConfig,
+    reaper_health: ReaperHealth,
     semaphore: Arc<Semaphore>,
     worker_started_at: DateTime<Utc>,
     cancel: CancellationToken,
@@ -114,8 +116,6 @@ pub fn spawn_worker_state_loop(
         } else {
             serde_json::to_string(&worker_config.queue_max_concurrency).ok()
         };
-
-        let recovery_config_json = serde_json::to_string(&app_config.recovery).ok();
 
         // Initialize sysinfo System for resource metrics.
         let sys_pid = Pid::from(pid as usize);
@@ -148,6 +148,34 @@ pub fn spawn_worker_state_loop(
             };
 
             let metrics = collect_resource_metrics(&mut sys, sys_pid);
+            let health = reaper_health.read().await.clone();
+            let mut recovery_value = serde_json::to_value(&app_config.recovery)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let Some(object) = recovery_value.as_object_mut() {
+                object.insert(
+                    "worker_state_retention_hours".to_owned(),
+                    serde_json::to_value(app_config.retention.worker_state_retention_hours)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                object.insert(
+                    "terminal_record_retention_hours".to_owned(),
+                    serde_json::to_value(app_config.retention.terminal_record_retention_hours)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                object.insert(
+                    "partition_coverage".to_owned(),
+                    health.partition_coverage.unwrap_or(serde_json::Value::Null),
+                );
+                object.insert(
+                    "partition_pruning".to_owned(),
+                    health.partition_pruning.unwrap_or(serde_json::Value::Null),
+                );
+                object.insert(
+                    "phase2_recovery".to_owned(),
+                    health.phase2_recovery.unwrap_or(serde_json::Value::Null),
+                );
+            }
+            let recovery_config_json = serde_json::to_string(&recovery_value).ok();
 
             if let Err(e) = sqlx::query(INSERT_WORKER_STATE_SQL)
                 .bind(&worker_id)

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 /// SQL: Insert a runner heartbeat for a single task.
 const RUNNER_HEARTBEAT_SQL: &str = "\
@@ -51,7 +52,7 @@ const MAX_CONSECUTIVE_HEARTBEAT_FAILURES: u32 = 5;
 /// horsies PR #134.
 pub fn spawn_runner_heartbeat(
     pool: PgPool,
-    task_id: String,
+    task_id: Uuid,
     worker_id: String,
     hostname: String,
     pid: i32,
@@ -66,7 +67,7 @@ pub fn spawn_runner_heartbeat(
             tokio::select! {
                 _ = cancel.cancelled() => break,
                 _ = tokio::time::sleep(interval) => {
-                    match send_runner_heartbeat(&pool, &task_id, &worker_id, &hostname, pid).await {
+                    match send_runner_heartbeat(&pool, task_id, &worker_id, &hostname, pid).await {
                         Ok(()) => {
                             if consecutive_failures > 0 {
                                 tracing::info!(
@@ -183,7 +184,7 @@ pub fn spawn_claimer_heartbeat(
 
 async fn send_runner_heartbeat(
     pool: &PgPool,
-    task_id: &str,
+    task_id: Uuid,
     worker_id: &str,
     hostname: &str,
     pid: i32,
@@ -270,7 +271,7 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_runner_heartbeat(
             pool,
-            "task-1".to_owned(),
+            Uuid::new_v4(),
             "worker-1".to_owned(),
             "host-1".to_owned(),
             123,

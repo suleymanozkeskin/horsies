@@ -23,6 +23,34 @@ use crate::broker::error::BrokerError;
 /// Name of the horsies-owned migrations bookkeeping table.
 pub const MIGRATIONS_TABLE: &str = "horsies_migrations";
 
+/// Highest embedded migration version expected by this binary.
+pub fn expected_schema_version() -> i64 {
+    sqlx::migrate!()
+        .iter()
+        .filter(|migration| !migration.migration_type.is_down_migration())
+        .map(|migration| migration.version)
+        .max()
+        .expect("the embedded horsies migration chain is non-empty")
+}
+
+/// Highest successfully applied horsies migration, or `None` when the ledger
+/// does not exist or has no successful rows.
+pub(crate) async fn successful_schema_version(pool: &PgPool) -> Result<Option<i64>, BrokerError> {
+    let table_exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(MIGRATIONS_TABLE)
+        .fetch_one(pool)
+        .await?;
+    if !table_exists {
+        return Ok(None);
+    }
+    sqlx::query_scalar(&format!(
+        "SELECT max(version) FROM {MIGRATIONS_TABLE} WHERE success"
+    ))
+    .fetch_one(pool)
+    .await
+    .map_err(BrokerError::from)
+}
+
 /// Postgres advisory-lock key used to serialise concurrent horsies migrators.
 ///
 /// Disjoint from sqlx's own lock id (`0x3d32ad9e * crc32(db_name)`), so it

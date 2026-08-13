@@ -10,6 +10,10 @@ use uuid::Uuid;
 
 use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
+use crate::core::history::maintenance::coverage::{
+    ensure_startup_coverage, DeclaredRetentionClass, StartupCoverageOutcome,
+};
+use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::task::TaskRegistry;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
@@ -19,7 +23,7 @@ use crate::worker::config::WorkerConfig;
 use crate::worker::error::WorkerError;
 use crate::worker::execution;
 use crate::worker::heartbeat::spawn_claimer_heartbeat;
-use crate::worker::recovery::{spawn_reaper, spawn_workflow_recovery};
+use crate::worker::recovery::{new_reaper_health, spawn_reaper};
 
 /// Decode a liveness ping and reply when it is a broadcast or addressed to
 /// this worker.
@@ -178,7 +182,7 @@ pub struct Worker {
     /// Task ids currently handed to the tracker (dispatched, not yet finished).
     /// The buffered-dispatch probe skips these so a task still in its
     /// CLAIMED→RUNNING window is not re-fetched and re-dispatched next pass (P7).
-    in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    in_dispatch: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
 }
 
 impl Worker {
@@ -244,6 +248,42 @@ impl Worker {
 
     /// Run the worker until cancelled or a fatal error occurs.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Fleet authorization and partition coverage precede every runtime
+        // surface: no LISTEN, heartbeat, or claim may race an incomplete
+        // cutover or a missing current-hour heartbeat leaf.
+        self.broker.ensure_schema_initialized().await?;
+        let declared_classes: Vec<DeclaredRetentionClass> = self
+            .app_config
+            .retention
+            .registrable_classes()
+            .into_iter()
+            .map(|class| DeclaredRetentionClass {
+                class_key: class.key,
+                duration: class.duration,
+            })
+            .collect();
+        let mut coverage_tx = self.broker.pool().begin().await?;
+        let startup_coverage = ensure_startup_coverage(
+            coverage_tx.as_mut(),
+            self.app_config.retention.history_leaf_horizon_days,
+            self.app_config.retention.heartbeat_leaf_horizon_hours,
+            &declared_classes,
+            &StagedLoaderPublisher,
+        )
+        .await?;
+        match startup_coverage {
+            StartupCoverageOutcome::Ready(outcome) => {
+                coverage_tx.commit().await?;
+                tracing::info!(outcome = ?outcome, "task-history startup coverage ready");
+            }
+            StartupCoverageOutcome::Refused(outcome) => {
+                coverage_tx.rollback().await?;
+                return Err(WorkerError::Config(format!(
+                    "task-history startup coverage refused: {outcome:?}"
+                )));
+            }
+        }
+
         // Print the startup banner before any log lines.
         crate::worker::cli::banner::print_banner(&crate::worker::cli::banner::BannerInfo {
             worker_id: &self.worker_id,
@@ -337,21 +377,16 @@ impl Worker {
             self.cancel.clone(),
         );
 
-        // Start reaper.
+        // Start the unified reaper (stale recovery, phase 2, retention,
+        // paused expiry, and partition maintenance share one cluster gate).
+        let reaper_health = new_reaper_health();
         let reaper = spawn_reaper(
-            self.broker.pool().clone(),
-            self.app_config.recovery.clone(),
-            self.app_config.retention.clone(),
-            self.cancel.clone(),
-        );
-
-        // Start workflow recovery loop.
-        let wf_recovery = spawn_workflow_recovery(
             self.broker.pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
             self.app_config.payload.clone(),
             self.app_config.retention.clone(),
+            Arc::clone(&reaper_health),
             self.cancel.clone(),
         );
 
@@ -364,6 +399,7 @@ impl Worker {
             std::process::id() as i32,
             self.worker_config.clone(),
             self.app_config.clone(),
+            reaper_health,
             Arc::clone(&self.semaphore),
             worker_started_at,
             self.cancel.clone(),
@@ -380,10 +416,9 @@ impl Worker {
         // the closed channel.
         let (fatal_tx, mut fatal_rx) =
             mpsc::unbounded_channel::<crate::worker::supervision::ServiceExit>();
-        let services: [(&'static str, tokio::task::JoinHandle<()>); 4] = [
+        let services: [(&'static str, tokio::task::JoinHandle<()>); 3] = [
             ("claimer-heartbeat", claimer_hb),
             ("reaper", reaper),
-            ("workflow-recovery", wf_recovery),
             ("worker-state", state_loop),
         ];
         for (service, handle) in services {
@@ -682,7 +717,7 @@ impl Worker {
                     .in_dispatch
                     .lock()
                     .expect("in_dispatch poisoned")
-                    .contains(&row.id.to_string())
+                    .contains(&row.id)
                 {
                     continue;
                 }
@@ -777,18 +812,16 @@ impl Worker {
         if claimed_rows.iter().any(|r| r.is_workflow_task) {
             // The claim generations travel with their ids: one batch can span
             // claim transactions, so each task fences on its own claimed_at.
-            let claims: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = claimed_rows
-                .iter()
-                .map(|r| (r.id.to_string(), r.claimed_at))
-                .collect();
+            let claims: Vec<(Uuid, Option<chrono::DateTime<chrono::Utc>>)> =
+                claimed_rows.iter().map(|r| (r.id, r.claimed_at)).collect();
             let filtered_ids = self
                 .broker
                 .filter_non_runnable_workflow_tasks(&claims, &self.worker_id)
                 .await?;
             if !filtered_ids.is_empty() {
-                let filtered_set: std::collections::HashSet<&str> =
-                    filtered_ids.iter().map(|s| s.as_str()).collect();
-                claimed_rows.retain(|r| !filtered_set.contains(r.id.to_string().as_str()));
+                let filtered_set: std::collections::HashSet<Uuid> =
+                    filtered_ids.into_iter().collect();
+                claimed_rows.retain(|r| !filtered_set.contains(&r.id));
             }
         }
 
@@ -837,13 +870,13 @@ impl Worker {
                     "no semaphore permit available, requeueing task",
                 );
                 let broker = Arc::clone(&self.broker);
-                let task_id = row.id.to_string();
+                let task_id = row.id;
                 let worker_id = self.worker_id.clone();
                 let claimed_at = row.claimed_at;
                 self.tracker.spawn(async move {
                     if let Err(e) = execution::unclaim_task_with_retry(
                         &broker,
-                        &task_id,
+                        task_id,
                         &worker_id,
                         claimed_at,
                         "no semaphore permit available",
@@ -935,11 +968,11 @@ impl Worker {
 
         // Mark this task in-dispatch until the spawned execution finishes, so the
         // buffered probe won't re-fetch it while it is still CLAIMED (P7).
-        let task_id = row.id.to_string();
+        let task_id = row.id;
         self.in_dispatch
             .lock()
             .expect("in_dispatch poisoned")
-            .insert(task_id.clone());
+            .insert(task_id);
         let in_dispatch = Arc::clone(&self.in_dispatch);
 
         self.tracker.spawn(async move {
@@ -988,6 +1021,10 @@ mod tests {
     use crate::async_task_fn;
     use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
     use crate::core::config::recovery::RecoveryConfig;
+    use crate::core::history::maintenance::coverage::{
+        ensure_startup_coverage, StartupCoverageOutcome,
+    };
+    use crate::core::history::reads::publisher::StagedLoaderPublisher;
     use crate::core::registry::WorkflowSpecRegistry;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult};
@@ -1036,6 +1073,13 @@ mod tests {
         crate::broker::migrations::run_horsies_migrations(&pool)
             .await
             .expect("migrations failed");
+        let mut transaction = pool.begin().await.expect("coverage transaction");
+        let coverage =
+            ensure_startup_coverage(transaction.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
+                .await
+                .expect("startup coverage");
+        assert!(matches!(coverage, StartupCoverageOutcome::Ready(_)));
+        transaction.commit().await.expect("commit startup coverage");
         pool
     }
 
@@ -1056,7 +1100,7 @@ mod tests {
 
     async fn insert_claimed_task(
         pool: &PgPool,
-        task_id: &str,
+        task_id: &Uuid,
         queue_name: &str,
         retry_count: i32,
         max_retries: i32,
@@ -1077,7 +1121,7 @@ mod tests {
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(task_id)
+        .bind(*task_id)
         .bind(queue_name)
         .bind(retry_count)
         .bind(max_retries)
@@ -1089,7 +1133,7 @@ mod tests {
 
     async fn insert_running_task(
         pool: &PgPool,
-        task_id: &str,
+        task_id: &Uuid,
         queue_name: &str,
         retry_count: i32,
         max_retries: i32,
@@ -1110,7 +1154,7 @@ mod tests {
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(task_id)
+        .bind(*task_id)
         .bind(queue_name)
         .bind(retry_count)
         .bind(max_retries)
@@ -1125,12 +1169,12 @@ mod tests {
     /// execution path reads them from `set_running`'s RETURNING, not the
     /// claimed row (v12 claim shape).
     fn claimed_task_row(
-        task_id: &str,
+        task_id: &Uuid,
         queue_name: &str,
         task_options: Option<String>,
     ) -> ClaimedTaskRow {
         ClaimedTaskRow {
-            id: Uuid::parse_str(task_id).unwrap(),
+            id: *task_id,
             task_name: "finalize_test".to_owned(),
             args: Some("[]".to_owned()),
             kwargs: Some("{}".to_owned()),
@@ -1144,7 +1188,7 @@ mod tests {
     /// Like `claimed_task_row` but marked as a workflow task, mirroring a row
     /// claimed for a task that `link_task_to_workflow` attached to a workflow.
     fn claimed_workflow_task_row(
-        task_id: &str,
+        task_id: &Uuid,
         queue_name: &str,
         task_options: Option<String>,
     ) -> ClaimedTaskRow {
@@ -1156,11 +1200,11 @@ mod tests {
 
     async fn link_task_to_workflow(
         pool: &PgPool,
-        task_id: &str,
+        task_id: &Uuid,
         output_task_index: Option<i32>,
-    ) -> String {
-        let workflow_id = Uuid::new_v4().to_string();
-        let workflow_task_id = Uuid::new_v4().to_string();
+    ) -> Uuid {
+        let workflow_id = Uuid::new_v4();
+        let workflow_task_id = Uuid::new_v4();
 
         sqlx::query(
             "INSERT INTO horsies_workflows (
@@ -1173,7 +1217,7 @@ mod tests {
                 NOW(), NOW(), NOW(), NOW()
             )",
         )
-        .bind(&workflow_id)
+        .bind(workflow_id)
         .bind(output_task_index)
         .execute(pool)
         .await
@@ -1190,9 +1234,9 @@ mod tests {
                 'ENQUEUED', FALSE, $3, NOW()
             )",
         )
-        .bind(&workflow_task_id)
-        .bind(&workflow_id)
-        .bind(task_id)
+        .bind(workflow_task_id)
+        .bind(workflow_id)
+        .bind(*task_id)
         .execute(pool)
         .await
         .unwrap();
@@ -1201,7 +1245,7 @@ mod tests {
         // (workflow inserts set is_workflow_task = TRUE) so phase-2 routing,
         // which now reads the carried column, advances the workflow.
         sqlx::query("UPDATE horsies_tasks SET is_workflow_task = TRUE WHERE id = $1")
-            .bind(task_id)
+            .bind(*task_id)
             .execute(pool)
             .await
             .unwrap();
@@ -1211,43 +1255,58 @@ mod tests {
 
     async fn fetch_task_state(
         pool: &PgPool,
-        task_id: &str,
+        task_id: &Uuid,
     ) -> (String, Option<String>, Option<String>) {
-        sqlx::query_as("SELECT status, result, error_code FROM horsies_tasks WHERE id = $1")
-            .bind(task_id)
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
-    async fn fetch_attempt_state(pool: &PgPool, task_id: &str) -> (String, bool, Option<String>) {
         sqlx::query_as(
-            "SELECT outcome, will_retry, error_code
-             FROM horsies_task_attempts
-             WHERE task_id = $1
-             ORDER BY attempt
+            "SELECT status, result, error_code
+             FROM (
+                 SELECT status, result, error_code, 0 AS source
+                 FROM horsies_tasks WHERE id = $1
+                 UNION ALL
+                 SELECT status, convert_from(result_payload, 'UTF8') AS result,
+                        error_code, 1 AS source
+                 FROM horsies_task_history WHERE task_id = $1
+             ) AS task_state
+             ORDER BY source
              LIMIT 1",
         )
-        .bind(task_id)
+        .bind(*task_id)
         .fetch_one(pool)
         .await
         .unwrap()
     }
 
-    async fn fetch_workflow_state(pool: &PgPool, workflow_id: &str) -> (String, Option<String>) {
+    async fn fetch_attempt_state(
+        broker: &PostgresBroker,
+        task_id: &Uuid,
+    ) -> (String, bool, Option<String>) {
+        let attempts = broker.get_task_attempts(*task_id).await.unwrap();
+        let attempt = attempts.last().expect("first attempt");
+        (
+            attempt.outcome.clone(),
+            attempt.will_retry,
+            attempt.error_code.clone(),
+        )
+    }
+
+    async fn fetch_workflow_state(pool: &PgPool, workflow_id: &Uuid) -> (String, Option<String>) {
         sqlx::query_as("SELECT status, result FROM horsies_workflows WHERE id = $1")
-            .bind(workflow_id)
+            .bind(*workflow_id)
             .fetch_one(pool)
             .await
             .unwrap()
     }
 
-    async fn fetch_workflow_task_status(pool: &PgPool, workflow_id: &str, task_id: &str) -> String {
+    async fn fetch_workflow_task_status(
+        pool: &PgPool,
+        workflow_id: &Uuid,
+        task_id: &Uuid,
+    ) -> String {
         sqlx::query_scalar(
             "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_id = $2",
         )
-        .bind(workflow_id)
-        .bind(task_id)
+        .bind(*workflow_id)
+        .bind(*task_id)
         .fetch_one(pool)
         .await
         .unwrap()
@@ -1255,23 +1314,23 @@ mod tests {
 
     async fn fetch_only_workflow_task_state(
         pool: &PgPool,
-        workflow_id: &str,
-    ) -> (String, Option<String>) {
+        workflow_id: &Uuid,
+    ) -> (String, Option<Uuid>) {
         sqlx::query_as(
             "SELECT status, task_id
              FROM horsies_workflow_tasks
              WHERE workflow_id = $1
              LIMIT 1",
         )
-        .bind(workflow_id)
+        .bind(*workflow_id)
         .fetch_one(pool)
         .await
         .unwrap()
     }
 
-    async fn fetch_attempt_count(pool: &PgPool, task_id: &str) -> i64 {
+    async fn fetch_attempt_count(pool: &PgPool, task_id: &Uuid) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
-            .bind(task_id)
+            .bind(*task_id)
             .fetch_one(pool)
             .await
             .unwrap()
@@ -1329,6 +1388,34 @@ mod tests {
         let _: fn(&Worker) = |w| w.request_stop();
         let _: fn(&Worker) -> CancellationToken = |w| w.cancel_token();
         let _: fn(&Worker) -> &str = |w| w.worker_id();
+    }
+
+    #[test]
+    fn startup_authorization_and_coverage_precede_runtime_side_effects() {
+        let source = include_str!("worker.rs");
+        let run = &source[source
+            .find("pub async fn run(&self)")
+            .expect("Worker::run source")
+            .to_owned()..];
+        let schema = run
+            .find("ensure_schema_initialized().await")
+            .expect("schema authorization");
+        let coverage = run
+            .find("ensure_startup_coverage(")
+            .expect("startup partition coverage");
+        let banner = run.find("print_banner(").expect("startup banner");
+        let listener = run
+            .find("connect_listener_with_resilience().await")
+            .expect("listener setup");
+        let heartbeats = run
+            .find("spawn_claimer_heartbeat")
+            .expect("heartbeat writer startup");
+        let claims = run.find("claim_batch(").expect("claim loop");
+        assert!(schema < coverage);
+        assert!(coverage < banner);
+        assert!(coverage < listener);
+        assert!(coverage < heartbeats);
+        assert!(coverage < claims);
     }
 
     #[test]
@@ -1561,14 +1648,15 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn finalize_retry_succeeds_on_first_attempt() {
-        let result = finalize_with_retry("task-1", "test", || async { Ok::<i32, _>(42) }).await;
+        let result =
+            finalize_with_retry(Uuid::new_v4(), "test", || async { Ok::<i32, _>(42) }).await;
         assert_eq!(result.unwrap(), 42);
     }
 
     #[tokio::test(start_paused = true)]
     async fn finalize_retry_recovers_after_transient_error() {
         let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry("task-2", "test", || {
+        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
             let n = call_count.fetch_add(1, Ordering::SeqCst);
             async move {
                 if n < 2 {
@@ -1590,7 +1678,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn finalize_retry_exhausted_returns_error() {
         let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry("task-3", "test", || {
+        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
             call_count.fetch_add(1, Ordering::SeqCst);
             async { Err::<i32, _>(transient_error()) }
         })
@@ -1609,7 +1697,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn finalize_retry_non_retryable_fails_immediately() {
         let call_count = AtomicU32::new(0);
-        let result = finalize_with_retry("task-4", "test", || {
+        let result = finalize_with_retry(Uuid::new_v4(), "test", || {
             call_count.fetch_add(1, Ordering::SeqCst);
             async { Err::<i32, _>(non_retryable_error()) }
         })
@@ -1660,7 +1748,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
         run_finalize(
@@ -1680,7 +1768,8 @@ mod tests {
             serde_json::Value::String("done".to_owned())
         );
 
-        let (outcome, will_retry, attempt_error_code) = fetch_attempt_state(&pool, &task_id).await;
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
         assert_eq!(outcome, "COMPLETED");
         assert!(!will_retry);
         assert_eq!(attempt_error_code, None);
@@ -1688,7 +1777,7 @@ mod tests {
 
     /// Insert a RUNNING task owned by a specific worker, simulating a task that
     /// was reaper-requeued and re-claimed (then set RUNNING) by another worker.
-    async fn insert_running_task_owned_by(pool: &PgPool, task_id: &str, owner: &str) {
+    async fn insert_running_task_owned_by(pool: &PgPool, task_id: &Uuid, owner: &str) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
@@ -1704,7 +1793,7 @@ mod tests {
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(task_id)
+        .bind(*task_id)
         .bind(owner)
         .execute(pool)
         .await
@@ -1729,16 +1818,16 @@ mod tests {
         };
 
         let complete_as =
-            |task_id: &str, worker: &str| TerminalizationCommand::CompleteLockedTask {
-                task_id: task_id.to_owned(),
+            |task_id: Uuid, worker: &str| TerminalizationCommand::CompleteLockedTask {
+                task_id,
                 fence: PriorLockedRead {
                     worker_id: worker.to_owned(),
                 },
                 result_json: "{}".to_owned(),
             };
-        let fail_as = |task_id: &str, worker: &str, reason: Option<&str>| {
+        let fail_as = |task_id: Uuid, worker: &str, reason: Option<&str>| {
             TerminalizationCommand::FailLockedTask {
-                task_id: task_id.to_owned(),
+                task_id,
                 fence: PriorLockedRead {
                     worker_id: worker.to_owned(),
                 },
@@ -1752,11 +1841,11 @@ mod tests {
         };
 
         // complete: stale owner rejected, current owner applies.
-        let t_complete = Uuid::new_v4().to_string();
+        let t_complete = Uuid::new_v4();
         insert_running_task_owned_by(&pool, &t_complete, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &complete_as(&t_complete, "worker-1"))
+                &terminalize(&pool, &complete_as(t_complete, "worker-1"))
                     .await
                     .unwrap()
             ),
@@ -1765,7 +1854,7 @@ mod tests {
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "RUNNING");
         assert!(
             applied(
-                &terminalize(&pool, &complete_as(&t_complete, "worker-2"))
+                &terminalize(&pool, &complete_as(t_complete, "worker-2"))
                     .await
                     .unwrap()
             ),
@@ -1774,11 +1863,11 @@ mod tests {
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "COMPLETED");
 
         // fail: stale owner rejected, current owner applies.
-        let t_fail = Uuid::new_v4().to_string();
+        let t_fail = Uuid::new_v4();
         insert_running_task_owned_by(&pool, &t_fail, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &fail_as(&t_fail, "worker-1", None))
+                &terminalize(&pool, &fail_as(t_fail, "worker-1", None))
                     .await
                     .unwrap()
             ),
@@ -1786,25 +1875,25 @@ mod tests {
         );
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "RUNNING");
         assert!(applied(
-            &terminalize(&pool, &fail_as(&t_fail, "worker-2", None))
+            &terminalize(&pool, &fail_as(t_fail, "worker-2", None))
                 .await
                 .unwrap()
         ));
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "FAILED");
 
         // requeue: stale owner rejected, current owner applies.
-        let t_requeue = Uuid::new_v4().to_string();
+        let t_requeue = Uuid::new_v4();
         insert_running_task_owned_by(&pool, &t_requeue, "worker-2").await;
         assert!(
             !broker
-                .requeue(&t_requeue, Some(Utc::now()), "worker-1")
+                .requeue(t_requeue, Some(Utc::now()), "worker-1")
                 .await
                 .unwrap(),
             "stale owner must not requeue the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "RUNNING");
         assert!(broker
-            .requeue(&t_requeue, Some(Utc::now()), "worker-2")
+            .requeue(t_requeue, Some(Utc::now()), "worker-2")
             .await
             .unwrap());
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
@@ -1812,11 +1901,11 @@ mod tests {
         // worker-crash failure (failed_reason carried): stale owner rejected,
         // current owner applies. Same operation as task failure — they differ
         // only in whether a failure reason travels.
-        let t_worker = Uuid::new_v4().to_string();
+        let t_worker = Uuid::new_v4();
         insert_running_task_owned_by(&pool, &t_worker, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &fail_as(&t_worker, "worker-1", Some("crash")))
+                &terminalize(&pool, &fail_as(t_worker, "worker-1", Some("crash")))
                     .await
                     .unwrap()
             ),
@@ -1824,7 +1913,7 @@ mod tests {
         );
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "RUNNING");
         assert!(applied(
-            &terminalize(&pool, &fail_as(&t_worker, "worker-2", Some("crash")))
+            &terminalize(&pool, &fail_as(t_worker, "worker-2", Some("crash")))
                 .await
                 .unwrap()
         ));
@@ -1842,18 +1931,13 @@ mod tests {
         let pool = test_pool().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
         // Drive the single node terminal so the non-terminal count is zero.
         sqlx::query("UPDATE horsies_workflow_tasks SET status = 'COMPLETED', result = '{}', completed_at = NOW() WHERE workflow_id = $1")
             .bind(&workflow_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', result = '{}', terminal_at = NOW() WHERE id = $1")
-            .bind(&task_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1871,7 +1955,7 @@ mod tests {
         let registry = WorkflowSpecRegistry::new();
         crate::workflow_engine::engine::check_workflow_completion(
             &pool,
-            &workflow_id,
+            workflow_id,
             &registry,
             &crate::core::config::payload::PayloadPolicy::default(),
             &crate::core::RetentionConfig::default(),
@@ -1893,7 +1977,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
@@ -1928,7 +2012,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
@@ -1988,7 +2072,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
 
@@ -2042,7 +2126,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         link_task_to_workflow(&pool, &task_id, Some(0)).await;
         EXECUTION_COUNT.store(0, Ordering::SeqCst);
@@ -2052,7 +2136,7 @@ mod tests {
             run_finalize(
                 &broker,
                 async_task_fn!(counted_success_task, ()),
-                claimed_task_row(&task_id, "default", None),
+                claimed_workflow_task_row(&task_id, "default", None),
             )
             .await;
 
@@ -2078,8 +2162,8 @@ mod tests {
                 serde_json::Value::String("counted".to_owned()),
             );
 
-            let attempt_count = fetch_attempt_count(&pool, &task_id).await;
-            assert_eq!(attempt_count, 1);
+            let attempts = broker.get_task_attempts(task_id).await.unwrap();
+            assert_eq!(attempts.len(), 1);
         })
         .catch_unwind()
         .await;
@@ -2098,7 +2182,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
         sqlx::query("UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = $1")
@@ -2138,7 +2222,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
         let workflow_id = link_task_to_workflow(&pool, &task_id, Some(0)).await;
         sqlx::query("UPDATE horsies_workflows SET status = 'CANCELLED' WHERE id = $1")
@@ -2175,7 +2259,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         let task_options = serde_json::json!({
             "auto_retry_for": ["RETRY_ME"],
             "retry_policy": {
@@ -2218,7 +2302,8 @@ mod tests {
             "retry scheduling should persist a future next_retry_at"
         );
 
-        let (outcome, will_retry, attempt_error_code) = fetch_attempt_state(&pool, &task_id).await;
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
         assert_eq!(outcome, "FAILED");
         assert!(will_retry);
         assert_eq!(attempt_error_code.as_deref(), Some("RETRY_ME"));
@@ -2231,7 +2316,7 @@ mod tests {
         let broker = test_broker().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
         run_finalize(
@@ -2252,7 +2337,8 @@ mod tests {
             Some(TaskErrorCode::User("FATAL".to_owned()))
         );
 
-        let (outcome, will_retry, attempt_error_code) = fetch_attempt_state(&pool, &task_id).await;
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
         assert_eq!(outcome, "FAILED");
         assert!(!will_retry);
         assert_eq!(attempt_error_code.as_deref(), Some("FATAL"));
@@ -2266,7 +2352,7 @@ mod tests {
         clean(&pool).await;
         let task_error_code = OperationalErrorCode::TaskError.to_string();
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
         run_finalize(
@@ -2295,7 +2381,7 @@ mod tests {
         let pool = test_pool().await;
         clean(&pool).await;
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_running_task(&pool, &task_id, "default", 0, 0, None).await;
 
         let closed_broker = test_broker().await;
@@ -2303,11 +2389,11 @@ mod tests {
 
         let Err(err) = persist_terminal_state(
             &closed_broker,
-            &task_id,
+            task_id,
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
             &crate::broker::SetRunningRow {
-                id: Uuid::parse_str(&task_id).unwrap(),
+                id: task_id,
                 started_at: Utc::now(),
                 retry_count: 0,
                 max_retries: 0,
@@ -2339,7 +2425,7 @@ mod tests {
         clean(&pool).await;
         let ser_error_code = OperationalErrorCode::WorkerSerializationError.to_string();
 
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         insert_claimed_task(&pool, &task_id, "default", 0, 0, None).await;
 
         run_finalize(
@@ -2356,7 +2442,8 @@ mod tests {
         assert_eq!(status, "FAILED");
         assert_eq!(error_code.as_deref(), Some(ser_error_code.as_str()));
 
-        let (outcome, will_retry, attempt_error_code) = fetch_attempt_state(&pool, &task_id).await;
+        let (outcome, will_retry, attempt_error_code) =
+            fetch_attempt_state(&broker, &task_id).await;
         assert_eq!(outcome, "FAILED");
         assert!(!will_retry);
         assert_eq!(attempt_error_code.as_deref(), Some(ser_error_code.as_str()));
@@ -2374,7 +2461,8 @@ mod tests {
         listener.listen("task_new").await.unwrap();
         listener.listen("task_queue_high-priority").await.unwrap();
 
-        notify_worker_capacity(&pool, "high-priority", "task-123").await;
+        let task_id = Uuid::new_v4();
+        notify_worker_capacity(&pool, "high-priority", task_id).await;
 
         let first = tokio::time::timeout(Duration::from_secs(2), listener.recv())
             .await
@@ -2384,7 +2472,7 @@ mod tests {
             (first.channel().to_owned(), first.payload().to_owned()),
             (
                 "task_queue_high-priority".to_owned(),
-                "capacity:task-123".to_owned(),
+                format!("capacity:{task_id}"),
             ),
         );
 
@@ -2401,7 +2489,7 @@ mod tests {
     async fn notify_worker_capacity_swallow_pool_errors() {
         let pool = test_pool().await;
         pool.close().await;
-        notify_worker_capacity(&pool, "default", "task-closed").await;
+        notify_worker_capacity(&pool, "default", Uuid::new_v4()).await;
     }
 
     /// C11: `run()` must fire the cancellation token on a fatal exit path, not
@@ -2416,6 +2504,21 @@ mod tests {
     #[serial]
     async fn run_fires_cancel_on_fatal_claim_exit() {
         use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        let observer = test_pool().await;
+        clean(&observer).await;
+        let probe_task_id = Uuid::new_v4();
+        insert_claimed_task(&observer, &probe_task_id, "default", 0, 0, None).await;
+        sqlx::query(
+            "UPDATE horsies_tasks
+             SET status = 'PENDING', claimed = FALSE,
+                 claimed_by_worker_id = NULL, claimed_at = NULL
+             WHERE id = $1",
+        )
+        .bind(probe_task_id)
+        .execute(&observer)
+        .await
+        .unwrap();
 
         // Distinct session URL (same DB, extra query param) so the session pool
         // is separate from the main pool.
@@ -2473,10 +2576,34 @@ mod tests {
         let cancel = worker.cancel_token();
         assert!(!cancel.is_cancelled(), "token must start uncancelled");
 
+        let handle = tokio::spawn(async move { worker.run().await });
+
+        // Let exact-schema authorization, startup coverage, and the background
+        // loops complete before injecting the fatal claim failure. Closing the
+        // pool earlier would now exercise P7's startup refusal path instead.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let processed: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (
+                         SELECT 1 FROM horsies_task_history WHERE task_id = $1
+                     )",
+                )
+                .bind(probe_task_id)
+                .fetch_one(&observer)
+                .await
+                .unwrap();
+                if processed {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker must reach its runtime loops");
+
         // Close only the main pool; the listener connects via the session pool.
         broker.pool().close().await;
 
-        let handle = tokio::spawn(async move { worker.run().await });
         let result = tokio::time::timeout(Duration::from_secs(20), handle)
             .await
             .expect("run() must exit after the fatal claim error, not hang")
@@ -2503,6 +2630,7 @@ mod tests {
     async fn buffered_dispatch_respects_queue_cap_in_soft_mode() {
         use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
 
+        let _initialized = test_pool().await;
         let broker = test_broker().await;
         let pool = broker.pool().clone();
         clean(&pool).await;
@@ -2560,7 +2688,7 @@ mod tests {
         // Seed 6 buffered CLAIMED tasks of the capped queue owned by this worker,
         // none RUNNING — the pathological state the claim function permits.
         for _ in 0..6 {
-            let id = Uuid::new_v4().to_string();
+            let id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs, status,
@@ -2577,7 +2705,7 @@ mod tests {
                     1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
                 )",
             )
-            .bind(&id)
+            .bind(id)
             .bind(&worker.worker_id)
             .execute(&pool)
             .await

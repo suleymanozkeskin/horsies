@@ -72,6 +72,7 @@ pub enum OutcomeCode {
     WorkflowPaused,
     WorkflowFailed,
     WorkflowCancelled,
+    WorkflowExpired,
     UpstreamSkipped,
     SubworkflowFailed,
     WorkflowSuccessCaseNotMet,
@@ -375,12 +376,13 @@ impl TaskError {
     /// Returns `None` for any error that is not a sub-workflow failure or whose
     /// `data` does not carry the expected fields.
     pub fn sub_workflow_details(&self) -> Option<SubWorkflowError> {
-        if self.error_code.as_ref().map(ToString::to_string).as_deref() != Some("SUBWORKFLOW_FAILED")
+        if self.error_code.as_ref().map(ToString::to_string).as_deref()
+            != Some("SUBWORKFLOW_FAILED")
         {
             return None;
         }
         let data = self.data.as_ref()?;
-        let sub_workflow_id = data.get("sub_workflow_id")?.as_str()?.to_owned();
+        let sub_workflow_id = uuid::Uuid::parse_str(data.get("sub_workflow_id")?.as_str()?).ok()?;
         let sub_workflow_summary: SubWorkflowSummary =
             serde_json::from_value(data.get("sub_workflow_summary")?.clone()).ok()?;
         Some(SubWorkflowError {
@@ -412,7 +414,7 @@ pub struct SubWorkflowError {
     pub task_error: TaskError,
 
     /// ID of the failed child workflow.
-    pub sub_workflow_id: String,
+    pub sub_workflow_id: uuid::Uuid,
 
     /// Summary of the child workflow's execution.
     pub sub_workflow_summary: SubWorkflowSummary,
@@ -516,6 +518,7 @@ mod tests {
             OutcomeCode::WorkflowPaused,
             OutcomeCode::WorkflowFailed,
             OutcomeCode::WorkflowCancelled,
+            OutcomeCode::WorkflowExpired,
             OutcomeCode::UpstreamSkipped,
             OutcomeCode::SubworkflowFailed,
             OutcomeCode::WorkflowSuccessCaseNotMet,
@@ -578,7 +581,7 @@ mod tests {
                 cause: None,
                 data: None,
             },
-            sub_workflow_id: "wf-child-789".to_owned(),
+            sub_workflow_id: uuid::Uuid::nil(),
             sub_workflow_summary: SubWorkflowSummary {
                 status: "FAILED".to_owned(),
                 is_success: false,
@@ -589,13 +592,13 @@ mod tests {
                 failed_tasks: 1,
                 skipped_tasks: 1,
                 error_summary: Some("task 'transform' exploded".to_owned()),
-                child_workflow_id: "wf-child-789".to_owned(),
+                child_workflow_id: uuid::Uuid::nil(),
             },
         };
 
         let json = serde_json::to_string(&err).unwrap();
         let back: SubWorkflowError = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.sub_workflow_id, "wf-child-789");
+        assert_eq!(back.sub_workflow_id, uuid::Uuid::nil());
         assert!(!back.sub_workflow_summary.is_success);
     }
 
@@ -608,7 +611,7 @@ mod tests {
                 cause: None,
                 data: None,
             },
-            sub_workflow_id: "wf-abc".to_owned(),
+            sub_workflow_id: uuid::Uuid::nil(),
             sub_workflow_summary: SubWorkflowSummary {
                 status: "FAILED".to_owned(),
                 is_success: false,
@@ -619,7 +622,7 @@ mod tests {
                 failed_tasks: 1,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: "wf-abc".to_owned(),
+                child_workflow_id: uuid::Uuid::nil(),
             },
         };
 
@@ -644,7 +647,7 @@ mod tests {
             failed_tasks: 1,
             skipped_tasks: 1,
             error_summary: Some("child task 'b' failed".to_owned()),
-            child_workflow_id: "wf-child-42".to_owned(),
+            child_workflow_id: uuid::Uuid::nil(),
         }
     }
 
@@ -664,7 +667,7 @@ mod tests {
         };
 
         let details = err.sub_workflow_details().expect("should reconstruct");
-        assert_eq!(details.sub_workflow_id, "wf-child-42");
+        assert_eq!(details.sub_workflow_id, uuid::Uuid::nil());
         assert_eq!(details.sub_workflow_summary.status, "FAILED");
         assert_eq!(details.sub_workflow_summary.failed_tasks, 1);
         assert!(!details.sub_workflow_summary.is_success);
@@ -686,7 +689,7 @@ mod tests {
         let json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
         let decoded: TaskResult<serde_json::Value> = serde_json::from_str(&json).unwrap();
         let recovered = decoded.unwrap_err().sub_workflow_details().unwrap();
-        assert_eq!(recovered.sub_workflow_id, "wf-child-42");
+        assert_eq!(recovered.sub_workflow_id, uuid::Uuid::nil());
         assert_eq!(recovered.sub_workflow_summary.completed_tasks, 1);
     }
 

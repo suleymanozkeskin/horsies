@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use horsies::{OperationalErrorCode, PostgresBroker, TaskResult};
 use horsies_test_support::{
@@ -41,7 +42,7 @@ async fn broker() -> PostgresBroker {
 }
 
 /// Enqueue a task by name with kwargs JSON, return the task ID.
-async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs_json: &str) -> String {
+async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs_json: &str) -> Uuid {
     broker
         .enqueue(
             task_name,
@@ -62,40 +63,42 @@ async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs_json: &st
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 /// Enqueue a task with no args.
-async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> String {
+async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> Uuid {
     enqueue_task(broker, task_name, "{}").await
 }
 
 /// Wait for a task to complete and return the result JSON.
-async fn get_result_json(pool: &PgPool, task_id: &str) -> Option<String> {
-    sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
-        .bind(task_id)
-        .fetch_optional(pool)
+async fn get_result_json(pool: &PgPool, task_id: &Uuid) -> Option<String> {
+    let info = PostgresBroker::from_pool(pool.clone())
+        .get_task_info(*task_id, true, false)
         .await
-        .unwrap()
-        .flatten()
+        .unwrap()?;
+    info.result
+        .map(|result| serde_json::to_string(&result).unwrap())
 }
 
 /// Get task status from DB.
-async fn get_task_status(pool: &PgPool, task_id: &str) -> String {
-    sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-        .bind(task_id)
-        .fetch_one(pool)
+async fn get_task_status(pool: &PgPool, task_id: &Uuid) -> String {
+    PostgresBroker::from_pool(pool.clone())
+        .get_task_info(*task_id, false, false)
         .await
         .unwrap()
+        .unwrap()
+        .status
+        .to_string()
 }
 
 /// Get task retry_count from DB.
-async fn get_retry_count(pool: &PgPool, task_id: &str) -> i32 {
-    sqlx::query_scalar("SELECT retry_count FROM horsies_tasks WHERE id = $1")
-        .bind(task_id)
-        .fetch_one(pool)
+async fn get_retry_count(pool: &PgPool, task_id: &Uuid) -> i32 {
+    PostgresBroker::from_pool(pool.clone())
+        .get_task_info(*task_id, false, false)
         .await
         .unwrap()
+        .unwrap()
+        .retry_count as i32
 }
 
 /// Enqueue with an explicit task_options JSON string. The low-level broker
@@ -106,7 +109,7 @@ async fn enqueue_with_options(
     task_name: &str,
     kwargs: &str,
     task_options_json: &str,
-) -> String {
+) -> Uuid {
     broker
         .enqueue(
             task_name,
@@ -127,20 +130,17 @@ async fn enqueue_with_options(
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 /// Get the latest recorded attempt's error_code for a task.
-async fn get_latest_attempt_error_code(pool: &PgPool, task_id: &str) -> Option<String> {
-    sqlx::query_scalar(
-        "SELECT error_code FROM horsies_task_attempts \
-         WHERE task_id = $1 ORDER BY attempt DESC LIMIT 1",
-    )
-    .bind(task_id)
-    .fetch_optional(pool)
-    .await
-    .unwrap()
-    .flatten()
+async fn get_latest_attempt_error_code(pool: &PgPool, task_id: &Uuid) -> Option<String> {
+    PostgresBroker::from_pool(pool.clone())
+        .get_task_attempts(*task_id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|attempt| attempt.error_code)
 }
 
 fn db_url() -> String {
@@ -231,23 +231,15 @@ async fn test_status_transitions() {
     let status = get_task_status(&pool, &task_id).await;
     assert_eq!(status, "COMPLETED");
 
-    // Verify timestamps are set.
-    type TaskTimestamps = (
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    );
-    let (started, completed, claimed): TaskTimestamps = sqlx::query_as(
-        "SELECT started_at, completed_at, claimed_at FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(&task_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-
-    assert!(started.is_some(), "started_at should be set");
-    assert!(completed.is_some(), "completed_at should be set");
-    assert!(claimed.is_some(), "claimed_at should be set");
+    // Verify archived provenance is exposed through the public info surface.
+    let info = broker
+        .get_task_info(task_id, false, false)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(info.started_at.is_some(), "started_at should be set");
+    assert!(info.completed_at.is_some(), "completed_at should be set");
+    assert!(info.claimed_at.is_some(), "claimed_at should be set");
 }
 
 #[tokio::test]
@@ -522,7 +514,7 @@ async fn enqueue_with_retry(
     max_retries: i32,
     intervals: &[i32],
     auto_retry_for: &[&str],
-) -> String {
+) -> Uuid {
     let task_options = serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
@@ -554,7 +546,6 @@ async fn enqueue_with_retry(
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 #[tokio::test]
@@ -666,8 +657,7 @@ async fn test_good_until_already_past() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     let _worker = start_worker(
         &db_url(),
@@ -710,8 +700,7 @@ async fn test_good_until_future_completes() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     let _worker = start_worker(
         &db_url(),
@@ -766,8 +755,7 @@ async fn test_retry_blocked_by_good_until_expiry() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     let _worker = start_worker(
         &db_url(),
@@ -811,11 +799,7 @@ async fn test_worker_resolution_error() {
     // Task-level failures write to `result` (serialized TaskResult::Err), not
     // `failed_reason` (which is reserved for worker crashes — see FAIL_TASK_SQL
     // vs FAIL_WORKER_SQL in horsies/src/broker/postgres.rs).
-    let result_json: String = sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
-        .bind(&task_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    let result_json = get_result_json(&pool, &task_id).await.unwrap();
     let parsed: TaskResult<serde_json::Value> =
         serde_json::from_str(&result_json).expect("result must deserialize as TaskResult");
     let TaskResult::Err(err) = parsed else {
@@ -844,7 +828,7 @@ async fn test_argument_deserialization_error() {
     db::clean_tables(&pool).await;
 
     // Insert task with corrupted args directly.
-    let task_id = uuid::Uuid::new_v4().to_string();
+    let task_id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, \
          status, sent_at, enqueued_at, enqueue_sha, created_at, updated_at,
@@ -868,12 +852,12 @@ async fn test_argument_deserialization_error() {
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
 
-    let error_code: Option<String> =
-        sqlx::query_scalar("SELECT error_code FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let error_code = PostgresBroker::from_pool(pool.clone())
+        .get_task_info(task_id, false, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .error_code;
 
     assert_eq!(
         error_code.as_deref(),
@@ -892,12 +876,17 @@ async fn test_task_cancelled() {
 
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
-    // Cancel directly in DB before worker picks it up.
-    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED', terminal_at = NOW() WHERE id = $1")
-        .bind(&task_id)
-        .execute(&pool)
+    assert!(broker
+        .cancel(
+            task_id,
+            &[
+                horsies::TaskStatus::Pending,
+                horsies::TaskStatus::Claimed,
+                horsies::TaskStatus::Running,
+            ],
+        )
         .await
-        .unwrap();
+        .unwrap());
 
     let status = get_task_status(&pool, &task_id).await;
     assert_eq!(status, "CANCELLED");
@@ -920,13 +909,10 @@ async fn test_task_info_after_completion() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 21}"#).await;
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
 
-    let info = broker
-        .get_task_info(uuid::Uuid::parse_str(&task_id).unwrap(), true, true)
-        .await
-        .unwrap();
+    let info = broker.get_task_info(task_id, true, true).await.unwrap();
     let info = info.expect("task info should exist");
 
-    assert_eq!(info.task_id.to_string(), task_id);
+    assert_eq!(info.task_id, task_id);
     assert_eq!(info.task_name, "e2e_simple");
     assert_eq!(info.status, horsies::TaskStatus::Completed);
     assert_eq!(info.queue_name, "default");
@@ -985,8 +971,7 @@ async fn test_exponential_backoff_state() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // Poll until retry_count >= 1 and next_retry_at is set.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1059,8 +1044,7 @@ async fn test_exponential_backoff_intervals() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // Capture enqueued_at snapshots at each retry_count.
     let mut snapshots: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> =
@@ -1157,8 +1141,7 @@ async fn test_auto_retry_by_error_code() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(15)).await;
 
@@ -1201,8 +1184,7 @@ async fn test_task_expires_before_claim() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // Wait until task is definitely expired.
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1275,8 +1257,7 @@ async fn test_retry_succeeds_within_good_until() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(30)).await;
 
@@ -1330,8 +1311,7 @@ async fn test_good_until_expires_while_claimed_before_start() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < claim_deadline {
@@ -1354,11 +1334,14 @@ async fn test_good_until_expires_while_claimed_before_start() {
         String,
         Option<chrono::DateTime<chrono::Utc>>,
         Option<String>,
-        Option<bool>,
         Option<String>,
     ) = sqlx::query_as(
-        "SELECT status, started_at, claimed_by_worker_id, claimed, error_code \
-         FROM horsies_tasks WHERE id = $1",
+        "SELECT (detail.task_row).status,
+                (detail.task_row).started_at,
+                (detail.task_row).last_claimed_worker_id,
+                (detail.task_row).error_code
+         FROM horsies_task_detail_staged($1) AS detail
+         WHERE detail.location = 'HISTORY'",
     )
     .bind(&target_id)
     .fetch_one(&pool)
@@ -1374,8 +1357,15 @@ async fn test_good_until_expires_while_claimed_before_start() {
         row.2.is_some(),
         "claimed_by_worker_id should be preserved for forensics",
     );
-    assert_eq!(row.3, Some(false), "claimed flag should be cleared");
-    assert_eq!(row.4.as_deref(), Some("TASK_EXPIRED"));
+    assert_eq!(row.3.as_deref(), Some("TASK_EXPIRED"));
+
+    let live_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM horsies_tasks WHERE id = $1)")
+            .bind(target_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!live_exists, "expired claim must leave the live table");
 
     let attempts: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
@@ -1419,8 +1409,7 @@ async fn test_priority_ordering() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // High priority (1) submitted second.
     let task_id_high = broker
@@ -1442,8 +1431,7 @@ async fn test_priority_ordering() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // Start worker with concurrency=1 to force serial execution.
     let _worker = start_worker(
@@ -1461,19 +1449,18 @@ async fn test_priority_ordering() {
     .await;
 
     // High priority should have started before low.
-    let (started_high,): (Option<chrono::DateTime<chrono::Utc>>,) =
-        sqlx::query_as("SELECT started_at FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id_high)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-
-    let (started_low,): (Option<chrono::DateTime<chrono::Utc>>,) =
-        sqlx::query_as("SELECT started_at FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id_low)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let started_high = broker
+        .get_task_info(task_id_high, false, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .started_at;
+    let started_low = broker
+        .get_task_info(task_id_low, false, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .started_at;
 
     assert!(
         started_high.unwrap() < started_low.unwrap(),
@@ -1694,10 +1681,7 @@ async fn test_wait_timeout() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
     let result = broker
-        .get_result::<serde_json::Value>(
-            uuid::Uuid::parse_str(&task_id).unwrap(),
-            Some(Duration::from_millis(500)),
-        )
+        .get_result::<serde_json::Value>(task_id, Some(Duration::from_millis(500)))
         .await
         .unwrap();
 
@@ -1754,18 +1738,20 @@ async fn test_task_cancelled_get_result() {
 
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
-    // Cancel directly in DB.
-    sqlx::query("UPDATE horsies_tasks SET status = 'CANCELLED', terminal_at = NOW() WHERE id = $1")
-        .bind(&task_id)
-        .execute(&pool)
+    assert!(broker
+        .cancel(
+            task_id,
+            &[
+                horsies::TaskStatus::Pending,
+                horsies::TaskStatus::Claimed,
+                horsies::TaskStatus::Running,
+            ],
+        )
         .await
-        .unwrap();
+        .unwrap());
 
     let result = broker
-        .get_result::<serde_json::Value>(
-            uuid::Uuid::parse_str(&task_id).unwrap(),
-            Some(Duration::from_millis(1000)),
-        )
+        .get_result::<serde_json::Value>(task_id, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
 
@@ -1778,7 +1764,10 @@ async fn test_task_cancelled_get_result() {
     // Verify the error message contains the task_id.
     let err = result.unwrap_err();
     assert!(
-        err.message.as_deref().unwrap_or("").contains(&task_id),
+        err.message
+            .as_deref()
+            .unwrap_or("")
+            .contains(&task_id.to_string()),
         "expected task_id in error message",
     );
 }
@@ -1897,8 +1886,7 @@ async fn test_custom_mode_queue_routing() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
     let normal_id = broker
         .enqueue(
             "e2e_normal",
@@ -1918,8 +1906,7 @@ async fn test_custom_mode_queue_routing() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
     let low_id = broker
         .enqueue(
             "e2e_low",
@@ -1939,8 +1926,7 @@ async fn test_custom_mode_queue_routing() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     wait_for_all_terminal(
         &pool,
@@ -1995,17 +1981,16 @@ async fn test_custom_mode_queue_names_stored() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     wait_for_task_status(&pool, &high_id, "COMPLETED", Duration::from_secs(10)).await;
 
-    let queue_name: String =
-        sqlx::query_scalar("SELECT queue_name FROM horsies_tasks WHERE id = $1")
-            .bind(&high_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let queue_name = broker
+        .get_task_info(high_id, false, false)
+        .await
+        .unwrap()
+        .unwrap()
+        .queue_name;
 
     assert_eq!(queue_name, "high", "queue_name should be stored as 'high'");
 }
@@ -2014,24 +1999,13 @@ async fn test_custom_mode_queue_names_stored() {
 // L1.9 Task attempt history
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, sqlx::FromRow)]
-struct AttemptRow {
-    attempt: i32,
-    outcome: String,
-    will_retry: bool,
-    error_code: Option<String>,
-    worker_id: Option<String>,
-}
-
-async fn get_attempts(pool: &PgPool, task_id: &str) -> Vec<AttemptRow> {
-    sqlx::query_as::<_, AttemptRow>(
-        "SELECT attempt, outcome, will_retry, error_code, worker_id \
-         FROM horsies_task_attempts WHERE task_id = $1 ORDER BY attempt ASC",
-    )
-    .bind(task_id)
-    .fetch_all(pool)
-    .await
-    .unwrap()
+async fn get_attempts(pool: &PgPool, task_id: &Uuid) -> Vec<horsies::TaskAttemptRow> {
+    let mut attempts = PostgresBroker::from_pool(pool.clone())
+        .get_task_attempts(*task_id)
+        .await
+        .unwrap();
+    attempts.reverse();
+    attempts
 }
 
 /// Successful task writes a COMPLETED attempt record.
@@ -2133,8 +2107,7 @@ async fn test_attempt_recorded_on_retry_exhausted() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
 
@@ -2194,9 +2167,8 @@ async fn test_enqueue_sha_idempotent_same_sha() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
-    assert_eq!(id1, task_id.to_string());
+        .unwrap();
+    assert_eq!(id1, task_id);
 
     // Second enqueue with same SHA — should succeed idempotently.
     let id2 = broker
@@ -2218,11 +2190,9 @@ async fn test_enqueue_sha_idempotent_same_sha() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
     assert_eq!(
-        id2,
-        task_id.to_string(),
+        id2, task_id,
         "idempotent re-enqueue should return same task_id"
     );
 }
@@ -2253,8 +2223,7 @@ async fn test_enqueue_sha_payload_mismatch() {
             None,
         )
         .await
-        .unwrap()
-        .to_string();
+        .unwrap();
 
     // Second enqueue with DIFFERENT SHA — should fail.
     let result = broker

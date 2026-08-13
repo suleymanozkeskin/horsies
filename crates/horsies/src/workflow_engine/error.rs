@@ -1,5 +1,6 @@
 use crate::broker::BrokerError;
 use crate::core::TaskError;
+use uuid::Uuid;
 
 /// Errors produced by workflow engine operations.
 #[derive(Debug, thiserror::Error)]
@@ -18,11 +19,11 @@ pub enum WorkflowError {
 
     /// Workflow not found in the database.
     #[error("workflow not found: {workflow_id}")]
-    WorkflowNotFound { workflow_id: String },
+    WorkflowNotFound { workflow_id: Uuid },
 
     /// Timeout waiting for workflow completion.
     #[error("timeout waiting for workflow result: {workflow_id}")]
-    WorkflowTimeout { workflow_id: String },
+    WorkflowTimeout { workflow_id: Uuid },
 
     /// Task-level error propagated from a workflow task.
     #[error("workflow task error: {0}")]

@@ -4,15 +4,27 @@
 use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// Wait until all given tasks reach a terminal status.
-pub async fn wait_for_all_terminal(pool: &PgPool, task_ids: &[String], timeout: Duration) {
+pub async fn wait_for_all_terminal(pool: &PgPool, task_ids: &[Uuid], timeout: Duration) {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
         let pending: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_tasks \
-             WHERE id = ANY($1) AND status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')",
+            "SELECT count(*)
+             FROM unnest($1::uuid[]) AS requested(task_id)
+             LEFT JOIN LATERAL horsies_task_detail_staged(requested.task_id) AS detail
+                 ON TRUE
+             LEFT JOIN horsies_tasks AS live ON live.id = requested.task_id
+             WHERE CASE
+                 WHEN detail.location = 'LIVE' THEN live.status
+                 ELSE (detail.task_row).status
+             END IS NULL
+                OR CASE
+                    WHEN detail.location = 'LIVE' THEN live.status
+                    ELSE (detail.task_row).status
+                END NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')",
         )
         .bind(task_ids)
         .fetch_one(pool)
@@ -34,20 +46,26 @@ pub async fn wait_for_all_terminal(pool: &PgPool, task_ids: &[String], timeout: 
 /// Wait until a single task reaches the given status.
 pub async fn wait_for_task_status(
     pool: &PgPool,
-    task_id: &str,
+    task_id: &Uuid,
     target_status: &str,
     timeout: Duration,
 ) {
     let deadline = Instant::now() + timeout;
 
     while Instant::now() < deadline {
-        let status: Option<String> =
-            sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
-                .bind(task_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten();
+        let status: Option<String> = sqlx::query_scalar(
+            "SELECT CASE
+                 WHEN detail.location = 'LIVE' THEN live.status
+                 ELSE (detail.task_row).status
+             END
+             FROM horsies_task_detail_staged($1) AS detail
+             LEFT JOIN horsies_tasks AS live ON live.id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
 
         if status.as_deref() == Some(target_status) {
             return;
@@ -66,7 +84,7 @@ pub async fn wait_for_task_status(
 /// Wait until a workflow reaches a terminal status. Returns the final status.
 pub async fn wait_for_workflow_terminal(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: &Uuid,
     timeout: Duration,
 ) -> String {
     let deadline = Instant::now() + timeout;
@@ -83,7 +101,7 @@ pub async fn wait_for_workflow_terminal(
 
         if let Some(s) = status {
             last_status = s.clone();
-            if matches!(s.as_str(), "COMPLETED" | "FAILED" | "CANCELLED") {
+            if matches!(s.as_str(), "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED") {
                 return s;
             }
         }
@@ -101,7 +119,7 @@ pub async fn wait_for_workflow_terminal(
 /// Wait until a workflow reaches a specific status.
 pub async fn wait_for_workflow_status(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: &Uuid,
     target_status: &str,
     timeout: Duration,
 ) {

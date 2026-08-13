@@ -11,6 +11,10 @@ pub enum WorkerError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
 
+    /// Task-history coverage or partition contract error.
+    #[error("task-history error: {0}")]
+    History(#[from] crate::core::history::errors::HistoryError),
+
     /// Worker configuration error.
     #[error("configuration error: {0}")]
     Config(String),
@@ -32,6 +36,10 @@ impl WorkerError {
         match self {
             Self::Broker(e) => e.is_retryable(),
             Self::Database(e) => is_retryable_sqlx_error(e),
+            Self::History(crate::core::history::errors::HistoryError::Database(e)) => {
+                is_retryable_sqlx_error(e)
+            }
+            Self::History(_) => false,
             Self::Config(_) => false,
             Self::ServiceLoopDied { .. } => false,
         }

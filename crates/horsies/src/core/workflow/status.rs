@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 ///                      → FAILED (on task failure with on_error=FAIL)
 ///                      → PAUSED (on task failure with on_error=PAUSE)
 ///                      → CANCELLED (user requested)
+///                      → EXPIRED (paused past the configured lifetime)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowStatus {
@@ -22,12 +23,34 @@ pub enum WorkflowStatus {
     Paused,
     /// User cancelled via WorkflowHandle.cancel().
     Cancelled,
+    /// A paused workflow exceeded `paused_workflow_auto_cancel_after`.
+    Expired,
 }
 
 impl WorkflowStatus {
     /// Whether this status represents a final state (no further transitions).
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::Expired
+        )
+    }
+}
+
+impl TryFrom<&str> for WorkflowStatus {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "PENDING" => Ok(Self::Pending),
+            "RUNNING" => Ok(Self::Running),
+            "COMPLETED" => Ok(Self::Completed),
+            "FAILED" => Ok(Self::Failed),
+            "PAUSED" => Ok(Self::Paused),
+            "CANCELLED" => Ok(Self::Cancelled),
+            "EXPIRED" => Ok(Self::Expired),
+            unknown => Err(unknown.to_owned()),
+        }
     }
 }
 
@@ -36,6 +59,7 @@ pub const WORKFLOW_TERMINAL_STATES: &[WorkflowStatus] = &[
     WorkflowStatus::Completed,
     WorkflowStatus::Failed,
     WorkflowStatus::Cancelled,
+    WorkflowStatus::Expired,
 ];
 
 impl std::fmt::Display for WorkflowStatus {
@@ -47,6 +71,7 @@ impl std::fmt::Display for WorkflowStatus {
             Self::Failed => write!(f, "FAILED"),
             Self::Paused => write!(f, "PAUSED"),
             Self::Cancelled => write!(f, "CANCELLED"),
+            Self::Expired => write!(f, "EXPIRED"),
         }
     }
 }
@@ -127,6 +152,7 @@ mod tests {
         assert!(WorkflowStatus::Completed.is_terminal());
         assert!(WorkflowStatus::Failed.is_terminal());
         assert!(WorkflowStatus::Cancelled.is_terminal());
+        assert!(WorkflowStatus::Expired.is_terminal());
         assert!(!WorkflowStatus::Pending.is_terminal());
         assert!(!WorkflowStatus::Running.is_terminal());
         assert!(!WorkflowStatus::Paused.is_terminal());
@@ -164,6 +190,7 @@ mod tests {
             WorkflowStatus::Failed,
             WorkflowStatus::Paused,
             WorkflowStatus::Cancelled,
+            WorkflowStatus::Expired,
         ];
         for s in all {
             assert_eq!(

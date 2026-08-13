@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use sqlx::FromRow;
+use uuid::Uuid;
 
 /// Row from the `horsies_heartbeats` table.
 ///
@@ -11,7 +12,7 @@ use sqlx::FromRow;
 pub struct HeartbeatRow {
     /// BIGINT since migration 0020 (`horsies_heartbeats.id`).
     pub id: i64,
-    pub task_id: String,
+    pub task_id: Uuid,
     pub sender_id: String,
     pub role: String,
     pub sent_at: DateTime<Utc>,
@@ -29,14 +30,14 @@ mod tests {
     fn heartbeat_row_field_types() {
         let row = HeartbeatRow {
             id: 1,
-            task_id: "abc-123".to_owned(),
+            task_id: Uuid::nil(),
             sender_id: "worker-1".to_owned(),
             role: "runner".to_owned(),
             sent_at: Utc::now(),
             hostname: Some("host1".to_owned()),
             pid: Some(1234),
         };
-        assert_eq!(row.task_id, "abc-123");
+        assert_eq!(row.task_id, Uuid::nil());
         assert_eq!(row.role, "runner");
     }
 
@@ -45,7 +46,7 @@ mod tests {
     fn heartbeat_row_optional_fields() {
         let row = HeartbeatRow {
             id: 2,
-            task_id: "def-456".to_owned(),
+            task_id: Uuid::max(),
             sender_id: "worker-2".to_owned(),
             role: "claimer".to_owned(),
             sent_at: Utc::now(),

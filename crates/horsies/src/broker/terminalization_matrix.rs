@@ -52,6 +52,10 @@ pub(super) const WIRE_PHASE2_EXPECTATIONS: [(&str, bool); 15] = [
     ("WORKFLOW_CANCEL_WORKFLOW", false),
 ];
 
+fn uuid(value: &str) -> Uuid {
+    Uuid::parse_str(value).expect("test identity must be UUID")
+}
+
 fn test_db_url() -> String {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         return url;
@@ -79,7 +83,7 @@ struct P5TestDatabase {
 
 static P5_DATABASE: OnceCell<P5TestDatabase> = OnceCell::const_new();
 
-pub(super) async fn migrated_pool() -> PgPool {
+pub(crate) async fn migrated_pool() -> PgPool {
     let database = P5_DATABASE
         .get_or_init(|| async {
             let base_options =
@@ -390,7 +394,7 @@ async fn complete_locked_moves_to_history_and_preserves_last_claim_evidence() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -430,7 +434,7 @@ async fn complete_replay_within_class_is_already_applied() {
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", None),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -443,7 +447,7 @@ async fn complete_replay_within_class_is_already_applied() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -474,7 +478,7 @@ async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w-other".to_owned(),
             },
@@ -497,7 +501,7 @@ async fn complete_locked_wrong_worker_is_lost_claim_and_absent_is_absent() {
     let absent = terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: Uuid::new_v4().to_string(),
+            task_id: Uuid::new_v4(),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -543,7 +547,7 @@ async fn fused_applies_with_attempt_notify_and_generation_fence() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", Some(claimed_at)),
             result_json: "{\"Ok\":7}".to_owned(),
             notify_channel: channel.clone(),
@@ -655,7 +659,7 @@ async fn move_terminalizes_the_key_reservation_at_the_history_anchor() {
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", None),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -749,7 +753,7 @@ async fn archive_availability_refusal_rolls_back_the_whole_move() {
     let error = terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -823,7 +827,7 @@ async fn fused_stale_generation_is_lost_claim() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", Some(stale)),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -868,7 +872,7 @@ async fn fused_on_matching_claim_outside_source_state_is_conflict() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", Some(claimed_at)),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -911,7 +915,7 @@ async fn fail_locked_assigns_failed_reason_unconditionally() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::FailLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -961,7 +965,7 @@ async fn cross_class_replay_names_the_foreign_kind() {
     terminalize(
         &pool,
         &TerminalizationCommand::CancelLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: CallerHoldsRowLock,
             permitted_source_statuses: vec![TaskStatus::Pending],
         },
@@ -972,7 +976,7 @@ async fn cross_class_replay_names_the_foreign_kind() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::FailLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -1014,7 +1018,7 @@ async fn legacy_kind_is_foreign_and_never_inferred_as_a_wire_replay() {
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", None),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -1036,7 +1040,7 @@ async fn legacy_kind_is_foreign_and_never_inferred_as_a_wire_replay() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::FailLockedTask {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -1098,7 +1102,7 @@ async fn fail_stale_applies_on_silence_and_refuses_on_heartbeat() {
     .expect("heartbeat");
 
     let command = |task_id: &str| TerminalizationCommand::FailStaleTask {
-        task_id: task_id.to_owned(),
+        task_id: uuid(task_id),
         stale_after_ms: 60_000,
         finalizing_stale_after_ms: 60_000,
         result_json: "{\"Err\":{}}".to_owned(),
@@ -1175,7 +1179,7 @@ async fn expire_owned_claim_applies_for_any_generation_and_reports_deadline() {
     .await;
 
     let command = |task_id: &str| TerminalizationCommand::ExpireOwnedClaim {
-        task_id: task_id.to_owned(),
+        task_id: uuid(task_id),
         fence: WorkerOwned {
             worker_id: "w1".to_owned(),
         },
@@ -1216,7 +1220,7 @@ async fn expire_owned_claim_applies_for_any_generation_and_reports_deadline() {
     let foreign = terminalize(
         &pool,
         &TerminalizationCommand::ExpireOwnedClaim {
-            task_id: not_due.clone(),
+            task_id: uuid(&not_due),
             fence: WorkerOwned {
                 worker_id: "w-other".to_owned(),
             },
@@ -1444,7 +1448,7 @@ async fn cancel_locked_applies_within_permitted_statuses_only() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelLockedTask {
-            task_id: pending.clone(),
+            task_id: uuid(&pending),
             fence: CallerHoldsRowLock,
             permitted_source_statuses: vec![TaskStatus::Pending, TaskStatus::Claimed],
         },
@@ -1475,7 +1479,7 @@ async fn cancel_locked_applies_within_permitted_statuses_only() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelLockedTask {
-            task_id: running.clone(),
+            task_id: uuid(&running),
             fence: CallerHoldsRowLock,
             permitted_source_statuses: vec![TaskStatus::Pending],
         },
@@ -1513,7 +1517,7 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteTaskFused {
-            task_id: done.clone(),
+            task_id: uuid(&done),
             fence: owned("w1", None),
             result_json: "{}".to_owned(),
             notify_channel: "matrix_unused".to_owned(),
@@ -1526,7 +1530,7 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelLockedTask {
-            task_id: wf_task.clone(),
+            task_id: uuid(&wf_task),
             fence: CallerHoldsRowLock,
             permitted_source_statuses: vec![TaskStatus::Pending],
         },
@@ -1545,7 +1549,7 @@ async fn cancel_locked_refuses_workflow_tasks_and_never_overwrites_terminal() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelLockedTask {
-            task_id: done.clone(),
+            task_id: uuid(&done),
             fence: CallerHoldsRowLock,
             permitted_source_statuses: vec![TaskStatus::Completed],
         },
@@ -1607,7 +1611,7 @@ async fn cancel_owned_orphan_applies_only_without_runnable_linkage() {
     seed_wf_task(&pool, &wf_id, &linked, "ENQUEUED").await;
 
     let command = |task_id: &str| TerminalizationCommand::CancelOwnedOrphan {
-        task_id: task_id.to_owned(),
+        task_id: uuid(task_id),
         fence: owned("w1", Some(claimed_at)),
     };
 
@@ -1745,7 +1749,7 @@ async fn abandon_owned_node_applies_and_fences_generation() {
     let stale = terminalize(
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", Some(claimed_at - Duration::hours(1))),
         },
     )
@@ -1760,7 +1764,7 @@ async fn abandon_owned_node_applies_and_fences_generation() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
-            task_id: id.clone(),
+            task_id: uuid(&id),
             fence: owned("w1", Some(claimed_at)),
         },
     )
@@ -1830,7 +1834,7 @@ async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
     terminalize(
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
-            task_id: done.clone(),
+            task_id: uuid(&done),
             fence: owned("w1", Some(claimed_at)),
         },
     )
@@ -1840,10 +1844,10 @@ async fn abandon_owned_nodes_reports_per_ordinal_in_caller_order() {
     let fence = OwnedClaimBatch::new(
         "w1".to_owned(),
         vec![
-            (mine.clone(), Some(claimed_at)),
-            (absent.clone(), None),
-            (theirs.clone(), Some(claimed_at)),
-            (done.clone(), Some(claimed_at)),
+            (uuid(&mine), Some(claimed_at)),
+            (uuid(&absent), None),
+            (uuid(&theirs), Some(claimed_at)),
+            (uuid(&done), Some(claimed_at)),
         ],
     )
     .unwrap();
@@ -1955,7 +1959,7 @@ async fn abandon_nodes_of_paused_workflows_reaches_only_paused_enqueued() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::AbandonNodesOfPausedWorkflows {
-            workflow_ids: vec![paused_wf.clone(), running_wf.clone()],
+            workflow_ids: vec![uuid(&paused_wf), uuid(&running_wf)],
         },
     )
     .await
@@ -2008,7 +2012,7 @@ async fn cancel_owned_node_honors_requeued_pending_carveout() {
     let refused = terminalize(
         &pool,
         &TerminalizationCommand::CancelOwnedNode {
-            task_id: requeued.clone(),
+            task_id: uuid(&requeued),
             fence: owned("w1", None),
             accepts_requeued_pending: false,
         },
@@ -2024,7 +2028,7 @@ async fn cancel_owned_node_honors_requeued_pending_carveout() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelOwnedNode {
-            task_id: requeued.clone(),
+            task_id: uuid(&requeued),
             fence: owned("w1", None),
             accepts_requeued_pending: true,
         },
@@ -2077,7 +2081,7 @@ async fn cancel_owned_nodes_batch_applies_owned_claims() {
 
     let fence = OwnedClaimBatch::new(
         "w1".to_owned(),
-        vec![(a.clone(), Some(gen_a)), (b.clone(), Some(gen_b))],
+        vec![(uuid(&a), Some(gen_a)), (uuid(&b), Some(gen_b))],
     )
     .unwrap();
     let outcomes = terminalize(&pool, &TerminalizationCommand::CancelOwnedNodes { fence })
@@ -2140,7 +2144,7 @@ async fn cancel_nodes_of_cancelled_workflow_reaches_briefly_running_enqueued() {
     let outcomes = terminalize(
         &pool,
         &TerminalizationCommand::CancelNodesOfCancelledWorkflow {
-            workflow_ids: vec![wf_id.clone()],
+            workflow_ids: vec![uuid(&wf_id)],
         },
     )
     .await
@@ -2229,7 +2233,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     terminalize(
         &pool,
         &TerminalizationCommand::CompleteLockedTask {
-            task_id: complete.clone(),
+            task_id: uuid(&complete),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -2241,7 +2245,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     terminalize(
         &pool,
         &TerminalizationCommand::FailLockedTask {
-            task_id: failed.clone(),
+            task_id: uuid(&failed),
             fence: PriorLockedRead {
                 worker_id: "w1".to_owned(),
             },
@@ -2255,7 +2259,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     terminalize(
         &pool,
         &TerminalizationCommand::FailStaleTask {
-            task_id: stale.clone(),
+            task_id: uuid(&stale),
             stale_after_ms: 60_000,
             finalizing_stale_after_ms: 60_000,
             result_json: "{}".to_owned(),
@@ -2268,7 +2272,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     terminalize(
         &pool,
         &TerminalizationCommand::ExpireOwnedClaim {
-            task_id: expired.clone(),
+            task_id: uuid(&expired),
             fence: WorkerOwned {
                 worker_id: "w1".to_owned(),
             },
@@ -2301,7 +2305,7 @@ async fn deferred_projection_table_mints_phase2_for_all_five_deferred_wire_kinds
     terminalize(
         &pool,
         &TerminalizationCommand::AbandonOwnedNode {
-            task_id: nondeferred.clone(),
+            task_id: uuid(&nondeferred),
             fence: owned("w1", Some(claimed_at)),
         },
     )

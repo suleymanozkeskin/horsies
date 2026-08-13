@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, RwLock};
 
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 
 use crate::core::app as core_app;
 use crate::core::config::payload::PayloadPolicy;
@@ -170,19 +171,15 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_app_error(err, String::new()))?;
+            .map_err(|err| self.wrap_app_error(err, None))?;
         bound.start().await
     }
 
-    pub async fn start_with_id(
-        &self,
-        workflow_id: impl Into<String>,
-    ) -> WorkflowStartResult<WorkflowHandle<T>> {
-        let workflow_id = workflow_id.into();
+    pub async fn start_with_id(&self, workflow_id: Uuid) -> WorkflowStartResult<WorkflowHandle<T>> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_app_error(err, workflow_id.clone()))?;
+            .map_err(|err| self.wrap_app_error(err, Some(workflow_id)))?;
         bound.start_with_id(workflow_id).await
     }
 
@@ -193,14 +190,11 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         let bound = self
             .bound_spec()
             .await
-            .map_err(|err| self.wrap_app_error(err, error.workflow_id.clone()))?;
+            .map_err(|err| self.wrap_app_error(err, error.workflow_id))?;
         bound.retry_start(error).await
     }
 
-    pub async fn handle(
-        &self,
-        workflow_id: impl Into<String>,
-    ) -> Result<WorkflowHandle<T>, crate::AppError> {
+    pub async fn handle(&self, workflow_id: Uuid) -> Result<WorkflowHandle<T>, crate::AppError> {
         Ok(self.bound_spec().await?.handle(workflow_id))
     }
 
@@ -229,7 +223,11 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         ))
     }
 
-    fn wrap_app_error(&self, err: crate::AppError, workflow_id: String) -> WorkflowStartError {
+    fn wrap_app_error(
+        &self,
+        err: crate::AppError,
+        workflow_id: Option<Uuid>,
+    ) -> WorkflowStartError {
         match err {
             crate::AppError::Validation(err) => WorkflowStartError {
                 code: WorkflowStartErrorCode::ValidationFailed,
@@ -317,7 +315,7 @@ impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
             message: err.to_string(),
             retryable: false,
             workflow_name: self.workflow_name.clone(),
-            workflow_id: String::new(),
+            workflow_id: None,
         })?;
         self.starter.start(spec).await
     }
@@ -325,15 +323,14 @@ impl<P, T: DeserializeOwned + Clone> WorkflowTemplate<P, T> {
     pub async fn start_with_id(
         &self,
         params: P,
-        workflow_id: impl Into<String>,
+        workflow_id: Uuid,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
-        let workflow_id = workflow_id.into();
         let spec = self.build(params).map_err(|err| WorkflowStartError {
             code: WorkflowStartErrorCode::ValidationFailed,
             message: err.to_string(),
             retryable: false,
             workflow_name: self.workflow_name.clone(),
-            workflow_id: workflow_id.clone(),
+            workflow_id: Some(workflow_id),
         })?;
         self.starter.start_with_id(spec, workflow_id).await
     }
@@ -382,7 +379,7 @@ impl WorkflowStarter {
                 message: err.to_string(),
                 retryable: err.is_retryable(),
                 workflow_name: workflow_name.clone(),
-                workflow_id: String::new(),
+                workflow_id: None,
             })?;
         let registry = self
             .registry
@@ -398,7 +395,7 @@ impl WorkflowStarter {
                 message: err.to_string(),
                 retryable: false,
                 workflow_name: workflow_name.clone(),
-                workflow_id: String::new(),
+                workflow_id: None,
             })?;
 
         let bound = BoundWorkflowSpec::<T>::from_broker(
@@ -415,10 +412,9 @@ impl WorkflowStarter {
     pub(crate) async fn start_with_id<T: DeserializeOwned + Clone>(
         &self,
         mut spec: WorkflowSpec,
-        workflow_id: impl Into<String>,
+        workflow_id: Uuid,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         let workflow_name = spec.name.clone();
-        let workflow_id = workflow_id.into();
         let broker = self
             .broker
             .get_ready(&self.resilience)
@@ -428,7 +424,7 @@ impl WorkflowStarter {
                 message: err.to_string(),
                 retryable: err.is_retryable(),
                 workflow_name: workflow_name.clone(),
-                workflow_id: workflow_id.clone(),
+                workflow_id: Some(workflow_id),
             })?;
         let registry = self
             .registry
@@ -444,7 +440,7 @@ impl WorkflowStarter {
                 message: err.to_string(),
                 retryable: false,
                 workflow_name: workflow_name.clone(),
-                workflow_id: workflow_id.clone(),
+                workflow_id: Some(workflow_id),
             })?;
 
         let bound = BoundWorkflowSpec::<T>::from_broker(

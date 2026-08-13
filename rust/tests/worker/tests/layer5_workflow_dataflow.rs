@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use std::sync::Arc;
 
@@ -54,7 +55,7 @@ fn db_url() -> String {
     db::db_url()
 }
 
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
     let handle: WorkflowHandle<serde_json::Value> = app
@@ -65,7 +66,7 @@ async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
 }
 
 /// Get the result JSON of a workflow task by index.
-async fn get_wf_task_result(pool: &PgPool, wf_id: &str, task_index: i32) -> Option<String> {
+async fn get_wf_task_result(pool: &PgPool, wf_id: &Uuid, task_index: i32) -> Option<String> {
     sqlx::query_scalar(
         "SELECT result FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -654,10 +655,12 @@ async fn test_join_ctx_gating() {
     let b_task = &tasks[1]; // B (slow, 300ms)
     let c_task = &tasks[2]; // C (ctx reader, join=any)
 
-    // Critical invariant: C must start AFTER B completes,
-    // even though join=any would normally fire when A completes first.
+    // Critical invariant: C is not enqueued before B is terminal, even though
+    // join=any would normally fire when A completes first. Phase-2 marks B
+    // complete and enqueues C in one transaction, so PostgreSQL's stable
+    // NOW() may assign the two ordered writes the same timestamp.
     assert!(
-        c_task.started_at.unwrap() > b_task.completed_at.unwrap(),
+        c_task.started_at.unwrap() >= b_task.completed_at.unwrap(),
         "C should start only after ctx dep B is terminal: \
          C.started_at={:?}, B.completed_at={:?}",
         c_task.started_at,

@@ -71,7 +71,7 @@ async fn start_dynamic_child(rt: TaskRuntime, input: SourceInput) -> Result<Stri
         .start::<serde_json::Value>(spec)
         .await
         .map_err(|err| TaskError::new("WF_START_FAILED", err.message))?;
-    Ok(handle.workflow_id().to_owned())
+    Ok(handle.workflow_id().to_string())
 }
 
 fn config() -> AppConfig {

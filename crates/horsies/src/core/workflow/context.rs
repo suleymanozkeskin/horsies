@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::core::task::error::TaskError;
 use crate::core::task::result::TaskResult;
@@ -18,7 +19,7 @@ pub const WORKFLOW_CTX_KWARG: &str = "__horsies_workflow_ctx__";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowContext {
     /// ID of the running workflow instance.
-    pub workflow_id: String,
+    pub workflow_id: Uuid,
 
     /// Index of the current task within the workflow.
     pub task_index: i32,
@@ -39,7 +40,7 @@ pub struct WorkflowContext {
 impl WorkflowContext {
     /// Create a new context with pre-populated upstream results.
     pub fn new(
-        workflow_id: String,
+        workflow_id: Uuid,
         task_index: i32,
         task_name: String,
         results_by_id: HashMap<String, TaskResult<serde_json::Value>>,
@@ -167,7 +168,7 @@ mod tests {
         );
         results.insert("count:1".to_owned(), TaskResult::Ok(serde_json::json!(42)));
         WorkflowContext::new(
-            "wf-123".to_owned(),
+            Uuid::nil(),
             2,
             "process".to_owned(),
             results,
@@ -238,7 +239,7 @@ mod tests {
         let ctx = make_ctx();
         let json = serde_json::to_string(&ctx).unwrap();
         let back: WorkflowContext = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.workflow_id, "wf-123");
+        assert_eq!(back.workflow_id, Uuid::nil());
         assert_eq!(back.task_index, 2);
         assert_eq!(back.task_name, "process");
         assert!(back.has_result("fetch:0"));
@@ -266,11 +267,11 @@ mod tests {
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: "child-wf-1".to_owned(),
+                child_workflow_id: Uuid::nil(),
             },
         );
         let ctx = WorkflowContext::new(
-            "wf-123".to_owned(),
+            Uuid::nil(),
             1,
             "consumer".to_owned(),
             HashMap::new(),
@@ -287,13 +288,13 @@ mod tests {
         assert!(restored.is_success);
         assert_eq!(restored.output, Some(serde_json::json!(42)));
         assert_eq!(restored.total_tasks, 3);
-        assert_eq!(restored.child_workflow_id, "child-wf-1");
+        assert_eq!(restored.child_workflow_id, Uuid::nil());
     }
 
     #[test]
     fn context_empty_results() {
         let ctx = WorkflowContext::new(
-            "wf-1".to_owned(),
+            Uuid::nil(),
             0,
             "root".to_owned(),
             HashMap::new(),
@@ -318,11 +319,11 @@ mod tests {
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: "child-1".to_owned(),
+                child_workflow_id: Uuid::nil(),
             },
         );
         WorkflowContext::new(
-            "wf-parent".to_owned(),
+            Uuid::nil(),
             1,
             "aggregate".to_owned(),
             HashMap::new(),
@@ -335,7 +336,7 @@ mod tests {
         let ctx = make_ctx_with_summary();
         let key: NodeKey<()> = NodeKey::new("sub_wf:0".to_owned());
         let summary = ctx.summary_for(&key).unwrap();
-        assert_eq!(summary.child_workflow_id, "child-1");
+        assert_eq!(summary.child_workflow_id, Uuid::nil());
         assert_eq!(summary.status, "COMPLETED");
     }
 
@@ -388,11 +389,11 @@ mod tests {
                 failed_tasks: 0,
                 skipped_tasks: 0,
                 error_summary: None,
-                child_workflow_id: "child-1".to_owned(),
+                child_workflow_id: Uuid::nil(),
             },
         );
         let ctx = WorkflowContext::new(
-            "wf-parent".to_owned(),
+            Uuid::nil(),
             1,
             "aggregate".to_owned(),
             HashMap::new(),
@@ -439,13 +440,7 @@ mod tests {
                 "something broke".to_owned(),
             )),
         );
-        let ctx = WorkflowContext::new(
-            "wf-1".to_owned(),
-            1,
-            "next".to_owned(),
-            results,
-            HashMap::new(),
-        );
+        let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         assert!(ctx.has_result("failed:0"));
     }
 
@@ -456,13 +451,7 @@ mod tests {
             "failed:0".to_owned(),
             TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned())),
         );
-        let ctx = WorkflowContext::new(
-            "wf-1".to_owned(),
-            1,
-            "next".to_owned(),
-            results,
-            HashMap::new(),
-        );
+        let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         let key: NodeKey<String> = NodeKey::new("failed:0".to_owned());
         let result = ctx.result_for(&key).unwrap();
         assert!(result.is_err());
@@ -473,7 +462,7 @@ mod tests {
     #[test]
     fn from_json_reconstruction() {
         let json = r#"{
-            "workflow_id": "wf-from-json",
+            "workflow_id": "00000000-0000-0000-0000-000000000000",
             "task_index": 3,
             "task_name": "parse",
             "results_by_id": {
@@ -481,7 +470,7 @@ mod tests {
             }
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();
-        assert_eq!(ctx.workflow_id, "wf-from-json");
+        assert_eq!(ctx.workflow_id, Uuid::nil());
         assert_eq!(ctx.task_index, 3);
         assert!(ctx.has_result("fetch:0"));
         assert!(!ctx.has_summary("anything"));

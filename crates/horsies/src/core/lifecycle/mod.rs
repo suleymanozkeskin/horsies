@@ -38,7 +38,7 @@ pub enum LifecycleValidationError {
          generation; a repeat means two generations claim the same row and \
          the fence is ambiguous."
     )]
-    DuplicateTaskIdInBatch { task_id: String },
+    DuplicateTaskIdInBatch { task_id: uuid::Uuid },
 
     #[error(
         "batch_size must be a positive integer, got {got}; the bound exists \
@@ -57,6 +57,7 @@ mod tests {
     };
     use super::*;
     use crate::core::types::status::TaskStatus;
+    use uuid::Uuid;
 
     fn snake(variant: &str) -> String {
         let mut out = String::new();
@@ -70,15 +71,20 @@ mod tests {
     }
 
     fn sample_commands() -> Vec<(&'static str, TerminalizationCommand)> {
-        let owned = OwnedClaim { worker_id: "w1".to_owned(), claimed_at: None };
-        let prior = PriorLockedRead { worker_id: "w1".to_owned() };
-        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![("t1".to_owned(), None)]).unwrap();
+        let owned = OwnedClaim {
+            worker_id: "w1".to_owned(),
+            claimed_at: None,
+        };
+        let prior = PriorLockedRead {
+            worker_id: "w1".to_owned(),
+        };
+        let batch = OwnedClaimBatch::new("w1".to_owned(), vec![(Uuid::nil(), None)]).unwrap();
         let bound = BatchSize::new(500).unwrap();
         vec![
             (
                 "CompleteLockedTask",
                 TerminalizationCommand::CompleteLockedTask {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: prior.clone(),
                     result_json: "{}".into(),
                 },
@@ -86,7 +92,7 @@ mod tests {
             (
                 "CompleteTaskFused",
                 TerminalizationCommand::CompleteTaskFused {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
                     notify_channel: "c".into(),
@@ -96,7 +102,7 @@ mod tests {
             (
                 "FailLockedTask",
                 TerminalizationCommand::FailLockedTask {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: prior,
                     result_json: "{}".into(),
                     error_code: None,
@@ -106,7 +112,7 @@ mod tests {
             (
                 "FailStaleTask",
                 TerminalizationCommand::FailStaleTask {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     stale_after_ms: 1000,
                     finalizing_stale_after_ms: 1000,
                     result_json: "{}".into(),
@@ -117,8 +123,10 @@ mod tests {
             (
                 "ExpireOwnedClaim",
                 TerminalizationCommand::ExpireOwnedClaim {
-                    task_id: "t".into(),
-                    fence: WorkerOwned { worker_id: "w1".into() },
+                    task_id: Uuid::nil(),
+                    fence: WorkerOwned {
+                        worker_id: "w1".into(),
+                    },
                     result_json: "{}".into(),
                     error_code: "E".into(),
                 },
@@ -134,7 +142,7 @@ mod tests {
             (
                 "CancelLockedTask",
                 TerminalizationCommand::CancelLockedTask {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: super::fences::CallerHoldsRowLock,
                     permitted_source_statuses: vec![TaskStatus::Pending],
                 },
@@ -142,7 +150,7 @@ mod tests {
             (
                 "CancelOwnedOrphan",
                 TerminalizationCommand::CancelOwnedOrphan {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: owned.clone(),
                 },
             ),
@@ -153,24 +161,26 @@ mod tests {
             (
                 "AbandonOwnedNode",
                 TerminalizationCommand::AbandonOwnedNode {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: owned.clone(),
                 },
             ),
             (
                 "AbandonOwnedNodes",
-                TerminalizationCommand::AbandonOwnedNodes { fence: batch.clone() },
+                TerminalizationCommand::AbandonOwnedNodes {
+                    fence: batch.clone(),
+                },
             ),
             (
                 "AbandonNodesOfPausedWorkflows",
                 TerminalizationCommand::AbandonNodesOfPausedWorkflows {
-                    workflow_ids: vec!["w".into()],
+                    workflow_ids: vec![Uuid::nil()],
                 },
             ),
             (
                 "CancelOwnedNode",
                 TerminalizationCommand::CancelOwnedNode {
-                    task_id: "t".into(),
+                    task_id: Uuid::nil(),
                     fence: owned,
                     accepts_requeued_pending: false,
                 },
@@ -182,7 +192,7 @@ mod tests {
             (
                 "CancelNodesOfCancelledWorkflow",
                 TerminalizationCommand::CancelNodesOfCancelledWorkflow {
-                    workflow_ids: vec!["w".into()],
+                    workflow_ids: vec![Uuid::nil()],
                 },
             ),
         ]
@@ -192,11 +202,13 @@ mod tests {
     fn duplicate_task_id_in_batch_rejected() {
         let result = OwnedClaimBatch::new(
             "w1".to_owned(),
-            vec![("t1".to_owned(), None), ("t1".to_owned(), None)],
+            vec![(Uuid::nil(), None), (Uuid::nil(), None)],
         );
         assert_eq!(
             result.unwrap_err(),
-            LifecycleValidationError::DuplicateTaskIdInBatch { task_id: "t1".to_owned() }
+            LifecycleValidationError::DuplicateTaskIdInBatch {
+                task_id: Uuid::nil()
+            }
         );
     }
 

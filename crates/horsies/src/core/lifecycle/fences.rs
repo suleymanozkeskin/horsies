@@ -29,6 +29,7 @@
 //! than carried as data — see `commands.rs`.
 
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use super::LifecycleValidationError;
 
@@ -82,33 +83,34 @@ pub struct OwnedClaim {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedClaimBatch {
     worker_id: String,
-    claim_generations: Vec<(String, Option<DateTime<Utc>>)>,
+    claim_generations: Vec<(Uuid, Option<DateTime<Utc>>)>,
 }
 
 impl OwnedClaimBatch {
     pub fn new(
         worker_id: String,
-        claim_generations: Vec<(String, Option<DateTime<Utc>>)>,
+        claim_generations: Vec<(Uuid, Option<DateTime<Utc>>)>,
     ) -> Result<Self, LifecycleValidationError> {
         let mut seen = std::collections::HashSet::new();
         for (task_id, _) in &claim_generations {
-            if !seen.insert(task_id.clone()) {
-                return Err(LifecycleValidationError::DuplicateTaskIdInBatch {
-                    task_id: task_id.clone(),
-                });
+            if !seen.insert(*task_id) {
+                return Err(LifecycleValidationError::DuplicateTaskIdInBatch { task_id: *task_id });
             }
         }
-        Ok(Self { worker_id, claim_generations })
+        Ok(Self {
+            worker_id,
+            claim_generations,
+        })
     }
 
     pub fn worker_id(&self) -> &str {
         &self.worker_id
     }
 
-    pub fn task_ids(&self) -> Vec<String> {
+    pub fn task_ids(&self) -> Vec<Uuid> {
         self.claim_generations
             .iter()
-            .map(|(task_id, _)| task_id.clone())
+            .map(|(task_id, _)| *task_id)
             .collect()
     }
 

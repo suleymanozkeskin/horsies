@@ -144,7 +144,7 @@ impl TaskRuntime {
     pub async fn start_with_id<T: DeserializeOwned + Clone>(
         &self,
         spec: WorkflowSpec,
-        workflow_id: impl Into<String>,
+        workflow_id: uuid::Uuid,
     ) -> WorkflowStartResult<WorkflowHandle<T>> {
         self.workflow_starter.start_with_id(spec, workflow_id).await
     }

@@ -3,12 +3,19 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
+use crate::core::history::maintenance::coverage::{
+    ensure_partition_coverage, CoverageOutcome, DeclaredRetentionClass,
+};
+use crate::core::history::maintenance::pruning::prune_expired_partitions;
+use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::retry_utils::check_retry_eligibility;
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
@@ -95,7 +102,571 @@ WHERE id = $1
 /// Row from Phase 1 scan — just the task ID.
 #[derive(Debug, FromRow)]
 struct StaleTaskId {
-    id: String,
+    id: Uuid,
+}
+
+#[cfg(test)]
+mod p7_maintenance_tests {
+    use super::*;
+    use crate::broker::terminalization::terminalize;
+    use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
+    use crate::core::history::ddl::classes::{
+        finite_class_parent_name, register_finite_retention_class,
+    };
+    use crate::core::history::ddl::runtime_names::daily_leaf_name;
+    use crate::core::history::heartbeats::partitioning::{
+        create_hourly_heartbeat_leaf, hourly_leaf_ref, CreateHourlyHeartbeatLeaf,
+    };
+    use crate::core::history::maintenance::coverage::{
+        ensure_startup_coverage, StartupCoverageOutcome,
+    };
+    use crate::core::history::partitions::catalog::database_now;
+    use crate::core::history::partitions::manager::create_daily_leaf;
+    use crate::core::history::partitions::publication::LoaderPublication;
+    use crate::core::lifecycle::{PriorLockedRead, TerminalizationCommand, TerminalizationOutcome};
+    use chrono::Timelike;
+    use serial_test::serial;
+
+    async fn seed_terminal_workflow_with_pending(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7_retention', 'RUNNING', 'fail', NULL,
+                       'test.p7.retention.v1', 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, args, kwargs, status,
+                sent_at, enqueued_at, started_at, claimed, claimed_at,
+                claimed_by_worker_id, is_workflow_task, retry_count, max_retries,
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition, created_at, updated_at
+             ) VALUES ($1, 'p7_retention_task', 'default', 100, '[]', '{}', 'RUNNING',
+                       NOW(), NOW(), NOW(), TRUE, NOW(), 'p7-retention-worker', TRUE,
+                       0, 0, $1::text, 1, $2, 'forever', FALSE,
+                       'NEVER_ELIGIBLE', NOW(), NOW())",
+        )
+        .bind(task_id)
+        .bind(vec![23_u8; 32])
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args,
+                task_kwargs, queue_name, priority, dependencies, allow_failed_deps,
+                join_type, status, is_subworkflow, task_id, created_at
+             ) VALUES ($1, $2, 0, 'root', 'p7_retention_task', '[]', '{}',
+                       'default', 100, '{}', FALSE, 'all', 'RUNNING', FALSE, $3, NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let result = serde_json::to_string(&crate::core::TaskResult::Ok(
+            serde_json::json!({"retained": true}),
+        ))
+        .unwrap();
+        let outcomes = terminalize(
+            pool,
+            &TerminalizationCommand::CompleteLockedTask {
+                task_id,
+                fence: PriorLockedRead {
+                    worker_id: "p7-retention-worker".to_owned(),
+                },
+                result_json: result,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [TerminalizationOutcome::Applied { .. }]
+        ));
+        sqlx::query(
+            "UPDATE horsies_workflows
+             SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '48 hours',
+                 created_at = NOW() - INTERVAL '48 hours',
+                 updated_at = NOW() - INTERVAL '48 hours'
+             WHERE id = $1",
+        )
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn retention_owns_only_worker_state_and_workflow_rows() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut coverage = pool.begin().await.unwrap();
+        let outcome = ensure_startup_coverage(coverage.as_mut(), 2, 2, &[], &StagedLoaderPublisher)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
+        coverage.commit().await.unwrap();
+
+        let workflow_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
+        let heartbeat_task_id = Uuid::new_v4();
+        let worker_id = format!("p7-retention-{}", Uuid::new_v4());
+        seed_terminal_workflow_with_pending(&pool, workflow_id, task_id).await;
+        sqlx::query(
+            "INSERT INTO horsies_worker_states (
+                worker_id, snapshot_at, hostname, pid, processes,
+                max_claim_batch, max_claim_per_worker, queues,
+                tasks_running, tasks_claimed, worker_started_at
+             ) VALUES ($1, NOW() - INTERVAL '48 hours', 'host', 1, 1,
+                       1, 1, '{default}', 0, 0, NOW() - INTERVAL '48 hours')",
+        )
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_heartbeats
+                (task_id, sender_id, role, sent_at, hostname, pid)
+             VALUES ($1, $2, 'runner', NOW(), 'host', 1)",
+        )
+        .bind(heartbeat_task_id)
+        .bind(&worker_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = RetentionConfig::default();
+        config.worker_state_retention_hours = Some(1);
+        config.terminal_record_retention_hours = Some(1);
+        run_retention_cleanup(&pool, &config).await;
+
+        let state: (i64, i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT count(*) FROM horsies_worker_states WHERE worker_id = $1),
+                (SELECT count(*) FROM horsies_workflows WHERE id = $2),
+                (SELECT count(*) FROM horsies_workflow_phase2_pending WHERE task_id = $3),
+                (SELECT count(*) FROM horsies_task_history WHERE task_id = $3),
+                (SELECT count(*) FROM horsies_heartbeats WHERE task_id = $4)",
+        )
+        .bind(&worker_id)
+        .bind(workflow_id)
+        .bind(task_id)
+        .bind(heartbeat_task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state,
+            (0, 0, 0, 1, 1),
+            "row retention deletes worker-state/workflow rows, workflow cascade owns pending evidence, and partitioned task/heartbeat facts remain",
+        );
+
+        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id = $1")
+            .bind(heartbeat_task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = false;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let mut retention = RetentionConfig::default();
+        retention.worker_state_retention_hours = None;
+        retention.terminal_record_retention_hours = None;
+        retention
+            .retention_classes
+            .push(crate::core::config::retention::RetentionClassConfig {
+                key: "unsafe-class-key".to_owned(),
+                duration: chrono::Duration::days(7),
+            });
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now();
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let snapshot = health.read().await.clone();
+        assert_eq!(
+            snapshot
+                .partition_coverage
+                .as_ref()
+                .and_then(|value| value["state"].as_str()),
+            Some("error"),
+        );
+        assert!(
+            snapshot.partition_pruning.is_some(),
+            "pruning still runs and publishes health after coverage fails",
+        );
+        assert!(
+            snapshot.phase2_recovery.is_some(),
+            "every pass publishes phase-2 health independently",
+        );
+        assert!(
+            snapshot.workflow_recovery.is_some(),
+            "every pass publishes non-phase2 workflow-recovery health independently",
+        );
+        assert!(
+            next_partition_maintenance > tokio::time::Instant::now(),
+            "the periodic maintenance tick advances after contained failures",
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn periodic_maintenance_runs_non_phase2_workflow_recovery() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7_periodic_orphan', 'RUNNING', 'fail', $2, 0,
+                       $1, NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(format!("test.p7.periodic-orphan.{workflow_id}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = false;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let retention = RetentionConfig::default();
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut next_partition_maintenance = tokio::time::Instant::now() + Duration::from_secs(60);
+        let mut orphan_state = OrphanSweepState::default();
+
+        run_reaper_pass(
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
+                .bind(workflow_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "FAILED");
+        let snapshot = health.read().await.clone();
+        let report = snapshot.workflow_recovery.unwrap();
+        assert!(report["case4_orphaned_failed"].as_u64().unwrap() >= 1);
+        assert_eq!(report["errors"], 0);
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn periodic_maintenance_creates_ahead_prunes_both_partition_families_and_contains_a_blocker(
+    ) {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut recovery = RecoveryConfig::default();
+        recovery.auto_requeue_stale_claimed = false;
+        recovery.auto_fail_stale_running = false;
+        recovery.auto_terminate_orphaned_workflow_tasks = false;
+        let mut retention = RetentionConfig::default();
+        retention.worker_state_retention_hours = Some(1);
+        retention.terminal_record_retention_hours = Some(1);
+        let blocked_class = "p7_pass_blocked_1d";
+        let valid_class = "p7_pass_valid_1d";
+
+        // Settle all pre-existing classes at the same horizons so the pass's
+        // creation counts are attributable to the two classes introduced here.
+        let mut baseline = pool.begin().await.unwrap();
+        let baseline_outcome = ensure_startup_coverage(
+            baseline.as_mut(),
+            retention.history_leaf_horizon_days,
+            retention.heartbeat_leaf_horizon_hours,
+            &[],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(baseline_outcome, StartupCoverageOutcome::Ready(_)));
+        baseline.commit().await.unwrap();
+
+        let mut setup = pool.begin().await.unwrap();
+        for class_key in [blocked_class, valid_class] {
+            register_finite_retention_class(&mut setup, class_key, chrono::Duration::days(1))
+                .await
+                .unwrap();
+        }
+        let now = database_now(&mut setup).await.unwrap();
+        let old_day = (now - chrono::Duration::days(6))
+            .with_hour(0)
+            .and_then(|value| value.with_minute(0))
+            .and_then(|value| value.with_second(0))
+            .and_then(|value| value.with_nanosecond(0))
+            .unwrap();
+        let mut history_leaves = Vec::new();
+        for (offset, class_key) in [blocked_class, valid_class].into_iter().enumerate() {
+            let lower = old_day + chrono::Duration::days(offset as i64);
+            let parent = finite_class_parent_name(class_key).unwrap();
+            let leaf = LeafRef::new(
+                daily_leaf_name(&parent, lower).unwrap(),
+                class_key,
+                LeafBounds::new(lower, lower + chrono::Duration::days(1)).unwrap(),
+            )
+            .unwrap();
+            create_daily_leaf(
+                &mut setup,
+                &CreateDailyHistoryLeaf::new(leaf.clone()).unwrap(),
+                &StagedLoaderPublisher,
+            )
+            .await
+            .unwrap();
+            history_leaves.push(leaf);
+        }
+        let old_hour = (now - chrono::Duration::hours(12))
+            .with_minute(0)
+            .and_then(|value| value.with_second(0))
+            .and_then(|value| value.with_nanosecond(0))
+            .unwrap();
+        let heartbeat_leaf = hourly_leaf_ref(old_hour).unwrap();
+        create_hourly_heartbeat_leaf(
+            &mut setup,
+            &CreateHourlyHeartbeatLeaf::new(heartbeat_leaf.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let workflow_id = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+        let blocker_task_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO horsies_workflows (id, name) VALUES ($1, 'p7 pass blocker')")
+            .bind(workflow_id)
+            .execute(&mut *setup)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name)
+             VALUES ($1, $2, 0, 'p7 pass blocker')",
+        )
+        .bind(node_id)
+        .bind(workflow_id)
+        .execute(&mut *setup)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_workflow_phase2_pending (
+                 task_id, workflow_id, workflow_node_row_id, terminal_status,
+                 terminal_at, terminalization_kind, recovery_source,
+                 history_class, history_anchor, history_schema_version,
+                 result_digest, phase2_generation, created_at, attempt_count
+             ) VALUES ($1, $2, $3, 'COMPLETED', $4, 'COMPLETE_LOCKED',
+                       'HISTORY', $5, $4, 1, $6, $7,
+                       NOW() - INTERVAL '2 hours', $8)",
+        )
+        .bind(blocker_task_id)
+        .bind(workflow_id)
+        .bind(node_id)
+        .bind(history_leaves[0].bounds().lower() + chrono::Duration::hours(1))
+        .bind(blocked_class)
+        .bind(vec![31_u8; 32])
+        .bind(Uuid::new_v4())
+        .bind(recovery.phase2_quarantine_after_attempts as i32)
+        .execute(&mut *setup)
+        .await
+        .unwrap();
+
+        // Statement-level sentinels discriminate the removed row-retention
+        // SQL from partition pruning, including an empty DELETE statement.
+        for statement in [
+            "CREATE TABLE p7_reaper_row_delete_audit (relation_name text NOT NULL)",
+            "CREATE OR REPLACE FUNCTION p7_reaper_record_row_delete() RETURNS trigger
+             LANGUAGE plpgsql AS $body$
+             BEGIN
+                 INSERT INTO p7_reaper_row_delete_audit VALUES (TG_TABLE_NAME);
+                 RETURN NULL;
+             END
+             $body$",
+            "CREATE TRIGGER p7_reaper_task_row_delete
+                 AFTER DELETE ON horsies_tasks FOR EACH STATEMENT
+                 EXECUTE FUNCTION p7_reaper_record_row_delete()",
+            "CREATE TRIGGER p7_reaper_heartbeat_row_delete
+                 AFTER DELETE ON horsies_heartbeats FOR EACH STATEMENT
+                 EXECUTE FUNCTION p7_reaper_record_row_delete()",
+        ] {
+            sqlx::query(statement).execute(&mut *setup).await.unwrap();
+        }
+        setup.commit().await.unwrap();
+
+        retention.retention_classes.extend([
+            crate::core::config::retention::RetentionClassConfig {
+                key: blocked_class.to_owned(),
+                duration: chrono::Duration::days(1),
+            },
+            crate::core::config::retention::RetentionClassConfig {
+                key: valid_class.to_owned(),
+                duration: chrono::Duration::days(1),
+            },
+        ]);
+        let health = new_reaper_health();
+        let mut next_retention_cleanup = tokio::time::Instant::now();
+        let mut next_partition_maintenance = tokio::time::Instant::now();
+        let mut orphan_state = OrphanSweepState::default();
+        run_reaper_pass(
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            &recovery,
+            &PayloadPolicy::default(),
+            &retention,
+            &health,
+            &mut next_retention_cleanup,
+            &mut next_partition_maintenance,
+            &mut orphan_state,
+        )
+        .await;
+
+        let snapshot = health.read().await.clone();
+        let coverage = snapshot.partition_coverage.unwrap();
+        assert_eq!(coverage["state"], "ensured");
+        assert_eq!(coverage["created_history_leaves"], 8);
+        assert_eq!(coverage["created_heartbeat_leaves"], 0);
+        assert_eq!(coverage["heartbeat_covered_now"], true);
+        let pruning = snapshot.partition_pruning.unwrap();
+        assert_eq!(pruning["finalized"], 0);
+        assert_eq!(pruning["detached"], 2);
+        assert_eq!(pruning["dropped"], 2);
+        assert_eq!(pruning["refusals"].as_array().unwrap().len(), 1);
+        assert!(pruning["refusals"][0]
+            .as_str()
+            .unwrap()
+            .contains(history_leaves[0].leaf_name()));
+        assert_eq!(pruning["errors"].as_array().unwrap().len(), 0);
+        let phase2 = snapshot.phase2_recovery.unwrap();
+        assert_eq!(phase2["considered"], 0);
+        assert_eq!(phase2["applied"], 0);
+        assert_eq!(phase2["retained"], 0);
+        assert_eq!(phase2["failed"], 0);
+        assert_eq!(phase2["over_attempt_bound"], 1);
+
+        let physical: (bool, bool, bool, i64) = sqlx::query_as(
+            "SELECT
+                 to_regclass($1) IS NOT NULL,
+                 to_regclass($2) IS NULL,
+                 to_regclass($3) IS NULL,
+                 (SELECT count(*) FROM p7_reaper_row_delete_audit)",
+        )
+        .bind(history_leaves[0].leaf_name())
+        .bind(history_leaves[1].leaf_name())
+        .bind(heartbeat_leaf.leaf_name())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(physical, (true, true, true, 0));
+        for class_key in [blocked_class, valid_class] {
+            let parent = finite_class_parent_name(class_key).unwrap();
+            for offset in 0..=retention.history_leaf_horizon_days {
+                let lower = now
+                    .with_hour(0)
+                    .and_then(|value| value.with_minute(0))
+                    .and_then(|value| value.with_second(0))
+                    .and_then(|value| value.with_nanosecond(0))
+                    .unwrap()
+                    + chrono::Duration::days(i64::from(offset));
+                let leaf_name = daily_leaf_name(&parent, lower).unwrap();
+                let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+                    .bind(leaf_name)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                assert!(exists, "periodic pass omitted create-ahead for {class_key}");
+            }
+        }
+
+        let mut cleanup = pool.begin().await.unwrap();
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+            .bind(blocker_task_id)
+            .execute(&mut *cleanup)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(workflow_id)
+            .execute(&mut *cleanup)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(&mut *cleanup)
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE p7_reaper_row_delete_audit CASCADE")
+            .execute(&mut *cleanup)
+            .await
+            .unwrap();
+        sqlx::query("DROP FUNCTION p7_reaper_record_row_delete() CASCADE")
+            .execute(&mut *cleanup)
+            .await
+            .unwrap();
+        for class_key in [blocked_class, valid_class] {
+            let parent = finite_class_parent_name(class_key).unwrap();
+            sqlx::query(&format!("DROP TABLE {parent} CASCADE"))
+                .execute(&mut *cleanup)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM horsies_task_history_leaf_catalog WHERE class_key = $1")
+                .bind(class_key)
+                .execute(&mut *cleanup)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM horsies_retention_classes WHERE class_key = $1")
+                .bind(class_key)
+                .execute(&mut *cleanup)
+                .await
+                .unwrap();
+        }
+        StagedLoaderPublisher.republish(&mut cleanup).await.unwrap();
+        cleanup.commit().await.unwrap();
+    }
 }
 
 /// Row from Phase 2 per-task FOR UPDATE — full context for retry eligibility.
@@ -147,24 +718,6 @@ WHERE horsies_tasks.id = stale.id";
 // ---------------------------------------------------------------------------
 // Retention cleanup SQL
 // ---------------------------------------------------------------------------
-
-// Retention deletes run in bounded batches (parity with horsies PR #172):
-// each statement deletes at most $2 rows selected by an id-subselect, and the
-// pass commits per batch (autocommit). An unbounded DELETE turns the first
-// pass over a large eligible backlog (retention newly enabled, or the window
-// lowered) into one multi-hour-lock transaction: WAL burst, task_attempts
-// cascades, long row locks. FOR UPDATE SKIP LOCKED lets concurrent ungated
-// passes drain disjoint batches instead of blocking.
-
-#[cfg(test)]
-const DELETE_EXPIRED_HEARTBEATS_SQL: &str = "\
-DELETE FROM horsies_heartbeats
-WHERE id IN (
-    SELECT id FROM horsies_heartbeats
-    WHERE sent_at < NOW() - CAST($1 || ' hours' AS INTERVAL)
-    LIMIT $2
-    FOR UPDATE SKIP LOCKED
-)";
 
 const DELETE_EXPIRED_WORKER_STATES_SQL: &str = "\
 DELETE FROM horsies_worker_states
@@ -224,7 +777,7 @@ doomed AS (
             FROM horsies_workflow_tasks wt
             WHERE wt.workflow_id = w.id) AS node_count
     FROM horsies_workflows w
-    WHERE w.status IN ('COMPLETED', 'FAILED', 'CANCELLED')
+    WHERE w.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
       AND NOT EXISTS (
           SELECT 1 FROM live WHERE live.workflow_id = w.id
@@ -249,100 +802,32 @@ purged_nodes AS (
 DELETE FROM horsies_workflows
 WHERE id IN (SELECT id FROM budgeted)";
 
-// The status list + COALESCE expression must stay textually aligned with
-// idx_horsies_tasks_retention (migrations/0025_retention_indexes.sql): the
-// planner can only serve the eligibility predicate from the partial index
-// while it can prove the status predicate implies the index predicate.
-//
-// task_attempts are purged set-wise in the purged_attempts CTE rather than
-// left to the FK ON DELETE CASCADE: RI triggers are row-level, so the cascade
-// issues one child DELETE per doomed task inside this statement's transaction
-// — costlier in aggregate than the parent delete itself. The CTE removes the
-// whole child set in one indexed statement; the cascade trigger still fires
-// per parent row but finds nothing, and remains the correctness net for
-// non-retention deletes. rows_affected reports the top-level DELETE only, so
-// the batching loop keeps counting parent rows.
-//
-// $3 carries the queues with a per-queue override window
-// (queue_terminal_record_retention_hours); an empty array excludes nothing.
-// The exclusion shields PLAIN tasks only: workflow-backing rows
-// (is_workflow_task = TRUE) age under the global window even on override
-// queues, because the per-queue statement filters them out — an unconditional
-// exclusion would leave them unreachable by both statements and retained
-// forever. The exclusion is a heap filter on the already-bounded candidate
-// scan, so the 0025 index plan is unchanged.
-#[cfg(test)]
-const DELETE_EXPIRED_TASKS_SQL: &str = "\
-WITH doomed AS (
-    SELECT t.id
-    FROM horsies_tasks t
-    WHERE t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
-      AND NOT (t.queue_name = ANY(CAST($3 AS text[]))
-               AND t.is_workflow_task = FALSE)
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt
-          JOIN horsies_workflows w ON w.id = wt.workflow_id
-          WHERE wt.task_id = t.id
-            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-      )
-    LIMIT $2
-    FOR UPDATE OF t SKIP LOCKED
-),
-purged_attempts AS (
-    DELETE FROM horsies_task_attempts
-    WHERE task_id IN (SELECT id FROM doomed)
-)
-DELETE FROM horsies_tasks
-WHERE id IN (SELECT id FROM doomed)";
-
-// Per-queue override window (queue_terminal_record_retention_hours), one
-// statement per override queue. Served by idx_horsies_tasks_queue_retention
-// (migration 0029): the 0025 expression index cannot serve an override window
-// efficiently because the override cutoff is far more recent than the global
-// one, making every other queue's retained terminal rows heap-filter misses.
-// Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows age
-// under the global window so a workflow and its task rows are retained as a
-// unit. The NOT EXISTS guard is kept as defense in depth (plain tasks have no
-// workflow_task linkage). Same purged_attempts mechanism as the global delete.
-#[cfg(test)]
-const DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL: &str = "\
-WITH doomed AS (
-    SELECT t.id
-    FROM horsies_tasks t
-    WHERE t.queue_name = $3
-      AND t.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
-      AND COALESCE(t.completed_at, t.failed_at, t.updated_at, t.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
-      AND t.is_workflow_task = FALSE
-      AND NOT EXISTS (
-          SELECT 1
-          FROM horsies_workflow_tasks wt
-          JOIN horsies_workflows w ON w.id = wt.workflow_id
-          WHERE wt.task_id = t.id
-            AND w.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED')
-      )
-    LIMIT $2
-    FOR UPDATE OF t SKIP LOCKED
-),
-purged_attempts AS (
-    DELETE FROM horsies_task_attempts
-    WHERE task_id IN (SELECT id FROM doomed)
-)
-DELETE FROM horsies_tasks
-WHERE id IN (SELECT id FROM doomed)";
-
 /// Max stale-RUNNING candidates a single reaper pass processes. Phase 2 handles
 /// each in its own transaction under the cluster-wide reaper gate, so this bounds
 /// how long one pass holds the gate; successive passes drain any larger backlog
 /// (P8).
 const STALE_RUNNING_SCAN_LIMIT: i64 = 1_000;
 
-/// Wall-clock budget for one retention pass across all five statements. A
+/// Wall-clock budget for one retention pass across both retained-row statements. A
 /// backlog that does not drain within the budget resumes on the next pass;
 /// every statement still runs at least one batch per pass so a deep backlog
 /// in an earlier table cannot starve the later ones indefinitely.
 const RETENTION_PASS_TIME_BUDGET: Duration = Duration::from_secs(60);
+
+/// Reaper-owned health attached to worker-state snapshots.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ReaperHealthSnapshot {
+    pub workflow_recovery: Option<serde_json::Value>,
+    pub partition_coverage: Option<serde_json::Value>,
+    pub partition_pruning: Option<serde_json::Value>,
+    pub phase2_recovery: Option<serde_json::Value>,
+}
+
+pub type ReaperHealth = Arc<RwLock<ReaperHealthSnapshot>>;
+
+pub fn new_reaper_health() -> ReaperHealth {
+    Arc::new(RwLock::new(ReaperHealthSnapshot::default()))
+}
 
 /// Spawn the reaper loop for stale task recovery.
 ///
@@ -351,14 +836,18 @@ const RETENTION_PASS_TIME_BUDGET: Duration = Duration::from_secs(60);
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
     pool: PgPool,
+    registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
+    payload: PayloadPolicy,
     retention: RetentionConfig,
+    health: ReaperHealth,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let check_interval = Duration::from_millis(config.check_interval_ms);
         let mut next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
+        let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
 
         tracing::info!(
@@ -380,10 +869,10 @@ pub fn spawn_reaper(
                             tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
                         GatePass::Ungated => {
-                            run_reaper_pass(&pool, &config, &retention, &mut next_retention_cleanup, &mut orphan_state).await;
+                            run_reaper_pass(&pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
                         }
                         GatePass::Held(tx) => {
-                            run_reaper_pass(&pool, &config, &retention, &mut next_retention_cleanup, &mut orphan_state).await;
+                            run_reaper_pass(&pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
                             release_gate(tx).await;
                         }
                     }
@@ -421,15 +910,6 @@ fn advisory_key_reaper() -> i64 {
     advisory_key_from(b"horsies:reaper:v1")
 }
 
-/// Fixed advisory key for the cluster-wide workflow-recovery gate. Distinct from
-/// the reaper key so the two passes gate independently. Python runs workflow
-/// recovery inside the reaper pass (one shared gate); the Rust port splits it
-/// into its own loop, so it needs its own gate to keep the same "one worker per
-/// interval, cluster-wide" behavior (parity with horsies PR #101).
-fn advisory_key_workflow_recovery() -> i64 {
-    advisory_key_from(b"horsies:workflow_recovery:v1")
-}
-
 /// Try to acquire a periodic-pass gate as a transaction-scoped advisory lock on
 /// `key`, held by an otherwise-idle transaction for the duration of the pass.
 ///
@@ -448,15 +928,21 @@ async fn acquire_gate(pool: &PgPool, key: i64) -> GatePass {
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
         Err(e) => {
-            tracing::warn!(error = %e, "periodic-pass gate connection unavailable; running ungated");
-            return GatePass::Ungated;
+            tracing::warn!(error = %e, "periodic-pass gate connection unavailable; skipping interval");
+            return GatePass::Skip;
         }
     };
-    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+    let acquired: bool = match sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
         .bind(key)
         .fetch_one(tx.as_mut())
         .await
-        .unwrap_or(false);
+    {
+        Ok(acquired) => acquired,
+        Err(error) => {
+            tracing::warn!(%error, "periodic-pass advisory gate failed; skipping interval");
+            return GatePass::Skip;
+        }
+    };
     if acquired {
         GatePass::Held(tx)
     } else {
@@ -476,9 +962,13 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// requeue, and periodic retention cleanup.
 async fn run_reaper_pass(
     pool: &PgPool,
+    registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
+    payload: &PayloadPolicy,
     retention: &RetentionConfig,
+    health: &ReaperHealth,
     next_retention_cleanup: &mut tokio::time::Instant,
+    next_partition_maintenance: &mut tokio::time::Instant,
     orphan_state: &mut OrphanSweepState,
 ) {
     if config.auto_fail_stale_running {
@@ -571,11 +1061,143 @@ async fn run_reaper_pass(
         }
     }
 
+    // Exact outbox recovery. Each candidate owns its transaction; retaining
+    // dispositions remain visible and count toward bounded quarantine.
+    let workflow_recovery = crate::workflow_engine::recovery::recover_stuck_workflows(
+        pool,
+        registry,
+        config.crashed_worker_recovery_grace_ms,
+        payload,
+        retention,
+    )
+    .await;
+    health.write().await.workflow_recovery = Some(match workflow_recovery {
+        Ok(report) => serde_json::to_value(report).unwrap_or_else(
+            |error| serde_json::json!({"state": "error", "error": error.to_string()}),
+        ),
+        Err(error) => {
+            tracing::error!(%error, "workflow recovery pass failed");
+            serde_json::json!({"state": "error", "error": error.to_string()})
+        }
+    });
+
+    let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
+        pool,
+        registry,
+        config.crashed_worker_recovery_grace_ms,
+        crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
+        config.phase2_quarantine_after_attempts,
+        payload,
+        retention,
+    )
+    .await;
+    health.write().await.phase2_recovery = Some(match phase2 {
+        Ok(summary) => {
+            if summary.applied > 0 || summary.retained > 0 || summary.failed > 0 {
+                tracing::info!(?summary, "phase-2 recovery pass completed");
+            }
+            serde_json::to_value(summary).unwrap_or_else(
+                |error| serde_json::json!({"state": "error", "error": error.to_string()}),
+            )
+        }
+        Err(error) => {
+            tracing::error!(%error, "phase-2 recovery pass failed");
+            serde_json::json!({"state": "error", "error": error.to_string()})
+        }
+    });
+
     // Retention cleanup (runs every retention_sweep_interval_s).
     if tokio::time::Instant::now() >= *next_retention_cleanup {
         run_retention_cleanup(pool, retention).await;
         *next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
+    }
+
+    if let Some(age) = retention.paused_workflow_auto_cancel_after {
+        match crate::workflow_engine::lifecycle::expire_paused_workflows(pool, age, 50).await {
+            Ok(count) if count > 0 => {
+                tracing::info!(
+                    count,
+                    "expired paused workflows past the declared age policy"
+                );
+            }
+            Err(error) => {
+                tracing::error!(%error, "paused-workflow expiry sweep failed");
+            }
+            _ => {}
+        }
+    }
+
+    if tokio::time::Instant::now() >= *next_partition_maintenance {
+        let declared: Vec<DeclaredRetentionClass> = retention
+            .registrable_classes()
+            .into_iter()
+            .map(|class| DeclaredRetentionClass {
+                class_key: class.key,
+                duration: class.duration,
+            })
+            .collect();
+        let coverage_health = match pool.begin().await {
+            Ok(mut transaction) => match ensure_partition_coverage(
+                transaction.as_mut(),
+                retention.history_leaf_horizon_days,
+                retention.heartbeat_leaf_horizon_hours,
+                &declared,
+                &StagedLoaderPublisher,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    let encoded = match &outcome {
+                        CoverageOutcome::Ensured(ensured) => serde_json::json!({
+                            "state": "ensured",
+                            "created_history_leaves": ensured.created_history_leaves,
+                            "created_heartbeat_leaves": ensured.created_heartbeat_leaves,
+                            "republished": ensured.republished,
+                            "heartbeat_covered_now": ensured.heartbeat_covered_now,
+                            "history_covered_through": ensured.history_covered_through,
+                            "heartbeats_covered_through": ensured.heartbeats_covered_through,
+                            "absent_leaves": ensured.absent_leaves,
+                        }),
+                        CoverageOutcome::Failed(failed) => serde_json::json!({
+                            "state": "failed",
+                            "stage": failed.stage,
+                            "class_key": failed.class_key,
+                            "refusal": failed.refusal,
+                            "heartbeat_covered_now": failed.heartbeat_covered_now,
+                            "absent_leaves": failed.absent_leaves,
+                        }),
+                    };
+                    if let Err(error) = transaction.commit().await {
+                        tracing::error!(%error, "partition coverage commit failed");
+                    }
+                    Some(encoded)
+                }
+                Err(error) => {
+                    let _ = transaction.rollback().await;
+                    tracing::error!(%error, "partition coverage ensure failed");
+                    Some(serde_json::json!({"state": "error", "error": error.to_string()}))
+                }
+            },
+            Err(error) => {
+                tracing::error!(%error, "partition coverage transaction failed");
+                Some(serde_json::json!({"state": "error", "error": error.to_string()}))
+            }
+        };
+        health.write().await.partition_coverage = coverage_health;
+
+        // Coverage and pruning are independently contained: either half runs
+        // and publishes health even when the other refuses.
+        let prune = prune_expired_partitions(pool, &StagedLoaderPublisher).await;
+        health.write().await.partition_pruning = Some(serde_json::json!({
+            "finalized": prune.finalized_leaves.len(),
+            "detached": prune.detached_count(),
+            "dropped": prune.dropped_count(),
+            "refusals": prune.refusals,
+            "errors": prune.errors,
+        }));
+        *next_partition_maintenance = tokio::time::Instant::now()
+            + Duration::from_secs(retention.partition_maintenance_interval_s);
     }
 }
 
@@ -622,7 +1244,7 @@ pub async fn mark_stale_running_as_failed(
     for stale in &stale_ids {
         let result = process_single_stale_task(
             pool,
-            &stale.id,
+            stale.id,
             threshold_secs,
             finalizing_threshold_secs,
             threshold_ms,
@@ -649,7 +1271,7 @@ pub async fn mark_stale_running_as_failed(
 /// Returns `Ok(true)` if processed, `Ok(false)` if skipped (no longer RUNNING).
 async fn process_single_stale_task(
     pool: &PgPool,
-    task_id: &str,
+    task_id: Uuid,
     threshold_secs: f64,
     finalizing_threshold_secs: f64,
     threshold_ms: u64,
@@ -730,7 +1352,7 @@ async fn process_single_stale_task(
             tx.commit().await?;
 
             tracing::info!(
-                task_id,
+                task_id = %task_id,
                 retry_count = new_count,
                 next_retry_at = %next_retry_at,
                 "stale RUNNING task scheduled for retry",
@@ -750,7 +1372,7 @@ async fn process_single_stale_task(
 
         // good_until guard blocked the retry — fall through to fail path.
         tracing::info!(
-            task_id,
+            task_id = %task_id,
             "stale task retry blocked by good_until, falling through to fail",
         );
     }
@@ -776,35 +1398,13 @@ async fn process_single_stale_task(
 
         let task_result: TaskResult<()> = TaskResult::Err(task_error);
         let result_json = serde_json::to_string(&task_result).unwrap_or_else(|e| {
-            tracing::error!(task_id, error = %e, "failed to serialize stale task result");
+            tracing::error!(task_id = %task_id, error = %e, "failed to serialize stale task result");
             r#"{"__type":"err","value":{"message":"serialization failed"}}"#.to_owned()
         });
 
-        let command = crate::core::lifecycle::TerminalizationCommand::FailStaleTask {
-            task_id: task_id.to_owned(),
-            stale_after_ms: threshold_ms as i32,
-            finalizing_stale_after_ms: (finalizing_threshold_secs * 1000.0) as i32,
-            result_json,
-            error_code: error_code_str.to_owned(),
-            failed_reason: failed_reason.clone(),
-        };
-        let outcomes = crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
-
-        let applied = matches!(
-            outcomes.first(),
-            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
-        );
-        if !applied {
-            // The authoritative capture disagreed with the advisory scan
-            // (e.g. a heartbeat landed in between): nothing was failed, so
-            // no attempt row either. Evidence is logged at the adapter
-            // boundary.
-            tx.rollback()
-                .await
-                .map_err(crate::broker::BrokerError::Database)?;
-            return Ok(false);
-        }
-
+        // Write the attempt before the move so the terminalization function
+        // archives it. A refusal rolls this row back with the rest of the
+        // caller-owned transaction.
         sqlx::query(UPSERT_TASK_ATTEMPT_SQL)
             .bind(task_id)
             .bind(attempt_num)
@@ -823,11 +1423,34 @@ async fn process_single_stale_task(
             .await
             .map_err(crate::broker::BrokerError::Database)?;
 
+        let command = crate::core::lifecycle::TerminalizationCommand::FailStaleTask {
+            task_id,
+            stale_after_ms: threshold_ms as i32,
+            finalizing_stale_after_ms: (finalizing_threshold_secs * 1000.0) as i32,
+            result_json,
+            error_code: error_code_str.to_owned(),
+            failed_reason: failed_reason.clone(),
+        };
+        let outcomes = crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
+
+        if !matches!(
+            outcomes.first(),
+            Some(crate::core::lifecycle::TerminalizationOutcome::Applied { .. })
+        ) {
+            // The authoritative capture disagreed with the advisory scan
+            // (e.g. a heartbeat landed in between): discard the speculative
+            // attempt and every other write.
+            tx.rollback()
+                .await
+                .map_err(crate::broker::BrokerError::Database)?;
+            return Ok(false);
+        }
+
         tx.commit()
             .await
             .map_err(crate::broker::BrokerError::Database)?;
 
-        tracing::info!(task_id, "stale RUNNING task marked FAILED");
+        tracing::info!(task_id = %task_id, "stale RUNNING task marked FAILED");
     }
 
     Ok(true)
@@ -934,23 +1557,12 @@ enum DrainedWhen {
     EmptyBatch,
 }
 
-/// Statement-specific third bind for the tasks retention deletes.
-#[derive(Clone, Copy)]
-#[allow(dead_code)]
-enum ExtraBind<'a> {
-    /// Global tasks delete: queues shielded by a per-queue override window.
-    ExcludedQueues(&'a [String]),
-    /// Per-queue override delete: the override queue's name.
-    QueueName(&'a str),
-}
-
 /// Run one retention DELETE in bounded batches (autocommit per batch).
 ///
 /// Always runs at least one batch; stops when the backlog reads as drained
 /// (per `drained_when`) or the pass deadline is reached (backlog resumes next
 /// pass). Bounded batches keep per-transaction WAL and row locks flat
-/// regardless of backlog size. `extra` supplies the statement-specific third
-/// bind of the tasks deletes; the two-bind statements pass `None`.
+/// regardless of backlog size.
 async fn delete_expired_in_batches(
     pool: &PgPool,
     sql: &str,
@@ -958,18 +1570,16 @@ async fn delete_expired_in_batches(
     batch_size: i64,
     deadline: tokio::time::Instant,
     drained_when: DrainedWhen,
-    extra: Option<ExtraBind<'_>>,
 ) -> Result<u64, sqlx::Error> {
     let hours = retention_hours.to_string();
     let mut total: u64 = 0;
     loop {
-        let query = sqlx::query(sql).bind(&hours).bind(batch_size);
-        let query = match extra {
-            None => query,
-            Some(ExtraBind::ExcludedQueues(queues)) => query.bind(queues),
-            Some(ExtraBind::QueueName(queue)) => query.bind(queue),
-        };
-        let deleted = query.execute(pool).await?.rows_affected();
+        let deleted = sqlx::query(sql)
+            .bind(&hours)
+            .bind(batch_size)
+            .execute(pool)
+            .await?
+            .rows_affected();
         total += deleted;
         let drained = match drained_when {
             DrainedWhen::ShortBatch => deleted < batch_size as u64,
@@ -995,7 +1605,7 @@ async fn delete_expired_in_batches(
 /// node rows are deleted together by the workflow-batched statement.
 /// Deletes run in bounded batches under a shared pass time budget.
 ///
-/// Normally called by the reaper loop every `retention_sweep_interval_s`.
+/// Called by the reaper loop every `retention_sweep_interval_s`.
 pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
     let mut deleted_worker_states: u64 = 0;
     let mut deleted_workflows: u64 = 0;
@@ -1015,7 +1625,6 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::ShortBatch,
-                None,
             )
             .await?;
         }
@@ -1031,7 +1640,6 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
                 batch_size,
                 deadline,
                 DrainedWhen::EmptyBatch,
-                None,
             )
             .await?;
         }
@@ -1057,111 +1665,40 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
     }
 }
 
-/// Spawn a periodic workflow recovery loop.
-///
-/// Runs alongside the task reaper to detect and fix stuck workflow tasks.
-/// Uses the same check interval as the task reaper.
-#[allow(clippy::needless_pass_by_value)]
-pub fn spawn_workflow_recovery(
-    pool: PgPool,
-    registry: Arc<WorkflowSpecRegistry>,
-    config: RecoveryConfig,
-    payload: PayloadPolicy,
-    retention: RetentionConfig,
-    cancel: CancellationToken,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let check_interval = Duration::from_millis(config.check_interval_ms);
-
-        tracing::info!(
-            check_interval_ms = config.check_interval_ms,
-            "workflow recovery loop started",
-        );
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(check_interval) => {
-                    // Cluster-wide gate: only one worker runs a recovery pass per
-                    // interval. Passes are safe to run concurrently (each case query
-                    // uses per-row CAS / SKIP LOCKED), but redundant across a cluster;
-                    // the gate elides the duplicate work. Restores the "one worker per
-                    // interval" behavior Python gets by running recovery inside the
-                    // gated reaper pass.
-                    match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
-                        GatePass::Skip => {
-                            tracing::debug!(
-                                "workflow recovery pass skipped: another worker holds the gate",
-                            );
-                        }
-                        GatePass::Ungated => {
-                            run_workflow_recovery_pass(
-                                &pool,
-                                &registry,
-                                &config,
-                                &payload,
-                                &retention,
-                            )
-                            .await;
-                        }
-                        GatePass::Held(tx) => {
-                            run_workflow_recovery_pass(
-                                &pool,
-                                &registry,
-                                &config,
-                                &payload,
-                                &retention,
-                            )
-                            .await;
-                            release_gate(tx).await;
-                        }
-                    }
-                }
-            }
-        }
-    })
-}
-
-/// Run one workflow-recovery pass and log its outcome.
-async fn run_workflow_recovery_pass(
-    pool: &PgPool,
-    registry: &WorkflowSpecRegistry,
-    config: &RecoveryConfig,
-    payload: &PayloadPolicy,
-    retention: &RetentionConfig,
-) {
-    match crate::workflow_engine::recover_stuck_workflows(
-        pool,
-        registry,
-        config.crashed_worker_recovery_grace_ms,
-        payload,
-        retention,
-    )
-    .await
-    {
-        Ok(report) if report.total() > 0 => {
-            tracing::info!(
-                total = report.total(),
-                errors = report.errors,
-                "workflow recovery pass completed",
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "workflow recovery pass failed");
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::history::maintenance::coverage::{
+        ensure_startup_coverage, StartupCoverageOutcome,
+    };
     use serial_test::serial;
     use uuid::Uuid;
 
     /// Batch size for direct retention-statement tests (the default
     /// `RecoveryConfig::retention_delete_batch_size`).
     const TEST_RETENTION_BATCH: i64 = 500;
+
+    #[tokio::test]
+    async fn gate_runs_ungated_only_for_static_single_connection_capacity() {
+        let single = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&test_db_url())
+            .unwrap();
+        assert!(matches!(
+            acquire_gate(&single, advisory_key_reaper()).await,
+            GatePass::Ungated
+        ));
+
+        let unavailable = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy(&test_db_url())
+            .unwrap();
+        unavailable.close().await;
+        assert!(matches!(
+            acquire_gate(&unavailable, advisory_key_reaper()).await,
+            GatePass::Skip
+        ));
+    }
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -1197,53 +1734,32 @@ mod tests {
         crate::broker::migrations::run_horsies_migrations(&pool)
             .await
             .expect("migrations");
-        pool
-    }
-
-    /// N3: the workflow-recovery loop must gate cluster-wide (like the reaper),
-    /// so only one worker runs a pass per interval. Before this fix the loop had
-    /// no gate and every worker scanned each interval. Verify the gate mechanism
-    /// is wired to a distinct key and skips when another holder owns it.
-    #[tokio::test]
-    #[serial]
-    async fn workflow_recovery_gate_skips_when_another_holder_owns_it() {
-        // Distinct keys so the two periodic passes gate independently.
-        assert_ne!(
-            advisory_key_workflow_recovery(),
-            advisory_key_reaper(),
-            "workflow-recovery gate must not share the reaper key",
-        );
-
-        let pool = test_pool().await;
-
-        // Hold the workflow-recovery advisory lock on a separate connection.
-        let mut holder = pool.begin().await.expect("begin holder tx");
-        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-            .bind(advisory_key_workflow_recovery())
-            .fetch_one(holder.as_mut())
+        let mut coverage = pool.begin().await.expect("begin startup coverage");
+        let outcome = ensure_startup_coverage(
+            coverage.as_mut(),
+            RetentionConfig::default().history_leaf_horizon_days,
+            RetentionConfig::default().heartbeat_leaf_horizon_hours,
+            &[],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .expect("startup coverage");
+        assert!(matches!(outcome, StartupCoverageOutcome::Ready(_)));
+        coverage.commit().await.expect("commit startup coverage");
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'reaper_test'")
+            .execute(&pool)
             .await
-            .expect("holder acquires lock");
-        assert!(held, "holder must acquire the gate lock");
-
-        // A second acquirer must be told to skip the pass this interval.
-        match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
-            GatePass::Skip => {}
-            GatePass::Held(_) => panic!("expected Skip while the gate is held, got Held"),
-            GatePass::Ungated => panic!("expected Skip, got Ungated (pool too small?)"),
-        }
-
-        // Release the holder; acquisition then succeeds and returns a held gate.
-        holder.rollback().await.expect("release holder");
-        match acquire_gate(&pool, advisory_key_workflow_recovery()).await {
-            GatePass::Held(tx) => release_gate(tx).await,
-            GatePass::Skip => panic!("expected Held after release, got Skip"),
-            GatePass::Ungated => panic!("expected Held after release, got Ungated"),
-        }
+            .expect("clean live reaper fixtures");
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_name = 'reaper_test'")
+            .execute(&pool)
+            .await
+            .expect("clean archived reaper fixtures");
+        pool
     }
 
     /// Insert a RUNNING task whose runner heartbeat is already stale, with the
     /// given `finalizing_at` (NULL or a timestamp).
-    async fn insert_stale_running_task(pool: &PgPool, task_id: &str, finalizing_at_sql: &str) {
+    async fn insert_stale_running_task(pool: &PgPool, task_id: Uuid, finalizing_at_sql: &str) {
         let sql = format!(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
@@ -1263,7 +1779,7 @@ mod tests {
         sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
     }
 
-    async fn task_status(pool: &PgPool, task_id: &str) -> String {
+    async fn task_status(pool: &PgPool, task_id: Uuid) -> String {
         sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
             .bind(task_id)
             .fetch_one(pool)
@@ -1285,8 +1801,8 @@ mod tests {
 
         let mut ids = Vec::new();
         for _ in 0..3 {
-            let id = Uuid::new_v4().to_string();
-            insert_stale_running_task(&pool, &id, "NULL").await;
+            let id = Uuid::new_v4();
+            insert_stale_running_task(&pool, id, "NULL").await;
             ids.push(id);
         }
 
@@ -1299,8 +1815,26 @@ mod tests {
             "the bounded scan must process at most scan_limit tasks"
         );
 
+        let state: (i64, i64) = sqlx::query_as(
+            "SELECT
+                 (SELECT count(*) FROM horsies_tasks WHERE id = ANY($1::uuid[])),
+                 (SELECT count(*) FROM horsies_task_history
+                  WHERE task_id = ANY($1::uuid[]) AND status = 'FAILED'
+                    AND terminalization_kind = 'FAIL_STALE')",
+        )
+        .bind(&ids)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(state, (1, 2));
+
         for id in &ids {
             sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
                 .bind(id)
                 .execute(&pool)
                 .await
@@ -1314,9 +1848,9 @@ mod tests {
     #[serial]
     async fn reaper_skips_actively_finalizing_task() {
         let pool = test_pool().await;
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         // finalizing_at = NOW(): within the finalizing threshold → skip.
-        insert_stale_running_task(&pool, &task_id, "NOW()").await;
+        insert_stale_running_task(&pool, task_id, "NOW()").await;
 
         // running stale threshold 1s (heartbeat is 1h old → stale), finalizing
         // threshold 300s (finalizing_at is fresh → protected). The reaper scan is
@@ -1326,13 +1860,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            task_status(&pool, &task_id).await,
+            task_status(&pool, task_id).await,
             "RUNNING",
             "actively-finalizing task must be skipped by the reaper"
         );
 
         sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+            .bind(task_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1344,22 +1878,26 @@ mod tests {
     #[serial]
     async fn reaper_reclaims_task_finalizing_past_threshold() {
         let pool = test_pool().await;
-        let task_id = Uuid::new_v4().to_string();
+        let task_id = Uuid::new_v4();
         // finalizing_at well in the past → past the finalizing threshold.
-        insert_stale_running_task(&pool, &task_id, "NOW() - INTERVAL '1 hour'").await;
+        insert_stale_running_task(&pool, task_id, "NOW() - INTERVAL '1 hour'").await;
 
-        mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_RUNNING_SCAN_LIMIT)
+        let count = mark_stale_running_as_failed(&pool, 1.0, 300.0, STALE_RUNNING_SCAN_LIMIT)
             .await
             .unwrap();
+        assert!(count >= 1, "the targeted stale row must be reclaimed");
+        let archived: (String, String) = sqlx::query_as(
+            "SELECT status, terminalization_kind
+             FROM horsies_task_history WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(archived, ("FAILED".to_owned(), "FAIL_STALE".to_owned()));
 
-        assert_eq!(
-            task_status(&pool, &task_id).await,
-            "FAILED",
-            "task finalizing past the threshold must be reclaimed"
-        );
-
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1383,13 +1921,12 @@ mod tests {
             TEST_RETENTION_BATCH,
             deadline,
             DrainedWhen::EmptyBatch,
-            None,
         )
         .await
         .unwrap();
 
-        let wf_id = Uuid::new_v4().to_string();
-        let task_id = Uuid::new_v4().to_string();
+        let wf_id = Uuid::new_v4();
+        let task_id = Uuid::new_v4();
 
         // Terminal + expired workflow.
         sqlx::query(
@@ -1403,7 +1940,7 @@ mod tests {
                 NOW() - INTERVAL '2 hours'
             )",
         )
-        .bind(&wf_id)
+        .bind(wf_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -1422,7 +1959,7 @@ mod tests {
                 1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
-        .bind(&task_id)
+        .bind(task_id)
         .execute(&pool)
         .await
         .unwrap();
@@ -1434,29 +1971,29 @@ mod tests {
             ) VALUES (
                 $1, $2, 0, 'node_0', 'ret_task', '[]', '{}',
                 'default', 100, '{}', FALSE, 'all',
-                'RUNNING', FALSE, $3, NOW() - INTERVAL '2 hours'
+                'ENQUEUED', FALSE, $3, NOW() - INTERVAL '2 hours'
             )",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(&wf_id)
-        .bind(&task_id)
+        .bind(Uuid::new_v4())
+        .bind(wf_id)
+        .bind(task_id)
         .execute(&pool)
         .await
         .unwrap();
 
-        let wt_count = |pool: PgPool, wf: String| async move {
+        let wt_count = |pool: PgPool, wf: Uuid| async move {
             sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
             )
-            .bind(&wf)
+            .bind(wf)
             .fetch_one(&pool)
             .await
             .unwrap()
         };
 
-        let wf_count = |pool: PgPool, wf: String| async move {
+        let wf_count = |pool: PgPool, wf: Uuid| async move {
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM horsies_workflows WHERE id = $1")
-                .bind(&wf)
+                .bind(wf)
                 .fetch_one(&pool)
                 .await
                 .unwrap()
@@ -1476,23 +2013,30 @@ mod tests {
             "no workflow deleted while a backing task is live"
         );
         assert_eq!(
-            wt_count(pool.clone(), wf_id.clone()).await,
+            wt_count(pool.clone(), wf_id).await,
             1,
             "linkage must be retained while a backing task is live",
         );
         assert_eq!(
-            wf_count(pool.clone(), wf_id.clone()).await,
+            wf_count(pool.clone(), wf_id).await,
             1,
             "workflow must be retained while a backing task is live",
         );
 
-        // Backing task becomes terminal → workflow and linkage sweep together
-        // in one statement.
-        sqlx::query("UPDATE horsies_tasks SET status = 'COMPLETED', completed_at = NOW() - INTERVAL '2 hours', terminal_at = NOW() - INTERVAL '2 hours' WHERE id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Canonical workflow cancellation moves the backing task to history;
+        // workflow and linkage then sweep together in one statement.
+        let outcomes = crate::broker::terminalization::terminalize(
+            &pool,
+            &crate::core::lifecycle::TerminalizationCommand::CancelNodesOfCancelledWorkflow {
+                workflow_ids: vec![wf_id],
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcomes.as_slice(),
+            [crate::core::lifecycle::TerminalizationOutcome::Applied { .. }]
+        ));
         let deleted = sqlx::query(DELETE_EXPIRED_WORKFLOWS_SQL)
             .bind("0")
             .bind(TEST_RETENTION_BATCH)
@@ -1502,18 +2046,18 @@ mod tests {
             .rows_affected();
         assert_eq!(deleted, 1, "rowcount counts workflows");
         assert_eq!(
-            wt_count(pool.clone(), wf_id.clone()).await,
+            wt_count(pool.clone(), wf_id).await,
             0,
             "linkage must leave with its workflow",
         );
         assert_eq!(
-            wf_count(pool.clone(), wf_id.clone()).await,
+            wf_count(pool.clone(), wf_id).await,
             0,
             "workflow swept once all backing tasks terminal",
         );
 
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1541,13 +2085,12 @@ mod tests {
             TEST_RETENTION_BATCH,
             deadline,
             DrainedWhen::EmptyBatch,
-            None,
         )
         .await
         .unwrap();
 
         let seed_workflow = |pool: PgPool, nodes: i64| async move {
-            let wf_id = Uuid::new_v4().to_string();
+            let wf_id = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO horsies_workflows (
                     id, name, status, on_error, definition_key, depth, root_workflow_id,
@@ -1559,7 +2102,7 @@ mod tests {
                     NOW() - INTERVAL '2 hours'
                 )",
             )
-            .bind(&wf_id)
+            .bind(wf_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -1575,8 +2118,8 @@ mod tests {
                         'COMPLETED', FALSE, NOW() - INTERVAL '2 hours'
                     )",
                 )
-                .bind(Uuid::new_v4().to_string())
-                .bind(&wf_id)
+                .bind(Uuid::new_v4())
+                .bind(wf_id)
                 .bind(i as i32)
                 .execute(&pool)
                 .await
@@ -1619,7 +2162,6 @@ mod tests {
             6,
             deadline,
             DrainedWhen::EmptyBatch,
-            None,
         )
         .await
         .unwrap();
@@ -1639,574 +2181,11 @@ mod tests {
         let nodes_left: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM horsies_workflow_tasks WHERE workflow_id = $1",
         )
-        .bind(&jumbo)
+        .bind(jumbo)
         .fetch_one(&pool)
         .await
         .unwrap();
         assert_eq!(nodes_left, 0, "jumbo's nodes leave with it");
-    }
-
-    /// Seed `count` heartbeat rows with an old sent_at, clearing the table first.
-    async fn seed_old_heartbeats(pool: &PgPool, count: i64) {
-        sqlx::query("DELETE FROM horsies_heartbeats")
-            .execute(pool)
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at)
-             SELECT 'ret-batch-' || g, 'test-sender', 'runner', NOW() - INTERVAL '2 hours'
-             FROM generate_series(1, $1) g",
-        )
-        .bind(count)
-        .execute(pool)
-        .await
-        .unwrap();
-    }
-
-    async fn heartbeat_count(pool: &PgPool) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM horsies_heartbeats")
-            .fetch_one(pool)
-            .await
-            .unwrap()
-    }
-
-    /// A backlog larger than the batch size drains fully across batches
-    /// (rowcounts 2, 2, 1 at batch_size=2). Parity with horsies PR #172.
-    #[tokio::test]
-    #[serial]
-    async fn retention_batches_drain_backlog() {
-        let pool = test_pool().await;
-        seed_old_heartbeats(&pool, 5).await;
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let deleted = delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_HEARTBEATS_SQL,
-            1,
-            2,
-            deadline,
-            DrainedWhen::ShortBatch,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(deleted, 5, "full backlog drains across batches");
-        assert_eq!(heartbeat_count(&pool).await, 0);
-    }
-
-    /// An expired pass deadline still runs exactly one batch, and the
-    /// remaining backlog is left for the next pass.
-    #[tokio::test]
-    #[serial]
-    async fn retention_budget_runs_at_least_one_batch() {
-        let pool = test_pool().await;
-        seed_old_heartbeats(&pool, 5).await;
-
-        // Deadline already reached before the first batch.
-        let deadline = tokio::time::Instant::now();
-        let deleted = delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_HEARTBEATS_SQL,
-            1,
-            2,
-            deadline,
-            DrainedWhen::ShortBatch,
-            None,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(deleted, 2, "exactly one batch under an expired budget");
-        assert_eq!(heartbeat_count(&pool).await, 3, "backlog resumes next pass");
-
-        sqlx::query("DELETE FROM horsies_heartbeats")
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    /// The planner must serve the tasks retention eligibility predicate from
-    /// idx_horsies_tasks_retention (migration 0025). Catches a drifted
-    /// COALESCE expression or a regression to bound-array status params,
-    /// either of which silently falls back to a full heap scan. The plan must
-    /// also carry the set-wise attempts purge as its own Delete node — the FK
-    /// cascade form cannot produce one (row-level triggers never appear as
-    /// plan nodes), so this assertion is the revert-proof for the
-    /// purged_attempts CTE (parity with horsies PR #204).
-    #[tokio::test]
-    #[serial]
-    async fn retention_delete_uses_retention_index() {
-        let pool = test_pool().await;
-
-        // Re-runnable after a failed run: drop any leftover seed rows.
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_explain_task'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // Realistic statistics: 500 old terminal rows (eligible) + 2000
-        // recent terminal rows (in-window). The recent population makes the
-        // retention index's cutoff range decisively more selective than the
-        // status index's terminal-ANY condition — with only eligible rows the
-        // two cost the same and the planner's pick is arbitrary.
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
-            )
-            SELECT
-                'ret-idx-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-            FROM generate_series(1, 500) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
-            )
-            SELECT
-                'ret-idx-recent-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-idx-recent-' || g,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-            FROM generate_series(1, 2000) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("ANALYZE horsies_tasks")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // A 500-row table fits in a few pages, so the planner still prefers a
-        // seq scan; disable it (transaction-local) to force the index choice
-        // a production-sized heap produces on its own. EXPLAIN plans the real
-        // DELETE statement without executing it, so drift between the DELETE
-        // text and the index definition fails this test.
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let plan_rows: Vec<(String,)> =
-            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_SQL))
-                .bind("240")
-                .bind(TEST_RETENTION_BATCH)
-                .bind(Vec::<String>::new())
-                .fetch_all(&mut *tx)
-                .await
-                .unwrap();
-        tx.rollback().await.unwrap();
-
-        let plan = plan_rows
-            .iter()
-            .map(|(line,)| line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            plan.contains("idx_horsies_tasks_retention"),
-            "eligibility predicate must be served by the retention index; plan:\n{plan}",
-        );
-        assert!(
-            plan.contains("Delete on horsies_task_attempts"),
-            "attempts must be purged set-wise in the statement, not via FK cascade; plan:\n{plan}",
-        );
-
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_explain_task'")
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    /// The purged_attempts CTE removes a doomed task's attempt history in the
-    /// same statement, leaves survivors' history intact, and reports parent
-    /// rows only in rows_affected (parity with horsies PR #204).
-    #[tokio::test]
-    #[serial]
-    async fn retention_delete_purges_attempts_set_wise() {
-        let pool = test_pool().await;
-
-        // Drain pre-existing eligible candidates (other tests' leftovers) so
-        // the rows_affected assertion below sees only this test's rows.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_TASKS_SQL,
-            0,
-            TEST_RETENTION_BATCH,
-            deadline,
-            DrainedWhen::ShortBatch,
-            Some(ExtraBind::ExcludedQueues(&[])),
-        )
-        .await
-        .unwrap();
-
-        let doomed_id = Uuid::new_v4().to_string();
-        let survivor_id = Uuid::new_v4().to_string();
-
-        // Doomed: terminal, aged out. Survivor: terminal but in-window.
-        for (id, completed_at_expr) in [
-            (&doomed_id, "NOW() - INTERVAL '2 hours'"),
-            (&survivor_id, "NOW()"),
-        ] {
-            sqlx::query(&format!(
-                "INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, args, kwargs, status,
-                    sent_at, created_at, updated_at, completed_at, terminal_at,
-                    retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                    command_fingerprint, retention_class_key, retain_rerun_input,
-                    prepared_rerun_input_disposition
-                ) VALUES (
-                    $1, 'ret_attempts_task', 'default', 100, '[]', '{{}}', 'COMPLETED',
-                    {expr}, {expr}, {expr}, {expr}, {expr}, 0, 0, $1,
-                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-                )",
-                expr = completed_at_expr,
-            ))
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO horsies_task_attempts (
-                    task_id, attempt, outcome, will_retry, started_at, finished_at
-                ) VALUES ($1, 1, 'COMPLETED', FALSE, NOW(), NOW())",
-            )
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-
-        // hours = 1 → only the doomed task qualifies by age.
-        let deleted = sqlx::query(DELETE_EXPIRED_TASKS_SQL)
-            .bind("1")
-            .bind(TEST_RETENTION_BATCH)
-            .bind(Vec::<String>::new())
-            .execute(&pool)
-            .await
-            .unwrap()
-            .rows_affected();
-        assert_eq!(deleted, 1, "rows_affected counts parent rows only");
-
-        let attempts_for = |pool: PgPool, id: String| async move {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1",
-            )
-            .bind(&id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-        };
-        assert_eq!(
-            attempts_for(pool.clone(), doomed_id.clone()).await,
-            0,
-            "doomed task's attempt history must be purged",
-        );
-        assert_eq!(
-            attempts_for(pool.clone(), survivor_id.clone()).await,
-            1,
-            "survivor's attempt history must be intact",
-        );
-
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
-            .bind(&survivor_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    /// Per-queue override windows (parity with horsies PR #207): the override
-    /// delete removes only its queue's eligible PLAIN tasks (other queues,
-    /// in-window rows, and workflow-backing rows on the same queue survive;
-    /// the doomed row's attempts are purged); the global delete's
-    /// excluded_queues shields override queues' plain tasks but NOT their
-    /// workflow-backing rows, and an empty array excludes nothing.
-    #[tokio::test]
-    #[serial]
-    async fn per_queue_retention_override_scopes_and_shields() {
-        let pool = test_pool().await;
-
-        // Drain pre-existing eligible candidates for deterministic counts.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        delete_expired_in_batches(
-            &pool,
-            DELETE_EXPIRED_TASKS_SQL,
-            0,
-            TEST_RETENTION_BATCH,
-            deadline,
-            DrainedWhen::ShortBatch,
-            Some(ExtraBind::ExcludedQueues(&[])),
-        )
-        .await
-        .unwrap();
-
-        let seed_task = |pool: PgPool, queue: &'static str, aged: bool, wf: bool| async move {
-            let id = Uuid::new_v4().to_string();
-            let ts = if aged {
-                "NOW() - INTERVAL '2 hours'"
-            } else {
-                "NOW()"
-            };
-            sqlx::query(&format!(
-                "INSERT INTO horsies_tasks (
-                    id, task_name, queue_name, priority, args, kwargs, status,
-                    is_workflow_task, sent_at, created_at, updated_at,
-                    completed_at, terminal_at, retry_count, max_retries, enqueue_sha,
-                    command_fingerprint_version, command_fingerprint, retention_class_key,
-                    retain_rerun_input, prepared_rerun_input_disposition
-                ) VALUES (
-                    $1, 'ret_override_task', $2, 100, '[]', '{{}}', 'COMPLETED',
-                    $3, {ts}, {ts}, {ts}, {ts}, {ts}, 0, 0, $1,
-                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-                )",
-            ))
-            .bind(&id)
-            .bind(queue)
-            .bind(wf)
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO horsies_task_attempts (
-                    task_id, attempt, outcome, will_retry, started_at, finished_at
-                ) VALUES ($1, 1, 'COMPLETED', FALSE, NOW(), NOW())",
-            )
-            .bind(&id)
-            .execute(&pool)
-            .await
-            .unwrap();
-            id
-        };
-        let exists = |pool: PgPool, id: String| async move {
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM horsies_tasks WHERE id = $1")
-                .bind(&id)
-                .fetch_one(&pool)
-                .await
-                .unwrap()
-                == 1
-        };
-
-        let a_old_plain = seed_task(pool.clone(), "ret-q-a", true, false).await;
-        let a_recent_plain = seed_task(pool.clone(), "ret-q-a", false, false).await;
-        let a_old_wf = seed_task(pool.clone(), "ret-q-a", true, true).await;
-        let b_old_plain = seed_task(pool.clone(), "ret-q-b", true, false).await;
-
-        // Override delete (1h window) on queue a: only a_old_plain leaves.
-        let deleted = sqlx::query(DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL)
-            .bind("1")
-            .bind(TEST_RETENTION_BATCH)
-            .bind("ret-q-a")
-            .execute(&pool)
-            .await
-            .unwrap()
-            .rows_affected();
-        assert_eq!(
-            deleted, 1,
-            "override deletes only its queue's eligible plain tasks"
-        );
-        assert!(!exists(pool.clone(), a_old_plain.clone()).await);
-        assert!(
-            exists(pool.clone(), a_recent_plain.clone()).await,
-            "in-window survives"
-        );
-        assert!(
-            exists(pool.clone(), a_old_wf.clone()).await,
-            "workflow-backing survives"
-        );
-        assert!(
-            exists(pool.clone(), b_old_plain.clone()).await,
-            "other queue survives"
-        );
-        let orphan_attempts: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
-                .bind(&a_old_plain)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(orphan_attempts, 0, "doomed row's attempts purged");
-
-        // Global delete (0h window) with queue a excluded: shields queue a's
-        // remaining PLAIN task but not its workflow-backing row; queue b's
-        // plain task leaves.
-        let excluded = vec!["ret-q-a".to_owned()];
-        sqlx::query(DELETE_EXPIRED_TASKS_SQL)
-            .bind("0")
-            .bind(TEST_RETENTION_BATCH)
-            .bind(&excluded)
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(
-            exists(pool.clone(), a_recent_plain.clone()).await,
-            "exclusion shields the override queue's plain tasks from the global window",
-        );
-        assert!(
-            !exists(pool.clone(), a_old_wf.clone()).await,
-            "workflow-backing rows are NOT shielded (they age under the global window)",
-        );
-        assert!(!exists(pool.clone(), b_old_plain.clone()).await);
-
-        // Empty exclusion excludes nothing.
-        sqlx::query(DELETE_EXPIRED_TASKS_SQL)
-            .bind("0")
-            .bind(TEST_RETENTION_BATCH)
-            .bind(Vec::<String>::new())
-            .execute(&pool)
-            .await
-            .unwrap();
-        assert!(!exists(pool.clone(), a_recent_plain.clone()).await);
-    }
-
-    /// The per-queue override delete must plan onto a retention partial index
-    /// — the 0029 queue-leading composite or the 0025 expression index. At
-    /// seeded scale the planner's pick between them is arbitrary (the LIMIT
-    /// lets either terminate early under a correlation-blind estimate), so
-    /// the EXPLAIN accepts both: a drifted COALESCE or status-literal
-    /// regression falls off both partials and still fails. The 0029
-    /// composite's own shape is pinned against the catalog, where planner
-    /// arbitrariness cannot reach.
-    #[tokio::test]
-    #[serial]
-    async fn per_queue_retention_delete_uses_queue_index() {
-        let pool = test_pool().await;
-
-        // Re-runnable after a failed run: drop any leftover seed rows.
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_qidx_task'")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // 500 old (eligible) + 2000 recent terminal rows on the override
-        // queue, plus 2000 equally-old terminal rows on another queue
-        // (retained under the longer global window). Both single-column
-        // contenders scan 2500 rows and filter to 500 — the plain queue_name
-        // index carries the recent same-queue rows, the 0025 expression index
-        // carries the old other-queue rows — while the queue-leading
-        // composite lands on exactly the 500.
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
-            )
-            SELECT
-                'ret-qidx-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-            FROM generate_series(1, 500) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
-            )
-            SELECT
-                'ret-qidx-other-' || g, 'ret_qidx_task', 'ret-q-other', 100, '[]', '{}', 'COMPLETED',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-            FROM generate_series(1, 2000) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO horsies_tasks (
-                id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
-                command_fingerprint, retention_class_key, retain_rerun_input,
-                prepared_rerun_input_disposition
-            )
-            SELECT
-                'ret-qidx-recent-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g,
-                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
-            FROM generate_series(1, 2000) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("ANALYZE horsies_tasks")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let plan_rows: Vec<(String,)> =
-            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL))
-                .bind("1")
-                .bind(TEST_RETENTION_BATCH)
-                .bind("ret-q-idx")
-                .fetch_all(&mut *tx)
-                .await
-                .unwrap();
-        tx.rollback().await.unwrap();
-
-        let plan = plan_rows
-            .iter()
-            .map(|(line,)| line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            plan.contains("idx_horsies_tasks_queue_retention")
-                || plan.contains("idx_horsies_tasks_retention"),
-            "per-queue delete must be served by a retention partial index; plan:\n{plan}",
-        );
-
-        // Catalog pin of the 0029 composite: queue-leading column order, the
-        // retention COALESCE, and the terminal-status partial predicate.
-        let indexdef: String = sqlx::query_scalar(
-            "SELECT pg_get_indexdef(oid) FROM pg_class \
-             WHERE relname = 'idx_horsies_tasks_queue_retention'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert!(
-            indexdef.contains(
-                "(queue_name, COALESCE(completed_at, failed_at, updated_at, created_at))",
-            ),
-            "0029 composite must lead with queue_name; got: {indexdef}",
-        );
-        assert!(
-            indexdef.contains("WHERE"),
-            "0029 composite must be partial on terminal statuses; got: {indexdef}",
-        );
-
-        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = 'ret_qidx_task'")
-            .execute(&pool)
-            .await
-            .unwrap();
     }
 
     /// The workflow retention DELETE must execute via
@@ -2238,12 +2217,12 @@ mod tests {
                 sent_at, created_at, started_at, updated_at, completed_at
             )
             SELECT
-                'ret-wf-idx-' || g, 'ret_explain_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0,
-                'ret-wf-idx-' || g,
+                id, 'ret_explain_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0,
+                id,
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
                 NOW() - INTERVAL '30 days'
-            FROM generate_series(1, 500) g",
+            FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, 500)) seeded",
         )
         .execute(&pool)
         .await
@@ -2254,10 +2233,10 @@ mod tests {
                 sent_at, created_at, started_at, updated_at, completed_at
             )
             SELECT
-                'ret-wf-idx-recent-' || g, 'ret_explain_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0,
-                'ret-wf-idx-recent-' || g,
+                id, 'ret_explain_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0,
+                id,
                 NOW(), NOW(), NOW(), NOW(), NOW()
-            FROM generate_series(1, 2000) g",
+            FROM (SELECT gen_random_uuid() AS id FROM generate_series(1, 2000)) seeded",
         )
         .execute(&pool)
         .await
@@ -2301,62 +2280,6 @@ mod tests {
         );
 
         sqlx::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
-
-    /// P4: the heartbeat retention DELETE filters `sent_at < cutoff`; the planner
-    /// must serve it from idx_horsies_heartbeats_sent_at (migration 0026). Before
-    /// it, 0013's composite (task_id, role, sent_at DESC) could not serve a
-    /// leading sent_at range and every hourly pass seq-scanned the heartbeat heap.
-    #[tokio::test]
-    #[serial]
-    async fn heartbeat_retention_delete_uses_sent_at_index() {
-        let pool = test_pool().await;
-
-        // Realistic statistics: a population of old heartbeat rows.
-        sqlx::query(
-            "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid)
-             SELECT 'hb-ret-' || g, 'w1', 'runner', NOW() - INTERVAL '30 days', 'h1', 1
-             FROM generate_series(1, 500) g",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query("ANALYZE horsies_heartbeats")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        // A 500-row table fits in a few pages, so force the index choice a
-        // production-sized heap makes on its own. EXPLAIN plans the real DELETE
-        // without executing it.
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL enable_seqscan = off")
-            .execute(&mut *tx)
-            .await
-            .unwrap();
-        let plan_rows: Vec<(String,)> =
-            sqlx::query_as(&format!("EXPLAIN {}", DELETE_EXPIRED_HEARTBEATS_SQL))
-                .bind("1")
-                .bind(TEST_RETENTION_BATCH)
-                .fetch_all(&mut *tx)
-                .await
-                .unwrap();
-        tx.rollback().await.unwrap();
-
-        let plan = plan_rows
-            .iter()
-            .map(|(line,)| line.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            plan.contains("idx_horsies_heartbeats_sent_at"),
-            "sent_at range predicate must be served by the sent_at index; plan:\n{plan}",
-        );
-
-        sqlx::query("DELETE FROM horsies_heartbeats WHERE task_id LIKE 'hb-ret-%'")
             .execute(&pool)
             .await
             .unwrap();

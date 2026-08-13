@@ -4,6 +4,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use sqlx::PgPool;
 use tokio::time::Instant;
+use uuid::Uuid;
 
 use crate::broker::postgres::RESULT_WAIT_REPOLL;
 use crate::broker::SharedNotifyListener;
@@ -63,7 +64,7 @@ struct TaskResultRow {
     result: Option<String>,
     started_at: Option<chrono::DateTime<chrono::Utc>>,
     completed_at: Option<chrono::DateTime<chrono::Utc>>,
-    sub_workflow_id: Option<String>,
+    sub_workflow_id: Option<Uuid>,
     sub_workflow_summary: Option<String>,
 }
 
@@ -79,7 +80,7 @@ struct NodeResultRow {
 /// Get the current status of a workflow.
 pub async fn get_workflow_status(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
 ) -> Result<WorkflowStatus, WorkflowError> {
     let row: Option<StatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
         .bind(workflow_id)
@@ -87,10 +88,8 @@ pub async fn get_workflow_status(
         .await?;
 
     match row {
-        Some(r) => Ok(parse_workflow_status(&r.status)),
-        None => Err(WorkflowError::WorkflowNotFound {
-            workflow_id: workflow_id.to_owned(),
-        }),
+        Some(r) => parse_workflow_status(&r.status),
+        None => Err(WorkflowError::WorkflowNotFound { workflow_id }),
     }
 }
 
@@ -108,7 +107,7 @@ pub async fn get_workflow_status(
 pub async fn get_workflow_result<T: DeserializeOwned>(
     pool: &PgPool,
     shared_listener: &SharedNotifyListener,
-    workflow_id: &str,
+    workflow_id: Uuid,
     timeout: Option<Duration>,
 ) -> Result<TaskResult<T>, WorkflowError> {
     let start = Instant::now();
@@ -128,7 +127,8 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
     }
 
     // Subscribe to shared workflow_done listener.
-    let mut subscription = shared_listener.subscribe(workflow_id);
+    let workflow_id_text = workflow_id.to_string();
+    let mut subscription = shared_listener.subscribe(&workflow_id_text);
 
     // Re-check after subscribing (race guard).
     match try_fetch_terminal_result(pool, workflow_id).await? {
@@ -188,7 +188,7 @@ pub async fn get_workflow_result<T: DeserializeOwned>(
 /// Get all task results keyed by node_id.
 pub async fn get_workflow_results(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
 ) -> Result<HashMap<String, TaskResult<serde_json::Value>>, WorkflowError> {
     let rows: Vec<TaskResultRow> = sqlx::query_as(GET_ALL_TASK_RESULTS_SQL)
         .bind(workflow_id)
@@ -218,7 +218,7 @@ pub async fn get_workflow_results(
 /// Get a single typed result by node key.
 pub async fn get_workflow_result_for<T: DeserializeOwned>(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
     node_id: &str,
 ) -> Result<TaskResult<T>, WorkflowError> {
     let row: Option<NodeResultRow> = sqlx::query_as(GET_TASK_RESULT_BY_NODE_ID_SQL)
@@ -271,32 +271,31 @@ pub async fn get_workflow_result_for<T: DeserializeOwned>(
 /// Get all tasks in a workflow with their metadata.
 pub async fn get_workflow_tasks(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
 ) -> Result<Vec<WorkflowTaskInfo>, WorkflowError> {
     let rows: Vec<TaskResultRow> = sqlx::query_as(GET_ALL_TASK_RESULTS_SQL)
         .bind(workflow_id)
         .fetch_all(pool)
         .await?;
 
-    Ok(rows
-        .into_iter()
+    rows.into_iter()
         .map(|row| {
             let result = row
                 .result
                 .and_then(|json| serde_json::from_str::<TaskResult<serde_json::Value>>(&json).ok());
-            WorkflowTaskInfo {
+            Ok(WorkflowTaskInfo {
                 node_id: row.node_id,
                 index: row.task_index,
                 name: row.task_name,
-                status: parse_task_status(&row.status),
+                status: parse_task_status(&row.status)?,
                 result,
                 started_at: row.started_at,
                 completed_at: row.completed_at,
                 sub_workflow_id: row.sub_workflow_id,
                 sub_workflow_summary: row.sub_workflow_summary,
-            }
+            })
         })
-        .collect())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -313,7 +312,7 @@ enum TerminalFetch {
 /// Try to fetch a terminal workflow result. Returns None if not terminal yet.
 async fn try_fetch_terminal_result(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
 ) -> Result<TerminalFetch, WorkflowError> {
     let row: Option<WorkflowResultRow> = sqlx::query_as(GET_WORKFLOW_RESULT_SQL)
         .bind(workflow_id)
@@ -321,8 +320,14 @@ async fn try_fetch_terminal_result(
         .await?;
 
     match row {
-        Some(r) if is_terminal(&r.status) => Ok(TerminalFetch::Terminal(r)),
-        Some(_) => Ok(TerminalFetch::NotTerminal),
+        Some(r) => match parse_workflow_status(&r.status)? {
+            WorkflowStatus::Completed
+            | WorkflowStatus::Failed
+            | WorkflowStatus::Paused
+            | WorkflowStatus::Cancelled
+            | WorkflowStatus::Expired => Ok(TerminalFetch::Terminal(r)),
+            WorkflowStatus::Pending | WorkflowStatus::Running => Ok(TerminalFetch::NotTerminal),
+        },
         None => Ok(TerminalFetch::NotFound),
     }
 }
@@ -330,7 +335,7 @@ async fn try_fetch_terminal_result(
 /// Final poll before timeout — check one more time, then timeout.
 async fn final_poll_or_timeout<T: DeserializeOwned>(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: Uuid,
     start: Instant,
 ) -> Result<TaskResult<T>, WorkflowError> {
     match try_fetch_terminal_result(pool, workflow_id).await? {
@@ -350,7 +355,7 @@ async fn final_poll_or_timeout<T: DeserializeOwned>(
     }
 }
 
-async fn workflow_exists(pool: &PgPool, workflow_id: &str) -> Result<bool, WorkflowError> {
+async fn workflow_exists(pool: &PgPool, workflow_id: Uuid) -> Result<bool, WorkflowError> {
     let row: Option<StatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
         .bind(workflow_id)
         .fetch_optional(pool)
@@ -360,7 +365,7 @@ async fn workflow_exists(pool: &PgPool, workflow_id: &str) -> Result<bool, Workf
 
 /// Parse a terminal workflow result into a typed TaskResult.
 fn parse_workflow_result<T: DeserializeOwned>(
-    workflow_id: &str,
+    workflow_id: Uuid,
     row: &WorkflowResultRow,
 ) -> TaskResult<T> {
     match row.status.as_str() {
@@ -395,6 +400,18 @@ fn parse_workflow_result<T: DeserializeOwned>(
             OutcomeCode::WorkflowCancelled,
             "workflow was cancelled",
         )),
+        "EXPIRED" => {
+            let err = match row.error.as_deref() {
+                Some(json) => serde_json::from_str::<TaskError>(json).unwrap_or_else(|error| {
+                    TaskError::builtin(
+                        OperationalErrorCode::ResultDeserializationError,
+                        format!("failed to deserialize expired workflow error: {error}"),
+                    )
+                }),
+                None => TaskError::builtin(OutcomeCode::WorkflowExpired, "workflow expired"),
+            };
+            TaskResult::Err(err)
+        }
         "PAUSED" => TaskResult::Err(TaskError::builtin(
             OutcomeCode::WorkflowPaused,
             "workflow is paused awaiting intervention",
@@ -408,7 +425,7 @@ fn parse_workflow_result<T: DeserializeOwned>(
 
 fn map_task_result_value<T: DeserializeOwned>(
     raw: TaskResult<serde_json::Value>,
-    workflow_id: &str,
+    workflow_id: Uuid,
     node_id: Option<&str>,
 ) -> TaskResult<T> {
     let scope = match node_id {
@@ -427,41 +444,35 @@ fn map_task_result_value<T: DeserializeOwned>(
     }
 }
 
-fn parse_workflow_status(s: &str) -> WorkflowStatus {
+fn parse_workflow_status(s: &str) -> Result<WorkflowStatus, WorkflowError> {
+    WorkflowStatus::try_from(s).map_err(WorkflowError::InvalidStatus)
+}
+
+fn parse_task_status(s: &str) -> Result<WorkflowTaskStatus, WorkflowError> {
     match s {
-        "PENDING" => WorkflowStatus::Pending,
-        "RUNNING" => WorkflowStatus::Running,
-        "COMPLETED" => WorkflowStatus::Completed,
-        "FAILED" => WorkflowStatus::Failed,
-        "PAUSED" => WorkflowStatus::Paused,
-        "CANCELLED" => WorkflowStatus::Cancelled,
-        _ => WorkflowStatus::Pending,
+        "PENDING" => Ok(WorkflowTaskStatus::Pending),
+        "READY" => Ok(WorkflowTaskStatus::Ready),
+        "ENQUEUED" => Ok(WorkflowTaskStatus::Enqueued),
+        "RUNNING" => Ok(WorkflowTaskStatus::Running),
+        "COMPLETED" => Ok(WorkflowTaskStatus::Completed),
+        "FAILED" => Ok(WorkflowTaskStatus::Failed),
+        "SKIPPED" => Ok(WorkflowTaskStatus::Skipped),
+        unknown => Err(WorkflowError::InvalidStatus(unknown.to_owned())),
     }
 }
 
-fn parse_task_status(s: &str) -> WorkflowTaskStatus {
-    match s {
-        "PENDING" => WorkflowTaskStatus::Pending,
-        "READY" => WorkflowTaskStatus::Ready,
-        "ENQUEUED" => WorkflowTaskStatus::Enqueued,
-        "RUNNING" => WorkflowTaskStatus::Running,
-        "COMPLETED" => WorkflowTaskStatus::Completed,
-        "FAILED" => WorkflowTaskStatus::Failed,
-        "SKIPPED" => WorkflowTaskStatus::Skipped,
-        _ => WorkflowTaskStatus::Pending,
-    }
-}
-
+#[cfg(test)]
 fn is_terminal(status: &str) -> bool {
-    matches!(status, "COMPLETED" | "FAILED" | "CANCELLED" | "PAUSED")
+    matches!(
+        status,
+        "COMPLETED" | "FAILED" | "PAUSED" | "CANCELLED" | "EXPIRED"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{
-        OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
-    };
+    use crate::core::{OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode};
 
     // -----------------------------------------------------------------------
     // Helper
@@ -485,7 +496,7 @@ mod tests {
         let json = serde_json::to_string(&wrapped).unwrap();
         let r = row("COMPLETED", Some(&json), None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         assert_eq!(result.unwrap(), 42);
     }
 
@@ -493,7 +504,7 @@ mod tests {
     fn completed_with_null_result() {
         let r = row("COMPLETED", None, None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -506,7 +517,7 @@ mod tests {
     fn completed_with_malformed_json() {
         let r = row("COMPLETED", Some("{not valid json"), None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -523,7 +534,7 @@ mod tests {
         let json = serde_json::to_string(&wrapped).unwrap();
         let r = row("COMPLETED", Some(&json), None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -539,7 +550,7 @@ mod tests {
         let err_json = serde_json::to_string(&task_err).unwrap();
         let r = row("FAILED", None, Some(&err_json));
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -552,7 +563,7 @@ mod tests {
     fn failed_with_malformed_error_json() {
         let r = row("FAILED", None, Some("{garbage"));
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -565,7 +576,7 @@ mod tests {
     fn failed_with_null_error() {
         let r = row("FAILED", None, None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -578,7 +589,7 @@ mod tests {
     fn cancelled_produces_workflow_cancelled() {
         let r = row("CANCELLED", None, None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -587,10 +598,30 @@ mod tests {
     }
 
     #[test]
+    fn expired_is_terminal_and_produces_workflow_expired() {
+        let r = row("EXPIRED", None, None);
+
+        assert_eq!(
+            parse_workflow_status("EXPIRED").unwrap(),
+            WorkflowStatus::Expired
+        );
+        assert!(is_terminal("EXPIRED"));
+
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.error_code,
+            Some(TaskErrorCode::from(OutcomeCode::WorkflowExpired)),
+        );
+    }
+
+    #[test]
     fn paused_produces_workflow_paused() {
         let r = row("PAUSED", None, None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        assert!(is_terminal("PAUSED"));
+
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -602,13 +633,25 @@ mod tests {
     fn unknown_status_produces_result_not_ready() {
         let r = row("RUNNING", None, None);
 
-        let result: TaskResult<i32> = parse_workflow_result("wf-1", &r);
+        let result: TaskResult<i32> = parse_workflow_result(Uuid::nil(), &r);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
             Some(TaskErrorCode::from(RetrievalCode::ResultNotReady)),
         );
-        assert!(err.message.as_deref().unwrap().contains("wf-1"));
+        assert!(err
+            .message
+            .as_deref()
+            .unwrap()
+            .contains(&Uuid::nil().to_string()));
+    }
+
+    #[test]
+    fn unknown_persisted_status_fails_closed() {
+        assert!(matches!(
+            parse_workflow_status("CORRUPT"),
+            Err(WorkflowError::InvalidStatus(status)) if status == "CORRUPT"
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -619,7 +662,7 @@ mod tests {
     fn map_ok_with_matching_type() {
         let raw = TaskResult::Ok(serde_json::json!(42));
 
-        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), None);
         assert_eq!(result.unwrap(), 42);
     }
 
@@ -627,7 +670,7 @@ mod tests {
     fn map_ok_with_mismatched_type() {
         let raw = TaskResult::Ok(serde_json::json!("not a number"));
 
-        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), None);
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -635,14 +678,18 @@ mod tests {
                 OperationalErrorCode::ResultDeserializationError,
             )),
         );
-        assert!(err.message.as_deref().unwrap().contains("wf-1"));
+        assert!(err
+            .message
+            .as_deref()
+            .unwrap()
+            .contains(&Uuid::nil().to_string()));
     }
 
     #[test]
     fn map_ok_with_mismatched_type_includes_node_id() {
         let raw = TaskResult::Ok(serde_json::json!("not a number"));
 
-        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", Some("step-a"));
+        let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), Some("step-a"));
         let err = result.unwrap_err();
         assert_eq!(
             err.error_code,
@@ -651,7 +698,10 @@ mod tests {
             )),
         );
         let msg = err.message.as_deref().unwrap();
-        assert!(msg.contains("wf-1"), "expected workflow_id in message: {msg}");
+        assert!(
+            msg.contains(&Uuid::nil().to_string()),
+            "expected workflow_id in message: {msg}"
+        );
         assert!(msg.contains("step-a"), "expected node_id in message: {msg}");
     }
 
@@ -660,7 +710,7 @@ mod tests {
         let original = TaskError::new("MY_CODE", "original error");
         let raw: TaskResult<serde_json::Value> = TaskResult::Err(original.clone());
 
-        let result: TaskResult<i32> = map_task_result_value(raw, "wf-1", None);
+        let result: TaskResult<i32> = map_task_result_value(raw, Uuid::nil(), None);
         let err = result.unwrap_err();
         assert_eq!(err.error_code, original.error_code);
         assert_eq!(err.message, original.message);
@@ -676,7 +726,10 @@ mod wait_tests {
     //! this test pins the deterministic anti-hang property (missing workflow).
     use super::*;
     use crate::broker::postgres::PostgresBroker;
-    use crate::core::TaskErrorCode;
+    use crate::core::{OutcomeCode, TaskErrorCode};
+    use crate::workflow_engine::bound_handle::WorkflowHandle;
+    use serial_test::serial;
+    use std::sync::Arc;
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -700,14 +753,17 @@ mod wait_tests {
 
     #[tokio::test]
     async fn get_workflow_result_no_timeout_returns_not_found_for_missing_workflow() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
+        broker.ensure_schema_initialized().await.expect("schema");
         let listener = broker.workflow_done_listener().await.expect("listener");
-        let missing = format!("missing-wf-{}", uuid::Uuid::new_v4());
+        let missing = Uuid::new_v4();
 
         // Wrap in an outer timeout: a regression to an unbounded wait hangs here.
         let res = tokio::time::timeout(
             Duration::from_secs(5),
-            get_workflow_result::<i32>(broker.pool(), listener, &missing, None),
+            get_workflow_result::<i32>(broker.pool(), listener, missing, None),
         )
         .await
         .expect("get_workflow_result(None) must not hang for a missing workflow");
@@ -718,5 +774,155 @@ mod wait_tests {
             err.error_code,
             Some(TaskErrorCode::from(RetrievalCode::WorkflowNotFound)),
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn workflow_handle_get_returns_immediately_for_paused_workflow() {
+        let broker = Arc::new(
+            PostgresBroker::connect(&test_db_url())
+                .await
+                .expect("connect"),
+        );
+        broker.ensure_schema_initialized().await.expect("schema");
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES ($1, 'p7_paused_get', 'PAUSED', 'fail', $2, 0, $1,
+                       NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(format!("test.p7.paused-get.{workflow_id}"))
+        .execute(broker.pool())
+        .await
+        .expect("seed paused workflow");
+
+        let handle = WorkflowHandle::<i32>::new(
+            workflow_id,
+            Arc::clone(&broker),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            crate::core::config::payload::PayloadPolicy::default(),
+            crate::core::RetentionConfig::default(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(5), handle.get(None))
+            .await
+            .expect("PAUSED must complete get() without a terminal notification");
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.error_code,
+            Some(TaskErrorCode::from(OutcomeCode::WorkflowPaused)),
+        );
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(broker.pool())
+            .await
+            .expect("cleanup paused workflow");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn workflow_handle_get_preserves_structured_expiry_error() {
+        let broker = Arc::new(
+            PostgresBroker::connect(&test_db_url())
+                .await
+                .expect("connect"),
+        );
+        broker.ensure_schema_initialized().await.expect("schema");
+        let workflow_id = Uuid::new_v4();
+        let persisted = TaskError {
+            error_code: Some(OutcomeCode::WorkflowExpired.into()),
+            message: Some("paused_workflow_auto_cancel_after elapsed: 3600 seconds".to_owned()),
+            cause: None,
+            data: Some(serde_json::json!({
+                "policy": "paused_workflow_auto_cancel_after",
+                "older_than_seconds": 3600.0,
+            })),
+        };
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at,
+                 completed_at, updated_at
+             ) VALUES ($1, 'p7_expired_get', 'EXPIRED', 'fail', $2, $3, 0, $1,
+                       NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(serde_json::to_string(&persisted).unwrap())
+        .bind(format!("test.p7.expired-get.{workflow_id}"))
+        .execute(broker.pool())
+        .await
+        .expect("seed expired workflow");
+
+        let handle = WorkflowHandle::<i32>::new(
+            workflow_id,
+            Arc::clone(&broker),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            crate::core::config::payload::PayloadPolicy::default(),
+            crate::core::RetentionConfig::default(),
+        );
+        let error = handle.get(None).await.unwrap_err();
+        assert_eq!(error.error_code, persisted.error_code);
+        assert_eq!(error.message, persisted.message);
+        assert_eq!(error.data, persisted.data);
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(broker.pool())
+            .await
+            .expect("cleanup expired workflow");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn workflow_handle_get_fails_closed_on_malformed_expiry_error() {
+        let broker = Arc::new(
+            PostgresBroker::connect(&test_db_url())
+                .await
+                .expect("connect"),
+        );
+        broker.ensure_schema_initialized().await.expect("schema");
+        let workflow_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at,
+                 completed_at, updated_at
+             ) VALUES ($1, 'p7_expired_corrupt_get', 'EXPIRED', 'fail',
+                       '{corrupt', $2, 0, $1, NOW(), NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(format!("test.p7.expired-corrupt-get.{workflow_id}"))
+        .execute(broker.pool())
+        .await
+        .expect("seed malformed expired workflow");
+
+        let handle = WorkflowHandle::<i32>::new(
+            workflow_id,
+            Arc::clone(&broker),
+            Arc::new(crate::core::registry::WorkflowSpecRegistry::new()),
+            crate::core::config::payload::PayloadPolicy::default(),
+            crate::core::RetentionConfig::default(),
+        );
+        let error = handle.get(None).await.unwrap_err();
+        assert_eq!(
+            error.error_code,
+            Some(TaskErrorCode::from(
+                OperationalErrorCode::ResultDeserializationError,
+            )),
+        );
+        assert!(error
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("failed to deserialize expired workflow error"));
+
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow_id)
+            .execute(broker.pool())
+            .await
+            .expect("cleanup malformed expired workflow");
     }
 }

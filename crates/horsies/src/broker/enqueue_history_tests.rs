@@ -767,3 +767,47 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
         "only the populated-v26 migration fixture may omit post-v26 columns",
     );
 }
+
+#[test]
+fn workflow_and_worker_database_identities_stay_uuid_typed() {
+    const SOURCES: &[(&str, &str)] = &[
+        ("worker/worker.rs", include_str!("../worker/worker.rs")),
+        (
+            "workflow_engine/engine.rs",
+            include_str!("../workflow_engine/engine.rs"),
+        ),
+        (
+            "workflow_engine/lifecycle.rs",
+            include_str!("../workflow_engine/lifecycle.rs"),
+        ),
+        (
+            "workflow_engine/start.rs",
+            include_str!("../workflow_engine/start.rs"),
+        ),
+    ];
+    const FORBIDDEN: &[&str] = &[
+        "mint_task_id()\n                .map(|task_id| task_id.to_string())",
+        "UNNEST($1::text[])::uuid",
+        "HashSet<String>>",
+        ".contains(&row.id.to_string())",
+        "let task_id = row.id.to_string()",
+    ];
+
+    for (path, source) in SOURCES {
+        for forbidden in FORBIDDEN {
+            assert!(
+                !source.contains(forbidden),
+                "{path}: database identity crossed a String adapter: {forbidden}",
+            );
+        }
+    }
+
+    assert!(
+        SOURCES[1].1.contains("UNNEST($1::uuid[]) AS tid"),
+        "batch workflow promotion must bind its task identities as uuid[]",
+    );
+    assert!(
+        SOURCES[0].1.contains("HashSet<Uuid>>"),
+        "in-dispatch task identities must remain UUID-typed",
+    );
+}

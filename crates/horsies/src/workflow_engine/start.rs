@@ -26,7 +26,7 @@ use crate::workflow_engine::parse_good_until_from_options;
 // ---------------------------------------------------------------------------
 
 const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
-SELECT id::text AS id FROM horsies_workflows WHERE id = $1::uuid";
+SELECT id FROM horsies_workflows WHERE id = $1::uuid";
 
 const INSERT_WORKFLOW_SQL: &str = "\
 INSERT INTO horsies_workflows (
@@ -100,19 +100,19 @@ SELECT id, name, definition_key FROM ancestors";
 #[derive(Debug, sqlx::FromRow)]
 #[allow(dead_code)]
 struct ExistsRow {
-    id: String,
+    id: Uuid,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 #[allow(dead_code)]
 struct DepthRow {
     depth: Option<i32>,
-    root_workflow_id: Option<String>,
+    root_workflow_id: Option<Uuid>,
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct AncestorWorkflowRow {
-    id: String,
+    id: Uuid,
     name: String,
     definition_key: Option<String>,
 }
@@ -124,7 +124,7 @@ struct AncestorWorkflowRow {
 /// recomputing. Parity with horsies PR #126.
 struct PreparedNode<'a> {
     node: &'a AnyNode,
-    wt_id: String,
+    wt_id: Uuid,
     queue: String,
     priority: i32,
     args_from_json: Option<serde_json::Value>,
@@ -134,7 +134,7 @@ struct PreparedNode<'a> {
     status: &'static str,
     /// `Some` only for fast-path roots — the `horsies_tasks` id, also written to
     /// the workflow_task's `task_id` so the two link without a follow-up UPDATE.
-    task_id: Option<String>,
+    task_id: Option<Uuid>,
     enqueue_facts: Option<PreparedEnqueueFacts>,
     is_root: bool,
     fast_path: bool,
@@ -149,22 +149,22 @@ struct PreparedNode<'a> {
 pub async fn start_workflow<T>(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
-    workflow_id: Option<String>,
+    workflow_id: Option<Uuid>,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
-    let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let wf_id = workflow_id.unwrap_or_else(Uuid::new_v4);
     let wf_name = spec.name.clone();
 
-    start_workflow_inner(broker, spec, &wf_id, registry, payload, retention)
+    start_workflow_inner(broker, spec, wf_id, registry, payload, retention)
         .await
         .map_err(|e| WorkflowStartError {
             code: classify_workflow_error(&e),
             message: format!("{}", e),
             retryable: is_retryable_workflow_error(&e),
             workflow_name: wf_name,
-            workflow_id: wf_id,
+            workflow_id: Some(wf_id),
         })
 }
 
@@ -173,7 +173,7 @@ pub async fn start_workflow<T>(
 pub async fn start_workflow_with_retry<T>(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
-    workflow_id: Option<String>,
+    workflow_id: Option<Uuid>,
     registry: &WorkflowSpecRegistry,
     resend_on_transient_err: bool,
     payload: &PayloadPolicy,
@@ -190,7 +190,7 @@ pub async fn start_workflow_with_retry<T>(
     const START_RETRY_MAX_MS: u64 = 2000;
 
     let max_attempts = 1 + START_RETRY_COUNT;
-    let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    let wf_id = workflow_id.unwrap_or_else(Uuid::new_v4);
     let mut last_err: Option<WorkflowStartError> = None;
 
     for attempt in 0..max_attempts {
@@ -213,16 +213,7 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow(
-            broker,
-            spec,
-            Some(wf_id.clone()),
-            registry,
-            payload,
-            retention,
-        )
-        .await
-        {
+        match start_workflow(broker, spec, Some(wf_id), registry, payload, retention).await {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -240,7 +231,7 @@ pub async fn start_workflow_with_retry<T>(
 async fn start_workflow_inner<T>(
     broker: &Arc<PostgresBroker>,
     spec: &WorkflowSpec,
-    wf_id: &str,
+    wf_id: Uuid,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
     retention: &RetentionConfig,
@@ -259,7 +250,7 @@ async fn start_workflow_inner<T>(
             "workflow already exists, returning existing handle",
         );
         return Ok(WorkflowHandle::new(
-            wf_id.to_owned(),
+            wf_id,
             Arc::clone(broker),
             Arc::new(registry.clone()),
             payload.clone(),
@@ -300,7 +291,7 @@ async fn start_workflow_inner<T>(
     tx.commit().await?;
 
     Ok(WorkflowHandle::new(
-        wf_id.to_owned(),
+        wf_id,
         Arc::clone(broker),
         Arc::new(registry.clone()),
         payload.clone(),
@@ -389,7 +380,7 @@ fn resolve_insert_priority(node: &AnyNode) -> Result<i32, WorkflowError> {
 /// `launch_root_subworkflow` → `start_child_workflow_in_tx`.
 fn insert_workflow_tasks<'a>(
     tx: &'a mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workflow_id: &'a str,
+    workflow_id: Uuid,
     tasks: &'a [AnyNode],
     registry: &'a WorkflowSpecRegistry,
     retention: &'a RetentionConfig,
@@ -450,11 +441,9 @@ fn insert_workflow_tasks<'a>(
                 is_root && !task.is_subworkflow && task.args_from.is_empty() && !has_ctx_from;
             let task_id = if fast_path {
                 Some(
-                    crate::core::history::identity::uuid7::mint_task_id()
-                        .map(|task_id| task_id.to_string())
-                        .map_err(|error| {
-                            WorkflowError::Validation(format!("task identity mint failed: {error}"))
-                        })?,
+                    crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+                        WorkflowError::Validation(format!("task identity mint failed: {error}"))
+                    })?,
                 )
             } else {
                 None
@@ -491,7 +480,7 @@ fn insert_workflow_tasks<'a>(
 
             prepared.push(PreparedNode {
                 node: task,
-                wt_id: Uuid::new_v4().to_string(),
+                wt_id: Uuid::new_v4(),
                 queue: queue.to_owned(),
                 priority,
                 args_from_json,
@@ -519,9 +508,9 @@ fn insert_workflow_tasks<'a>(
         );
         qb.push_values(prepared.iter(), |mut b, p| {
             let deps: Vec<i32> = p.node.dependencies.iter().map(|&d| d as i32).collect();
-            b.push_bind(p.wt_id.clone())
+            b.push_bind(p.wt_id)
                 .push_unseparated("::uuid")
-                .push_bind(workflow_id.to_owned())
+                .push_bind(workflow_id)
                 .push_unseparated("::uuid")
                 .push_bind(p.node.index as i32)
                 .push_bind(p.node.node_id.clone())
@@ -646,7 +635,7 @@ fn insert_workflow_tasks<'a>(
                     .await?;
 
                 tracing::debug!(
-                    workflow_id,
+                    workflow_id = %workflow_id,
                     task_index = p.node.index,
                     task_id = %task_id,
                     "root task enqueued (slow path)",
@@ -667,12 +656,10 @@ async fn enqueue_root_task(
     priority: i32,
     merged_task_options: Option<&str>,
     retention: &RetentionConfig,
-) -> Result<String, WorkflowError> {
-    let task_id = crate::core::history::identity::uuid7::mint_task_id()
-        .map(|task_id| task_id.to_string())
-        .map_err(|error| {
-            WorkflowError::Validation(format!("task identity mint failed: {error}"))
-        })?;
+) -> Result<Uuid, WorkflowError> {
+    let task_id = crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+        WorkflowError::Validation(format!("task identity mint failed: {error}"))
+    })?;
     let max_retries = parse_max_retries(merged_task_options);
     let enqueue_sha = format!("wf-{}", task_id);
     let retention_class_key = retention.resolve_queue_class(queue);
@@ -731,7 +718,7 @@ async fn enqueue_root_task(
 /// linking the parent workflow_task to it.
 async fn launch_root_subworkflow(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    workflow_id: &str,
+    workflow_id: Uuid,
     task: &AnyNode,
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
@@ -748,7 +735,7 @@ async fn launch_root_subworkflow(
         .await?;
 
     let parent_depth = depth_row.depth.unwrap_or(0);
-    let root_wf_id = depth_row.root_workflow_id.as_deref().unwrap_or(workflow_id);
+    let root_wf_id = depth_row.root_workflow_id.unwrap_or(workflow_id);
 
     // Build the child spec (supports dynamic parameterization if a builder is registered).
     let child_spec = build_child_spec(
@@ -780,7 +767,7 @@ async fn launch_root_subworkflow(
         .await?;
 
     tracing::debug!(
-        workflow_id,
+        workflow_id = %workflow_id,
         task_index = task.index,
         child_workflow_id = %child_id,
         spec_name,
@@ -801,14 +788,14 @@ async fn launch_root_subworkflow(
 pub async fn start_child_workflow_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     spec: &WorkflowSpec,
-    parent_workflow_id: &str,
+    parent_workflow_id: Uuid,
     parent_task_index: i32,
     depth: i32,
-    root_workflow_id: &str,
+    root_workflow_id: Uuid,
     registry: &WorkflowSpecRegistry,
     retention: &RetentionConfig,
-) -> Result<String, WorkflowError> {
-    let child_id = Uuid::new_v4().to_string();
+) -> Result<Uuid, WorkflowError> {
+    let child_id = Uuid::new_v4();
     ensure_no_runtime_subworkflow_cycle(tx, parent_workflow_id, spec).await?;
 
     let on_error_str = match spec.on_error {
@@ -838,7 +825,7 @@ pub async fn start_child_workflow_in_tx(
 
     tracing::debug!(
         child_workflow_id = %child_id,
-        parent_workflow_id,
+        parent_workflow_id = %parent_workflow_id,
         parent_task_index,
         depth,
         name = %spec.name,
@@ -846,7 +833,7 @@ pub async fn start_child_workflow_in_tx(
     );
 
     // Insert all workflow_task rows and enqueue roots within same tx.
-    insert_workflow_tasks(tx, &child_id, &spec.tasks, registry, retention).await?;
+    insert_workflow_tasks(tx, child_id, &spec.tasks, registry, retention).await?;
 
     Ok(child_id)
 }
@@ -872,7 +859,7 @@ fn subworkflow_cycle_ancestor<'a>(
 
 async fn ensure_no_runtime_subworkflow_cycle(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    parent_workflow_id: &str,
+    parent_workflow_id: Uuid,
     child_spec: &WorkflowSpec,
 ) -> Result<(), WorkflowError> {
     let ancestors: Vec<AncestorWorkflowRow> = sqlx::query_as(CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL)
@@ -912,11 +899,11 @@ pub(crate) fn build_child_spec(
         || !parent_task.args_from.is_empty();
     let resolved = registry
         .resolve_child_registration(spec_name, definition_key)
-        .ok_or_else(|| WorkflowError::WorkflowNotFound {
-            workflow_id: format!(
+        .ok_or_else(|| {
+            WorkflowError::Validation(format!(
                 "sub-workflow spec not found (definition_key={:?}, name='{}')",
                 definition_key, spec_name,
-            ),
+            ))
         })?;
 
     materialize_child_spec(
@@ -1001,7 +988,7 @@ mod tests {
 
     fn ancestor(name: &str, key: Option<&str>) -> AncestorWorkflowRow {
         AncestorWorkflowRow {
-            id: format!("id-{name}-{}", key.unwrap_or("none")),
+            id: Uuid::new_v4(),
             name: name.to_owned(),
             definition_key: key.map(str::to_owned),
         }
@@ -1100,7 +1087,7 @@ mod tests {
             .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
         let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
         let registry = WorkflowSpecRegistry::new();
-        let workflow_id = Uuid::new_v4().to_string();
+        let workflow_id = Uuid::new_v4();
 
         let _: WorkflowHandle<serde_json::Value> = start_workflow(
             &broker,
@@ -1128,7 +1115,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|row| row.0 == slow_id));
+        assert!(rows.iter().any(|row| row.0 == slow_id.to_string()));
         for row in rows {
             assert_eq!(row.1, "q_bulk_7d");
             assert_eq!(row.2, "NEVER_ELIGIBLE");

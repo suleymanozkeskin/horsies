@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
 use crate::core::WorkflowTaskStatus;
@@ -31,7 +32,7 @@ pub struct WorkflowTaskInfo {
     pub completed_at: Option<DateTime<Utc>>,
 
     /// ID of the child workflow (if this task is a sub-workflow node).
-    pub sub_workflow_id: Option<String>,
+    pub sub_workflow_id: Option<Uuid>,
 
     /// Summary of the child workflow result (if this task is a sub-workflow node).
     pub sub_workflow_summary: Option<String>,

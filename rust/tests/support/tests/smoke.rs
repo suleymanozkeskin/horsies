@@ -9,10 +9,12 @@
 //! Run with: `cargo test -p horsies-test-support --test smoke`
 
 use horsies::{
-    task, Horsies, TaskError, TaskResult, WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
+    task, Horsies, PostgresBroker, TaskError, TaskRegistry, TaskResult, Worker, WorkerConfig,
+    WorkflowHandle, WorkflowSpecBuilder, WorkflowSpecRegistry,
 };
 use horsies_test_support::{db, fixtures, tasks, workflow_helpers};
 use serial_test::serial;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Dummy tasks for workflow infrastructure smoke tests
@@ -36,6 +38,57 @@ fn ensure_tasks_registered() {
         dummy_task_a::register(&mut app).unwrap();
         dummy_task_b::register(&mut app).unwrap();
     });
+}
+
+async fn ensure_history_runtime(pool: &sqlx::PgPool) {
+    let published: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure(
+             'horsies_task_provenance_staged(uuid,boolean)'
+         ) IS NOT NULL",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    if published {
+        return;
+    }
+
+    let worker = Arc::new(
+        Worker::new(
+            Arc::new(PostgresBroker::from_pool(pool.clone())),
+            Arc::new(TaskRegistry::new()),
+            Arc::new(WorkflowSpecRegistry::new()),
+            fixtures::default_app_config(),
+            WorkerConfig::default(),
+        )
+        .unwrap(),
+    );
+    let running = Arc::clone(&worker);
+    let handle = tokio::spawn(async move { running.run().await });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let published: bool = sqlx::query_scalar(
+                "SELECT to_regprocedure(
+                     'horsies_task_provenance_staged(uuid,boolean)'
+                 ) IS NOT NULL",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            if published {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("worker startup must publish staged history readers");
+    worker.request_stop();
+    tokio::time::timeout(std::time::Duration::from_secs(10), handle)
+        .await
+        .expect("worker must stop after startup publication")
+        .expect("worker join")
+        .expect("worker shutdown");
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +252,8 @@ async fn workflow_helpers_insert_and_query_task() {
     db::run_migrations(&pool).await;
     db::clean_tables(&pool).await;
 
-    let task_id = uuid::Uuid::new_v4().to_string();
-    workflow_helpers::insert_task(&pool, &task_id, "test_task", "default", "PENDING").await;
+    let task_id = uuid::Uuid::new_v4();
+    workflow_helpers::insert_task(&pool, task_id, "test_task", "default", "PENDING").await;
 
     // Verify the task exists.
     let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
@@ -218,6 +271,7 @@ async fn workflow_helpers_start_and_complete_workflow() {
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
+    ensure_history_runtime(&pool).await;
 
     let registry = WorkflowSpecRegistry::new();
 
@@ -281,6 +335,7 @@ async fn workflow_helpers_failing_task_fails_workflow() {
     let pool = db::create_pool().await;
     db::run_migrations(&pool).await;
     db::clean_workflow_tables(&pool).await;
+    ensure_history_runtime(&pool).await;
 
     let registry = WorkflowSpecRegistry::new();
 
@@ -421,7 +476,7 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
     let stale_threshold_secs: f64 = 5.0;
 
     // Insert a RUNNING task with started_at well in the past.
-    let task_id = uuid::Uuid::new_v4().to_string();
+    let task_id = uuid::Uuid::new_v4();
     sqlx::query(
         "INSERT INTO horsies_tasks (id, task_name, queue_name, status, started_at, max_retries,
              enqueue_sha, command_fingerprint_version, command_fingerprint, retention_class_key,
@@ -430,7 +485,7 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
              'sha-test', 1, decode(repeat('00', 32), 'hex'), 'standard_30d',
              FALSE, 'NEVER_ELIGIBLE')",
     )
-    .bind(&task_id)
+    .bind(task_id)
     .execute(&pool)
     .await
     .unwrap();
@@ -440,27 +495,14 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
         "INSERT INTO horsies_heartbeats (task_id, sender_id, role, sent_at, hostname, pid) \
          VALUES ($1, 'worker-1', 'runner', NOW(), 'test-host', 12345)",
     )
-    .bind(&task_id)
+    .bind(task_id)
     .execute(&pool)
     .await
     .unwrap();
 
-    // Phase 2 query should return NO rows because the heartbeat is fresh.
-    let phase2_sql = "\
-        SELECT t.id, t.retry_count, t.worker_pid, t.worker_hostname, \
-               t.claimed_by_worker_id, t.started_at, t.worker_process_name, \
-               t.max_retries, t.task_options, t.good_until, t.queue_name, \
-               clock_timestamp() AS db_now \
-        FROM horsies_tasks t \
-        WHERE t.id = $1 AND t.status = 'RUNNING' \
-          AND NOT EXISTS ( \
-            SELECT 1 FROM horsies_heartbeats \
-            WHERE task_id = t.id AND role = 'runner' \
-              AND sent_at > NOW() - $2 * INTERVAL '1 second' \
-          ) \
-        FOR UPDATE OF t";
-
-    let row: Option<(String,)> = sqlx::query_as(
+    // The stale-running predicate should return no rows because the heartbeat
+    // is fresh.
+    let row: Option<(uuid::Uuid,)> = sqlx::query_as(
         // Simplified: just check if the query returns anything.
         &format!(
             "SELECT t.id FROM horsies_tasks t \
@@ -472,7 +514,7 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
                )"
         ),
     )
-    .bind(&task_id)
+    .bind(task_id)
     .bind(stale_threshold_secs)
     .fetch_optional(&pool)
     .await

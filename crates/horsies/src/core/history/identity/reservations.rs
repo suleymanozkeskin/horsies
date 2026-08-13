@@ -134,6 +134,7 @@ fn decode_reservation_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn reservation_row_decode_fails_closed() {
@@ -145,5 +146,80 @@ mod tests {
         assert!(decode_reservation_row(Some("CONFLICT"), Some(task_id), None).is_err());
         assert!(decode_reservation_row(Some("FOREIGN"), Some(task_id), None).is_err());
         assert!(decode_reservation_row(Some("APPLIED"), None, None).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cleanup_wrapper_deletes_only_expired_terminal_rows_with_the_requested_bound() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let expired = [vec![31_u8; 32], vec![32_u8; 32]];
+        let retained = vec![33_u8; 32];
+        for (index, digest) in expired.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO horsies_key_reservations (
+                    idempotency_key_digest, key_scope_version, fingerprint_version,
+                    command_fingerprint, task_id, disposition, reservation_window, expires_at
+                 ) VALUES ($1, 1, 1, $2, $3, 'TERMINAL', INTERVAL '1 hour',
+                           NOW() - INTERVAL '1 hour')",
+            )
+            .bind(digest)
+            .bind(vec![index as u8 + 1; 32])
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .expect("seed expired reservation");
+        }
+        sqlx::query(
+            "INSERT INTO horsies_key_reservations (
+                idempotency_key_digest, key_scope_version, fingerprint_version,
+                command_fingerprint, task_id, disposition, reservation_window, expires_at
+             ) VALUES ($1, 1, 1, $2, $3, 'TERMINAL', INTERVAL '1 hour',
+                       NOW() + INTERVAL '1 hour')",
+        )
+        .bind(&retained)
+        .bind(vec![9_u8; 32])
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .expect("seed retained reservation");
+
+        let mut connection = pool.acquire().await.expect("reservation connection");
+        assert_eq!(
+            cleanup_expired_reservations(&mut connection, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            cleanup_expired_reservations(&mut connection, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            cleanup_expired_reservations(&mut connection, 1)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(cleanup_expired_reservations(&mut connection, 0)
+            .await
+            .is_err());
+        drop(connection);
+
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_key_reservations
+             WHERE idempotency_key_digest = $1",
+        )
+        .bind(&retained)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, 1, "unexpired TERMINAL evidence is retained");
+        sqlx::query("DELETE FROM horsies_key_reservations WHERE idempotency_key_digest = $1")
+            .bind(&retained)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

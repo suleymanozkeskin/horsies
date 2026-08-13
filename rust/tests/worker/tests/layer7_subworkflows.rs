@@ -23,6 +23,7 @@ use serde::de::DeserializeOwned;
 use serial_test::serial;
 use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
 
 use horsies::{
     resume_workflow, Horsies, OnError, PostgresBroker, SubWorkflowNode, SuccessCase, SuccessPolicy,
@@ -93,7 +94,7 @@ where
         .unwrap_or_else(|e| panic!("app.start failed: {}", e))
 }
 
-async fn task_status(pool: &PgPool, wf_id: &str, index: i32) -> String {
+async fn task_status(pool: &PgPool, wf_id: &Uuid, index: i32) -> String {
     sqlx::query_scalar(
         "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -104,7 +105,7 @@ async fn task_status(pool: &PgPool, wf_id: &str, index: i32) -> String {
     .unwrap()
 }
 
-async fn task_result_json(pool: &PgPool, wf_id: &str, index: i32) -> Option<String> {
+async fn task_result_json(pool: &PgPool, wf_id: &Uuid, index: i32) -> Option<String> {
     sqlx::query_scalar(
         "SELECT result FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -115,7 +116,7 @@ async fn task_result_json(pool: &PgPool, wf_id: &str, index: i32) -> Option<Stri
     .unwrap()
 }
 
-async fn task_subwf_summary(pool: &PgPool, wf_id: &str, index: i32) -> Option<String> {
+async fn task_subwf_summary(pool: &PgPool, wf_id: &Uuid, index: i32) -> Option<String> {
     sqlx::query_scalar(
         "SELECT sub_workflow_summary FROM horsies_workflow_tasks \
          WHERE workflow_id = $1 AND task_index = $2",
@@ -192,17 +193,17 @@ async fn subworkflow_success_full_surface_matrix() {
 
     // 2) parent sub-workflow node COMPLETED + populated summary
     assert_eq!(
-        task_status(&pool, handle.workflow_id(), 1).await,
+        task_status(&pool, &handle.workflow_id(), 1).await,
         "COMPLETED"
     );
-    let summary_json = task_subwf_summary(&pool, handle.workflow_id(), 1)
+    let summary_json = task_subwf_summary(&pool, &handle.workflow_id(), 1)
         .await
         .expect("summary column populated");
     assert!(summary_json.contains("COMPLETED"));
 
     // 3) reader observed the child through workflow_ctx (summary_for/output_for/result_for)
     let reader_json = ok_value(
-        &task_result_json(&pool, handle.workflow_id(), 2)
+        &task_result_json(&pool, &handle.workflow_id(), 2)
             .await
             .expect("reader produced a result"),
     );
@@ -259,11 +260,11 @@ async fn subworkflow_failure_fail_policy_preserves_error_everywhere() {
         .expect("sub-workflow detail recoverable from handle error");
     assert_eq!(details.sub_workflow_summary.status, "FAILED");
     assert!(details.sub_workflow_summary.failed_tasks >= 1);
-    assert!(!details.sub_workflow_id.is_empty());
+    assert_ne!(details.sub_workflow_id, Uuid::nil());
 
     // Parent node FAILED with the same code; summary column FAILED.
-    assert_eq!(task_status(&pool, handle.workflow_id(), 0).await, "FAILED");
-    assert!(task_subwf_summary(&pool, handle.workflow_id(), 0)
+    assert_eq!(task_status(&pool, &handle.workflow_id(), 0).await, "FAILED");
+    assert!(task_subwf_summary(&pool, &handle.workflow_id(), 0)
         .await
         .unwrap()
         .contains("FAILED"));
@@ -327,7 +328,7 @@ async fn subworkflow_failure_pause_policy_preserves_error_after_resume() {
     let reg = WorkflowSpecRegistry::new();
     resume_workflow(
         &pool,
-        &wf_id,
+        wf_id,
         &reg,
         &horsies::PayloadPolicy::default(),
         &horsies::RetentionConfig::default(),
@@ -703,7 +704,7 @@ async fn nested_subworkflow_failure_surfaces_each_child_error() {
     assert_eq!(details.sub_workflow_summary.status, "FAILED");
 
     // The top sub-workflow node is FAILED, and a descendant workflow is FAILED too.
-    assert_eq!(task_status(&pool, handle.workflow_id(), 0).await, "FAILED");
+    assert_eq!(task_status(&pool, &handle.workflow_id(), 0).await, "FAILED");
     let failed_descendants: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM horsies_workflows WHERE root_workflow_id = $1 AND status = 'FAILED'",
     )
@@ -797,8 +798,8 @@ async fn subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with()
 
     // Child STARTED (received the failed TaskResult in build_with) then FAILED inside —
     // it must not have been SKIPPED, which is what proves delivery.
-    assert_eq!(task_status(&pool, handle.workflow_id(), 1).await, "FAILED");
-    assert!(task_subwf_summary(&pool, handle.workflow_id(), 1)
+    assert_eq!(task_status(&pool, &handle.workflow_id(), 1).await, "FAILED");
+    assert!(task_subwf_summary(&pool, &handle.workflow_id(), 1)
         .await
         .unwrap()
         .contains("FAILED"));

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used)]
 
-use horsies::{run_horsies_migrations, BrokerError, PostgresBroker};
+use horsies::{expected_schema_version, run_horsies_migrations, BrokerError, PostgresBroker};
 use horsies_test_support::db;
 use serial_test::serial;
 use sqlx::{Executor, PgPool};
@@ -262,6 +262,13 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
 
     run_horsies_migrations(&pool).await.unwrap();
 
+    let schema_version: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM horsies_migrations WHERE success")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(schema_version, Some(expected_schema_version()));
+
     assert_monitoring_trigger_parity(&pool).await;
 
     for &(relation, column) in UUID_COLUMNS {
@@ -368,6 +375,39 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
 
     let broker = PostgresBroker::from_pool(pool.clone());
     broker.ensure_schema_initialized().await.unwrap();
+
+    pool.close().await;
+    db::drop_database(&db_url).await;
+}
+
+#[tokio::test]
+#[serial]
+async fn newer_schema_ledger_refuses_before_running_the_embedded_chain() {
+    let db_url = db::create_empty_database().await;
+    let pool = PgPool::connect(&db_url).await.unwrap();
+    run_horsies_migrations(&pool).await.unwrap();
+
+    let expected = expected_schema_version();
+    let future = expected + 1;
+    sqlx::query(
+        "INSERT INTO horsies_migrations (
+             version, description, success, checksum, execution_time
+         ) VALUES ($1, 'future schema sentinel', TRUE, decode('00', 'hex'), 0)",
+    )
+    .bind(future)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let broker = PostgresBroker::from_pool(pool.clone());
+    let error = broker.ensure_schema_initialized().await.unwrap_err();
+    assert!(matches!(
+        error,
+        BrokerError::SchemaVersionMismatch {
+            expected: actual_expected,
+            actual: Some(actual_future),
+        } if actual_expected == expected && actual_future == future
+    ));
 
     pool.close().await;
     db::drop_database(&db_url).await;

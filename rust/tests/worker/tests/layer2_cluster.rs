@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use horsies::{PostgresBroker, TaskResult};
 use horsies_test_support::{
@@ -43,7 +44,7 @@ fn db_url() -> String {
     db::db_url()
 }
 
-async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs: &str) -> String {
+async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs: &str) -> Uuid {
     broker
         .enqueue(
             task_name,
@@ -64,10 +65,9 @@ async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs: &str) ->
         )
         .await
         .unwrap()
-        .to_string()
 }
 
-async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> String {
+async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> Uuid {
     enqueue_task(broker, task_name, "{}").await
 }
 
@@ -79,7 +79,7 @@ async fn enqueue_with_retry(
     max_retries: i32,
     intervals: &[i32],
     auto_retry_for: &[&str],
-) -> String {
+) -> Uuid {
     let task_options = serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
@@ -111,7 +111,6 @@ async fn enqueue_with_retry(
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 /// Write a fast-recovery AppConfig to a temp JSON file. Returns the path.
@@ -851,7 +850,7 @@ async fn enqueue_to_queue(
     task_name: &str,
     kwargs: &str,
     queue_name: &str,
-) -> String {
+) -> Uuid {
     broker
         .enqueue(
             task_name,
@@ -872,7 +871,6 @@ async fn enqueue_to_queue(
         )
         .await
         .unwrap()
-        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1265,7 +1263,7 @@ async fn prepare_execution_ledger_tables(pool: &PgPool) {
 }
 
 /// Helper: wait until task is CLAIMED and return claimed_by_worker_id.
-async fn wait_for_claimed_owner(pool: &PgPool, task_id: &str, timeout: Duration) -> String {
+async fn wait_for_claimed_owner(pool: &PgPool, task_id: &Uuid, timeout: Duration) -> String {
     let deadline = tokio::time::Instant::now() + timeout;
     while tokio::time::Instant::now() < deadline {
         let row: Option<(String, Option<String>)> =

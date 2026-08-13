@@ -2,6 +2,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
+use uuid::Uuid;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
@@ -66,14 +67,11 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
     }
 
     /// Start the workflow with a caller-provided workflow ID.
-    pub async fn start_with_id(
-        &self,
-        workflow_id: impl Into<String>,
-    ) -> WorkflowStartResult<WorkflowHandle<T>> {
+    pub async fn start_with_id(&self, workflow_id: Uuid) -> WorkflowStartResult<WorkflowHandle<T>> {
         crate::workflow_engine::start::start_workflow_with_retry::<T>(
             &self.broker,
             &self.spec,
-            Some(workflow_id.into()),
+            Some(workflow_id),
             &self.registry,
             self.resend_on_transient_err,
             &self.payload,
@@ -99,9 +97,9 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
     }
 
     /// Reconnect to an already-known workflow ID using the bound resources.
-    pub fn handle(&self, workflow_id: impl Into<String>) -> WorkflowHandle<T> {
+    pub fn handle(&self, workflow_id: Uuid) -> WorkflowHandle<T> {
         WorkflowHandle::new(
-            workflow_id.into(),
+            workflow_id,
             Arc::clone(&self.broker),
             Arc::clone(&self.registry),
             self.payload.clone(),

@@ -119,7 +119,7 @@ pub struct ObservedStaleness {
 /// A workflow-status guard's evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservedWorkflowState {
-    pub workflow_id: String,
+    pub workflow_id: Uuid,
     pub workflow_status: String,
 }
 
@@ -418,8 +418,13 @@ fn decode_evidence(
         }
         GuardKind::WorkflowStatus => {
             let payload = require_payload(raw, guard_kind, &["workflow_id", "workflow_status"])?;
+            let workflow_id = require_string(&payload, "workflow_id")?;
             Ok(GuardEvidence::WorkflowState(ObservedWorkflowState {
-                workflow_id: require_string(&payload, "workflow_id")?,
+                workflow_id: Uuid::parse_str(&workflow_id).map_err(|error| {
+                    OutcomeDecodeError(format!(
+                        "diagnostic payload workflow_id is not a UUID: {error}"
+                    ))
+                })?,
                 workflow_status: require_string(&payload, "workflow_status")?,
             }))
         }

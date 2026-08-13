@@ -4,9 +4,10 @@
 use std::time::{Duration, Instant};
 
 use sqlx::PgPool;
+use uuid::Uuid;
 
 /// Get current status of a workflow.
-pub async fn get_workflow_status(pool: &PgPool, workflow_id: &str) -> String {
+pub async fn get_workflow_status(pool: &PgPool, workflow_id: &Uuid) -> String {
     sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
         .bind(workflow_id)
         .fetch_optional(pool)
@@ -17,7 +18,11 @@ pub async fn get_workflow_status(pool: &PgPool, workflow_id: &str) -> String {
 }
 
 /// Get status of a specific workflow task by index.
-pub async fn get_workflow_task_status(pool: &PgPool, workflow_id: &str, task_index: i32) -> String {
+pub async fn get_workflow_task_status(
+    pool: &PgPool,
+    workflow_id: &Uuid,
+    task_index: i32,
+) -> String {
     sqlx::query_scalar(
         "SELECT status FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
     )
@@ -31,7 +36,7 @@ pub async fn get_workflow_task_status(pool: &PgPool, workflow_id: &str, task_ind
 }
 
 /// Fetch all workflow_tasks for a workflow, ordered by task_index.
-pub async fn get_workflow_tasks(pool: &PgPool, workflow_id: &str) -> Vec<WorkflowTaskRow> {
+pub async fn get_workflow_tasks(pool: &PgPool, workflow_id: &Uuid) -> Vec<WorkflowTaskRow> {
     sqlx::query_as(
         "SELECT task_index, task_name, status, started_at, completed_at \
          FROM horsies_workflow_tasks WHERE workflow_id = $1 ORDER BY task_index",
@@ -55,7 +60,7 @@ pub struct WorkflowTaskRow {
 /// Poll DB until workflow reaches terminal state. Returns the final status.
 pub async fn wait_for_workflow_completion(
     pool: &PgPool,
-    workflow_id: &str,
+    workflow_id: &Uuid,
     timeout: Duration,
 ) -> String {
     let deadline = Instant::now() + timeout;
@@ -64,7 +69,10 @@ pub async fn wait_for_workflow_completion(
     while Instant::now() < deadline {
         let status = get_workflow_status(pool, workflow_id).await;
         last_status = status.clone();
-        if matches!(status.as_str(), "COMPLETED" | "FAILED" | "CANCELLED") {
+        if matches!(
+            status.as_str(),
+            "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED"
+        ) {
             return status;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -79,7 +87,7 @@ pub async fn wait_for_workflow_completion(
 }
 
 /// Poll DB and return the max concurrent RUNNING tasks observed for a workflow.
-pub async fn poll_max_running_tasks(pool: &PgPool, workflow_id: &str, duration: Duration) -> i64 {
+pub async fn poll_max_running_tasks(pool: &PgPool, workflow_id: &Uuid, duration: Duration) -> i64 {
     let deadline = Instant::now() + duration;
     let mut max_observed: i64 = 0;
 

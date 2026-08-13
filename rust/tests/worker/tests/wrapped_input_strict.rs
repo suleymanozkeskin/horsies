@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use serial_test::serial;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use horsies::{Horsies, PostgresBroker, TaskResult, WorkflowHandle, WorkflowSpecBuilder};
 use horsies_test_support::{
@@ -44,7 +45,7 @@ async fn pool() -> PgPool {
     p
 }
 
-async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
+async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> Uuid {
     let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
     let mut app = Horsies::with_broker(fixtures::default_app_config(), broker).unwrap();
     let handle: WorkflowHandle<serde_json::Value> = app
@@ -54,7 +55,7 @@ async fn start_wf(pool: &PgPool, spec: &horsies::WorkflowSpec) -> String {
     handle.workflow_id().to_owned()
 }
 
-async fn get_wf_task_result(pool: &PgPool, wf_id: &str, task_index: i32) -> Option<String> {
+async fn get_wf_task_result(pool: &PgPool, wf_id: &Uuid, task_index: i32) -> Option<String> {
     sqlx::query_scalar(
         "SELECT result FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = $2",
     )
