@@ -290,3 +290,17 @@ pub struct ScheduleStateInfo {
     pub run_count: i32,
     pub updated_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelTaskBody {
+    #[serde(default)]
+    pub include_running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionResponse {
+    pub outcome: String,
+    pub was_status: Option<String>,
+    pub next_attempt_number: Option<i32>,
+    pub warning: Option<String>,
+}
