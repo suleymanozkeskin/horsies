@@ -86,7 +86,9 @@ pub type Broker = PostgresBroker;
 pub use crate::worker::{
     cli::{
         cutover::{execute_cutover, CutoverArgs, CutoverCliError, CutoverCommand},
-        init_tracing, Cli, Command, LogLevel,
+        init_tracing,
+        transcode::{execute_transcode, TranscodeArgs, TranscodeCliError, TranscodeCommand},
+        Cli, Command, LogLevel,
     },
     config::WorkerConfig,
     docs_fetcher::fetch_docs,

@@ -1,5 +1,6 @@
 pub mod banner;
 pub mod cutover;
+pub mod transcode;
 
 use std::fmt;
 use std::str::FromStr;
@@ -97,6 +98,8 @@ pub enum Command {
     GetDocs(GetDocsArgs),
     /// Operate the offline task-history cutover.
     Cutover(cutover::CutoverArgs),
+    /// Operate replacement-partition archive transcodes.
+    Transcode(transcode::TranscodeArgs),
 }
 
 /// Arguments for the `worker` subcommand.

@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use horsies::{execute_cutover, Cli, Command};
+use horsies::{execute_cutover, execute_transcode, Cli, Command};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -11,6 +11,13 @@ async fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("cutover failed: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Command::Transcode(args) => match execute_transcode(args).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("transcode failed: {error}");
                 ExitCode::FAILURE
             }
         },

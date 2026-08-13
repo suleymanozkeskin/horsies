@@ -21,6 +21,7 @@ pub mod phase2;
 pub mod projection;
 pub mod reads;
 pub mod rerun;
+pub mod transcode;
 
 #[cfg(test)]
 mod tests;
