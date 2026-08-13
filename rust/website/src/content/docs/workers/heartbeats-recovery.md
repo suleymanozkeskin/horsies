@@ -1,290 +1,196 @@
 ---
 title: Heartbeats & Recovery
-summary: Detecting and recovering from worker crashes via heartbeats.
+summary: Detect stale work, recover task state, and complete workflow progression.
+related: [../../configuration/recovery-config, ../../configuration/retention-config, worker-architecture]
 tags: [workers, heartbeats, recovery, crash-detection]
 ---
 
 ## Overview
 
-When a worker dies mid-task, the task would be stuck forever without detection. Heartbeats solve this:
+Workers send heartbeats for owned tasks. The reaper checks stored heartbeats.
+It repairs stale task and workflow state.
 
-1. Workers send periodic heartbeats for their tasks
-2. A reaper checks for missing heartbeats
-3. Stale tasks are automatically recovered
+| Task state | Recovery action | Reason |
+|---|---|---|
+| `CLAIMED` | Requeue to `PENDING` | User code did not start |
+| `RUNNING` | Retry or fail | User code may have run |
+| Terminal workflow backing task | Consume phase-2 evidence | The DAG still needs progression |
 
-The recovery path depends on the task state:
+## Heartbeat roles
 
-| State when worker disappears | Recovery action | Why |
-| --- | --- | --- |
-| `CLAIMED` | requeue to `PENDING` | user code never started |
-| `RUNNING` | retry or fail | user code may have partially run |
-| workflow bookkeeping out of sync | reconcile workflow state | parent workflow still needs completion handling |
+A claimer heartbeat covers a `CLAIMED` task. The worker sends it while the task
+waits for execution.
 
-## Heartbeat Types
-
-### Claimer Heartbeat
-
-Sent by the worker for CLAIMED tasks:
-
-- Indicates worker is alive and will soon start the task
-- Sent at `claimer_heartbeat_interval_ms` interval
-- Covers the gap between claim and execution start
-
-### Runner Heartbeat
-
-Sent by the spawned tokio task for RUNNING tasks:
-
-- Indicates task is actively executing
-- Sent at `runner_heartbeat_interval_ms` interval
-- From a background tokio task spawned alongside the task execution
-
-## Heartbeat Flow
-
-<!-- todo:diagram-needed - Heartbeat sequence diagram -->
+A runner heartbeat covers a `RUNNING` task. The spawned task sends it while
+user code runs.
 
 ```text
 CLAIMED                          RUNNING
    |                               |
-   |  Claimer heartbeat            |  Runner heartbeat
-   |  (from worker loop)           |  (from spawned task)
+   |  claimer heartbeat            |  runner heartbeat
    |                               |
    +---- HB ----+                  +---- HB ----+
    |            |                  |            |
-   +---- HB ----+  30s interval    +---- HB ----+  30s interval
+   +---- HB ----+                  +---- HB ----+
    |            |                  |            |
-   +------------+------------------+------------+--->
+   +------------+------------------+------------+-->
 ```
 
-## What the Reaper Checks
+## Partitioned heartbeat storage
 
-The reaper periodically checks for stale tasks:
+`horsies_heartbeats` uses hourly range partitions. Task IDs use PostgreSQL
+`uuid`.
 
-```text
-for each task with status = CLAIMED:
-    last_hb = latest heartbeat(task, role = "claimer")
-    if now - last_hb > claimed_stale_threshold:
-        requeue(task)  // Safe - code never ran
+The worker creates future leaves at startup. It maintains them every
+`partition_maintenance_interval_s`. The default interval is 900 seconds.
 
-for each task with status = RUNNING:
-    last_hb = latest heartbeat(task, role = "runner")
-    if now - last_hb > running_stale_threshold:
-        retry_or_fail(task)  // Retry if policy allows, otherwise fail
-```
+`heartbeat_leaf_horizon_hours` sets the heartbeat horizon. The default is six
+hours. The allowed range is 2–48 hours.
 
-## Recovery Actions
+The maintenance pass drops old heartbeat leaves. It does not delete heartbeat
+rows. `heartbeat_retention_hours` no longer exists.
 
-### Stale CLAIMED -> PENDING
+Partition detach uses a five-second statement timeout. A blocked leaf is
+reported and retried later. Other retention classes continue.
 
-When a CLAIMED task has no recent claimer heartbeat:
+The worker role needs `CREATE` on the heartbeat partition parent. An external
+coverage job must create leaves when the worker role lacks that privilege.
 
-- **Safe to requeue**: User code never started
-- Task reset to PENDING
-- Another worker will claim it
-- No data corruption risk
+## Stale `CLAIMED` tasks
 
-This is the cleanest recovery path because execution never began.
+A stale claimer heartbeat means that user code did not start. Recovery returns
+the task to `PENDING`.
 
-### Stale RUNNING Recovery
+The drain operation uses the same distinction. A stale claim must be requeued
+through normal recovery before an offline cutover can continue.
 
-When a RUNNING task has no recent runner heartbeat:
+## Stale `RUNNING` tasks
 
-- **Not safe to blindly requeue**: Code was executing, may have partial side effects
-- If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
-- Otherwise: marked as FAILED with `WORKER_CRASHED` error
+A stale runner heartbeat does not prove that the task made no side effects.
+Recovery never treats it as an untouched send.
 
-The terminal branch runs through `horsies_fail_stale_task`, which captures
-the heartbeat and finalizing state under its own row lock and re-judges
-staleness from that capture — the reaper's scan is advisory. A heartbeat
-that lands between the scan and the call refuses the failure and reports the
-compared values (`last_heartbeat_at`, `finalizing_at`, thresholds, and the
-evaluation instant) instead of failing a live task.
+The action is:
 
-This is why idempotent task design still matters: crash recovery can retry work that may have partially completed before the worker died.
+- Retry when `WORKER_CRASHED` matches the retry policy and attempts remain.
+- Otherwise, move the task to history as `FAILED` with `WORKER_CRASHED`.
 
-### Orphaned Workflow Task Cleanup
+The terminal operation locks the task and reads its heartbeat facts again. A
+new heartbeat refuses the failure. The initial scan is only a candidate scan.
 
-A workflow task is *orphaned* when it sits CLAIMED or PENDING but no
-`workflow_tasks` row for it remains in a runnable state — it can never
-legitimately reach RUNNING, and left alone it holds a claim forever. With
-`auto_terminate_orphaned_workflow_tasks` (default `true`):
+`finalizing_at` protects the handoff after user code returns. Recovery waits
+until `finalizing_stale_threshold_ms` has also elapsed.
 
-- the reaper sweeps orphans CANCELLED in bounded batches (500 per batch, up
-  to 200 batches per pass); the sweep disables itself after 3 consecutive
-  permanent failures and logs that manual intervention is needed
-- a worker handed an orphan cancels it before start: the node RUNNING
-  handoff finding no runnable linkage triggers `horsies_cancel_owned_orphan`,
-  which re-verifies the linkage under its own lock and lets the task run if
-  a runnable link exists after all
+## Workflow progression outbox
 
-Set the flag to `false` to leave orphans CLAIMED for inspection instead.
+Workflow task finalization has two durable steps:
 
-### Workflow Task Recovery
+1. Move the terminal backing task to history.
+2. Apply the result to the workflow DAG.
 
-When a worker crashes during a **workflow** task, the reaper marks `tasks.status = FAILED`, but the worker dies before calling the workflow task completion handler. This leaves `workflow_tasks.status` stuck in `RUNNING` while the underlying task is already terminal.
+The first transaction writes `horsies_workflow_phase2_pending`. The row records
+the exact workflow node and terminal evidence. A worker crash cannot lose the
+owed progression.
 
-The recovery loop detects this mismatch automatically:
+The healthy finalizer may consume the evidence immediately. The reaper waits
+`crashed_worker_recovery_grace_ms` before recovery consumption. The default is
+10,000 ms. Set it to zero for no grace.
 
-1. Finds `workflow_tasks` rows in non-terminal status where the linked `tasks` row is terminal (`COMPLETED`, `FAILED`, or `CANCELLED`)
-2. Deserializes the `TaskResult` from the task's stored result
-3. If no result is stored, synthesizes an error result:
-   - `WORKER_CRASHED` for failed tasks
-   - `TASK_CANCELLED` for cancelled tasks
-   - `RESULT_NOT_AVAILABLE` for completed tasks with missing results
-4. Triggers the normal completion path: updates `workflow_tasks` status, applies `on_error` policy, propagates to dependents, and checks workflow completion
+Each evidence row is processed in its own transaction. One bad row does not
+block later rows.
 
-This runs before workflow finalization, so dependents are resolved in the same recovery pass.
+## Quarantine
 
-## What Is Public API vs Worker Internals
+Some evidence cannot apply because stored source and workflow state conflict.
+The worker keeps the evidence and increments its attempt count.
 
-The worker reaper handles stale task recovery automatically during normal worker operation.
+After `phase2_quarantine_after_attempts`, the worker moves the row to
+`horsies_workflow_phase2_quarantine`. The default is 25 passes. The allowed
+range is 3–1,000 passes.
 
-The public Rust API does not expose dedicated helpers for:
+Quarantine preserves the source facts. It removes the row from normal
+discovery. Worker health reports these values:
 
-- requeueing stale `CLAIMED` tasks
-- failing stale `RUNNING` tasks
+- applied rows
+- retained rows
+- failed rows
+- rows over the attempt bound
+- quarantined rows
+- quarantine refusals
 
-For those paths, the supported approach is to let the worker reaper handle them or to use targeted operational SQL if you are doing manual intervention.
+Deleting a terminal workflow deletes its unconsumed pending evidence through a
+foreign-key cascade.
 
-For workflow-level reconciliation, there is a separate public helper:
+## Orphaned workflow tasks
 
-```rust
-horsies::recover_stuck_workflows(&pool, &registry).await?;
-```
+An orphaned backing task has no runnable workflow-node link. It cannot start
+valid work.
+
+`auto_terminate_orphaned_workflow_tasks` defaults to `true`. The reaper cancels
+orphans in bounded batches. A worker also checks the link before task start.
+
+Set the field to `false` to leave orphaned claims for inspection.
+
+## Unified maintenance pass
+
+One reaper pass owns these independent operations:
+
+- stale task recovery
+- workflow recovery
+- phase-2 evidence consumption
+- phase-2 quarantine
+- history and heartbeat partition coverage
+- history and heartbeat partition pruning
+- paused workflow expiry
+- workflow and worker-state row cleanup
+
+A cluster-wide advisory gate keeps one maintenance owner active. A database
+error while acquiring the gate skips that pass. It does not run ungated.
+
+Each operation reports its own health. A failed history class does not stop
+heartbeat coverage or later history classes.
 
 ## Configuration
 
 ```rust
-use horsies::{AppConfig, RecoveryConfig};
+use horsies::{AppConfig, RecoveryConfig, RetentionConfig};
 
 let config = AppConfig {
     recovery: RecoveryConfig {
-        // Claimer detection
         auto_requeue_stale_claimed: true,
-        claimed_stale_threshold_ms: 120_000,     // 2 minutes
-        claimer_heartbeat_interval_ms: 30_000,   // 30 seconds
-
-        // Runner detection
+        claimed_stale_threshold_ms: 120_000,
         auto_fail_stale_running: true,
-        running_stale_threshold_ms: 300_000,     // 5 minutes
-        runner_heartbeat_interval_ms: 30_000,    // 30 seconds
-
-        // Check frequency
-        check_interval_ms: 30_000,               // 30 seconds
-
-        ..Default::default()
+        running_stale_threshold_ms: 300_000,
+        finalizing_stale_threshold_ms: 300_000,
+        crashed_worker_recovery_grace_ms: 10_000,
+        phase2_quarantine_after_attempts: 25,
+        claimer_heartbeat_interval_ms: 30_000,
+        runner_heartbeat_interval_ms: 30_000,
+        ..RecoveryConfig::default()
+    },
+    retention: RetentionConfig {
+        heartbeat_leaf_horizon_hours: 6,
+        partition_maintenance_interval_s: 900,
+        ..RetentionConfig::default()
     },
     ..AppConfig::for_database_url("postgresql://...")
 };
 ```
 
-## Timing Guidelines
-
-### Rule: Threshold >= 2x Interval
-
-Stale thresholds must be at least 2x the heartbeat interval:
-
-```rust
-// Valid
-RecoveryConfig {
-    runner_heartbeat_interval_ms: 30_000, // 30s
-    running_stale_threshold_ms: 60_000,   // 60s (2x)
-    ..Default::default()
-}
-
-// Invalid - will produce validation error
-RecoveryConfig {
-    runner_heartbeat_interval_ms: 30_000, // 30s
-    running_stale_threshold_ms: 30_000,   // 30s (too tight!)
-    ..Default::default()
-}
-```
-
-### For CPU-Heavy Tasks
-
-Long-running blocking tasks (via `#[blocking_task]`) may delay the heartbeat:
-
-```rust
-RecoveryConfig {
-    runner_heartbeat_interval_ms: 60_000,  // Heartbeat every minute
-    running_stale_threshold_ms: 300_000,   // 5 minutes before stale
-    ..Default::default()
-}
-```
-
-### For Quick Tasks
-
-Fast tasks can use tighter detection:
-
-```rust
-RecoveryConfig {
-    runner_heartbeat_interval_ms: 10_000, // 10 seconds
-    running_stale_threshold_ms: 30_000,   // 30 seconds
-    ..Default::default()
-}
-```
-
-## Database Schema
-
-Heartbeats are stored in the `horsies_heartbeats` table:
-
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | int | Auto-increment ID |
-| `task_id` | str | Task being tracked |
-| `sender_id` | str | Worker identifier |
-| `role` | str | 'claimer' or 'runner' |
-| `sent_at` | datetime | Heartbeat timestamp |
-| `hostname` | str | Machine hostname |
-| `pid` | int | Process ID |
-
-## Disabling Recovery
-
-Not recommended, but possible:
-
-```rust
-RecoveryConfig {
-    auto_requeue_stale_claimed: false,
-    auto_fail_stale_running: false,
-    ..Default::default()
-}
-```
-
-Tasks will remain stuck until manually resolved.
-
-## Table Cleanup
-
-Heartbeat cleanup is automatic by default. The worker reaper deletes expired heartbeats on every tick based on `RecoveryConfig.heartbeat_retention_hours` (default: `Some(24)`, set to `None` to disable).
-
-For manual cleanup:
-
-```sql
--- Delete heartbeats older than 24 hours
-DELETE FROM horsies_heartbeats WHERE sent_at < NOW() - INTERVAL '24 hours';
-```
+A stale threshold must be at least twice its heartbeat interval.
 
 ## Troubleshooting
 
-### False Positives (Tasks Marked Stale But Running)
+### Healthy tasks are marked stale
 
-Increase thresholds:
+Raise the matching stale threshold. Check database latency. Check runtime
+starvation in blocking work.
 
-```rust
-RecoveryConfig {
-    running_stale_threshold_ms: 600_000, // 10 minutes
-    ..Default::default()
-}
-```
+### Tasks do not recover
 
-Common causes:
+Check the worker reaper logs. Check database access. Check the automatic
+recovery flags. Check the maintenance health fields.
 
-- Blocking tasks holding the tokio runtime
-- Network latency to database
-- Database contention
+### Heartbeat writes fail near a leaf boundary
 
-### Tasks Not Recovering
-
-Check:
-
-- `auto_requeue_stale_claimed` / `auto_fail_stale_running` enabled?
-- Reaper loop running? (Check worker logs)
-- Database connectivity?
+Check partition coverage health. Confirm that the worker role can create
+partitions. Keep at least two future heartbeat leaves available.

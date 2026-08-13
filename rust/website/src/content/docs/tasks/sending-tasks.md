@@ -69,6 +69,68 @@ let node = my_task::node()?
     .good_until(deadline);
 ```
 
+### Choose task-history retention
+
+Every send gets a retention class. The precedence is:
+
+1. An explicit send choice.
+2. The queue's `queue_retention` mapping.
+3. `standard_30d`.
+
+Use `retention_class(...)` for a finite class:
+
+```rust
+use horsies::TaskSendOptions;
+
+let handle = audit_task::with_options(
+    TaskSendOptions::new().retention_class("audit_1y"),
+)
+.send(input)
+.await?;
+```
+
+Use `retain_forever()` for the explicit forever choice:
+
+```rust
+let handle = audit_task::with_options(
+    TaskSendOptions::new().retain_forever(),
+)
+.send(input)
+.await?;
+```
+
+The payload stores the explicit forever choice as a missing finite
+`retention_class_key`. The database resolves it to the `forever` class. Do not
+pass the string `"forever"` to `retention_class(...)`.
+
+An unknown class returns `ValidationFailed`. No task row is written. The class
+is fixed at enqueue. Retry methods replay the same class.
+
+See [Retention Config](../../configuration/retention-config).
+
+### Use an idempotency key
+
+An idempotency key deduplicates enqueue commands for one task name.
+
+```rust
+let handle = charge_card::with_options(
+    TaskSendOptions::new().idempotency_key("checkout-4182"),
+)
+.send(input)
+.await?;
+```
+
+The key is scoped by task name. The key must be non-empty. It can use at most
+255 UTF-8 bytes.
+
+The default reservation window is 24 hours. A matching command replays the
+existing task ID. A different command with the same scoped key returns a key
+conflict. The command fingerprint includes task name, queue, payload, options,
+retention class, deadline, and rerun lineage.
+
+Delayed sends carry the same key. `retry_send` and `retry_schedule` also carry
+it. Do not change the stored error payload before a retry.
+
 ### Wait for Result
 
 ```rust
@@ -183,10 +245,23 @@ Enqueue task for delayed execution.
 ### `TaskSendOptions`
 
 ```rust
-TaskSendOptions::new().good_until(deadline)
+TaskSendOptions::new()
+    .good_until(deadline)
+    .idempotency_key("checkout-4182")
+    .retention_class("audit_1y")
 ```
 
 `good_until` is the last valid time for the task to begin execution. A task whose deadline passes while still `Pending` or `Claimed` transitions to `Expired` without running user code.
+
+| Method | Meaning |
+|---|---|
+| `.good_until(deadline)` | Set the last valid start time |
+| `.idempotency_key(key)` | Set a task-name-scoped enqueue key |
+| `.retention_class(key)` | Select a configured finite class |
+| `.retain_forever()` | Keep the terminal record forever |
+
+Omitting retention uses the queue mapping. It uses `standard_30d` when the
+queue has no mapping.
 
 ### `TaskSendResult<T>`
 
@@ -199,7 +274,7 @@ Type alias: `Result<T, TaskSendError>`.
 | `code` | `TaskSendErrorCode` | Failure category |
 | `message` | `String` | Human-readable description |
 | `retryable` | `bool` | Whether the caller can retry with the same payload |
-| `task_id` | `Option<String>` | Generated task ID |
+| `task_id` | `Option<Uuid>` | Generated task ID |
 | `payload` | `Option<TaskSendPayload>` | Serialized envelope for replay |
 
 ### `TaskSendErrorCode`
@@ -210,11 +285,12 @@ Type alias: `Result<T, TaskSendError>`.
 | `ValidationFailed` | Argument serialization or validation failed | No |
 | `EnqueueFailed` | Broker/database failure during enqueue | Yes |
 | `PayloadMismatch` | Retry payload SHA does not match | No |
+| `PayloadTooLarge` | Serialized input exceeded the configured limit | No |
 
 ### `TaskHandle<T>`
 
 | Method | Returns | Description |
 | ------ | ------- | ----------- |
-| `.task_id()` | `&str` | Unique task identifier |
+| `.task_id()` | `Uuid` | Unique task identifier |
 | `.get(timeout)` | `TaskResult<T>` | Wait for result |
 | `.info(include_result, include_failed_reason, include_attempts)` | `BrokerResult<Option<TaskInfo>>` | Fetch task metadata |

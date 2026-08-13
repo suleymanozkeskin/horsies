@@ -910,9 +910,7 @@ mod tests {
         label: &'static str,
     }
 
-    struct OtherMacroState {
-        value: &'static str,
-    }
+    struct OtherMacroState;
 
     #[horsies::task("macro_add")]
     async fn macro_add(args: MacroAddArgs) -> Result<i32, horsies::TaskError> {
@@ -1164,7 +1162,7 @@ mod tests {
         let state = rt.state::<MacroState>().unwrap();
         assert_eq!(state.label, "first");
 
-        let err = app.provide(OtherMacroState { value: "later" }).unwrap_err();
+        let err = app.provide(OtherMacroState).unwrap_err();
         assert!(err.to_string().contains("frozen"));
     }
 

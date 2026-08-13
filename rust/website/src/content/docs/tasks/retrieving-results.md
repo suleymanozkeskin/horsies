@@ -7,7 +7,9 @@ tags: [tasks, results, TaskHandle, errors]
 
 # Retrieving Results
 
-Retrieve task outcomes through `TaskHandle::get()`. For error handling strategy, see [Error Handling](./error-handling) and [Result Handling](../concepts/result-handling).
+Retrieve task outcomes through `TaskHandle::get()`. For error handling
+strategy, see [Error Handling](../error-handling) and [Result
+Handling](../../concepts/result-handling).
 
 ## How To
 
@@ -126,6 +128,88 @@ if let Ok(Some(task_info)) = info_result {
 }
 ```
 
+`info()` reads both live and history storage. A terminal task's attempt list is
+decoded from its history snapshot. Corrupt result or attempt envelopes return
+an error. They are not guessed.
+
+## Rerun a retained terminal task
+
+`rerun_task` creates a new task from retained source input. It never changes
+the source record. The new task stores its direct source and its rerun root.
+
+```rust
+use horsies::{
+    rerun_task, RerunEnqueuePolicy, RerunOutcome, RerunTask,
+};
+
+let source_id = handle.task_id();
+let broker = app.get_broker().await?;
+
+let outcome = rerun_task(
+    &broker,
+    RerunTask::new(
+        source_id,
+        None,
+        Some("manual-rerun-4182".to_owned()),
+    ),
+    RerunEnqueuePolicy::standard(true),
+)
+.await?;
+
+match outcome {
+    RerunOutcome::Enqueued { new_task_id, .. } => {
+        println!("rerun task: {new_task_id}");
+    }
+    RerunOutcome::KeyReplay { existing_task_id } => {
+        println!("existing rerun: {existing_task_id}");
+    }
+    RerunOutcome::SourceLive { task_id } => {
+        println!("source is live: {task_id}");
+    }
+    RerunOutcome::SourceAbsent { task_id, .. } => {
+        println!("source is absent: {task_id}");
+    }
+    RerunOutcome::NotEligible { task_id, reason } => {
+        println!("source is not eligible: {task_id} {reason:?}");
+    }
+    RerunOutcome::InputUnavailable { task_id, .. } => {
+        println!("source input is unavailable: {task_id}");
+    }
+    RerunOutcome::InputCorrupt { task_id, detail } => {
+        println!("source input is corrupt: {task_id} {detail}");
+    }
+    RerunOutcome::KeyConflict { task_id, .. } => {
+        println!("rerun key conflicts: {task_id}");
+    }
+}
+```
+
+The source must be a retained terminal non-workflow task. A completed source is
+not eligible. A workflow backing task is not eligible.
+
+The source input must have an `INLINE` rerun envelope. Set
+`PostgresConfig.retain_rerun_input_default = true` before enqueue when later
+rerun is required. The default is `false`.
+
+The policy selects the new retention class. It also selects whether the new
+task retains its own rerun input. `RerunEnqueuePolicy::standard(true)` uses
+`standard_30d` and a 24-hour key reservation window.
+
+`RerunOutcome` is exhaustive:
+
+- `Enqueued`
+- `SourceLive`
+- `SourceAbsent`
+- `NotEligible`
+- `InputUnavailable`
+- `InputCorrupt`
+- `KeyConflict`
+- `KeyReplay`
+
+Use a caller key when an operator or API request may be submitted more than
+once. The rerun lineage is part of the command fingerprint. A source enqueue
+key cannot silently replay a rerun command.
+
 ## Things to Avoid
 
 **Don't silently ignore errors by only logging them.**
@@ -151,4 +235,4 @@ match result {
 }
 ```
 
-For detailed error handling patterns, see [Error Handling](./error-handling).
+For detailed error handling patterns, see [Error Handling](../error-handling).

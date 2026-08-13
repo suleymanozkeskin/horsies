@@ -18,7 +18,7 @@ Workflows in horsies are DAGs:
 ```text
 Pending -> Running -> Completed
                   -> Failed
-                  -> Paused
+                  -> Paused -> Expired
                   -> Cancelled
 ```
 
@@ -27,8 +27,13 @@ Terminal workflow statuses:
 - `Completed`
 - `Failed`
 - `Cancelled`
+- `Expired`
 
 `Paused` is non-terminal.
+
+`Cancelled` means that a caller stopped the workflow. `Expired` means that a
+paused workflow crossed its configured age limit. An expired child propagates
+to its parent like a cancelled child.
 
 ## Workflow Task Status Lifecycle
 
@@ -54,6 +59,41 @@ Rust currently supports two workflow error policies:
 | `Pause` | Pause immediately and block new enqueues until resume |
 
 There is no public `Continue` variant in the Rust API.
+
+## Pause and resume
+
+`OnError::Pause` stops new DAG progression. `WorkflowHandle::get()` returns a
+paused result instead of waiting forever.
+
+Pause handles backing tasks by their current state:
+
+- A `PENDING` backing task stays in the live table.
+- A `CLAIMED` backing task is abandoned as `CANCELLED`.
+- The cancelled backing task moves to task history.
+- Its workflow node returns to `READY` and clears the task ID.
+- Resume creates a fresh backing task row for that node.
+
+The history row names the pause terminalization. It is not an extra workflow
+node result.
+
+Pause also cascades to running child workflows. Resume applies to the selected
+workflow tree. It does not scan or mutate unrelated workflows.
+
+## Paused workflow expiry
+
+Set `AppConfig.retention.paused_workflow_auto_cancel_after` to enable expiry.
+The default is `None`.
+
+The worker changes an old `PAUSED` workflow to `EXPIRED`. It stores a
+structured `WORKFLOW_EXPIRED` error. The error data names the policy and the
+configured age.
+
+Expiry terminalizes any remaining backing tasks through the normal task-history
+move. Parent propagation runs through workflow recovery. A parent error cannot
+roll back the child expiry transaction.
+
+`WorkflowStatus::Expired` is terminal in result waits, notifications,
+sub-workflow propagation, and retention.
 
 ## Failure Semantics
 

@@ -1,7 +1,7 @@
 ---
 title: AppConfig
 summary: Root configuration for a horsies application.
-related: [broker-config, recovery-config, ../../concepts/queue-modes]
+related: [broker-config, recovery-config, retention-config, ../../concepts/queue-modes]
 tags: [configuration, AppConfig]
 ---
 
@@ -29,6 +29,7 @@ let mut app = Horsies::new(config)?;
 | `max_claim_renew_age_ms` | `u32` | `180000` | Max age (ms) of a CLAIMED task that heartbeat will renew. Older claims are left to expire, preventing indefinite renewal of orphaned tasks. Must be >= effective claim lease |
 | `payload` | `PayloadPolicy` | defaults | Payload-size guardrail (warn at 1 MiB, rejection off) |
 | `recovery` | `RecoveryConfig` | defaults | Crash recovery settings |
+| `retention` | `RetentionConfig` | defaults | Data lifetime, partition coverage, and cleanup settings |
 | `resilience` | `WorkerResilienceConfig` | defaults | Worker retry/backoff and notify polling |
 | `schedule` | `Option<ScheduleConfig>` | `None` | Scheduled task configuration |
 | `resend_on_transient_err` | `bool` | `false` | Auto-retry transient enqueue/start failures for task sends, scheduled sends, and workflow starts |
@@ -119,7 +120,36 @@ let config = AppConfig {
 };
 ```
 
-See [Recovery Config](recovery-config.md) for all options.
+See [Recovery Config](../recovery-config) for all options.
+
+## Retention Configuration
+
+Set record lifetime and partition coverage under `retention`:
+
+```rust
+use std::collections::HashMap;
+
+use chrono::Duration;
+use horsies::{RetentionClassConfig, RetentionConfig};
+
+let config = AppConfig {
+    retention: RetentionConfig {
+        queue_retention: HashMap::from([
+            ("emails".to_owned(), Some(Duration::days(7))),
+            ("audit".to_owned(), None),
+        ]),
+        retention_classes: vec![RetentionClassConfig {
+            key: "audit_1y".to_owned(),
+            duration: Duration::days(365),
+        }],
+        ..RetentionConfig::default()
+    },
+    ..AppConfig::for_database_url("postgresql://...")
+};
+```
+
+`None` in `queue_retention` means forever. A missing queue mapping uses the
+30-day default class. See [Retention Config](../retention-config).
 
 ## Payload Guardrail
 
@@ -205,6 +235,8 @@ See [Scheduler Overview](../../scheduling/scheduler-overview) for details.
 - `claim_lease_ms` is required when `prefetch_buffer > 0`
 - `claim_lease_ms` is optional when `prefetch_buffer = 0` (overrides the default 60s lease)
 - `cluster_wide_cap` cannot be combined with `prefetch_buffer > 0`
+- retention class keys and durations must be valid
+- `queue_retention` keys must name configured queues
 
 Multiple validation errors within the same phase are collected and reported together (compiler-style), rather than stopping at the first error.
 

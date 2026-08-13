@@ -1,7 +1,7 @@
 ---
 title: Recovery Config
 summary: Automatic detection and recovery of stale tasks.
-related: [../../workers/heartbeats-recovery, app-config]
+related: [retention-config, ../../workers/heartbeats-recovery, app-config]
 tags: [configuration, recovery, heartbeats]
 ---
 
@@ -41,17 +41,42 @@ let config = AppConfig {
 | `auto_fail_stale_running` | `bool` | `true` | Fail tasks stuck in RUNNING |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `true` | Cancel workflow tasks with no runnable `workflow_tasks` linkage (reaper sweep + pre-start check); `false` leaves them CLAIMED for inspection |
 | `running_stale_threshold_ms` | `u64` | 300,000 | Ms before RUNNING task is stale |
+| `finalizing_stale_threshold_ms` | `u64` | 300,000 | Ms a task may remain in finalization before recovery |
+| `crashed_worker_recovery_grace_ms` | `u64` | 10,000 | Grace before the worker consumes workflow progression evidence. `0` removes the grace |
+| `phase2_quarantine_after_attempts` | `u32` | 25 | Failed recovery passes before evidence moves to quarantine. Range: 3–1,000 |
 | `check_interval_ms` | `u64` | 30,000 | How often to check for stale tasks |
 | `runner_heartbeat_interval_ms` | `u64` | 30,000 | RUNNING task heartbeat frequency |
 | `claimer_heartbeat_interval_ms` | `u64` | 30,000 | CLAIMED task heartbeat frequency |
-| `heartbeat_retention_hours` | `Option<u32>` | `Some(24)` | Hours to keep heartbeat rows; `None` disables pruning |
-| `worker_state_retention_hours` | `Option<u32>` | `Some(168)` (7 days) | Hours to keep worker_state snapshots; `None` disables pruning |
-| `terminal_record_retention_hours` | `Option<u32>` | `Some(720)` (30 days) | Hours to keep terminal task/workflow rows; `None` disables pruning |
-| `queue_terminal_record_retention_hours` | `HashMap<String, u32>` | `{}` | Per-queue overrides of the terminal window for plain (non-workflow) tasks (1h–5y). Queues not listed use the global window; overrides apply even when the global window is `None`. Override keys must name declared queues |
-| `retention_sweep_interval_s` | `u64` | `300` | Seconds between retention sweep passes (30s–24h). Frequent small sweeps keep each pass short instead of accumulating an hourly spike |
-| `retention_delete_batch_size` | `u32` | `500` | Rows per retention DELETE batch (50–10,000). Bounds per-statement duration, row locks, and WAL; each batch commits independently |
+| `worker_state_snapshot_interval_ms` | `u64` | 30,000 | How often a worker writes a monitoring snapshot. Range: 1,000–300,000 ms |
 
-All time values for thresholds and intervals are in milliseconds. Retention values are in hours.
+Threshold and interval values on this page use milliseconds.
+
+## Moved and removed fields
+
+These fields moved from the alpha.25 `RecoveryConfig` to
+`AppConfig.retention`:
+
+- `terminal_record_retention_hours`
+- `worker_state_retention_hours`
+- `retention_sweep_interval_s`
+- `retention_delete_batch_size`
+
+These `AppConfig.retention` fields are new in alpha.26:
+
+- `retention_classes`
+- `history_leaf_horizon_days`
+- `heartbeat_leaf_horizon_hours`
+- `partition_maintenance_interval_s`
+- `paused_workflow_auto_cancel_after`
+
+`RecoveryConfig` refuses all nine names above. Each error names
+`AppConfig.retention.<field>` as the successor.
+
+`queue_terminal_record_retention_hours` was removed. Use
+`AppConfig.retention.queue_retention`.
+
+`heartbeat_retention_hours` was removed. Use partitioned heartbeat storage and
+`AppConfig.retention.heartbeat_leaf_horizon_hours`.
 
 ## Recovery Behaviors
 
@@ -71,7 +96,19 @@ When a **regular** task is RUNNING but the runner heartbeat stops:
 - If the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining: scheduled for retry (returns to PENDING with `next_retry_at`)
 - Otherwise: marked as FAILED with `WORKER_CRASHED` error
 
-For **workflow** tasks, the recovery loop also detects when `workflow_tasks` is stuck non-terminal while the underlying task is already terminal, and triggers the normal completion path. See [Heartbeats & Recovery](../../workers/heartbeats-recovery) for details.
+For workflow tasks, terminalization writes the owed DAG progression to a
+transactional outbox. The worker consumes that evidence after
+`crashed_worker_recovery_grace_ms`. See [Heartbeats &
+Recovery](../../workers/heartbeats-recovery).
+
+### Phase-2 quarantine
+
+Some workflow progression evidence cannot be applied. The worker retries each
+row on later passes. It moves a row to quarantine after
+`phase2_quarantine_after_attempts` failed passes.
+
+The quarantine keeps the source evidence. Discovery stops retrying that row.
+Worker health reports pending, failed, over-bound, and quarantined counts.
 
 ## Heartbeat System
 
@@ -89,6 +126,7 @@ The reaper (running as a tokio task in each worker) checks for missing heartbeat
 | Threshold | Constraint |
 |-----------|------------|
 | Stale threshold | Must be >= 2x heartbeat interval |
+| Finalizing stale threshold | Must be >= 2x runner heartbeat interval |
 | Claimed stale | 1 second to 1 hour |
 | Running stale | 1 second to 2 hours |
 | Check interval | 1 second to 10 minutes |
@@ -131,51 +169,13 @@ RecoveryConfig {
 }
 ```
 
-## Retention Cleanup
+## Retention
 
-The reaper loop automatically prunes old rows every `retention_sweep_interval_s` seconds (default 5 minutes), deleting in batches of `retention_delete_batch_size` rows (default 500) under a shared 60-second pass budget. A doomed task's `horsies_task_attempts` history is purged set-wise in the same statement. Three categories are cleaned independently:
+Retention now has a separate config object. It controls task-history classes,
+partition coverage, workflow cleanup, and worker-state cleanup.
 
-| Category | Config field | Default | What gets deleted |
-|----------|-------------|---------|-------------------|
-| Heartbeats | `heartbeat_retention_hours` | 24h | `horsies_heartbeats` rows older than threshold |
-| Worker states | `worker_state_retention_hours` | 7 days | `horsies_worker_states` snapshots older than threshold |
-| Terminal records | `terminal_record_retention_hours` | 30 days | `horsies_tasks`, `horsies_workflows`, and `horsies_workflow_tasks` rows in COMPLETED/FAILED/CANCELLED status older than threshold |
-
-Set any field to `None` to disable pruning for that category.
-
-```rust
-RecoveryConfig {
-    heartbeat_retention_hours: Some(48),         // Keep heartbeats for 2 days
-    worker_state_retention_hours: Some(24 * 14), // Keep worker snapshots for 2 weeks
-    terminal_record_retention_hours: Some(24 * 90), // Keep terminal records for 90 days
-    ..Default::default()
-}
-```
-
-Per-queue overrides shorten (or lengthen) the terminal window for plain tasks on specific queues — for example an hours-scale window for a high-volume metrics queue whose terminal rows have no audit value:
-
-```rust
-RecoveryConfig {
-    terminal_record_retention_hours: Some(24 * 30),
-    queue_terminal_record_retention_hours: HashMap::from([
-        ("metrics".to_owned(), 6), // metrics-queue terminal rows kept 6 hours
-    ]),
-    ..Default::default()
-}
-```
-
-Overrides govern plain (non-workflow) tasks only: workflow-backing task rows always age under the global window, so a workflow and its task rows are retained as a unit. Override keys must name declared queues (`custom_queues` in CUSTOM mode, `"default"` in DEFAULT mode) — a typo'd key fails config validation instead of silently doing nothing.
-
-To disable all automatic cleanup:
-
-```rust
-RecoveryConfig {
-    heartbeat_retention_hours: None,
-    worker_state_retention_hours: None,
-    terminal_record_retention_hours: None,
-    ..Default::default()
-}
-```
+Use [`AppConfig.retention`](../retention-config). Do not place retention fields in
+`RecoveryConfig`.
 
 ## Disabling Recovery
 

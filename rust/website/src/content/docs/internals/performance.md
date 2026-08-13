@@ -1,53 +1,78 @@
 ---
 title: Performance
-summary: Measured per-statement latencies of the hot path under a real workload shape, and what governs them.
+summary: Hot-path costs, task-history read shape, and retention cost.
 related: [../../questions-and-answers, database-schema, operational-indexes]
-tags: [internals, performance, latency, postgres]
+tags: [internals, performance, latency, postgres, task-history]
 ---
 
 # Performance
 
-Per-statement latency over a 24-hour window: workers and managed Postgres on
-separate machines in the same region, entry-tier instance, ~2.5M statements
-across the top 20 by execution count. The statements are the shared SQL
-surface of the horsies schema — the Rust port transcribes the same
-server-side functions and hot-path statements, so the per-statement costs
-below are properties of the statements, not of the client runtime.
+## Hot-path reference
 
-| Statement | Count / 24h | p50 | p99 |
-| --- | --- | --- | --- |
-| Cap-serialization advisory lock | 902,184 | 0 ms | 0 ms |
-| NOTIFY dispatch triggers | 260,248 | 0 ms | 0 ms |
-| Claim function (`horsies_claim`) | 150,417 | 1 ms | 2 ms |
-| Attempt-history retention delete | 37,478 | 0 ms | 1 ms |
+These figures use one entry-tier managed PostgreSQL instance. Workers and the
+database are on separate machines in one region. The sample covers about 2.5
+million statements in 24 hours.
+
+| Statement | Count in 24 hours | p50 | p99 |
+|---|---:|---:|---:|
+| Cap advisory lock | 902,184 | 0 ms | 0 ms |
+| Notify triggers | 260,248 | 0 ms | 0 ms |
+| Claim function | 150,417 | 1 ms | 2 ms |
 | Heartbeat insert | 36,765 | 0 ms | 1 ms |
 | Finalize fence update | 35,923 | 0 ms | 1 ms |
 | Task enqueue insert | 31,412 | 1 ms | 2 ms |
-| Requeue / unclaim update | 31,350 | 0 ms | 1 ms |
+| Requeue or unclaim update | 31,350 | 0 ms | 1 ms |
 
-No statement in the top 20 by count exceeds a 2 ms p99.
+The table reports server-side statement time. Network time is separate.
 
-## Where the runtime goes
+## Terminalization cost
 
-The claim function is the most expensive statement on the instance at ~18%
-of total DB runtime — by design. It is the entire claim critical section
-(advisory lock, candidate selection, per-queue cap enforcement, claim
-update) as one server-side statement, so the lock is held across a single
-statement rather than across client round trips. The two statements that
-reach 2 ms p99 are the two that do the most work per call: the claim
-function and the enqueue insert. Everything around them is near-free.
+Terminalization remains one database function call. The function locks the
+live row. It writes the history row. It archives attempts. It deletes live
+attempts. It deletes the live task. It emits the completion notification.
 
-## What the numbers measure
+The transaction writes one history leaf. Its cost includes the leaf's task-ID
+and enqueue-order indexes.
 
-Server-side per-statement latency. End-to-end task latency adds network
-round trips between your processes and the database, which scale with
-distance — co-locating workers with Postgres removes them entirely.
+## Point reads
 
-The table is a reference shape, not a ceiling: the instance is entry-tier,
-and per-statement latency stays flat as load grows until the instance
-saturates. Headroom scales with the instance tier.
+Task result and info reads check live storage first. Terminal reads use the
+staged reader functions.
 
-Results scale with the Postgres instance: a PlanetScale Postgres and a
-Heroku Postgres will not perform the same, and a transaction-pooled
-connection path taxes every round trip. Deployment guidance:
-[Why PostgreSQL only?](../../questions-and-answers#why-postgresql-only).
+The staged functions hold a static leaf list. UUIDv7 time orders likely leaf
+probes. The reader still probes every skipped leaf before absence. Each probe
+uses the leaf task-ID index.
+
+A missing leaf triggers reader publication on the next maintenance pass. The
+reader excludes the missing relation. The health report keeps its catalog name.
+
+## History lists
+
+Each leaf has an `enqueued_at` btree. A bounded list can merge leaf scans in
+index order and stop at its limit. Migration 0040 adds the schema-v34 index to
+existing leaves. New leaves receive the same index.
+
+Filters without a matching index still scan the selected leaves. Add a focused
+leaf index for a permanent application query. See [Operational
+Indexes](../operational-indexes).
+
+## Retention cost
+
+Task and heartbeat retention drops partitions. Drop cost does not grow with the
+number of rows in the leaf. A detach can wait for old transactions. The worker
+caps that wait with a statement timeout.
+
+Workflow and worker-state retention deletes rows in batches. Delete cost grows
+with the retired row count. Autovacuum must reclaim dead tuples later.
+
+History class duration sets a minimum age. Daily leaf size adds up to one day
+of retention. Smaller leaves would reduce that margin but would create more
+relations and indexes.
+
+## Cutover estimates
+
+Cutover duration depends on row count and database speed. Fit the preparation
+and relocation slopes on the target server. Measure fixed stage time on the
+same server. Do not copy coefficients from another deployment.
+
+See the [task-history cutover runbook](../../operations/cutover-runbook).

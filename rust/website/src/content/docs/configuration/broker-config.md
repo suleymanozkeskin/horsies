@@ -24,6 +24,7 @@ let broker = PostgresConfig::from_url(
 | `pgbouncer_transaction_mode` | `bool` | `false` | Disable SQLx named prepared-statement caching for PgBouncer transaction pools |
 | `pool_size` | `u32` | 30 | Runtime SQL connection pool size |
 | `max_overflow` | `u32` | 30 | Additional runtime SQL connections beyond pool_size |
+| `retain_rerun_input_default` | `bool` | `false` | Keep canonical input for later task rerun |
 | `pool_timeout` | `u32` | 30 | Seconds to wait for connection |
 | `pool_pre_ping` | `bool` | `true` | Pre-ping connections before use |
 | `echo` | `bool` | `false` | Echo SQL statements to logs |
@@ -63,6 +64,7 @@ PostgresConfig {
     pgbouncer_transaction_mode: false,
     pool_size: 10,
     max_overflow: 20,
+    retain_rerun_input_default: false,
     pool_timeout: 30,
     pool_recycle: 3600,
     pool_pre_ping: true,

@@ -251,6 +251,8 @@ Parent subworkflow-node state follows child workflow state:
 - child `Completed` -> parent node `Completed`
 - child `Failed` -> parent node `Failed`
 - child `Paused` -> parent node remains non-terminal until resumed
+- child `Cancelled` -> parent node `Failed` with a child cancellation error
+- child `Expired` -> parent node `Failed` with a child expiry error
 
 The child output becomes the upstream value for downstream parent nodes.
 

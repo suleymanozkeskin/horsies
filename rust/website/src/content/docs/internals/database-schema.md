@@ -1,290 +1,216 @@
 ---
 title: Database Schema
-summary: PostgreSQL tables for tasks, heartbeats, worker states, and schedules.
-related: [../../configuration/broker-config]
-tags: [internals, database, schema, PostgreSQL]
+summary: Live tasks, partitioned task history, heartbeats, workflows, and cutover state after migration 0042.
+related: [operational-indexes, ../../configuration/retention-config, ../../operations/cutover-runbook]
+tags: [internals, database, schema, PostgreSQL, task-history]
 ---
 
-## horsies_tasks
+## Live and history storage
 
-Primary task storage table.
+`horsies_tasks` holds live work only. Its status constraint accepts
+`PENDING`, `CLAIMED`, and `RUNNING`.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | VARCHAR(36) PK | UUID task identifier |
+A terminalization statement moves the task to `horsies_task_history`. The
+move is atomic. The history row and the terminal outcome commit together.
+
+Task and workflow identity columns use PostgreSQL `uuid`. New task IDs use
+UUIDv7. The UUIDv7 time is a lookup hint. It is not proof that a task is
+absent.
+
+## `horsies_tasks`
+
+The live task table contains claimable and executing work.
+
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | UUID PK | UUIDv7 task ID |
 | `task_name` | VARCHAR(255) | Registered task name |
-| `queue_name` | VARCHAR(100) | Queue assignment |
-| `priority` | INT | 1-100, lower = higher priority |
-| `args` | TEXT | JSON-serialized positional args |
-| `kwargs` | TEXT | JSON-serialized keyword args |
-| `status` | VARCHAR | PENDING/CLAIMED/RUNNING/COMPLETED/FAILED/CANCELLED/EXPIRED (stored as VARCHAR) |
+| `queue_name` | VARCHAR(100) | Queue |
+| `priority` | INT | Priority from 1 to 100 |
+| `args`, `kwargs` | TEXT | JSON task input |
+| `status` | VARCHAR | `PENDING`, `CLAIMED`, or `RUNNING` |
+| `sent_at` | TIMESTAMPTZ | Call time |
+| `enqueued_at` | TIMESTAMPTZ | Dispatch time |
+| `claimed_at`, `started_at` | TIMESTAMPTZ | Live lifecycle times |
+| `good_until` | TIMESTAMPTZ | Start deadline |
+| `retry_count`, `max_retries`, `next_retry_at` | mixed | Retry state |
+| `task_options` | TEXT | Serialized task options |
+| `is_workflow_task` | BOOLEAN | Workflow backing-task marker |
+| `finalizing_at`, `finalizing_by_worker_id` | mixed | Finalization handoff |
+| `enqueue_sha` | VARCHAR(64) | Retry payload digest |
+| `command_fingerprint_version` | SMALLINT | Fingerprint format |
+| `command_fingerprint` | BYTEA | Canonical enqueue fingerprint |
+| `retention_class_key` | TEXT | Class fixed at enqueue |
+| `input_digest` | BYTEA | Canonical input digest |
+| `rerun_of_task_id` | UUID | Direct rerun source |
+| `rerun_root_task_id` | UUID | First task in the rerun chain |
+| `idempotency_key_digest` | BYTEA | Scoped key digest |
+| `retain_rerun_input` | BOOLEAN | Input retention policy |
+| `prepared_rerun_input_*` | mixed | Prepared input envelope or refusal |
+| `worker_pid`, `worker_hostname`, `worker_process_name` | mixed | Worker identity |
+| `created_at`, `updated_at` | TIMESTAMPTZ | Row times |
 
-These values correspond to `TaskStatus` in the API (see Task Lifecycle for terminal states).
+The fingerprint, retention class, rerun-input policy, and prepared disposition
+are required at rest.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `sent_at` | TIMESTAMP | Immutable call-site timestamp (when `.send()` / `.schedule()` was called) |
-| `enqueued_at` | TIMESTAMP | Mutable dispatch timestamp (when task becomes claimable; updated on retry) |
-| `claimed_at` | TIMESTAMP | When worker claimed task |
-| `started_at` | TIMESTAMP | When execution started |
-| `completed_at` | TIMESTAMP | When task completed |
-| `failed_at` | TIMESTAMP | When task failed |
-| `result` | TEXT | JSON-serialized TaskResult |
-| `failed_reason` | TEXT | Human-readable failure message |
-| `error_code` | TEXT | Final `TaskError.error_code` for failed tasks (NULL for successful, non-terminal, or worker-level failures without a `TaskResult`) |
-| `claimed` | BOOLEAN | Claiming flag |
-| `claimed_by_worker_id` | VARCHAR(255) | Worker identifier |
-| `good_until` | TIMESTAMP | Task expiry deadline |
-| `retry_count` | INT | Current retry attempt |
-| `max_retries` | INT | Maximum retries allowed |
-| `next_retry_at` | TIMESTAMP | Next retry time |
-| `task_options` | TEXT | Serialized TaskOptions |
-| `worker_pid` | INT | Executing process ID |
-| `worker_hostname` | VARCHAR(255) | Executing machine |
-| `worker_process_name` | VARCHAR(255) | Process identifier |
-| `claim_expires_at` | TIMESTAMP | Claim lease expiry deadline |
-| `enqueue_sha` | VARCHAR(64) | SHA-256 digest for idempotent retry |
-| `terminal_at` | TIMESTAMPTZ | Canonical terminal instant. Non-NULL exactly while the row is terminal — enforced by `ck_horsies_tasks_terminal_at_terminal_only`: `(status IN (COMPLETED, FAILED, CANCELLED, EXPIRED)) = (terminal_at IS NOT NULL)` |
-| `terminalization_kind` | TEXT | Which terminal operation committed the row (e.g. `COMPLETE_FUSED`, `FAIL_STALE`, `CANCEL_ORPHAN_SWEEP`). Written only by the operation functions, never by callers; a value-domain CHECK rejects unknown kinds. NULL = the row predates the column; its provenance is unknown and never inferred |
-| `created_at` | TIMESTAMP | Row creation time |
-| `updated_at` | TIMESTAMP | Last update time |
+## `horsies_task_history`
 
-Indexes: `queue_name`, `status`, `claimed`, `good_until`, `next_retry_at`, `error_code` (partial, WHERE NOT NULL)
+The history table stores immutable terminal tasks. It is partitioned in two
+levels:
 
-## horsies_task_attempts
+1. `LIST (retention_class_key)` selects the class.
+2. `RANGE (retention_anchor_at)` selects a UTC day.
 
-Immutable per-attempt execution history. One row per finished execution attempt (success, failure, or worker crash). Written atomically in the same transaction as the task state transition.
+`standard_30d` keeps records for at least 30 days. Declared and queue-derived
+classes use their configured duration. `forever` uses daily range leaves but
+never prunes them.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | BIGSERIAL PK | Auto-increment |
-| `task_id` | VARCHAR(36) FK | References `horsies_tasks(id)` with `ON DELETE CASCADE` |
-| `attempt` | INT | 1-based attempt number (`retry_count + 1` at finalization time) |
-| `outcome` | VARCHAR(32) | `COMPLETED`, `FAILED`, or `WORKER_FAILURE` (CHECK constraint enforced) |
-| `will_retry` | BOOLEAN | Whether a retry was scheduled after this attempt |
-| `started_at` | TIMESTAMPTZ | When the attempt started running |
-| `finished_at` | TIMESTAMPTZ | When the attempt finished |
-| `error_code` | TEXT | `TaskError.error_code` for this attempt (NULL on success) |
-| `error_message` | TEXT | `TaskError.message` for this attempt (NULL on success) |
-| `failed_reason` | TEXT | Worker-level failure reason (NULL for domain errors and successes) |
-| `worker_id` | VARCHAR(255) | Worker that executed this attempt |
-| `worker_hostname` | VARCHAR(255) | Machine hostname |
-| `worker_pid` | INT | Process ID |
-| `worker_process_name` | VARCHAR(255) | Process identifier |
-| `created_at` | TIMESTAMPTZ | Row creation time |
+Each history leaf has two indexes:
 
-Constraints: `UNIQUE (task_id, attempt)`, `CHECK (outcome IN ('COMPLETED', 'FAILED', 'WORKER_FAILURE'))`
+- a btree on `task_id` for point reads
+- a btree on `enqueued_at` for bounded lists and default ordering
 
-Indexes: `error_code` (partial, WHERE NOT NULL), `finished_at DESC`
+The history row carries the terminal task projection. It also carries a
+verified attempt snapshot. It stores result and rerun-input envelope metadata
+with their digests.
 
-Pre-execution aborts (`CLAIM_LOST`, `OWNERSHIP_UNCONFIRMED`, `WORKFLOW_CHECK_FAILED`, `WORKFLOW_STOPPED`) do not create attempt rows.
+History retention drops whole leaves. It does not delete terminal task rows.
 
-## horsies_heartbeats
+## Staged history readers
 
-Task liveness tracking.
+Point reads call staged database functions:
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | INT PK | Auto-increment |
-| `task_id` | VARCHAR(36) | Associated task |
-| `sender_id` | VARCHAR(255) | Worker/process ID |
-| `role` | VARCHAR(20) | 'claimer' or 'runner' |
-| `sent_at` | TIMESTAMP | Heartbeat time |
-| `hostname` | VARCHAR(255) | Machine hostname |
-| `pid` | INT | Process ID |
+- `horsies_task_lookup_staged(uuid)`
+- `horsies_task_provenance_staged(uuid, boolean)`
+- `horsies_task_detail_staged(uuid)`
 
-Indexes: `(task_id, role, sent_at DESC)`
+The worker publishes all three functions in one transaction. Their static leaf
+list lets PostgreSQL plan direct probes.
 
-## horsies_worker_states
+A valid UUIDv7 time narrows the first probes. A five-second clock bound widens
+the likely range. The reader then probes every skipped leaf before it returns
+absence. Non-v7 UUIDs probe all leaves.
 
-Worker monitoring snapshots (timeseries).
+The leaf catalog keeps the verified minimum UUID birth time. The absence floor
+uses the complete attached catalog. A missing relation is excluded from probes
+but does not rewrite that floor.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | INT PK | Auto-increment |
-| `worker_id` | VARCHAR(255) | Worker identifier |
-| `snapshot_at` | TIMESTAMP | Snapshot time |
-| `hostname` | VARCHAR(255) | Machine hostname |
-| `pid` | INT | Main process ID |
-| `processes` | INT | Worker concurrency level |
-| `queues` | VARCHAR[] | Subscribed queues |
-| `tasks_running` | INT | Current running count |
-| `tasks_claimed` | INT | Current claimed count |
-| `memory_usage_mb` | FLOAT | Memory consumption |
-| `cpu_percent` | FLOAT | CPU usage |
-| `memory_percent` | FLOAT | Memory usage percentage |
-| `max_claim_batch` | INT | Max tasks claimed per batch |
-| `max_claim_per_worker` | INT | Max tasks claimable per worker |
-| `cluster_wide_cap` | INT | Cluster-wide in-flight cap |
-| `queue_priorities` | JSONB | Queue priority configuration |
-| `queue_max_concurrency` | JSONB | Per-queue concurrency limits |
-| `recovery_config` | JSONB | Recovery configuration snapshot |
-| `worker_started_at` | TIMESTAMP | Worker start time |
+## Retention support tables
 
-## horsies_schedule_state
+`horsies_retention_classes` stores immutable class definitions. Finite classes
+store a duration, a daily interval, and a class parent.
 
-Scheduler execution tracking.
+`horsies_task_history_leaf_catalog` stores leaf bounds and publication facts.
+It also records pruning and missing-relation state.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `schedule_name` | VARCHAR(255) PK | Schedule identifier |
-| `last_run_at` | TIMESTAMP | Last execution time |
-| `next_run_at` | TIMESTAMP | Next scheduled time |
-| `last_task_id` | VARCHAR(36) | Most recent task ID |
-| `run_count` | INT | Total executions |
-| `config_hash` | VARCHAR(64) | Configuration hash |
-| `updated_at` | TIMESTAMP | Last state update |
+`horsies_key_reservations` stores scoped idempotency reservations. A key claim
+can apply, replay the owning task, or report a fingerprint conflict.
 
-## horsies_workflows
+## Workflow progression evidence
 
-Workflow instance rows.
+`horsies_workflow_phase2_pending` is the workflow progression outbox. A
+terminal workflow task writes this evidence in the same transaction that moves
+the backing task to history.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | VARCHAR(36) PK | Workflow UUID |
-| `name` | VARCHAR(255) | Workflow name |
-| `status` | VARCHAR | `RUNNING`, `COMPLETED`, `FAILED`, `PAUSED`, `CANCELLED` |
-| `on_error` | VARCHAR | `FAIL` or `PAUSE` |
-| `output_task_index` | INT | Output node index |
-| `success_policy` | TEXT | Serialized success policy JSON |
-| `definition_key` | VARCHAR(255) | Stable workflow definition key |
-| `parent_workflow_id` | VARCHAR(36) | Parent workflow if this is a child |
-| `parent_task_index` | INT | Parent workflow task index for child workflows |
-| `depth` | INT | Workflow nesting depth |
-| `root_workflow_id` | VARCHAR(36) | Root workflow ID |
-| `sent_at` | TIMESTAMP | Workflow creation timestamp |
-| `started_at` | TIMESTAMP | When workflow entered running state |
-| `completed_at` | TIMESTAMP | Completion timestamp |
-| `updated_at` | TIMESTAMP | Last update time |
-| `created_at` | TIMESTAMP | Row creation time |
+The worker consumes pending evidence after the configured grace period. Each
+row tracks its attempt count, last attempt time, and last failure class.
 
-## horsies_workflow_tasks
+`horsies_workflow_phase2_quarantine` stores evidence that crossed the configured
+attempt bound. Quarantine stops repeated discovery. The source facts remain
+available for inspection.
 
-Per-node state for workflow execution.
+Deleting a workflow cascades to its unconsumed pending evidence.
 
-| Column | Type | Description |
-| ------ | ---- | ----------- |
-| `id` | VARCHAR(36) PK | Row identifier |
-| `workflow_id` | VARCHAR(36) FK | Parent workflow |
-| `task_index` | INT | Node index within the workflow |
-| `node_id` | VARCHAR(255) | Stable node identifier |
-| `task_name` | VARCHAR(255) | Registered task name or `__sub_workflow:*` marker |
-| `task_args` | TEXT | Serialized positional input JSON |
-| `task_kwargs` | TEXT | Serialized keyword input JSON |
-| `queue_name` | VARCHAR(100) | Resolved queue |
-| `priority` | INT | Resolved priority |
-| `dependencies` | INT[] | Upstream dependency indices |
-| `args_from` | JSONB | Field-name to dependency-index mapping |
-| `workflow_ctx_from` | TEXT[] | Node IDs used for workflow context |
-| `allow_failed_deps` | BOOLEAN | Whether downstream runs after upstream failure |
-| `join_type` | VARCHAR | `ALL`, `ANY`, `QUORUM` |
-| `min_success` | INT | Quorum threshold |
-| `task_options` | TEXT | Serialized task options JSON |
-| `status` | VARCHAR | `PENDING`, `READY`, `ENQUEUED`, `RUNNING`, `COMPLETED`, `FAILED`, `SKIPPED` |
-| `is_subworkflow` | BOOLEAN | Whether this node is a child workflow |
-| `sub_workflow_name` | VARCHAR(255) | Child workflow name if subworkflow |
-| `sub_definition_key` | VARCHAR(255) | Child workflow definition key if subworkflow |
-| `task_id` | VARCHAR(36) | Linked row in `horsies_tasks` for task nodes |
-| `sub_workflow_id` | VARCHAR(36) | Linked row in `horsies_workflows` for subworkflow nodes |
-| `started_at` | TIMESTAMP | When the node was enqueued/launched |
-| `completed_at` | TIMESTAMP | Completion timestamp |
-| `created_at` | TIMESTAMP | Row creation time |
-| `updated_at` | TIMESTAMP | Last update time |
+## `horsies_task_attempts`
 
-## Trigger
+This table holds attempt rows for live tasks.
 
-```sql
-CREATE FUNCTION horsies_notify_task_changes()
-RETURNS trigger AS $$
-BEGIN
-    IF TG_OP = 'INSERT' AND NEW.status = 'PENDING' THEN
-        PERFORM pg_notify('task_new', NEW.id);
-        PERFORM pg_notify('task_queue_' || NEW.queue_name, NEW.id);
-    ELSIF TG_OP = 'UPDATE' AND OLD.status != NEW.status THEN
-        IF NEW.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') THEN
-            PERFORM pg_notify('task_done', NEW.id);
-        END IF;
-    END IF;
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
+| Column | Type | Meaning |
+|---|---|---|
+| `id` | BIGSERIAL PK | Attempt row ID |
+| `task_id` | UUID FK | Live task with `ON DELETE CASCADE` |
+| `attempt` | INT | One-based attempt number |
+| `outcome` | VARCHAR(32) | `COMPLETED`, `FAILED`, or `WORKER_FAILURE` |
+| `will_retry` | BOOLEAN | Retry decision |
+| `started_at`, `finished_at` | TIMESTAMPTZ | Attempt window |
+| `error_code`, `error_message`, `failed_reason` | TEXT | Attempt failure facts |
+| `worker_id`, `worker_hostname`, `worker_pid`, `worker_process_name` | mixed | Worker facts |
+| `created_at` | TIMESTAMPTZ | Row time |
 
-CREATE TRIGGER horsies_task_notify_trigger
-    AFTER INSERT OR UPDATE ON horsies_tasks
-    FOR EACH ROW
-    EXECUTE FUNCTION horsies_notify_task_changes();
+`UNIQUE (task_id, attempt)` prevents duplicate attempt numbers.
+
+Terminalization encodes all attempts into the history snapshot. It deletes the
+live attempt rows in the same transaction. The snapshot is the only attempt
+record after the task moves.
+
+## `horsies_heartbeats`
+
+Heartbeats use PostgreSQL `uuid` task IDs. The table is partitioned by
+`RANGE (sent_at)` into hourly leaves.
+
+The worker creates leaves ahead of writes. It drops old leaves during the same
+maintenance pass. There is no heartbeat row-delete sweep.
+
+Each leaf has `(task_id, role, sent_at DESC)` for stale-task checks.
+
+## Workflow tables
+
+`horsies_workflows.id`, parent IDs, and root IDs use `uuid`.
+`horsies_workflow_tasks.id`, workflow IDs, task IDs, and sub-workflow IDs also
+use `uuid`.
+
+Workflow status accepts `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `PAUSED`,
+`CANCELLED`, and `EXPIRED`. `EXPIRED` is terminal.
+
+The workflow-node status domain is `PENDING`, `READY`, `ENQUEUED`, `RUNNING`,
+`COMPLETED`, `FAILED`, and `SKIPPED`.
+
+## Other tables
+
+`horsies_worker_states` stores monitoring snapshots. Retention deletes old
+rows in batches.
+
+`horsies_schedule_state.last_task_id` uses `uuid`. The table stores the last
+and next schedule times, run count, and config hash.
+
+## Notifications
+
+Task inserts notify `task_new` and the queue channel. Terminal task moves
+notify `task_done` directly. Workflow and worker-state triggers notify their
+monitoring channels.
+
+Notifications are wake-up signals. Readers always check stored state.
+
+## Migration and cutover state
+
+`horsies_migrations` records the Rust migration chain. The task-history release
+ends at migration 0042. Its final table shape matches task-history schema v35.
+
+`horsies_cutover_state` records offline cutover completion. Normal startup
+requires this row:
+
+```text
+task_history_v1_validated_v1
 ```
 
-## Schema Creation
+The schema version alone does not authorize startup. Validation writes the row
+only after it checks identity types, foreign keys, live status constraints,
+history partitions, and relocation ledger totals.
 
-Schema is managed through embedded SQL migrations. High-level `Horsies` entry points ensure the schema automatically on first use.
+The broker refuses an older migration version. It also refuses a newer version.
+See the [task-history cutover runbook](../../operations/cutover-runbook) for an
+upgrade from migration 0032.
 
-```rust
-let broker = PostgresBroker::connect_with(config).await?;
-broker.ensure_schema_initialized().await?;
-```
+The worker role needs `CREATE` on the history and heartbeat partition parents.
+Use an external coverage job when that privilege is not available.
 
-Applications already using `Horsies` typically do not need a separate migration step:
+## Cleanup summary
 
-```rust
-let broker = app.get_broker().await?;
-// schema already ensured by the high-level app path
-broker.health_check().await?;
-```
+| Data | Cleanup |
+|---|---|
+| Terminal tasks | Drop history leaves by retention class |
+| Heartbeats | Drop hourly leaves |
+| Terminal workflows and workflow nodes | Batched row delete |
+| Worker states | Batched row delete |
 
-## Terminalization Operations
-
-Every terminal task transition (COMPLETED / FAILED / CANCELLED / EXPIRED on
-`horsies_tasks`) executes through one of 15 PL/pgSQL operation functions plus
-one shared miss classifier, installed by migration 0032. Each function owns
-its guard, stamps `terminal_at` and its own `terminalization_kind`, and
-returns one typed outcome row per transition through the composite type
-`horsies_terminalization_outcome` (outcomes: `APPLIED`, `ALREADY_APPLIED`,
-`LOST_CLAIM`, `SOURCE_STATE_CONFLICT`, `TASK_ABSENT`, with guard evidence for
-refusals). No inline SQL in the library writes a terminal status — a source
-scan enforces this structurally.
-
-| Function | Kind | Target |
-| -------- | ---- | ------ |
-| `horsies_complete_locked_task` | COMPLETE_LOCKED | COMPLETED |
-| `horsies_complete_task_fused` | COMPLETE_FUSED | COMPLETED |
-| `horsies_fail_locked_task` | FAIL_RUNNING | FAILED |
-| `horsies_fail_stale_task` | FAIL_STALE | FAILED |
-| `horsies_expire_owned_claim` | EXPIRE_CLAIMED | EXPIRED |
-| `horsies_expire_pending_tasks` | EXPIRE_PENDING | EXPIRED |
-| `horsies_cancel_locked_task` | CANCEL_ADMIN | CANCELLED |
-| `horsies_cancel_owned_orphan` | CANCEL_ORPHAN | CANCELLED |
-| `horsies_cancel_orphaned_tasks` | CANCEL_ORPHAN_SWEEP | CANCELLED |
-| `horsies_abandon_owned_node` | PAUSE_ABANDON_CLAIM | CANCELLED |
-| `horsies_abandon_owned_nodes` | PAUSE_ABANDON_CLAIM_BATCH | CANCELLED |
-| `horsies_abandon_nodes_of_paused_workflows` | PAUSE_ABANDON_WORKFLOW | CANCELLED |
-| `horsies_cancel_owned_node` | WORKFLOW_CANCEL_CLAIM | CANCELLED |
-| `horsies_cancel_owned_nodes` | WORKFLOW_CANCEL_CLAIM_BATCH | CANCELLED |
-| `horsies_cancel_nodes_of_cancelled_workflow` | WORKFLOW_CANCEL_WORKFLOW | CANCELLED |
-| `horsies_terminalization_miss` | (shared classifier) | — |
-
-Kinds form equivalence classes (e.g. both completion kinds are
-interchangeable): a crash-replay that finds a kind from its own class already
-committed reports `ALREADY_APPLIED`; a kind from another class reports
-`SOURCE_STATE_CONFLICT` with `FOREIGN_TERMINALIZATION` evidence naming the
-committed kind. Functions are re-installed DROP-then-CREATE on migration
-apply, so a body change ships as a new migration re-running the set.
-
-## Automatic Retention Cleanup
-
-The worker's reaper loop prunes old rows automatically every `retention_sweep_interval_s` seconds (default 5 minutes) based on [RecoveryConfig](../../configuration/recovery-config) retention settings:
-
-| Table | Config field | Default | Condition |
-|-------|-------------|---------|-----------|
-| `horsies_heartbeats` | `heartbeat_retention_hours` | 24h | `sent_at` older than threshold |
-| `horsies_worker_states` | `worker_state_retention_hours` | 7 days | `snapshot_at` older than threshold |
-| `horsies_tasks` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold; plain tasks on queues listed in `queue_terminal_record_retention_hours` use their per-queue window instead |
-| `horsies_task_attempts` | -- | -- | Purged set-wise in the same statement that deletes the parent task rows (the FK cascade remains as the net for non-retention deletes) |
-| `horsies_workflows` | `terminal_record_retention_hours` | 30 days | Terminal status + oldest timestamp older than threshold, and no live backing task |
-| `horsies_workflow_tasks` | `terminal_record_retention_hours` | 30 days | Purged set-wise in the same statement that deletes the parent workflow rows (the FK cascade remains as the net for non-retention deletes) |
-
-Terminal statuses: COMPLETED, FAILED, CANCELLED, EXPIRED. Set any retention field to `None` to disable cleanup for that category. See [Recovery Config](../../configuration/recovery-config#retention-cleanup) for configuration details.
-
-## File Location
-
-`horsies/src/broker/postgres.rs` (schema creation and queries)
+See [Retention Config](../../configuration/retention-config).

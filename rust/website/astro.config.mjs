@@ -93,6 +93,7 @@ export default defineConfig({
 						{ label: 'App Config', slug: 'configuration/app-config' },
 						{ label: 'Broker Config', slug: 'configuration/broker-config' },
 						{ label: 'Recovery Config', slug: 'configuration/recovery-config' },
+						{ label: 'Retention Config', slug: 'configuration/retention-config' },
 					],
 				},
 				{
@@ -128,6 +129,7 @@ export default defineConfig({
 					label: 'Operations',
 					items: [
 						{ label: 'Autovacuum Tuning', slug: 'operations/autovacuum-tuning' },
+						{ label: 'Task-history Cutover', slug: 'operations/cutover-runbook' },
 					],
 				},
 				{

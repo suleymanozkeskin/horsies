@@ -1,110 +1,90 @@
 ---
 title: Operational Indexes
-summary: Opt-in DDL for adopter-side history queries that horsies deliberately does not index in the shipped schema.
-related: [database-schema, ../../tasks/retrieving-results]
+summary: Shipped task-history indexes and safe adopter-owned additions.
+related: [database-schema, performance, ../../tasks/retrieving-results]
 tags: [internals, indexes, observability, postgres, performance]
 ---
 
 # Operational Indexes
 
-Task history in horsies is plain Postgres — `horsies_tasks` and
-`horsies_task_attempts` are queryable with ordinary SQL, and building
-dashboards or health checks directly on them is a supported pattern. The
-shipped schema, however, indexes only what horsies itself queries: the claim
-path, retention eligibility, and workflow completion. Dashboard-shaped
-queries are not indexed by default, because every additional index taxes the
-finalize write path of **every** deployment, including the majority that
-never run those queries.
+## Shipped history indexes
 
-This page lists verified, opt-in DDL for common history-query shapes. Create
-them on your own database; they are safe to add and drop independently of
-horsies migrations.
+Every task-history leaf has these btrees:
 
-## Why and When
+- `(task_id)` for point reads
+- `(enqueued_at)` for bounded lists and default sort
 
-Retained history grows with throughput (`terminal_record_retention_hours`
-defaults to 30 days). Past roughly 10⁵–10⁶ retained rows, any history query
-without a matching index degrades linearly with table size: at 1.2M retained
-rows, a latest-terminal-run lookup reads the whole heap at ~2.9 s per
-execution — and the same scans slow every other query on the broker
-database, including claims.
+Migration 0040 applies the schema-v34 `enqueued_at` index rule to every attached
+leaf. New leaves receive both indexes when they are created.
 
-If you query task history from application code, add the matching index
-below. If you only use `handle.get()` / `handle.info()` on known task ids,
-you do not need any of this — id lookups use the primary key.
+The list reader can merge leaf indexes in order. It can stop after the requested
+limit. It does not need one global sort over all matched history rows.
 
-## Latest terminal run by task name
+## Staged point lookup
 
-Serves the query shape:
+Task identity reads do not query the partition parent with a dynamic plan. The
+worker publishes staged lookup, provenance, and detail functions. Each function
+contains the current leaf list.
+
+The reader uses UUIDv7 birth time to order likely probes. It widens the hint by
+five seconds. It probes every skipped leaf before it reports absence. A caller
+clock error cannot hide a retained row.
+
+The point path uses each leaf's `(task_id)` index. `TaskHandle::get()`,
+`TaskHandle::info()`, and rerun source lookup use this path.
+
+## Add an adopter-owned history index
+
+Add an index only for a query that your application runs. Every history class
+and day is a separate leaf. An index on one leaf does not cover another leaf.
+
+This query filters by task name and sorts by enqueue time:
 
 ```sql
-SELECT ...
-FROM horsies_tasks
+SELECT task_id, status, enqueued_at
+FROM horsies_task_history
 WHERE task_name = $1
-  AND status IN ('CANCELLED', 'COMPLETED', 'EXPIRED', 'FAILED')
-ORDER BY COALESCE(completed_at, failed_at, updated_at) DESC
-LIMIT 1;
+ORDER BY enqueued_at DESC
+LIMIT 20;
 ```
 
-Index:
+A matching leaf index is:
 
 ```sql
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_horsies_tasks_name_terminal_finished
-ON horsies_tasks (
-  task_name,
-  (COALESCE(completed_at, failed_at, updated_at)) DESC
-)
-WHERE status IN ('CANCELLED', 'COMPLETED', 'EXPIRED', 'FAILED');
+CREATE INDEX CONCURRENTLY horsies_task_history_standard_30d_2026_08_13_name_enqueued_idx
+ON horsies_task_history_standard_30d_2026_08_13 (task_name, enqueued_at DESC);
 ```
 
-At 1.2M retained rows this replaces a ~2.9 s full scan with a single index
-probe.
+Repeat the index for each leaf that the query may scan. Automate this for new
+leaves when the query is permanent. Use a name that stays within PostgreSQL's
+63-byte identifier limit.
 
-Maintenance cost is bounded by the same discipline as the shipped retention
-indexes: the partial predicate covers only terminal statuses, so a row
-enters the index once, at its finalize transition — claims, lease renewals,
-and RUNNING transitions never maintain it. The write cost is one extra index
-insert per completed task.
+## Write cost
 
-Two exactness requirements:
+Each history row is inserted once. Each extra index adds one index entry to the
+terminalization transaction. It also adds build and storage cost to every leaf.
 
-- The `COALESCE(...)` expression in your query must be **textually
-  identical** to the indexed expression, or the planner will not use it.
-- The status list must match horsies' terminal statuses
-  (`CANCELLED`, `COMPLETED`, `EXPIRED`, `FAILED`). If a future horsies
-  version changes the terminal set, recreate the index with the new
-  literals.
+Do not add an all-purpose index set. Start from the query shape. Confirm the
+plan with `EXPLAIN (ANALYZE, BUFFERS)`.
 
-## Things to Avoid
+## Concurrent builds
 
-**Don't index `task_name` over all rows.**
+Use `CREATE INDEX CONCURRENTLY` on a live leaf. A plain build can block writes
+to that leaf.
+
+`CONCURRENTLY` cannot run in a transaction block. A failed build can leave an
+invalid index. Find invalid indexes with:
 
 ```sql
--- Wrong: maintained by every claim, lease renewal, and status transition
-CREATE INDEX idx_horsies_tasks_on_task_name ON horsies_tasks (task_name);
+SELECT indexrelid::regclass
+FROM pg_index
+WHERE NOT indisvalid;
 ```
 
-An all-rows index on `horsies_tasks` sits on the hottest write path in the
-schema. The partial terminal-only form above serves the same dashboard
-queries at a fraction of the maintenance cost.
+Drop the invalid index concurrently. Then run the build again.
 
-**Don't skip `CONCURRENTLY` on a live database.** A plain `CREATE INDEX`
-takes a lock that blocks writes — including claims — for the duration of the
-build.
+## Ownership
 
-`CONCURRENTLY` has two constraints of its own. It cannot run inside a
-transaction block — migration tools that wrap DDL in one must disable that
-for this statement. And a failed concurrent build leaves an `INVALID` index
-behind, which `IF NOT EXISTS` treats as present — a retry then silently does
-nothing. After a failed build, drop the leftover
-(`DROP INDEX CONCURRENTLY ...`) and re-run; invalid indexes are listed by:
-
-```sql
-SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
-```
-
-## Compatibility
-
-These indexes are adopter-owned. If a future horsies release ships an
-equivalent index in a schema migration, the release notes will say so — drop
-your copy then. Horsies never drops indexes it did not create.
+Horsies owns the two shipped indexes on each leaf. Your application owns every
+extra index. A leaf drop also drops every index on that leaf. Recreate an
+adopter-owned index on each new leaf that needs it.

@@ -46,6 +46,50 @@ It scales with your Postgres instance (a PlanetScale Postgres and a Heroku Postg
 
 Measured numbers: [performance](../internals/performance).
 
+## Where do terminal tasks go?
+
+Terminal tasks move from `horsies_tasks` to `horsies_task_history`. The move is
+part of the terminalization transaction. The live table contains only
+`PENDING`, `CLAIMED`, and `RUNNING` rows.
+
+History is partitioned by retention class and UTC day. Result and task-info
+reads search live storage and history. Attempt rows become a verified snapshot
+in the history row.
+
+See [Database Schema](../internals/database-schema).
+
+## How do I keep a task record forever?
+
+Use `TaskSendOptions::new().retain_forever()` for that send. Do not pass the
+string `"forever"` as a finite class.
+
+Use `queue_retention` with a `None` value to keep all tasks sent to one queue
+forever. An unmapped queue uses the 30-day default class.
+
+See [Retention Config](../configuration/retention-config).
+
+## Can I rerun a terminal task?
+
+Yes. `rerun_task` creates a new task with a new UUID. It records the direct
+source and the rerun root. It does not mutate the source history row.
+
+The source must have a retained inline input envelope. Enable
+`PostgresConfig.retain_rerun_input_default` before the original enqueue when
+later rerun is required.
+
+See [Retrieving Results](../tasks/retrieving-results#rerun-a-retained-terminal-task).
+
+## How do I upgrade an existing database to task history?
+
+A database at migration 0032 needs an offline cutover. Migration 0032 is the
+schema-v26 compatibility boundary. Stop every process. Take a named backup.
+Apply migrations 0033–0042. Run the stage order. Restart only after validation
+writes the cutover attestation.
+
+Fresh databases start at migration 0042 and need no cutover.
+
+See the [Task-history Cutover](../operations/cutover-runbook) runbook.
+
 ## Is it ergonomic for devs?
 
 Yes. The `#[task]` and `#[blocking_task]` proc macros generate typed companion modules with `register`, `send`, `schedule`, `node`, and `params`. Workflow wiring is explicit and typed, so mistakes are caught at registration time instead of runtime string matching.
