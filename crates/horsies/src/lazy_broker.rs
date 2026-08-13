@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use crate::broker::{BrokerError, PostgresBroker};
+use crate::broker::{BrokerError, PostgresBroker, SchemaInitializationMode};
 use crate::core::{PostgresConfig, WorkerResilienceConfig};
 use crate::worker::backoff::RetryBackoff;
 use tokio::sync::OnceCell;
 
 pub struct LazyBroker {
     config: PostgresConfig,
+    schema_initialization_mode: SchemaInitializationMode,
     broker: OnceCell<Arc<PostgresBroker>>,
 }
 
@@ -14,6 +15,15 @@ impl LazyBroker {
     pub fn new(config: PostgresConfig) -> Self {
         Self {
             config,
+            schema_initialization_mode: SchemaInitializationMode::MigrateAndValidate,
+            broker: OnceCell::new(),
+        }
+    }
+
+    pub fn observe_only(config: PostgresConfig) -> Self {
+        Self {
+            config,
+            schema_initialization_mode: SchemaInitializationMode::ObserveOnly,
             broker: OnceCell::new(),
         }
     }
@@ -21,7 +31,14 @@ impl LazyBroker {
     pub async fn get(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
         self.broker
             .get_or_try_init(|| async {
-                let broker = PostgresBroker::connect_with(&self.config).await?;
+                let broker = match self.schema_initialization_mode {
+                    SchemaInitializationMode::MigrateAndValidate => {
+                        PostgresBroker::connect_with(&self.config).await?
+                    }
+                    SchemaInitializationMode::ObserveOnly => {
+                        PostgresBroker::connect_observe_only(&self.config).await?
+                    }
+                };
                 Ok::<Arc<PostgresBroker>, BrokerError>(Arc::new(broker))
             })
             .await
@@ -54,7 +71,12 @@ impl LazyBroker {
 
     async fn try_get_ready_once(&self) -> Result<Arc<PostgresBroker>, BrokerError> {
         let broker = self.get().await?;
-        broker.ensure_schema_initialized().await?;
+        match self.schema_initialization_mode {
+            SchemaInitializationMode::MigrateAndValidate => {
+                broker.ensure_schema_initialized().await?;
+            }
+            SchemaInitializationMode::ObserveOnly => {}
+        }
         Ok(broker)
     }
 

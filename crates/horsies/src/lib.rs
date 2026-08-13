@@ -10,6 +10,8 @@ pub(crate) mod broker;
 #[doc(hidden)]
 pub mod core;
 pub mod monitoring;
+#[cfg(feature = "web")]
+pub mod web;
 pub(crate) mod worker;
 pub(crate) mod workflow_engine;
 
@@ -76,9 +78,10 @@ pub use crate::broker::{
     compute_enqueue_sha, expected_schema_version, run_horsies_migrations, BrokerError,
     BrokerErrorCode, BrokerOperationError, BrokerResult, ClaimedTaskRow, DatabasePing,
     ExpiredTaskRow, HeartbeatRow, NotifyListener, PostgresBroker, RawResultRecord,
-    SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle, TaskInfoRow, TaskResultRow,
-    TaskRunningContextRow, WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateRow,
-    WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow, MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
+    SchemaInitializationMode, SharedNotifyListener, StaleTaskRow, TaskAttemptRow, TaskHandle,
+    TaskInfoRow, TaskResultRow, TaskRunningContextRow, WorkerPingRequest, WorkerPong,
+    WorkerPongPayload, WorkerStateRow, WorkerStateSnapshot, WorkflowRow, WorkflowTaskRow,
+    MIGRATIONS_TABLE, WORKER_PING_CHANNEL,
 };
 /// Alias for [`PostgresBroker`].
 pub type Broker = PostgresBroker;
@@ -202,6 +205,19 @@ impl Horsies {
             workflow_registry_cache: Arc::new(RwLock::new(core.workflow_registry().clone())),
             core,
             broker: Arc::new(LazyBroker::new(broker_config)),
+            runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
+        })
+    }
+
+    /// Construct an app for monitoring reads without schema migrations or the
+    /// task-history fleet gate.
+    pub fn new_observe_only(config: AppConfig) -> Result<Self, HorsiesError> {
+        let broker_config = config.broker.clone();
+        let core = CoreHorsies::new(config)?;
+        Ok(Self {
+            workflow_registry_cache: Arc::new(RwLock::new(core.workflow_registry().clone())),
+            core,
+            broker: Arc::new(LazyBroker::observe_only(broker_config)),
             runtime_catalog: Arc::new(crate::runtime::RuntimeCatalog::new()),
         })
     }

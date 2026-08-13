@@ -626,6 +626,15 @@ pub struct ClaimPassParams {
 // PostgresBroker
 // ---------------------------------------------------------------------------
 
+/// Schema behavior selected when a broker is constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaInitializationMode {
+    /// Apply migrations and require the validated task-history fleet gate.
+    MigrateAndValidate,
+    /// Connect for monitoring reads without executing schema DDL or fleet gates.
+    ObserveOnly,
+}
+
 /// PostgreSQL-backed task broker.
 ///
 /// All operations are async and use connection pooling via `sqlx::PgPool`.
@@ -639,6 +648,7 @@ pub struct PostgresBroker {
     workflow_done_listener: tokio::sync::OnceCell<SharedNotifyListener>,
     listener_delivery_checked: tokio::sync::OnceCell<()>,
     schema_initialized: tokio::sync::OnceCell<()>,
+    schema_initialization_mode: SchemaInitializationMode,
 }
 
 impl PostgresBroker {
@@ -647,6 +657,22 @@ impl PostgresBroker {
     /// Useful for tests and for applications that already manage their own
     /// `PgPool` lifecycle.
     pub fn from_pool(pool: PgPool) -> Self {
+        Self::from_pool_with_schema_initialization_mode(
+            pool,
+            SchemaInitializationMode::MigrateAndValidate,
+        )
+    }
+
+    /// Construct a monitoring broker that never applies migrations or checks
+    /// the fleet cutover gate.
+    pub fn from_pool_observe_only(pool: PgPool) -> Self {
+        Self::from_pool_with_schema_initialization_mode(pool, SchemaInitializationMode::ObserveOnly)
+    }
+
+    fn from_pool_with_schema_initialization_mode(
+        pool: PgPool,
+        schema_initialization_mode: SchemaInitializationMode,
+    ) -> Self {
         Self {
             session_pool: pool.clone(),
             pool,
@@ -660,6 +686,7 @@ impl PostgresBroker {
             workflow_done_listener: tokio::sync::OnceCell::new(),
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
+            schema_initialization_mode,
         }
     }
 
@@ -695,6 +722,24 @@ impl PostgresBroker {
 
     /// Connect using a `PostgresConfig` from horsies-core.
     pub async fn connect_with(config: &PostgresConfig) -> Result<Self, BrokerError> {
+        Self::connect_with_schema_initialization_mode(
+            config,
+            SchemaInitializationMode::MigrateAndValidate,
+        )
+        .await
+    }
+
+    /// Connect a monitoring broker without applying migrations or checking
+    /// the task-history fleet gate.
+    pub async fn connect_observe_only(config: &PostgresConfig) -> Result<Self, BrokerError> {
+        Self::connect_with_schema_initialization_mode(config, SchemaInitializationMode::ObserveOnly)
+            .await
+    }
+
+    async fn connect_with_schema_initialization_mode(
+        config: &PostgresConfig,
+        schema_initialization_mode: SchemaInitializationMode,
+    ) -> Result<Self, BrokerError> {
         config
             .validate()
             .map_err(|err| BrokerError::ConnectionFailed(err.to_string()))?;
@@ -732,6 +777,7 @@ impl PostgresBroker {
             workflow_done_listener: tokio::sync::OnceCell::new(),
             listener_delivery_checked: tokio::sync::OnceCell::new(),
             schema_initialized: tokio::sync::OnceCell::new(),
+            schema_initialization_mode,
         })
     }
 
@@ -752,6 +798,9 @@ impl PostgresBroker {
     /// Bookkeeps in the horsies-owned `horsies_migrations` table so it never
     /// collides with an application's own `sqlx::migrate!()` runner.
     pub async fn migrate(&self) -> Result<(), BrokerError> {
+        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
+            return Ok(());
+        }
         crate::broker::migrations::run_horsies_migrations(&self.session_pool).await
     }
 
@@ -762,6 +811,9 @@ impl PostgresBroker {
     /// initialization fails, the guard remains unset so a future caller can
     /// retry.
     pub async fn ensure_schema_initialized(&self) -> Result<(), BrokerError> {
+        if self.schema_initialization_mode == SchemaInitializationMode::ObserveOnly {
+            return Ok(());
+        }
         self.schema_initialized
             .get_or_try_init(|| async {
                 let expected = crate::broker::migrations::expected_schema_version();
@@ -803,6 +855,11 @@ impl PostgresBroker {
             })
             .await?;
         Ok(())
+    }
+
+    /// The schema behavior selected when this broker was constructed.
+    pub const fn schema_initialization_mode(&self) -> SchemaInitializationMode {
+        self.schema_initialization_mode
     }
 
     /// Get a reference to the underlying connection pool.
