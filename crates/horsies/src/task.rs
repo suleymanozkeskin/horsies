@@ -8,11 +8,12 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::broker::{compute_enqueue_sha, TaskHandle};
+use crate::broker::{compute_enqueue_sha, BrokerError, TaskHandle};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind};
 use crate::core::{
-    ErrorCode, HorsiesError, PayloadPolicy, QueueMode, RegisteredTask, TaskNode, TaskOptions,
-    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, WorkerResilienceConfig,
+    ErrorCode, HorsiesError, PayloadPolicy, QueueMode, RegisteredTask, RetentionChoice,
+    RetentionConfig, TaskNode, TaskOptions, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, WorkerResilienceConfig,
 };
 
 use crate::lazy_broker::LazyBroker;
@@ -25,9 +26,11 @@ const SEND_RETRY_MAX_MS: u64 = 2000;
 ///
 /// For workflow tasks, prefer [`TaskNode::good_until`] so the deadline is
 /// attached when the workflow spec is built.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskSendOptions {
     good_until: Option<DateTime<Utc>>,
+    idempotency_key: Option<String>,
+    retention: Option<RetentionChoice>,
 }
 
 impl TaskSendOptions {
@@ -39,6 +42,24 @@ impl TaskSendOptions {
     pub fn good_until(mut self, deadline: DateTime<Utc>) -> Self {
         self.good_until = Some(deadline);
         self
+    }
+
+    pub fn idempotency_key(mut self, key: impl Into<String>) -> Self {
+        self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn retention(mut self, choice: RetentionChoice) -> Self {
+        self.retention = Some(choice);
+        self
+    }
+
+    pub fn retention_class(self, key: impl Into<String>) -> Self {
+        self.retention(RetentionChoice::class(key))
+    }
+
+    pub fn retain_forever(self) -> Self {
+        self.retention(RetentionChoice::Forever)
     }
 }
 
@@ -165,6 +186,7 @@ impl<'a, A: Serialize + 'static, T: DeserializeOwned + Clone + 'static>
             self.app.core.config().resend_on_transient_err,
             self.app.core.config().resilience.clone(),
             self.app.core.config().payload.clone(),
+            self.app.core.config().retention.clone(),
         );
         self.app.store_task_handle(&handle)?;
         Ok(handle)
@@ -185,6 +207,7 @@ pub struct TaskFunction<A, T> {
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
     payload_policy: PayloadPolicy,
+    retention: RetentionConfig,
     _phantom: PhantomData<fn(A) -> T>,
 }
 
@@ -205,6 +228,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
         payload_policy: PayloadPolicy,
+        retention: RetentionConfig,
     ) -> Self {
         Self {
             task_name,
@@ -216,6 +240,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             resend_on_transient_err,
             resilience,
             payload_policy,
+            retention,
             _phantom: PhantomData,
         }
     }
@@ -244,7 +269,8 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
     }
 
     pub async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>> {
-        self.send_inner(args, GoodUntilMode::Inherit, None).await
+        self.send_inner(args, GoodUntilMode::Inherit, None, None)
+            .await
     }
 
     pub async fn send_with_options(
@@ -252,12 +278,17 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         options: TaskSendOptions,
         args: A,
     ) -> TaskSendResult<TaskHandle<T>> {
-        self.send_inner(args, GoodUntilMode::Override(options.good_until), None)
-            .await
+        self.send_inner(
+            args,
+            GoodUntilMode::Override(options.good_until),
+            None,
+            Some(&options),
+        )
+        .await
     }
 
     pub async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>> {
-        self.send_inner(args, GoodUntilMode::Inherit, Some(delay))
+        self.send_inner(args, GoodUntilMode::Inherit, Some(delay), None)
             .await
     }
 
@@ -271,6 +302,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             args,
             GoodUntilMode::Override(options.good_until),
             Some(delay),
+            Some(&options),
         )
         .await
     }
@@ -280,17 +312,40 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         args: A,
         good_until_mode: GoodUntilMode,
         delay: Option<Duration>,
+        send_options: Option<&TaskSendOptions>,
     ) -> TaskSendResult<TaskHandle<T>> {
         self.check_suppression()?;
+        let resolved_retention = self
+            .retention
+            .resolve_choice(
+                &self.queue_name,
+                send_options.and_then(|options| options.retention.as_ref()),
+            )
+            .map_err(|error| TaskSendError {
+                code: TaskSendErrorCode::ValidationFailed,
+                message: format!("unknown retention class for {}: {error}", self.task_name),
+                retryable: false,
+                task_id: None,
+                payload: None,
+            })?;
         let (args_json, kwargs_json) = serialize_args::<A>(&self.task_name, &args)?;
-        let pre_task_id = Uuid::new_v4().to_string();
+        let pre_task_id =
+            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+                TaskSendError {
+                    code: TaskSendErrorCode::ValidationFailed,
+                    message: format!("failed to mint task identity: {error}"),
+                    retryable: false,
+                    task_id: None,
+                    payload: None,
+                }
+            })?;
 
         // Payload guardrail at the encode boundary: the check is one integer
         // comparison on the already-serialized parts (args + kwargs; Rust's
         // wire keeps both forms). Reject fails closed before any row is
         // written. Parity with horsies PR #208.
-        let encoded_len = args_json.as_deref().map_or(0, str::len)
-            + kwargs_json.as_deref().map_or(0, str::len);
+        let encoded_len =
+            args_json.as_deref().map_or(0, str::len) + kwargs_json.as_deref().map_or(0, str::len);
         if let Some(oversize) = enforce_payload_policy(
             &self.payload_policy,
             &self.task_name,
@@ -314,9 +369,6 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         let (good_until, task_options_json) = self.resolve_send_options(good_until_mode)?;
         let sent_at = Utc::now();
         let delay_secs = delay.map(|d| d.as_secs() as i64);
-        let enqueued_at = delay.map(|d| {
-            sent_at + chrono::Duration::from_std(d).unwrap_or_else(|_| chrono::Duration::zero())
-        });
 
         let enqueue_sha = compute_enqueue_sha(
             &self.task_name,
@@ -341,14 +393,16 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             enqueue_delay_seconds: delay_secs,
             task_options: task_options_json.clone(),
             enqueue_sha: enqueue_sha.clone(),
+            idempotency_key: send_options.and_then(|options| options.idempotency_key.clone()),
+            retention_class_key: resolved_retention,
         };
 
         self.enqueue_with_retry(
             args_json.as_deref(),
             kwargs_json.as_deref(),
-            &pre_task_id,
+            pre_task_id,
             sent_at,
-            enqueued_at,
+            None,
             good_until,
             task_options_json.as_deref(),
             &enqueue_sha,
@@ -364,7 +418,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             .get_ready(&self.resilience)
             .await
             .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::EnqueueFailed,
+                code: classify_broker_send_error(&e),
                 message: format!("{}", e),
                 retryable: e.is_retryable(),
                 task_id: Some(task_id.to_owned()),
@@ -372,10 +426,10 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             })?;
 
         let handle = broker
-            .retry_send(payload, Some(task_id))
+            .retry_send(payload, Some(*task_id))
             .await
             .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::EnqueueFailed,
+                code: classify_broker_send_error(&e),
                 message: format!("{}", e),
                 retryable: e.is_retryable(),
                 task_id: Some(task_id.to_owned()),
@@ -392,7 +446,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             .get_ready(&self.resilience)
             .await
             .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::EnqueueFailed,
+                code: classify_broker_send_error(&e),
                 message: format!("{}", e),
                 retryable: e.is_retryable(),
                 task_id: Some(task_id.to_owned()),
@@ -400,10 +454,10 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
             })?;
 
         let handle = broker
-            .retry_send(payload, Some(task_id))
+            .retry_send(payload, Some(*task_id))
             .await
             .map_err(|e| TaskSendError {
-                code: TaskSendErrorCode::EnqueueFailed,
+                code: classify_broker_send_error(&e),
                 message: format!("{}", e),
                 retryable: e.is_retryable(),
                 task_id: Some(task_id.to_owned()),
@@ -418,7 +472,7 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
         &self,
         args_json: Option<&str>,
         kwargs_json: Option<&str>,
-        pre_task_id: &str,
+        pre_task_id: Uuid,
         sent_at: chrono::DateTime<Utc>,
         enqueued_at: Option<chrono::DateTime<Utc>>,
         good_until: Option<chrono::DateTime<Utc>>,
@@ -452,10 +506,10 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
                     .get_ready(&self.resilience)
                     .await
                     .map_err(|e| TaskSendError {
-                        code: TaskSendErrorCode::EnqueueFailed,
+                        code: classify_broker_send_error(&e),
                         message: format!("{}", e),
                         retryable: e.is_retryable(),
-                        task_id: Some(pre_task_id.to_owned()),
+                        task_id: Some(pre_task_id),
                         payload: Some(payload.clone()),
                     })?;
 
@@ -472,6 +526,10 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
                     task_options_json,
                     enqueue_sha,
                     Some(pre_task_id),
+                    payload.enqueue_delay_seconds,
+                    payload.idempotency_key.as_deref(),
+                    payload.retention_class_key.as_deref(),
+                    None,
                 )
                 .await
             {
@@ -480,10 +538,10 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
                 }
                 Err(broker_err) => {
                     let err = TaskSendError {
-                        code: TaskSendErrorCode::EnqueueFailed,
+                        code: classify_broker_send_error(&broker_err),
                         message: format!("{}", broker_err),
                         retryable: broker_err.is_retryable(),
-                        task_id: Some(pre_task_id.to_owned()),
+                        task_id: Some(pre_task_id),
                         payload: Some(payload.clone()),
                     };
                     if err.retryable && attempt < max_attempts - 1 {
@@ -599,12 +657,14 @@ impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunction<A, T> {
 
 impl<A: Serialize, T: DeserializeOwned + Clone> TaskFunctionSendOptions<'_, A, T> {
     pub async fn send(&self, args: A) -> TaskSendResult<TaskHandle<T>> {
-        self.task.send_with_options(self.options, args).await
+        self.task
+            .send_with_options(self.options.clone(), args)
+            .await
     }
 
     pub async fn schedule(&self, delay: Duration, args: A) -> TaskSendResult<TaskHandle<T>> {
         self.task
-            .schedule_with_options(self.options, delay, args)
+            .schedule_with_options(self.options.clone(), delay, args)
             .await
     }
 }
@@ -627,6 +687,7 @@ impl<A, T> Clone for TaskFunction<A, T> {
             resend_on_transient_err: self.resend_on_transient_err,
             resilience: self.resilience.clone(),
             payload_policy: self.payload_policy.clone(),
+            retention: self.retention.clone(),
             _phantom: PhantomData,
         }
     }
@@ -647,12 +708,19 @@ enum RetryKind {
     Schedule,
 }
 
+fn classify_broker_send_error(error: &BrokerError) -> TaskSendErrorCode {
+    match error {
+        BrokerError::PayloadMismatch { .. } => TaskSendErrorCode::PayloadMismatch,
+        _ => TaskSendErrorCode::EnqueueFailed,
+    }
+}
+
 #[allow(clippy::needless_pass_by_value, clippy::result_large_err)]
 fn validate_retry<'a>(
     err: &'a TaskSendError,
     task_name: &str,
     kind: RetryKind,
-) -> TaskSendResult<(&'a str, &'a TaskSendPayload)> {
+) -> TaskSendResult<(&'a Uuid, &'a TaskSendPayload)> {
     if err.code != TaskSendErrorCode::EnqueueFailed {
         return Err(TaskSendError {
             code: TaskSendErrorCode::ValidationFailed,
@@ -666,7 +734,7 @@ fn validate_retry<'a>(
         });
     }
 
-    let task_id = err.task_id.as_deref().ok_or_else(|| TaskSendError {
+    let task_id = err.task_id.as_ref().ok_or_else(|| TaskSendError {
         code: TaskSendErrorCode::ValidationFailed,
         message: "cannot retry: no task_id on error".to_owned(),
         retryable: false,
@@ -755,13 +823,16 @@ mod tests {
     use crate::async_task_fn;
     use crate::core::{
         AppConfig, CustomQueueConfig, ErrorCode, Horsies as CoreHorsies, PostgresConfig, QueueMode,
-        RecoveryConfig, TaskSendError, TaskSendErrorCode, TaskSendPayload, WorkerResilienceConfig,
+        RecoveryConfig, RetentionChoice, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+        WorkerResilienceConfig,
     };
     use crate::core::{TaskErrorCode, TaskOptions};
     use crate::lazy_broker::LazyBroker;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
+    use std::time::Duration;
+    use uuid::Uuid;
 
     fn valid_config() -> AppConfig {
         AppConfig {
@@ -775,6 +846,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -784,6 +856,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -816,6 +889,7 @@ mod tests {
             false,
             config.resilience,
             config.payload,
+            config.retention,
         )
     }
 
@@ -839,6 +913,7 @@ mod tests {
                 warn_bytes: None,
                 reject_bytes: Some(4),
             },
+            config.retention,
         );
         let err = tf
             .send(Args {
@@ -851,6 +926,56 @@ mod tests {
         assert!(!err.retryable);
         assert!(err.task_id.is_some(), "task_id reported for diagnostics");
         assert!(err.payload.is_none(), "no envelope kept for replay");
+    }
+
+    #[test]
+    fn send_options_carry_idempotency_and_retention_choices() {
+        let options = TaskSendOptions::new()
+            .idempotency_key("request-1")
+            .retention_class("audit_7d");
+        assert_eq!(options.idempotency_key.as_deref(), Some("request-1"));
+        assert_eq!(options.retention, Some(RetentionChoice::class("audit_7d")),);
+        assert_eq!(
+            TaskSendOptions::new().retain_forever().retention,
+            Some(RetentionChoice::Forever),
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_retention_is_refused_before_send_and_schedule_broker_access() {
+        let config = valid_config();
+        let task: TaskFunction<Args, i32> = TaskFunction::new(
+            "retention_task".to_owned(),
+            Arc::new(LazyBroker::new(config.broker)),
+            "default".to_owned(),
+            100,
+            None,
+            Arc::new(AtomicBool::new(false)),
+            false,
+            config.resilience,
+            config.payload,
+            config.retention,
+        );
+
+        for result in [
+            task.send_with_options(
+                TaskSendOptions::new().retention_class("unknown_7d"),
+                Args { a: 1, b: 2 },
+            )
+            .await,
+            task.schedule_with_options(
+                TaskSendOptions::new().retention_class("unknown_7d"),
+                Duration::from_secs(60),
+                Args { a: 1, b: 2 },
+            )
+            .await,
+        ] {
+            let error = result.expect_err("unknown class must fail before broker access");
+            assert_eq!(error.code, TaskSendErrorCode::ValidationFailed);
+            assert!(!error.retryable);
+            assert!(error.task_id.is_none());
+            assert!(error.payload.is_none());
+        }
     }
 
     #[test]
@@ -987,8 +1112,7 @@ mod tests {
         }
 
         // Finite floats (including f64::MAX) are unchanged.
-        let (args, kwargs) =
-            serialize_args::<Payload>("charge", &Payload { amount: 1.5 }).unwrap();
+        let (args, kwargs) = serialize_args::<Payload>("charge", &Payload { amount: 1.5 }).unwrap();
         assert!(args.is_none());
         assert!(kwargs.expect("kwargs json").contains("1.5"));
         assert!(serialize_args::<Payload>("charge", &Payload { amount: f64::MAX }).is_ok());
@@ -1189,6 +1313,8 @@ mod tests {
             enqueue_delay_seconds: delay,
             task_options: None,
             enqueue_sha: "sha".to_owned(),
+            idempotency_key: None,
+            retention_class_key: Some("standard_30d".to_owned()),
         }
     }
 
@@ -1197,7 +1323,7 @@ mod tests {
             code: TaskSendErrorCode::EnqueueFailed,
             message: "test error".to_owned(),
             retryable: true,
-            task_id: Some("tid-1".to_owned()),
+            task_id: Some(Uuid::nil()),
             payload: Some(make_payload(task_name, delay)),
         }
     }
@@ -1225,7 +1351,7 @@ mod tests {
             code: TaskSendErrorCode::EnqueueFailed,
             message: "test".to_owned(),
             retryable: true,
-            task_id: Some("tid-1".to_owned()),
+            task_id: Some(Uuid::nil()),
             payload: None,
         };
         assert!(validate_retry(&err, "my_task", RetryKind::Send).is_err());
@@ -1263,7 +1389,7 @@ mod tests {
     fn retry_send_accepts_immediate_error() {
         let err = make_error("my_task", None);
         let (task_id, payload) = validate_retry(&err, "my_task", RetryKind::Send).unwrap();
-        assert_eq!(task_id, "tid-1");
+        assert_eq!(*task_id, Uuid::nil());
         assert_eq!(payload.task_name, "my_task");
     }
 
@@ -1279,7 +1405,7 @@ mod tests {
     fn retry_schedule_accepts_scheduled_error() {
         let err = make_error("my_task", Some(60));
         let (task_id, payload) = validate_retry(&err, "my_task", RetryKind::Schedule).unwrap();
-        assert_eq!(task_id, "tid-1");
+        assert_eq!(*task_id, Uuid::nil());
         assert_eq!(payload.enqueue_delay_seconds, Some(60));
     }
 

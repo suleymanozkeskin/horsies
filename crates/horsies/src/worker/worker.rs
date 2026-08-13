@@ -95,9 +95,7 @@ fn compute_ordered_queues(
     }
     let mut kept: Vec<String> = queues
         .iter()
-        .filter(|q| {
-            queue_priorities.contains_key(*q) || queue_max_concurrency.contains_key(*q)
-        })
+        .filter(|q| queue_priorities.contains_key(*q) || queue_max_concurrency.contains_key(*q))
         .cloned()
         .collect();
     kept.sort_by_key(|q| queue_priorities.get(q).copied().unwrap_or(100));
@@ -129,14 +127,14 @@ async fn handle_worker_ping(
     pid: i32,
     raw_payload: &str,
 ) -> Result<(), crate::broker::BrokerError> {
-    let request: crate::broker::health::WorkerPingRequest =
-        match serde_json::from_str(raw_payload) {
-            Ok(request) => request,
-            Err(e) => {
-                tracing::warn!(error = %e, "discarding invalid ping payload");
-                return Ok(());
-            }
-        };
+    let request: crate::broker::health::WorkerPingRequest = match serde_json::from_str(raw_payload)
+    {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::warn!(error = %e, "discarding invalid ping payload");
+            return Ok(());
+        }
+    };
 
     if let Some(target) = &request.target_worker_id {
         if target != worker_id {
@@ -150,7 +148,8 @@ async fn handle_worker_ping(
         hostname: hostname.to_owned(),
         pid,
     };
-    let payload = serde_json::to_string(&pong).map_err(crate::broker::BrokerError::Serialization)?;
+    let payload =
+        serde_json::to_string(&pong).map_err(crate::broker::BrokerError::Serialization)?;
 
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(&request.reply_channel)
@@ -342,6 +341,7 @@ impl Worker {
         let reaper = spawn_reaper(
             self.broker.pool().clone(),
             self.app_config.recovery.clone(),
+            self.app_config.retention.clone(),
             self.cancel.clone(),
         );
 
@@ -351,6 +351,7 @@ impl Worker {
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
             self.app_config.payload.clone(),
+            self.app_config.retention.clone(),
             self.cancel.clone(),
         );
 
@@ -681,22 +682,26 @@ impl Worker {
                     .in_dispatch
                     .lock()
                     .expect("in_dispatch poisoned")
-                    .contains(&row.id)
+                    .contains(&row.id.to_string())
                 {
                     continue;
                 }
                 // In soft-cap mode, do not start a capped queue's buffered task
                 // past its cluster-wide RUNNING cap.
                 if soft_cap_mode {
-                    if let Some(&cap) =
-                        self.worker_config.queue_max_concurrency.get(&row.queue_name)
+                    if let Some(&cap) = self
+                        .worker_config
+                        .queue_max_concurrency
+                        .get(&row.queue_name)
                     {
                         let running = running_by_queue.get(&row.queue_name).copied().unwrap_or(0);
                         let pending = *dispatched_by_queue.get(&row.queue_name).unwrap_or(&0);
                         if running + i64::from(pending) >= i64::from(cap) {
                             continue; // cap reached; leave this task CLAIMED
                         }
-                        *dispatched_by_queue.entry(row.queue_name.clone()).or_insert(0) += 1;
+                        *dispatched_by_queue
+                            .entry(row.queue_name.clone())
+                            .or_insert(0) += 1;
                     }
                 }
                 self.dispatch_task(row);
@@ -774,7 +779,7 @@ impl Worker {
             // claim transactions, so each task fences on its own claimed_at.
             let claims: Vec<(String, Option<chrono::DateTime<chrono::Utc>>)> = claimed_rows
                 .iter()
-                .map(|r| (r.id.clone(), r.claimed_at))
+                .map(|r| (r.id.to_string(), r.claimed_at))
                 .collect();
             let filtered_ids = self
                 .broker
@@ -783,7 +788,7 @@ impl Worker {
             if !filtered_ids.is_empty() {
                 let filtered_set: std::collections::HashSet<&str> =
                     filtered_ids.iter().map(|s| s.as_str()).collect();
-                claimed_rows.retain(|r| !filtered_set.contains(r.id.as_str()));
+                claimed_rows.retain(|r| !filtered_set.contains(r.id.to_string().as_str()));
             }
         }
 
@@ -832,7 +837,7 @@ impl Worker {
                     "no semaphore permit available, requeueing task",
                 );
                 let broker = Arc::clone(&self.broker);
-                let task_id = row.id.clone();
+                let task_id = row.id.to_string();
                 let worker_id = self.worker_id.clone();
                 let claimed_at = row.claimed_at;
                 self.tracker.spawn(async move {
@@ -880,6 +885,7 @@ impl Worker {
                 let hostname = self.hostname.clone();
                 let payload_policy = self.app_config.payload.clone();
                 let phase2_policy = self.app_config.payload.clone();
+                let phase2_retention = self.app_config.retention.clone();
                 self.tracker.spawn(async move {
                     let reason = format!("task '{}' not registered", task_name);
                     let task_error = TaskError::builtin(
@@ -897,8 +903,14 @@ impl Worker {
                     )
                     .await
                     {
-                        execution::run_phase2(broker.pool(), &workflow_registry, work, &phase2_policy)
-                            .await;
+                        execution::run_phase2(
+                            broker.pool(),
+                            &workflow_registry,
+                            work,
+                            &phase2_policy,
+                            &phase2_retention,
+                        )
+                        .await;
                     } else {
                         tracing::warn!(
                             task_id = %task_id,
@@ -919,10 +931,11 @@ impl Worker {
         let recovery = self.app_config.recovery.clone();
         let payload_policy = self.app_config.payload.clone();
         let phase2_policy = self.app_config.payload.clone();
+        let phase2_retention = self.app_config.retention.clone();
 
         // Mark this task in-dispatch until the spawned execution finishes, so the
         // buffered probe won't re-fetch it while it is still CLAIMED (P7).
-        let task_id = row.id.clone();
+        let task_id = row.id.to_string();
         self.in_dispatch
             .lock()
             .expect("in_dispatch poisoned")
@@ -946,8 +959,14 @@ impl Worker {
             drop(permit);
 
             if let Some(work) = phase2_work {
-                execution::run_phase2(broker.pool(), &workflow_registry, work, &phase2_policy)
-                    .await;
+                execution::run_phase2(
+                    broker.pool(),
+                    &workflow_registry,
+                    work,
+                    &phase2_policy,
+                    &phase2_retention,
+                )
+                .await;
             }
 
             in_dispatch
@@ -1048,12 +1067,14 @@ mod tests {
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, claimed_at, created_at, updated_at, claimed,
                 claimed_by_worker_id, retry_count, max_retries, task_options,
-                enqueue_sha
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', $2, 100, '[]', '{}', 'CLAIMED',
                 NOW(), NOW(), NOW(), NOW(), TRUE,
                 'worker-1', $3, $4, $5,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
         .bind(task_id)
@@ -1078,12 +1099,15 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, started_at, created_at, updated_at, claimed,
-                retry_count, max_retries, task_options, enqueue_sha
+                retry_count, max_retries, task_options, enqueue_sha,
+                command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', $2, 100, '[]', '{}', 'RUNNING',
                 NOW(), NOW(), NOW(), NOW(), FALSE,
                 $3, $4, $5,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
         .bind(task_id)
@@ -1106,7 +1130,7 @@ mod tests {
         task_options: Option<String>,
     ) -> ClaimedTaskRow {
         ClaimedTaskRow {
-            id: task_id.to_owned(),
+            id: Uuid::parse_str(task_id).unwrap(),
             task_name: "finalize_test".to_owned(),
             args: Some("[]".to_owned()),
             kwargs: Some("{}".to_owned()),
@@ -1401,7 +1425,10 @@ mod tests {
         let caps = std::collections::HashMap::new();
 
         let ordered = compute_ordered_queues(&queues, &priorities, &caps);
-        assert_eq!(ordered, queues, "stable sort preserves configured order on ties");
+        assert_eq!(
+            ordered, queues,
+            "stable sort preserves configured order on ties"
+        );
     }
 
     // -- compute_claim_lock_keys unit tests (parity with horsies PR #125) --
@@ -1615,7 +1642,14 @@ mod tests {
         if let Some(work) = phase2_work {
             let registry = WorkflowSpecRegistry::new();
             let policy = crate::core::config::payload::PayloadPolicy::default();
-            run_phase2(broker.pool(), &registry, work, &policy).await;
+            run_phase2(
+                broker.pool(),
+                &registry,
+                work,
+                &policy,
+                &crate::core::RetentionConfig::default(),
+            )
+            .await;
         }
     }
 
@@ -1659,12 +1693,15 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, started_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, enqueue_sha
+                claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
+                command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'finalize_test', 'default', 100, '[]', '{}', 'RUNNING',
                 NOW(), NOW(), NOW(), NOW(), FALSE,
                 $2, 0, 3,
-                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+                '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
         .bind(task_id)
@@ -1691,15 +1728,20 @@ mod tests {
             PriorLockedRead, TerminalizationCommand, TerminalizationOutcome,
         };
 
-        let complete_as = |task_id: &str, worker: &str| TerminalizationCommand::CompleteLockedTask {
-            task_id: task_id.to_owned(),
-            fence: PriorLockedRead { worker_id: worker.to_owned() },
-            result_json: "{}".to_owned(),
-        };
+        let complete_as =
+            |task_id: &str, worker: &str| TerminalizationCommand::CompleteLockedTask {
+                task_id: task_id.to_owned(),
+                fence: PriorLockedRead {
+                    worker_id: worker.to_owned(),
+                },
+                result_json: "{}".to_owned(),
+            };
         let fail_as = |task_id: &str, worker: &str, reason: Option<&str>| {
             TerminalizationCommand::FailLockedTask {
                 task_id: task_id.to_owned(),
-                fence: PriorLockedRead { worker_id: worker.to_owned() },
+                fence: PriorLockedRead {
+                    worker_id: worker.to_owned(),
+                },
                 result_json: "{}".to_owned(),
                 error_code: reason.is_none().then(|| "X".to_owned()),
                 failed_reason: reason.map(str::to_owned),
@@ -1713,12 +1755,20 @@ mod tests {
         let t_complete = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_complete, "worker-2").await;
         assert!(
-            !applied(&terminalize(&pool, &complete_as(&t_complete, "worker-1")).await.unwrap()),
+            !applied(
+                &terminalize(&pool, &complete_as(&t_complete, "worker-1"))
+                    .await
+                    .unwrap()
+            ),
             "stale owner must not complete the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "RUNNING");
         assert!(
-            applied(&terminalize(&pool, &complete_as(&t_complete, "worker-2")).await.unwrap()),
+            applied(
+                &terminalize(&pool, &complete_as(&t_complete, "worker-2"))
+                    .await
+                    .unwrap()
+            ),
             "current owner must complete its own task"
         );
         assert_eq!(fetch_task_state(&pool, &t_complete).await.0, "COMPLETED");
@@ -1727,22 +1777,36 @@ mod tests {
         let t_fail = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_fail, "worker-2").await;
         assert!(
-            !applied(&terminalize(&pool, &fail_as(&t_fail, "worker-1", None)).await.unwrap()),
+            !applied(
+                &terminalize(&pool, &fail_as(&t_fail, "worker-1", None))
+                    .await
+                    .unwrap()
+            ),
             "stale owner must not fail the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "RUNNING");
-        assert!(applied(&terminalize(&pool, &fail_as(&t_fail, "worker-2", None)).await.unwrap()));
+        assert!(applied(
+            &terminalize(&pool, &fail_as(&t_fail, "worker-2", None))
+                .await
+                .unwrap()
+        ));
         assert_eq!(fetch_task_state(&pool, &t_fail).await.0, "FAILED");
 
         // requeue: stale owner rejected, current owner applies.
         let t_requeue = Uuid::new_v4().to_string();
         insert_running_task_owned_by(&pool, &t_requeue, "worker-2").await;
         assert!(
-            !broker.requeue(&t_requeue, Some(Utc::now()), "worker-1").await.unwrap(),
+            !broker
+                .requeue(&t_requeue, Some(Utc::now()), "worker-1")
+                .await
+                .unwrap(),
             "stale owner must not requeue the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "RUNNING");
-        assert!(broker.requeue(&t_requeue, Some(Utc::now()), "worker-2").await.unwrap());
+        assert!(broker
+            .requeue(&t_requeue, Some(Utc::now()), "worker-2")
+            .await
+            .unwrap());
         assert_eq!(fetch_task_state(&pool, &t_requeue).await.0, "PENDING");
 
         // worker-crash failure (failed_reason carried): stale owner rejected,
@@ -1752,13 +1816,17 @@ mod tests {
         insert_running_task_owned_by(&pool, &t_worker, "worker-2").await;
         assert!(
             !applied(
-                &terminalize(&pool, &fail_as(&t_worker, "worker-1", Some("crash"))).await.unwrap()
+                &terminalize(&pool, &fail_as(&t_worker, "worker-1", Some("crash")))
+                    .await
+                    .unwrap()
             ),
             "stale owner must not worker-fail the re-claimed task"
         );
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "RUNNING");
         assert!(applied(
-            &terminalize(&pool, &fail_as(&t_worker, "worker-2", Some("crash"))).await.unwrap()
+            &terminalize(&pool, &fail_as(&t_worker, "worker-2", Some("crash")))
+                .await
+                .unwrap()
         ));
         assert_eq!(fetch_task_state(&pool, &t_worker).await.0, "FAILED");
     }
@@ -1792,11 +1860,13 @@ mod tests {
 
         // Terminal workflow with completed_at deliberately NULL: only the
         // status guard can prevent resurrection here.
-        sqlx::query("UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1")
-            .bind(&workflow_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE horsies_workflows SET status = 'CANCELLED', completed_at = NULL WHERE id = $1",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let registry = WorkflowSpecRegistry::new();
         crate::workflow_engine::engine::check_workflow_completion(
@@ -1804,6 +1874,7 @@ mod tests {
             &workflow_id,
             &registry,
             &crate::core::config::payload::PayloadPolicy::default(),
+            &crate::core::RetentionConfig::default(),
         )
         .await
         .unwrap();
@@ -1888,7 +1959,14 @@ mod tests {
 
         let registry = WorkflowSpecRegistry::new();
         let policy = crate::core::config::payload::PayloadPolicy::default();
-        run_phase2(broker.pool(), &registry, phase2_work, &policy).await;
+        run_phase2(
+            broker.pool(),
+            &registry,
+            phase2_work,
+            &policy,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
 
         let workflow_task_status = fetch_workflow_task_status(&pool, &workflow_id, &task_id).await;
         assert_eq!(workflow_task_status, "COMPLETED");
@@ -1931,7 +2009,14 @@ mod tests {
 
         let registry = WorkflowSpecRegistry::new();
         let policy = crate::core::config::payload::PayloadPolicy::default();
-        run_phase2(&failed_phase2_pool, &registry, phase2_work, &policy).await;
+        run_phase2(
+            &failed_phase2_pool,
+            &registry,
+            phase2_work,
+            &policy,
+            &crate::core::RetentionConfig::default(),
+        )
+        .await;
 
         let (task_status, result_json, _) = fetch_task_state(&pool, &task_id).await;
         assert_eq!(task_status, "COMPLETED");
@@ -2222,7 +2307,7 @@ mod tests {
             TaskResult::Ok(br#""phase1-durable""#.to_vec()),
             &claimed_task_row(&task_id, "default", None),
             &crate::broker::SetRunningRow {
-                id: task_id.clone(),
+                id: Uuid::parse_str(&task_id).unwrap(),
                 started_at: Utc::now(),
                 retry_count: 0,
                 max_retries: 0,
@@ -2344,6 +2429,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -2364,6 +2450,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             // Exhaust the claim retry budget quickly so the fatal break fires fast.
             resilience: WorkerResilienceConfig {
                 db_retry_initial_ms: 100,
@@ -2436,6 +2523,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -2445,6 +2533,7 @@ mod tests {
             claim_lease_ms: Some(60_000),
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -2477,12 +2566,15 @@ mod tests {
                     id, task_name, queue_name, priority, args, kwargs, status,
                     sent_at, enqueued_at, claimed_at, created_at, updated_at, claimed,
                     claimed_by_worker_id, claim_expires_at, retry_count, max_retries,
-                    is_workflow_task, enqueue_sha
+                    is_workflow_task, enqueue_sha, command_fingerprint_version,
+                    command_fingerprint, retention_class_key, retain_rerun_input,
+                    prepared_rerun_input_disposition
                 ) VALUES (
                     $1, 'block_a_while', 'c17q', 100, '[]', '{}', 'CLAIMED',
                     NOW(), NOW(), NOW(), NOW(), NOW(), TRUE,
                     $2, NOW() + INTERVAL '60 seconds', 0, 3,
-                    FALSE, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+                    FALSE, '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
                 )",
             )
             .bind(&id)
@@ -2510,7 +2602,10 @@ mod tests {
             running <= 2,
             "queue RUNNING ({running}) must not exceed max_concurrency (2) via buffered dispatch",
         );
-        assert_eq!(running, 2, "the cap's worth of buffered tasks must dispatch");
+        assert_eq!(
+            running, 2,
+            "the cap's worth of buffered tasks must dispatch"
+        );
 
         clean(&pool).await;
     }

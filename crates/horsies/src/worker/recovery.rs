@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
+use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::retry_utils::check_retry_eligibility;
 use crate::core::{OperationalErrorCode, TaskError, TaskResult};
@@ -155,6 +156,7 @@ WHERE horsies_tasks.id = stale.id";
 // cascades, long row locks. FOR UPDATE SKIP LOCKED lets concurrent ungated
 // passes drain disjoint batches instead of blocking.
 
+#[cfg(test)]
 const DELETE_EXPIRED_HEARTBEATS_SQL: &str = "\
 DELETE FROM horsies_heartbeats
 WHERE id IN (
@@ -269,6 +271,7 @@ WHERE id IN (SELECT id FROM budgeted)";
 // exclusion would leave them unreachable by both statements and retained
 // forever. The exclusion is a heap filter on the already-bounded candidate
 // scan, so the 0025 index plan is unchanged.
+#[cfg(test)]
 const DELETE_EXPIRED_TASKS_SQL: &str = "\
 WITH doomed AS (
     SELECT t.id
@@ -303,6 +306,7 @@ WHERE id IN (SELECT id FROM doomed)";
 // under the global window so a workflow and its task rows are retained as a
 // unit. The NOT EXISTS guard is kept as defense in depth (plain tasks have no
 // workflow_task linkage). Same purged_attempts mechanism as the global delete.
+#[cfg(test)]
 const DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL: &str = "\
 WITH doomed AS (
     SELECT t.id
@@ -348,12 +352,13 @@ const RETENTION_PASS_TIME_BUDGET: Duration = Duration::from_secs(60);
 pub fn spawn_reaper(
     pool: PgPool,
     config: RecoveryConfig,
+    retention: RetentionConfig,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let check_interval = Duration::from_millis(config.check_interval_ms);
-        let mut next_retention_cleanup = tokio::time::Instant::now()
-            + Duration::from_secs(config.retention_sweep_interval_s);
+        let mut next_retention_cleanup =
+            tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
         let mut orphan_state = OrphanSweepState::default();
 
         tracing::info!(
@@ -375,10 +380,10 @@ pub fn spawn_reaper(
                             tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
                         GatePass::Ungated => {
-                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup, &mut orphan_state).await;
+                            run_reaper_pass(&pool, &config, &retention, &mut next_retention_cleanup, &mut orphan_state).await;
                         }
                         GatePass::Held(tx) => {
-                            run_reaper_pass(&pool, &config, &mut next_retention_cleanup, &mut orphan_state).await;
+                            run_reaper_pass(&pool, &config, &retention, &mut next_retention_cleanup, &mut orphan_state).await;
                             release_gate(tx).await;
                         }
                     }
@@ -472,6 +477,7 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 async fn run_reaper_pass(
     pool: &PgPool,
     config: &RecoveryConfig,
+    retention: &RetentionConfig,
     next_retention_cleanup: &mut tokio::time::Instant,
     orphan_state: &mut OrphanSweepState,
 ) {
@@ -567,9 +573,9 @@ async fn run_reaper_pass(
 
     // Retention cleanup (runs every retention_sweep_interval_s).
     if tokio::time::Instant::now() >= *next_retention_cleanup {
-        run_retention_cleanup(pool, config).await;
+        run_retention_cleanup(pool, retention).await;
         *next_retention_cleanup =
-            tokio::time::Instant::now() + Duration::from_secs(config.retention_sweep_interval_s);
+            tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
     }
 }
 
@@ -649,7 +655,10 @@ async fn process_single_stale_task(
     threshold_ms: u64,
     error_code_str: &str,
 ) -> Result<bool, crate::broker::BrokerError> {
-    let mut tx = pool.begin().await.map_err(crate::broker::BrokerError::Database)?;
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(crate::broker::BrokerError::Database)?;
 
     // Re-acquire row with full context. Returns None if the task is no longer
     // RUNNING, if a fresh heartbeat arrived after the Phase 1 scan, or if the
@@ -779,8 +788,7 @@ async fn process_single_stale_task(
             error_code: error_code_str.to_owned(),
             failed_reason: failed_reason.clone(),
         };
-        let outcomes =
-            crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
+        let outcomes = crate::broker::terminalization::terminalize_in_tx(&mut tx, &command).await?;
 
         let applied = matches!(
             outcomes.first(),
@@ -791,7 +799,9 @@ async fn process_single_stale_task(
             // (e.g. a heartbeat landed in between): nothing was failed, so
             // no attempt row either. Evidence is logged at the adapter
             // boundary.
-            tx.rollback().await.map_err(crate::broker::BrokerError::Database)?;
+            tx.rollback()
+                .await
+                .map_err(crate::broker::BrokerError::Database)?;
             return Ok(false);
         }
 
@@ -813,7 +823,9 @@ async fn process_single_stale_task(
             .await
             .map_err(crate::broker::BrokerError::Database)?;
 
-        tx.commit().await.map_err(crate::broker::BrokerError::Database)?;
+        tx.commit()
+            .await
+            .map_err(crate::broker::BrokerError::Database)?;
 
         tracing::info!(task_id, "stale RUNNING task marked FAILED");
     }
@@ -924,6 +936,7 @@ enum DrainedWhen {
 
 /// Statement-specific third bind for the tasks retention deletes.
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 enum ExtraBind<'a> {
     /// Global tasks delete: queues shielded by a per-queue override window.
     ExcludedQueues(&'a [String]),
@@ -975,7 +988,7 @@ async fn delete_expired_in_batches(
     }
 }
 
-/// Run retention cleanup: prune old heartbeats, worker states, and terminal records.
+/// Run retention cleanup for relational monitoring and workflow records.
 ///
 /// Matches Python's retention cleanup logic in the worker's reaper loop.
 /// Each category is gated by its config (None = disabled). A workflow and its
@@ -983,11 +996,9 @@ async fn delete_expired_in_batches(
 /// Deletes run in bounded batches under a shared pass time budget.
 ///
 /// Normally called by the reaper loop every `retention_sweep_interval_s`.
-pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
-    let mut deleted_heartbeats: u64 = 0;
+pub async fn run_retention_cleanup(pool: &PgPool, config: &RetentionConfig) {
     let mut deleted_worker_states: u64 = 0;
     let mut deleted_workflows: u64 = 0;
-    let mut deleted_tasks: u64 = 0;
 
     let batch_size = i64::from(config.retention_delete_batch_size);
 
@@ -995,29 +1006,7 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
     // outlives the budget resumes next pass.
     let deadline = tokio::time::Instant::now() + RETENTION_PASS_TIME_BUDGET;
 
-    // Queues with a per-queue override window: shielded from the global
-    // tasks delete, then swept with their own windows below.
-    let mut override_queues: Vec<String> = config
-        .queue_terminal_record_retention_hours
-        .keys()
-        .cloned()
-        .collect();
-    override_queues.sort_unstable();
-
     let result: Result<(), sqlx::Error> = async {
-        if let Some(hours) = config.heartbeat_retention_hours {
-            deleted_heartbeats = delete_expired_in_batches(
-                pool,
-                DELETE_EXPIRED_HEARTBEATS_SQL,
-                hours,
-                batch_size,
-                deadline,
-                DrainedWhen::ShortBatch,
-                None,
-            )
-            .await?;
-        }
-
         if let Some(hours) = config.worker_state_retention_hours {
             deleted_worker_states = delete_expired_in_batches(
                 pool,
@@ -1033,11 +1022,8 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
 
         if let Some(hours) = config.terminal_record_retention_hours {
             // Workflows and their node rows go together in one
-            // workflow-batched statement (node purge is a CTE inside it);
-            // tasks follow. The all-backing-tasks-terminal guard makes
-            // partial progress between tables safe. The statement's rowcount
-            // counts workflows, which the node budget keeps below batch_size
-            // while backlog remains — hence EmptyBatch.
+            // workflow-batched statement. Terminal tasks already moved to
+            // partitioned history and are never row-deleted here.
             deleted_workflows = delete_expired_in_batches(
                 pool,
                 DELETE_EXPIRED_WORKFLOWS_SQL,
@@ -1048,34 +1034,6 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
                 None,
             )
             .await?;
-
-            deleted_tasks = delete_expired_in_batches(
-                pool,
-                DELETE_EXPIRED_TASKS_SQL,
-                hours,
-                batch_size,
-                deadline,
-                DrainedWhen::ShortBatch,
-                Some(ExtraBind::ExcludedQueues(&override_queues)),
-            )
-            .await?;
-        }
-
-        // Per-queue override windows govern plain (non-workflow) tasks on
-        // their queues and apply even when the global terminal window is
-        // disabled.
-        for queue_name in &override_queues {
-            let override_hours = config.queue_terminal_record_retention_hours[queue_name];
-            deleted_tasks += delete_expired_in_batches(
-                pool,
-                DELETE_EXPIRED_TASKS_FOR_QUEUE_SQL,
-                override_hours,
-                batch_size,
-                deadline,
-                DrainedWhen::ShortBatch,
-                Some(ExtraBind::QueueName(queue_name)),
-            )
-            .await?;
         }
 
         Ok(())
@@ -1084,14 +1042,11 @@ pub async fn run_retention_cleanup(pool: &PgPool, config: &RecoveryConfig) {
 
     match result {
         Ok(()) => {
-            let total =
-                deleted_heartbeats + deleted_worker_states + deleted_workflows + deleted_tasks;
+            let total = deleted_worker_states + deleted_workflows;
             if total > 0 {
                 tracing::info!(
-                    deleted_heartbeats,
                     deleted_worker_states,
                     deleted_workflows,
-                    deleted_tasks,
                     "retention cleanup completed",
                 );
             }
@@ -1112,6 +1067,7 @@ pub fn spawn_workflow_recovery(
     registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
     payload: PayloadPolicy,
+    retention: RetentionConfig,
     cancel: CancellationToken,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -1139,10 +1095,24 @@ pub fn spawn_workflow_recovery(
                             );
                         }
                         GatePass::Ungated => {
-                            run_workflow_recovery_pass(&pool, &registry, &config, &payload).await;
+                            run_workflow_recovery_pass(
+                                &pool,
+                                &registry,
+                                &config,
+                                &payload,
+                                &retention,
+                            )
+                            .await;
                         }
                         GatePass::Held(tx) => {
-                            run_workflow_recovery_pass(&pool, &registry, &config, &payload).await;
+                            run_workflow_recovery_pass(
+                                &pool,
+                                &registry,
+                                &config,
+                                &payload,
+                                &retention,
+                            )
+                            .await;
                             release_gate(tx).await;
                         }
                     }
@@ -1158,12 +1128,14 @@ async fn run_workflow_recovery_pass(
     registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     match crate::workflow_engine::recover_stuck_workflows(
         pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
         payload,
+        retention,
     )
     .await
     {
@@ -1277,13 +1249,15 @@ mod tests {
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, started_at, created_at, updated_at, claimed,
                 claimed_by_worker_id, retry_count, max_retries, enqueue_sha,
-                finalizing_at
+                finalizing_at, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'reaper_test', 'default', 100, '[]', '{{}}', 'RUNNING',
                 NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', NOW(), NOW(), TRUE,
                 'worker-1', 0, 0,
                 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-                {finalizing_at_sql}
+                {finalizing_at_sql}, 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )"
         );
         sqlx::query(&sql).bind(task_id).execute(pool).await.unwrap();
@@ -1320,7 +1294,10 @@ mod tests {
         let count = mark_stale_running_as_failed(&pool, 1.0, 300.0, 2)
             .await
             .unwrap();
-        assert_eq!(count, 2, "the bounded scan must process at most scan_limit tasks");
+        assert_eq!(
+            count, 2,
+            "the bounded scan must process at most scan_limit tasks"
+        );
 
         for id in &ids {
             sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
@@ -1435,11 +1412,14 @@ mod tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
-                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha
+                sent_at, started_at, created_at, updated_at, retry_count, max_retries, enqueue_sha,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'ret_task', 'default', 100, '[]', '{}', 'RUNNING',
                 NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
-                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', 0, 0, $1,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
         .bind(&task_id)
@@ -1491,7 +1471,10 @@ mod tests {
             .await
             .unwrap()
             .rows_affected();
-        assert_eq!(deleted, 0, "no workflow deleted while a backing task is live");
+        assert_eq!(
+            deleted, 0,
+            "no workflow deleted while a backing task is live"
+        );
         assert_eq!(
             wt_count(pool.clone(), wf_id.clone()).await,
             1,
@@ -1696,9 +1679,17 @@ mod tests {
         seed_old_heartbeats(&pool, 5).await;
 
         let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch, None)
-            .await
-            .unwrap();
+        let deleted = delete_expired_in_batches(
+            &pool,
+            DELETE_EXPIRED_HEARTBEATS_SQL,
+            1,
+            2,
+            deadline,
+            DrainedWhen::ShortBatch,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(deleted, 5, "full backlog drains across batches");
         assert_eq!(heartbeat_count(&pool).await, 0);
@@ -1714,9 +1705,17 @@ mod tests {
 
         // Deadline already reached before the first batch.
         let deadline = tokio::time::Instant::now();
-        let deleted = delete_expired_in_batches(&pool, DELETE_EXPIRED_HEARTBEATS_SQL, 1, 2, deadline, DrainedWhen::ShortBatch, None)
-            .await
-            .unwrap();
+        let deleted = delete_expired_in_batches(
+            &pool,
+            DELETE_EXPIRED_HEARTBEATS_SQL,
+            1,
+            2,
+            deadline,
+            DrainedWhen::ShortBatch,
+            None,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(deleted, 2, "exactly one batch under an expired budget");
         assert_eq!(heartbeat_count(&pool).await, 3, "backlog resumes next pass");
@@ -1755,13 +1754,16 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             )
             SELECT
                 'ret-idx-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-idx-' || g,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             FROM generate_series(1, 500) g",
         )
         .execute(&pool)
@@ -1771,11 +1773,14 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             )
             SELECT
                 'ret-idx-recent-' || g, 'ret_explain_task', 'default', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-idx-recent-' || g
+                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-idx-recent-' || g,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)
@@ -1861,10 +1866,13 @@ mod tests {
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs, status,
                     sent_at, created_at, updated_at, completed_at, terminal_at,
-                    retry_count, max_retries, enqueue_sha
+                    retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                    command_fingerprint, retention_class_key, retain_rerun_input,
+                    prepared_rerun_input_disposition
                 ) VALUES (
                     $1, 'ret_attempts_task', 'default', 100, '[]', '{{}}', 'COMPLETED',
-                    {expr}, {expr}, {expr}, {expr}, {expr}, 0, 0, $1
+                    {expr}, {expr}, {expr}, {expr}, {expr}, 0, 0, $1,
+                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
                 )",
                 expr = completed_at_expr,
             ))
@@ -1948,15 +1956,22 @@ mod tests {
 
         let seed_task = |pool: PgPool, queue: &'static str, aged: bool, wf: bool| async move {
             let id = Uuid::new_v4().to_string();
-            let ts = if aged { "NOW() - INTERVAL '2 hours'" } else { "NOW()" };
+            let ts = if aged {
+                "NOW() - INTERVAL '2 hours'"
+            } else {
+                "NOW()"
+            };
             sqlx::query(&format!(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs, status,
                     is_workflow_task, sent_at, created_at, updated_at,
-                    completed_at, terminal_at, retry_count, max_retries, enqueue_sha
+                    completed_at, terminal_at, retry_count, max_retries, enqueue_sha,
+                    command_fingerprint_version, command_fingerprint, retention_class_key,
+                    retain_rerun_input, prepared_rerun_input_disposition
                 ) VALUES (
                     $1, 'ret_override_task', $2, 100, '[]', '{{}}', 'COMPLETED',
-                    $3, {ts}, {ts}, {ts}, {ts}, {ts}, 0, 0, $1
+                    $3, {ts}, {ts}, {ts}, {ts}, {ts}, 0, 0, $1,
+                    1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
                 )",
             ))
             .bind(&id)
@@ -1999,18 +2014,29 @@ mod tests {
             .await
             .unwrap()
             .rows_affected();
-        assert_eq!(deleted, 1, "override deletes only its queue's eligible plain tasks");
+        assert_eq!(
+            deleted, 1,
+            "override deletes only its queue's eligible plain tasks"
+        );
         assert!(!exists(pool.clone(), a_old_plain.clone()).await);
-        assert!(exists(pool.clone(), a_recent_plain.clone()).await, "in-window survives");
-        assert!(exists(pool.clone(), a_old_wf.clone()).await, "workflow-backing survives");
-        assert!(exists(pool.clone(), b_old_plain.clone()).await, "other queue survives");
-        let orphan_attempts: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1",
-        )
-        .bind(&a_old_plain)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        assert!(
+            exists(pool.clone(), a_recent_plain.clone()).await,
+            "in-window survives"
+        );
+        assert!(
+            exists(pool.clone(), a_old_wf.clone()).await,
+            "workflow-backing survives"
+        );
+        assert!(
+            exists(pool.clone(), b_old_plain.clone()).await,
+            "other queue survives"
+        );
+        let orphan_attempts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM horsies_task_attempts WHERE task_id = $1")
+                .bind(&a_old_plain)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(orphan_attempts, 0, "doomed row's attempts purged");
 
         // Global delete (0h window) with queue a excluded: shields queue a's
@@ -2075,13 +2101,16 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             )
             SELECT
                 'ret-qidx-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-' || g,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             FROM generate_series(1, 500) g",
         )
         .execute(&pool)
@@ -2091,13 +2120,16 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             )
             SELECT
                 'ret-qidx-other-' || g, 'ret_qidx_task', 'ret-q-other', 100, '[]', '{}', 'COMPLETED',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
                 NOW() - INTERVAL '30 days', NOW() - INTERVAL '30 days',
-                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g
+                NOW() - INTERVAL '30 days', 0, 0, 'ret-qidx-other-' || g,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)
@@ -2107,11 +2139,14 @@ mod tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, created_at, updated_at, completed_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             )
             SELECT
                 'ret-qidx-recent-' || g, 'ret_qidx_task', 'ret-q-idx', 100, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g
+                NOW(), NOW(), NOW(), NOW(), NOW(), 0, 0, 'ret-qidx-recent-' || g,
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             FROM generate_series(1, 2000) g",
         )
         .execute(&pool)

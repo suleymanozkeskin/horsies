@@ -28,6 +28,8 @@ pub struct ResolvedEnqueue {
     pub queue_name: String,
     /// The resolved priority (from task, queue config, or default).
     pub priority: u32,
+    /// Queue-mapped retention class; `None` is explicit forever.
+    pub retention_class_key: Option<String>,
 }
 
 /// Main horsies application.
@@ -65,7 +67,11 @@ impl Horsies {
         if !errors.is_empty() {
             let mut report = crate::core::error::ValidationReport::new("config");
             for error in errors {
-                report.add(HorsiesError::new(error.to_string()));
+                let mut converted = HorsiesError::new(error.to_string());
+                if let Some(code) = error.error_code() {
+                    converted = converted.with_code(code);
+                }
+                report.add(converted);
             }
             return report.into_result().map(|_| unreachable!());
         }
@@ -689,7 +695,10 @@ impl Horsies {
                     node.task_name,
                 ))
                 .with_code(ErrorCode::WorkflowInvalidKwargKey)
-                .with_note(format!("input mismatch: {}", Self::input_error_detail(&task_error)))
+                .with_note(format!(
+                    "input mismatch: {}",
+                    Self::input_error_detail(&task_error)
+                ))
                 .with_help(
                     "ensure the node's kwargs match the task's declared input fields \
                      (names and types)",
@@ -1277,6 +1286,7 @@ impl Horsies {
             task_name: task_name.to_string(),
             queue_name: queue.to_string(),
             priority: resolved_priority,
+            retention_class_key: self.config.retention.resolve_queue_class(queue),
         })
     }
 }
@@ -1682,6 +1692,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -1691,10 +1702,26 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
         }
+    }
+
+    #[test]
+    fn retention_config_refusals_keep_hrs_216_for_single_and_collected_errors() {
+        let mut single = valid_config();
+        single.retention.history_leaf_horizon_days = 1;
+        let error = Horsies::new(single).expect_err("invalid retention must refuse startup");
+        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+
+        let mut collected = valid_config();
+        collected.retention.history_leaf_horizon_days = 1;
+        collected.retention.heartbeat_leaf_horizon_hours = 1;
+        let error = Horsies::new(collected).expect_err("all retention errors are collected");
+        assert_eq!(error.code, Some(ErrorCode::ConfigInvalidRetention));
+        assert_eq!(error.notes.len(), 2);
     }
 
     fn custom_config() -> AppConfig {
@@ -3026,8 +3053,11 @@ mod tests {
 
     #[test]
     fn validate_schedules_ok_when_kwargs_match_typed_input() {
-        let mut app =
-            Horsies::new(schedule_with_kwargs("counter", serde_json::json!({"count": 5}))).unwrap();
+        let mut app = Horsies::new(schedule_with_kwargs(
+            "counter",
+            serde_json::json!({"count": 5}),
+        ))
+        .unwrap();
         app.register("counter", typed_count_task()).unwrap();
         assert!(app.validate_schedules().is_ok());
     }

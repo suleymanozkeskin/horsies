@@ -55,9 +55,14 @@ async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs_json: &st
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 /// Enqueue a task with no args.
@@ -115,9 +120,14 @@ async fn enqueue_with_options(
             Some(task_options_json),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 /// Get the latest recorded attempt's error_code for a task.
@@ -375,7 +385,9 @@ async fn test_task_timeout_fails_with_task_timeout() {
 
     // Attempt row recorded with TASK_TIMEOUT; no retry (not opted in).
     assert_eq!(
-        get_latest_attempt_error_code(&pool, &task_id).await.as_deref(),
+        get_latest_attempt_error_code(&pool, &task_id)
+            .await
+            .as_deref(),
         Some("TASK_TIMEOUT"),
     );
     assert_eq!(get_retry_count(&pool, &task_id).await, 0);
@@ -413,7 +425,12 @@ async fn test_task_timeout_retry_opt_in() {
     let result_json = get_result_json(&pool, &task_id).await.unwrap();
     let result: TaskResult<serde_json::Value> = serde_json::from_str(&result_json).unwrap();
     assert_eq!(
-        result.unwrap_err().error_code.as_ref().map(|c| c.to_string()).as_deref(),
+        result
+            .unwrap_err()
+            .error_code
+            .as_ref()
+            .map(|c| c.to_string())
+            .as_deref(),
         Some("TASK_TIMEOUT"),
     );
 }
@@ -530,9 +547,14 @@ async fn enqueue_with_retry(
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 #[tokio::test]
@@ -638,9 +660,14 @@ async fn test_good_until_already_past() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     let _worker = start_worker(
         &db_url(),
@@ -677,9 +704,14 @@ async fn test_good_until_future_completes() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     let _worker = start_worker(
         &db_url(),
@@ -728,9 +760,14 @@ async fn test_retry_blocked_by_good_until_expiry() {
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     let _worker = start_worker(
         &db_url(),
@@ -774,12 +811,11 @@ async fn test_worker_resolution_error() {
     // Task-level failures write to `result` (serialized TaskResult::Err), not
     // `failed_reason` (which is reserved for worker crashes — see FAIL_TASK_SQL
     // vs FAIL_WORKER_SQL in horsies/src/broker/postgres.rs).
-    let result_json: String =
-        sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
-            .bind(&task_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let result_json: String = sqlx::query_scalar("SELECT result FROM horsies_tasks WHERE id = $1")
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let parsed: TaskResult<serde_json::Value> =
         serde_json::from_str(&result_json).expect("result must deserialize as TaskResult");
     let TaskResult::Err(err) = parsed else {
@@ -808,13 +844,17 @@ async fn test_argument_deserialization_error() {
     db::clean_tables(&pool).await;
 
     // Insert task with corrupted args directly.
+    let task_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, \
-         status, sent_at, enqueued_at, enqueue_sha, created_at, updated_at) \
+         status, sent_at, enqueued_at, enqueue_sha, created_at, updated_at,
+         command_fingerprint_version, command_fingerprint, retention_class_key,
+         retain_rerun_input, prepared_rerun_input_disposition) \
          VALUES ($1, 'e2e_simple', 'default', 100, '\"not_valid\"', '{}', \
-         'PENDING', NOW(), NOW(), 'test-sha', NOW(), NOW())",
+         'PENDING', NOW(), NOW(), 'test-sha', NOW(), NOW(),
+         1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE')",
     )
-    .bind("deser-error-task")
+    .bind(&task_id)
     .execute(&pool)
     .await
     .unwrap();
@@ -826,11 +866,11 @@ async fn test_argument_deserialization_error() {
         Duration::from_secs(10),
     );
 
-    wait_for_task_status(&pool, "deser-error-task", "FAILED", Duration::from_secs(10)).await;
+    wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(10)).await;
 
     let error_code: Option<String> =
         sqlx::query_scalar("SELECT error_code FROM horsies_tasks WHERE id = $1")
-            .bind("deser-error-task")
+            .bind(&task_id)
             .fetch_one(&pool)
             .await
             .unwrap();
@@ -880,10 +920,13 @@ async fn test_task_info_after_completion() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 21}"#).await;
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(10)).await;
 
-    let info = broker.get_task_info(&task_id, true, true).await.unwrap();
+    let info = broker
+        .get_task_info(uuid::Uuid::parse_str(&task_id).unwrap(), true, true)
+        .await
+        .unwrap();
     let info = info.expect("task info should exist");
 
-    assert_eq!(info.task_id, task_id);
+    assert_eq!(info.task_id.to_string(), task_id);
     assert_eq!(info.task_name, "e2e_simple");
     assert_eq!(info.status, horsies::TaskStatus::Completed);
     assert_eq!(info.queue_name, "default");
@@ -936,9 +979,14 @@ async fn test_exponential_backoff_state() {
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // Poll until retry_count >= 1 and next_retry_at is set.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -1005,9 +1053,14 @@ async fn test_exponential_backoff_intervals() {
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // Capture enqueued_at snapshots at each retry_count.
     let mut snapshots: std::collections::HashMap<i32, chrono::DateTime<chrono::Utc>> =
@@ -1098,9 +1151,14 @@ async fn test_auto_retry_by_error_code() {
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(15)).await;
 
@@ -1137,9 +1195,14 @@ async fn test_task_expires_before_claim() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // Wait until task is definitely expired.
     tokio::time::sleep(Duration::from_millis(600)).await;
@@ -1206,9 +1269,14 @@ async fn test_retry_succeeds_within_good_until() {
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(30)).await;
 
@@ -1256,9 +1324,14 @@ async fn test_good_until_expires_while_claimed_before_start() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     let claim_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < claim_deadline {
@@ -1340,9 +1413,14 @@ async fn test_priority_ordering() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // High priority (1) submitted second.
     let task_id_high = broker
@@ -1358,9 +1436,14 @@ async fn test_priority_ordering() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // Start worker with concurrency=1 to force serial execution.
     let _worker = start_worker(
@@ -1585,10 +1668,7 @@ async fn test_task_not_found() {
     let broker = broker().await;
 
     let result = broker
-        .get_result::<serde_json::Value>(
-            "00000000-0000-0000-0000-000000000000",
-            Some(Duration::from_millis(500)),
-        )
+        .get_result::<serde_json::Value>(uuid::Uuid::nil(), Some(Duration::from_millis(500)))
         .await
         .unwrap();
 
@@ -1614,7 +1694,10 @@ async fn test_wait_timeout() {
     let task_id = enqueue_task(&broker, "e2e_simple", r#"{"x": 5}"#).await;
 
     let result = broker
-        .get_result::<serde_json::Value>(&task_id, Some(Duration::from_millis(500)))
+        .get_result::<serde_json::Value>(
+            uuid::Uuid::parse_str(&task_id).unwrap(),
+            Some(Duration::from_millis(500)),
+        )
         .await
         .unwrap();
 
@@ -1679,7 +1762,10 @@ async fn test_task_cancelled_get_result() {
         .unwrap();
 
     let result = broker
-        .get_result::<serde_json::Value>(&task_id, Some(Duration::from_millis(1000)))
+        .get_result::<serde_json::Value>(
+            uuid::Uuid::parse_str(&task_id).unwrap(),
+            Some(Duration::from_millis(1000)),
+        )
         .await
         .unwrap();
 
@@ -1805,9 +1891,14 @@ async fn test_custom_mode_queue_routing() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
     let normal_id = broker
         .enqueue(
             "e2e_normal",
@@ -1821,9 +1912,14 @@ async fn test_custom_mode_queue_routing() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
     let low_id = broker
         .enqueue(
             "e2e_low",
@@ -1837,9 +1933,14 @@ async fn test_custom_mode_queue_routing() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     wait_for_all_terminal(
         &pool,
@@ -1888,9 +1989,14 @@ async fn test_custom_mode_queue_names_stored() {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     wait_for_task_status(&pool, &high_id, "COMPLETED", Duration::from_secs(10)).await;
 
@@ -2021,9 +2127,14 @@ async fn test_attempt_recorded_on_retry_exhausted() {
             Some(&serde_json::to_string(&task_options).unwrap()),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     wait_for_task_status(&pool, &task_id, "FAILED", Duration::from_secs(30)).await;
 
@@ -2061,7 +2172,7 @@ async fn test_attempt_recorded_on_retry_exhausted() {
 #[serial]
 async fn test_enqueue_sha_idempotent_same_sha() {
     let broker = broker().await;
-    let task_id = uuid::Uuid::new_v4().to_string();
+    let task_id = uuid::Uuid::new_v4();
     let sha = "deadbeef1234";
 
     let id1 = broker
@@ -2076,11 +2187,16 @@ async fn test_enqueue_sha_idempotent_same_sha() {
             None,
             None,
             sha,
-            Some(&task_id),
+            Some(task_id),
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
-    assert_eq!(id1, task_id);
+        .unwrap()
+        .to_string();
+    assert_eq!(id1, task_id.to_string());
 
     // Second enqueue with same SHA — should succeed idempotently.
     let id2 = broker
@@ -2095,12 +2211,18 @@ async fn test_enqueue_sha_idempotent_same_sha() {
             None,
             None,
             sha,
-            Some(&task_id),
+            Some(task_id),
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
     assert_eq!(
-        id2, task_id,
+        id2,
+        task_id.to_string(),
         "idempotent re-enqueue should return same task_id"
     );
 }
@@ -2110,7 +2232,7 @@ async fn test_enqueue_sha_idempotent_same_sha() {
 #[serial]
 async fn test_enqueue_sha_payload_mismatch() {
     let broker = broker().await;
-    let task_id = uuid::Uuid::new_v4().to_string();
+    let task_id = uuid::Uuid::new_v4();
 
     let _ = broker
         .enqueue(
@@ -2124,10 +2246,15 @@ async fn test_enqueue_sha_payload_mismatch() {
             None,
             None,
             "sha_original",
-            Some(&task_id),
+            Some(task_id),
+            None,
+            None,
+            None,
+            None,
         )
         .await
-        .unwrap();
+        .unwrap()
+        .to_string();
 
     // Second enqueue with DIFFERENT SHA — should fail.
     let result = broker
@@ -2142,7 +2269,11 @@ async fn test_enqueue_sha_payload_mismatch() {
             None,
             None,
             "sha_different",
-            Some(&task_id),
+            Some(task_id),
+            None,
+            None,
+            None,
+            None,
         )
         .await;
 

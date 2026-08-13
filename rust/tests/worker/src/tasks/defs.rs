@@ -204,7 +204,7 @@ pub async fn runtime_helper_dispatch(_rt: horsies::TaskRuntime) -> Result<String
     let handle = rt_ping::send(())
         .await
         .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
-    Ok(handle.task_id().to_owned())
+    Ok(handle.task_id().to_string())
 }
 
 #[task("e2e_runtime_helper_schedule")]
@@ -212,7 +212,7 @@ pub async fn runtime_helper_schedule(_rt: horsies::TaskRuntime) -> Result<String
     let handle = rt_ping::schedule(std::time::Duration::from_secs(5), ())
         .await
         .map_err(|err| TaskError::new("SCHEDULE_FAILED", err.message))?;
-    Ok(handle.task_id().to_owned())
+    Ok(handle.task_id().to_string())
 }
 
 #[task("e2e_runtime_helper_handle")]
@@ -222,7 +222,7 @@ pub async fn runtime_helper_handle(rt: horsies::TaskRuntime) -> Result<String, T
         .send(())
         .await
         .map_err(|err| TaskError::new("SEND_FAILED", err.message))?;
-    Ok(handle.task_id().to_owned())
+    Ok(handle.task_id().to_string())
 }
 
 #[task("e2e_dynamic_rt_start_no_args")]
@@ -870,11 +870,11 @@ pub struct NestedParentInput {
 fn build_nested_parent_workflow(params: NestedParentInput) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("e2e_nested_parent_pipeline");
     builder.definition_key("tests.e2e_nested_parent_pipeline.v1");
-    let produce = builder.task(
-        wf_produce_int::node()?
-            .node_id("n_produce")
-            .set_input(ProduceIntInput { value: params.value })?,
-    );
+    let produce = builder.task(wf_produce_int::node()?.node_id("n_produce").set_input(
+        ProduceIntInput {
+            value: params.value,
+        },
+    )?);
     let grandchild = builder.sub_workflow(
         SubWorkflowNode::<ChildLabelInput, String>::typed("e2e_child_label_pipeline")
             .node_id("n_child")
@@ -920,18 +920,12 @@ pub struct FailingChildInput {
 /// a top-level sub-workflow node referencing it is the first/only failure —
 /// surfacing `SUBWORKFLOW_FAILED` at the parent rather than an upstream task's
 /// error.
-fn build_failing_child_workflow(
-    params: FailingChildInput,
-) -> Result<WorkflowSpec, HorsiesError> {
+fn build_failing_child_workflow(params: FailingChildInput) -> Result<WorkflowSpec, HorsiesError> {
     let mut builder = WorkflowSpecBuilder::new("e2e_child_failing_pipeline");
     builder.definition_key("tests.e2e_child_failing_pipeline.v1");
-    let boom = builder.task(
-        wf_fail::node()?
-            .node_id("boom")
-            .set_input(FailInput {
-                error_code: params.error_code,
-            })?,
-    );
+    let boom = builder.task(wf_fail::node()?.node_id("boom").set_input(FailInput {
+        error_code: params.error_code,
+    })?);
     builder.output(boom);
     builder.build()
 }

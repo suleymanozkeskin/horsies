@@ -7,6 +7,10 @@ use std::sync::Arc;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
+use crate::core::history::enqueue::{
+    prepare_enqueue_facts, EnqueueInputEligibility, PreparedEnqueueFacts,
+};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{
     AnyNode, OnError, WorkflowSpec, WorkflowSpecRegistry, WorkflowStartError,
@@ -22,7 +26,7 @@ use crate::workflow_engine::parse_good_until_from_options;
 // ---------------------------------------------------------------------------
 
 const CHECK_WORKFLOW_EXISTS_SQL: &str = "\
-SELECT id FROM horsies_workflows WHERE id = $1";
+SELECT id::text AS id FROM horsies_workflows WHERE id = $1::uuid";
 
 const INSERT_WORKFLOW_SQL: &str = "\
 INSERT INTO horsies_workflows (
@@ -30,7 +34,7 @@ INSERT INTO horsies_workflows (
     definition_key,
     depth, root_workflow_id, sent_at, created_at, started_at, updated_at
 )
-VALUES ($1, $2, 'RUNNING', $3, $4, $5, $6, 0, $1, NOW(), NOW(), NOW(), NOW())
+VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, 0, $1::uuid, NOW(), NOW(), NOW(), NOW())
 ON CONFLICT (id) DO NOTHING
 RETURNING id";
 
@@ -41,38 +45,47 @@ INSERT INTO horsies_workflows (
     parent_workflow_id, parent_task_index, depth, root_workflow_id,
     sent_at, created_at, started_at, updated_at
 )
-VALUES ($1, $2, 'RUNNING', $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW(), NOW(), NOW())";
+VALUES ($1::uuid, $2, 'RUNNING', $3, $4, $5, $6, $7::uuid, $8, $9, $10::uuid,
+        NOW(), NOW(), NOW(), NOW())";
 
 const ENQUEUE_ROOT_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
     status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at
+    enqueue_sha, is_workflow_task, created_at, updated_at,
+    command_fingerprint_version, command_fingerprint, retention_class_key,
+    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
+    retain_rerun_input, prepared_rerun_input_disposition,
+    prepared_rerun_input_version, prepared_rerun_input_codec,
+    prepared_rerun_input_content_type, prepared_rerun_input_digest,
+    prepared_rerun_input_inline, prepared_rerun_input_reference
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10, TRUE, NOW(), NOW())";
+VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
+        TRUE, NOW(), NOW(), $11, $12, $13, $14, NULL, NULL, NULL, $15, $16,
+        $17, $18, $19, $20, $21, NULL)";
 
 const LINK_WORKFLOW_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET task_id = $1, status = 'ENQUEUED', started_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3";
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
+WHERE workflow_id = $2::uuid AND task_index = $3";
 
 const LINK_ROOT_SUBWORKFLOW_SQL: &str = "\
 UPDATE horsies_workflow_tasks
-SET sub_workflow_id = $1, status = 'ENQUEUED', started_at = NOW()
-WHERE workflow_id = $2 AND task_index = $3
+SET sub_workflow_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
+WHERE workflow_id = $2::uuid AND task_index = $3
   AND status = 'READY'";
 
 /// Get parent depth and root workflow ID (used by root sub-workflow launch at start).
 const GET_WORKFLOW_DEPTH_SQL: &str = "\
 SELECT depth, root_workflow_id
 FROM horsies_workflows
-WHERE id = $1";
+WHERE id = $1::uuid";
 
 const CHECK_ANCESTOR_WORKFLOW_CHAIN_SQL: &str = "\
 WITH RECURSIVE ancestors AS (
     SELECT id, name, definition_key, parent_workflow_id
     FROM horsies_workflows
-    WHERE id = $1
+    WHERE id = $1::uuid
   UNION ALL
     SELECT w.id, w.name, w.definition_key, w.parent_workflow_id
     FROM horsies_workflows w
@@ -122,6 +135,7 @@ struct PreparedNode<'a> {
     /// `Some` only for fast-path roots — the `horsies_tasks` id, also written to
     /// the workflow_task's `task_id` so the two link without a follow-up UPDATE.
     task_id: Option<String>,
+    enqueue_facts: Option<PreparedEnqueueFacts>,
     is_root: bool,
     fast_path: bool,
 }
@@ -138,11 +152,12 @@ pub async fn start_workflow<T>(
     workflow_id: Option<String>,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     let wf_id = workflow_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let wf_name = spec.name.clone();
 
-    start_workflow_inner(broker, spec, &wf_id, registry, payload)
+    start_workflow_inner(broker, spec, &wf_id, registry, payload, retention)
         .await
         .map_err(|e| WorkflowStartError {
             code: classify_workflow_error(&e),
@@ -162,9 +177,10 @@ pub async fn start_workflow_with_retry<T>(
     registry: &WorkflowSpecRegistry,
     resend_on_transient_err: bool,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     if !resend_on_transient_err {
-        return start_workflow(broker, spec, workflow_id, registry, payload).await;
+        return start_workflow(broker, spec, workflow_id, registry, payload, retention).await;
     }
 
     // 1 initial attempt + START_RETRY_COUNT retries = 4 total attempts.
@@ -197,7 +213,16 @@ pub async fn start_workflow_with_retry<T>(
             tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         }
 
-        match start_workflow(broker, spec, Some(wf_id.clone()), registry, payload).await {
+        match start_workflow(
+            broker,
+            spec,
+            Some(wf_id.clone()),
+            registry,
+            payload,
+            retention,
+        )
+        .await
+        {
             Ok(handle) => return Ok(handle),
             Err(e) => {
                 if e.retryable && attempt < max_attempts - 1 {
@@ -218,6 +243,7 @@ async fn start_workflow_inner<T>(
     wf_id: &str,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<WorkflowHandle<T>, WorkflowError> {
     let pool = broker.pool();
     // Idempotent start: if a caller-provided ID already exists, return
@@ -237,6 +263,7 @@ async fn start_workflow_inner<T>(
             Arc::clone(broker),
             Arc::new(registry.clone()),
             payload.clone(),
+            retention.clone(),
         ));
     }
 
@@ -268,7 +295,7 @@ async fn start_workflow_inner<T>(
     tracing::debug!(workflow_id = %wf_id, name = %spec.name, "workflow created");
 
     // Insert all workflow_task rows and enqueue roots.
-    insert_workflow_tasks(&mut tx, wf_id, &spec.tasks, registry).await?;
+    insert_workflow_tasks(&mut tx, wf_id, &spec.tasks, registry, retention).await?;
 
     tx.commit().await?;
 
@@ -277,6 +304,7 @@ async fn start_workflow_inner<T>(
         Arc::clone(broker),
         Arc::new(registry.clone()),
         payload.clone(),
+        retention.clone(),
     ))
 }
 
@@ -307,10 +335,19 @@ pub async fn retry_start<T>(
     error: &WorkflowStartError,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> WorkflowStartResult<WorkflowHandle<T>> {
     // Reuse the existing validation from horsies-core.
     let workflow_id = crate::core::workflow::start_types::validate_start_retry(error, &spec.name)?;
-    start_workflow(broker, spec, Some(workflow_id), registry, payload).await
+    start_workflow(
+        broker,
+        spec,
+        Some(workflow_id),
+        registry,
+        payload,
+        retention,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -355,6 +392,7 @@ fn insert_workflow_tasks<'a>(
     workflow_id: &'a str,
     tasks: &'a [AnyNode],
     registry: &'a WorkflowSpecRegistry,
+    retention: &'a RetentionConfig,
 ) -> Pin<Box<dyn Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
     Box::pin(async move {
         if tasks.is_empty() {
@@ -404,11 +442,42 @@ fn insert_workflow_tasks<'a>(
             // their horsies_tasks rows are bulk-inserted. Skipping the per-row CAS
             // is sound: the node rows are created in this same uncommitted tx, so no
             // concurrent transaction can observe or race them.
-            let has_ctx_from = task.workflow_ctx_from.as_ref().is_some_and(|v| !v.is_empty());
+            let has_ctx_from = task
+                .workflow_ctx_from
+                .as_ref()
+                .is_some_and(|v| !v.is_empty());
             let fast_path =
                 is_root && !task.is_subworkflow && task.args_from.is_empty() && !has_ctx_from;
             let task_id = if fast_path {
-                Some(Uuid::new_v4().to_string())
+                Some(
+                    crate::core::history::identity::uuid7::mint_task_id()
+                        .map(|task_id| task_id.to_string())
+                        .map_err(|error| {
+                            WorkflowError::Validation(format!("task identity mint failed: {error}"))
+                        })?,
+                )
+            } else {
+                None
+            };
+            let enqueue_facts = if fast_path {
+                let retention_class_key = retention.resolve_queue_class(queue);
+                Some(
+                    prepare_enqueue_facts(
+                        &task.task_name,
+                        queue,
+                        priority,
+                        task.args_json.as_deref(),
+                        task.kwargs_json.as_deref(),
+                        parse_good_until_from_options(merged_task_options.as_deref()),
+                        None,
+                        merged_task_options.as_deref(),
+                        retention_class_key.as_deref(),
+                        false,
+                        None,
+                        EnqueueInputEligibility::NeverEligible,
+                    )
+                    .map_err(|error| WorkflowError::Validation(error.to_string()))?,
+                )
             } else {
                 None
             };
@@ -431,6 +500,7 @@ fn insert_workflow_tasks<'a>(
                 sub_workflow_name,
                 status,
                 task_id,
+                enqueue_facts,
                 is_root,
                 fast_path,
             });
@@ -450,7 +520,9 @@ fn insert_workflow_tasks<'a>(
         qb.push_values(prepared.iter(), |mut b, p| {
             let deps: Vec<i32> = p.node.dependencies.iter().map(|&d| d as i32).collect();
             b.push_bind(p.wt_id.clone())
+                .push_unseparated("::uuid")
                 .push_bind(workflow_id.to_owned())
+                .push_unseparated("::uuid")
                 .push_bind(p.node.index as i32)
                 .push_bind(p.node.node_id.clone())
                 .push_bind(p.node.task_name.clone())
@@ -469,7 +541,8 @@ fn insert_workflow_tasks<'a>(
                 .push_bind(p.node.is_subworkflow)
                 .push_bind(p.sub_workflow_name.clone())
                 .push_bind(p.node.sub_definition_key.clone())
-                .push_bind(p.task_id.clone());
+                .push_bind(p.task_id.clone())
+                .push_unseparated("::uuid");
             // started_at: NOW() for the ENQUEUED fast path, NULL otherwise.
             if p.fast_path {
                 b.push("NOW()");
@@ -486,7 +559,14 @@ fn insert_workflow_tasks<'a>(
                 "INSERT INTO horsies_tasks (\
                  id, task_name, queue_name, priority, args, kwargs, \
                  status, sent_at, enqueued_at, good_until, max_retries, task_options, \
-                 enqueue_sha, is_workflow_task, created_at, updated_at) ",
+                 enqueue_sha, is_workflow_task, created_at, updated_at,
+                 command_fingerprint_version, command_fingerprint,
+                 retention_class_key, input_digest, rerun_of_task_id,
+                 rerun_root_task_id, idempotency_key_digest, retain_rerun_input,
+                 prepared_rerun_input_disposition, prepared_rerun_input_version,
+                 prepared_rerun_input_codec, prepared_rerun_input_content_type,
+                 prepared_rerun_input_digest, prepared_rerun_input_inline,
+                 prepared_rerun_input_reference) ",
             );
             tq.push_values(prepared.iter().filter(|p| p.fast_path), |mut b, p| {
                 let task_id = p
@@ -496,7 +576,12 @@ fn insert_workflow_tasks<'a>(
                 let max_retries = parse_max_retries(p.merged_task_options.as_deref());
                 let good_until = parse_good_until_from_options(p.merged_task_options.as_deref());
                 let enqueue_sha = format!("wf-{}", task_id);
+                let facts = p
+                    .enqueue_facts
+                    .as_ref()
+                    .expect("fast-path root always has enqueue facts");
                 b.push_bind(task_id)
+                    .push_unseparated("::uuid")
                     .push_bind(p.node.task_name.clone())
                     .push_bind(p.queue.clone())
                     .push_bind(p.priority)
@@ -509,7 +594,28 @@ fn insert_workflow_tasks<'a>(
                     .push_bind(max_retries)
                     .push_bind(p.merged_task_options.clone())
                     .push_bind(enqueue_sha);
-                b.push("TRUE").push("NOW()").push("NOW()"); // is_workflow_task, created_at, updated_at
+                b.push("TRUE")
+                    .push("NOW()")
+                    .push("NOW()")
+                    .push_bind(facts.command_fingerprint_version)
+                    .push_bind(facts.command_fingerprint.to_vec())
+                    .push_bind(facts.retention_class_key.clone())
+                    .push_bind(facts.input_digest.to_vec())
+                    .push("NULL")
+                    .push("NULL")
+                    .push("NULL")
+                    .push_bind(facts.retain_rerun_input)
+                    .push_bind(facts.prepared_rerun_input_disposition.as_str())
+                    .push_bind(facts.prepared_rerun_input_version)
+                    .push_bind(facts.prepared_rerun_input_codec)
+                    .push_bind(facts.prepared_rerun_input_content_type)
+                    .push_bind(
+                        facts
+                            .prepared_rerun_input_digest
+                            .map(|digest| digest.to_vec()),
+                    )
+                    .push_bind(facts.prepared_rerun_input_inline.clone())
+                    .push_bind(facts.prepared_rerun_input_reference.clone());
             });
             tq.build().execute(&mut **tx).await?;
         }
@@ -521,7 +627,7 @@ fn insert_workflow_tasks<'a>(
                 continue;
             }
             if p.node.is_subworkflow {
-                launch_root_subworkflow(tx, workflow_id, p.node, registry).await?;
+                launch_root_subworkflow(tx, workflow_id, p.node, registry, retention).await?;
             } else {
                 let task_id = enqueue_root_task(
                     &mut **tx,
@@ -529,6 +635,7 @@ fn insert_workflow_tasks<'a>(
                     &p.queue,
                     p.priority,
                     p.merged_task_options.as_deref(),
+                    retention,
                 )
                 .await?;
                 sqlx::query(LINK_WORKFLOW_TASK_SQL)
@@ -559,11 +666,31 @@ async fn enqueue_root_task(
     queue: &str,
     priority: i32,
     merged_task_options: Option<&str>,
+    retention: &RetentionConfig,
 ) -> Result<String, WorkflowError> {
-    let task_id = Uuid::new_v4().to_string();
+    let task_id = crate::core::history::identity::uuid7::mint_task_id()
+        .map(|task_id| task_id.to_string())
+        .map_err(|error| {
+            WorkflowError::Validation(format!("task identity mint failed: {error}"))
+        })?;
     let max_retries = parse_max_retries(merged_task_options);
-
     let enqueue_sha = format!("wf-{}", task_id);
+    let retention_class_key = retention.resolve_queue_class(queue);
+    let facts = prepare_enqueue_facts(
+        &node.task_name,
+        queue,
+        priority,
+        node.args_json.as_deref(),
+        node.kwargs_json.as_deref(),
+        parse_good_until_from_options(merged_task_options),
+        None,
+        merged_task_options,
+        retention_class_key.as_deref(),
+        false,
+        None,
+        EnqueueInputEligibility::NeverEligible,
+    )
+    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
     sqlx::query(ENQUEUE_ROOT_TASK_SQL)
         .bind(&task_id)
@@ -576,6 +703,22 @@ async fn enqueue_root_task(
         .bind(max_retries)
         .bind(merged_task_options)
         .bind(&enqueue_sha)
+        .bind(facts.command_fingerprint_version)
+        .bind(facts.command_fingerprint.as_slice())
+        .bind(&facts.retention_class_key)
+        .bind(facts.input_digest.as_slice())
+        .bind(facts.retain_rerun_input)
+        .bind(facts.prepared_rerun_input_disposition.as_str())
+        .bind(facts.prepared_rerun_input_version)
+        .bind(facts.prepared_rerun_input_codec)
+        .bind(facts.prepared_rerun_input_content_type)
+        .bind(
+            facts
+                .prepared_rerun_input_digest
+                .as_ref()
+                .map(|digest| digest.as_slice()),
+        )
+        .bind(facts.prepared_rerun_input_inline.as_deref())
         .execute(executor)
         .await?;
 
@@ -591,6 +734,7 @@ async fn launch_root_subworkflow(
     workflow_id: &str,
     task: &AnyNode,
     registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = task
         .task_name
@@ -623,6 +767,7 @@ async fn launch_root_subworkflow(
         parent_depth + 1,
         root_wf_id,
         registry,
+        retention,
     )
     .await?;
 
@@ -661,6 +806,7 @@ pub async fn start_child_workflow_in_tx(
     depth: i32,
     root_workflow_id: &str,
     registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
 ) -> Result<String, WorkflowError> {
     let child_id = Uuid::new_v4().to_string();
     ensure_no_runtime_subworkflow_cycle(tx, parent_workflow_id, spec).await?;
@@ -700,7 +846,7 @@ pub async fn start_child_workflow_in_tx(
     );
 
     // Insert all workflow_task rows and enqueue roots within same tx.
-    insert_workflow_tasks(tx, &child_id, &spec.tasks, registry).await?;
+    insert_workflow_tasks(tx, &child_id, &spec.tasks, registry, retention).await?;
 
     Ok(child_id)
 }
@@ -716,12 +862,12 @@ fn subworkflow_cycle_ancestor<'a>(
     child_name: &str,
     child_key: Option<&str>,
 ) -> Option<&'a AncestorWorkflowRow> {
-    ancestors.iter().find(|ancestor| {
-        match (child_key, ancestor.definition_key.as_deref()) {
+    ancestors.iter().find(
+        |ancestor| match (child_key, ancestor.definition_key.as_deref()) {
             (Some(ck), Some(ak)) => ck == ak,
             _ => ancestor.name == child_name,
-        }
-    })
+        },
+    )
 }
 
 async fn ensure_no_runtime_subworkflow_cycle(
@@ -841,6 +987,7 @@ mod tests {
     use crate::core::workflow::spec::WorkflowSpecBuilder;
     use crate::core::workflow::sub_workflow::SubWorkflowNode;
     use crate::TaskNode;
+    use serial_test::serial;
 
     fn child_registered_static() -> RegisteredWorkflowSpec {
         let mut builder = WorkflowSpecBuilder::new("child_static");
@@ -916,6 +1063,81 @@ mod tests {
             resolve_insert_priority(&node_with(true, Some(50))).unwrap(),
             50
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn p6_workflow_enqueue_start_paths_persist_mapped_class_and_never_eligible_facts() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let workflow_name = "p6_workflow_facts";
+        let task_name = "p6_workflow_node_facts";
+        sqlx::query("DELETE FROM horsies_workflows WHERE name = $1")
+            .bind(workflow_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut root = node_with(false, Some(17));
+        root.task_name = task_name.to_owned();
+        root.queue = Some("bulk".to_owned());
+        root.args_json = Some("[1]".to_owned());
+        let spec = WorkflowSpec {
+            name: workflow_name.to_owned(),
+            definition_key: Some("p6.workflow.facts.v1".to_owned()),
+            tasks: vec![root.clone()],
+            on_error: OnError::Fail,
+            output_index: Some(0),
+            success_policy: None,
+        };
+        let mut retention = RetentionConfig::default();
+        retention
+            .queue_retention
+            .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let registry = WorkflowSpecRegistry::new();
+        let workflow_id = Uuid::new_v4().to_string();
+
+        let _: WorkflowHandle<serde_json::Value> = start_workflow(
+            &broker,
+            &spec,
+            Some(workflow_id),
+            &registry,
+            &PayloadPolicy::default(),
+            &retention,
+        )
+        .await
+        .expect("start workflow with fast-path root");
+        let slow_id = enqueue_root_task(&pool, &root, "bulk", 17, None, &retention)
+            .await
+            .expect("enqueue slow-path workflow root");
+
+        let rows: Vec<(String, String, String, i32, i32, Option<i32>, bool)> = sqlx::query_as(
+            "SELECT id::text, retention_class_key,
+                    prepared_rerun_input_disposition,
+                    octet_length(command_fingerprint), octet_length(input_digest),
+                    octet_length(prepared_rerun_input_inline), retain_rerun_input
+             FROM horsies_tasks WHERE task_name = $1 ORDER BY id",
+        )
+        .bind(task_name)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.0 == slow_id));
+        for row in rows {
+            assert_eq!(row.1, "q_bulk_7d");
+            assert_eq!(row.2, "NEVER_ELIGIBLE");
+            assert_eq!(row.3, 32);
+            assert_eq!(row.4, 32);
+            assert!(row.5.is_none());
+            assert!(!row.6);
+            assert_eq!(Uuid::parse_str(&row.0).unwrap().get_version_num(), 7);
+        }
     }
 
     #[test]

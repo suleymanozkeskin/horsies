@@ -29,11 +29,7 @@ use horsies::{
     TaskResult, Worker, WorkerConfig, WorkflowHandle, WorkflowSpec, WorkflowSpecBuilder,
     WorkflowSpecRegistry,
 };
-use horsies_test_support::{
-    db,
-    e2e::db_poll::wait_for_workflow_terminal,
-    fixtures,
-};
+use horsies_test_support::{db, e2e::db_poll::wait_for_workflow_terminal, fixtures};
 use horsies_test_worker::tasks::{
     wf_fail_int, wf_produce_int, ChildLabelInput, FailingChildInput, NestedParentInput,
     ProduceIntInput,
@@ -195,7 +191,10 @@ async fn subworkflow_success_full_surface_matrix() {
     }
 
     // 2) parent sub-workflow node COMPLETED + populated summary
-    assert_eq!(task_status(&pool, handle.workflow_id(), 1).await, "COMPLETED");
+    assert_eq!(
+        task_status(&pool, handle.workflow_id(), 1).await,
+        "COMPLETED"
+    );
     let summary_json = task_subwf_summary(&pool, handle.workflow_id(), 1)
         .await
         .expect("summary column populated");
@@ -232,11 +231,16 @@ async fn subworkflow_failure_fail_policy_preserves_error_everywhere() {
     let mut b = WorkflowSpecBuilder::new("e2e_l7_fail_policy");
     b.on_error(OnError::Fail);
     let child = b.sub_workflow(
-        SubWorkflowNode::<FailingChildInput, serde_json::Value>::typed("e2e_child_failing_pipeline")
-            .node_id("child")
-            .queue("default")
-            .set(FailingChildInput::field_error_code(), "INNER_FAIL".to_owned())
-            .unwrap(),
+        SubWorkflowNode::<FailingChildInput, serde_json::Value>::typed(
+            "e2e_child_failing_pipeline",
+        )
+        .node_id("child")
+        .queue("default")
+        .set(
+            FailingChildInput::field_error_code(),
+            "INNER_FAIL".to_owned(),
+        )
+        .unwrap(),
     );
     b.output(child);
     let spec = b.build().unwrap();
@@ -282,11 +286,16 @@ async fn subworkflow_failure_pause_policy_preserves_error_after_resume() {
     let mut b = WorkflowSpecBuilder::new("e2e_l7_pause_policy");
     b.on_error(OnError::Pause);
     let child = b.sub_workflow(
-        SubWorkflowNode::<FailingChildInput, serde_json::Value>::typed("e2e_child_failing_pipeline")
-            .node_id("child")
-            .queue("default")
-            .set(FailingChildInput::field_error_code(), "INNER_FAIL".to_owned())
-            .unwrap(),
+        SubWorkflowNode::<FailingChildInput, serde_json::Value>::typed(
+            "e2e_child_failing_pipeline",
+        )
+        .node_id("child")
+        .queue("default")
+        .set(
+            FailingChildInput::field_error_code(),
+            "INNER_FAIL".to_owned(),
+        )
+        .unwrap(),
     );
     b.output(child);
     let spec = b.build().unwrap();
@@ -316,9 +325,15 @@ async fn subworkflow_failure_pause_policy_preserves_error_after_resume() {
     // Resume; workflow finalizes FAILED, error preserved with detail.
     // The failed child is already terminal, so an empty registry suffices.
     let reg = WorkflowSpecRegistry::new();
-    resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    resume_workflow(
+        &pool,
+        &wf_id,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(20)).await;
     assert_eq!(status, "FAILED");
 
@@ -448,7 +463,10 @@ async fn failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
     assert_eq!(reader_json["summary_status"], "FAILED");
     assert_eq!(reader_json["summary_is_success"], false);
     assert_eq!(reader_json["result_is_ok"], false);
-    assert!(task_subwf_summary(&pool, &wf_id, 1).await.unwrap().contains("FAILED"));
+    assert!(task_subwf_summary(&pool, &wf_id, 1)
+        .await
+        .unwrap()
+        .contains("FAILED"));
 
     cancel.cancel();
     let _ = worker.await;
@@ -512,7 +530,10 @@ async fn outputless_success_policy_keeps_failed_subworkflow_result() {
         .await
         .expect("failed child result retained");
     assert!(child_result.contains("SUBWORKFLOW_FAILED"));
-    assert!(task_subwf_summary(&pool, &wf_id, 2).await.unwrap().contains("FAILED"));
+    assert!(task_subwf_summary(&pool, &wf_id, 2)
+        .await
+        .unwrap()
+        .contains("FAILED"));
 
     cancel.cancel();
     let _ = worker.await;
@@ -578,8 +599,14 @@ async fn parallel_subworkflows_preserve_independent_success_and_failure() {
         serde_json::json!("ok=5")
     );
     assert_eq!(task_status(&pool, &wf_id, 3).await, "FAILED");
-    assert!(task_subwf_summary(&pool, &wf_id, 2).await.unwrap().contains("COMPLETED"));
-    assert!(task_subwf_summary(&pool, &wf_id, 3).await.unwrap().contains("FAILED"));
+    assert!(task_subwf_summary(&pool, &wf_id, 2)
+        .await
+        .unwrap()
+        .contains("COMPLETED"));
+    assert!(task_subwf_summary(&pool, &wf_id, 3)
+        .await
+        .unwrap()
+        .contains("FAILED"));
 
     cancel.cancel();
     let _ = worker.await;
@@ -625,8 +652,14 @@ async fn nested_subworkflow_success_records_depth_root_and_result() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert!(depths.contains(&1), "expected a depth-1 descendant, got {depths:?}");
-    assert!(depths.contains(&2), "expected a depth-2 descendant, got {depths:?}");
+    assert!(
+        depths.contains(&1),
+        "expected a depth-1 descendant, got {depths:?}"
+    );
+    assert!(
+        depths.contains(&2),
+        "expected a depth-2 descendant, got {depths:?}"
+    );
 
     cancel.cancel();
     let _ = worker.await;
@@ -678,7 +711,10 @@ async fn nested_subworkflow_failure_surfaces_each_child_error() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(failed_descendants >= 1, "expected a failed descendant workflow");
+    assert!(
+        failed_descendants >= 1,
+        "expected a failed descendant workflow"
+    );
 
     cancel.cancel();
     let _ = worker.await;

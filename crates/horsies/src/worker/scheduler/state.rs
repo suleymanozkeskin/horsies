@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
+use uuid::Uuid;
 
 /// A row from `horsies_schedule_state`.
 #[derive(Debug, sqlx::FromRow)]
@@ -8,7 +9,7 @@ pub struct ScheduleStateRow {
     pub schedule_name: String,
     pub last_run_at: Option<DateTime<Utc>>,
     pub next_run_at: Option<DateTime<Utc>>,
-    pub last_task_id: Option<String>,
+    pub last_task_id: Option<Uuid>,
     pub run_count: i32,
     pub config_hash: Option<String>,
 }
@@ -81,7 +82,7 @@ pub async fn upsert_state(
     schedule_name: &str,
     last_run_at: Option<DateTime<Utc>>,
     next_run_at: Option<DateTime<Utc>>,
-    last_task_id: Option<&str>,
+    last_task_id: Option<Uuid>,
     run_count: i32,
     config_hash: Option<&str>,
 ) -> Result<(), sqlx::Error> {
@@ -149,7 +150,9 @@ pub async fn get_all_states(pool: &PgPool) -> Result<Vec<ScheduleStateRow>, sqlx
 
 /// Names of all existing schedule-state rows (for the per-tick self-heal diff).
 pub async fn get_existing_names(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar(GET_EXISTING_NAMES_SQL).fetch_all(pool).await
+    sqlx::query_scalar(GET_EXISTING_NAMES_SQL)
+        .fetch_all(pool)
+        .await
 }
 
 /// Insert a schedule-state row only if it does not already exist.
@@ -162,7 +165,7 @@ pub async fn insert_state_if_absent(
     schedule_name: &str,
     last_run_at: Option<DateTime<Utc>>,
     next_run_at: Option<DateTime<Utc>>,
-    last_task_id: Option<&str>,
+    last_task_id: Option<Uuid>,
     run_count: i32,
     config_hash: Option<&str>,
 ) -> Result<bool, sqlx::Error> {
@@ -202,9 +205,7 @@ pub async fn try_acquire_schedule_lock(
 }
 
 /// Release a per-schedule advisory lock by committing its holder transaction.
-pub async fn release_schedule_lock(
-    tx: Transaction<'static, Postgres>,
-) -> Result<(), sqlx::Error> {
+pub async fn release_schedule_lock(tx: Transaction<'static, Postgres>) -> Result<(), sqlx::Error> {
     tx.commit().await
 }
 
@@ -322,9 +323,10 @@ mod tests {
 
         // Present → no-op, existing next_run_at preserved (not overwritten).
         let second = Utc::now() + chrono::Duration::seconds(999);
-        let inserted_again = insert_state_if_absent(&pool, &name, None, Some(second), None, 0, None)
-            .await
-            .expect("insert again");
+        let inserted_again =
+            insert_state_if_absent(&pool, &name, None, Some(second), None, 0, None)
+                .await
+                .expect("insert again");
         assert!(!inserted_again, "second insert must be a no-op");
 
         let row = get_state(&pool, &name).await.expect("get").expect("exists");

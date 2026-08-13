@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::FromRow;
+use uuid::Uuid;
 
 use crate::core::{TaskInfo, TaskStatus};
 
@@ -10,7 +11,7 @@ use crate::broker::error::BrokerError;
 #[derive(Debug, FromRow)]
 pub struct ClaimedId {
     #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: String,
+    pub id: Uuid,
 }
 
 /// Row returned by SET_RUNNING_SQL — the attempt context read atomically
@@ -39,7 +40,7 @@ pub struct ClaimedId {
 #[derive(Debug, Clone, FromRow)]
 pub struct SetRunningRow {
     #[allow(dead_code)] // populated by FromRow; used as existence check
-    pub id: String,
+    pub id: Uuid,
     pub started_at: DateTime<Utc>,
     pub retry_count: i32,
     pub max_retries: i32,
@@ -62,7 +63,7 @@ pub struct SetRunningRow {
 /// by the transition that locks the row.
 #[derive(Debug, Clone, FromRow)]
 pub struct ClaimedTaskRow {
-    pub id: String,
+    pub id: Uuid,
     pub task_name: String,
     pub args: Option<String>,
     pub kwargs: Option<String>,
@@ -75,7 +76,7 @@ pub struct ClaimedTaskRow {
 /// Columns fetched for result retrieval.
 #[derive(Debug, FromRow)]
 pub struct TaskResultRow {
-    pub id: String,
+    pub id: Uuid,
     pub status: String,
     pub result: Option<String>,
     pub failed_reason: Option<String>,
@@ -84,7 +85,7 @@ pub struct TaskResultRow {
 /// Columns fetched for task info.
 #[derive(Debug, FromRow)]
 pub struct TaskInfoRow {
-    pub id: String,
+    pub id: Uuid,
     pub task_name: String,
     pub status: String,
     pub queue_name: String,
@@ -175,7 +176,7 @@ pub struct TaskRunningContextRow {
 /// Row returned by SELECT_TASK_ATTEMPTS_SQL.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct TaskAttemptRow {
-    pub task_id: String,
+    pub task_id: Uuid,
     pub attempt: i32,
     pub outcome: String,
     pub will_retry: bool,
@@ -200,7 +201,7 @@ pub struct TaskAttemptRow {
 /// the configured threshold, indicating the worker may have crashed.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct StaleTaskRow {
-    pub id: String,
+    pub id: Uuid,
     pub task_name: String,
     pub worker_hostname: Option<String>,
     pub worker_pid: Option<i32>,
@@ -215,7 +216,7 @@ pub struct StaleTaskRow {
 /// meaning it will never be claimed by a worker.
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct ExpiredTaskRow {
-    pub id: String,
+    pub id: Uuid,
     pub task_name: String,
     pub queue_name: String,
     pub priority: i32,

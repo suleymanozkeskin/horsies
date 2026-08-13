@@ -1,7 +1,9 @@
 /// Pre-built configurations for common test scenarios.
 ///
 /// Mirrors Python's `conftest.py` fixtures (app_config, broker, app).
-use horsies::{AppConfig, PostgresConfig, QueueMode, RecoveryConfig, WorkerResilienceConfig};
+use horsies::{
+    AppConfig, PostgresConfig, QueueMode, RecoveryConfig, RetentionConfig, WorkerResilienceConfig,
+};
 
 use crate::db;
 
@@ -18,6 +20,7 @@ pub fn default_app_config() -> AppConfig {
             pool_pre_ping: true,
             pool_size: 5,
             max_overflow: 5,
+            retain_rerun_input_default: false,
             pool_timeout: 10,
             pool_recycle: 600,
             echo: false,
@@ -27,6 +30,7 @@ pub fn default_app_config() -> AppConfig {
         claim_lease_ms: None,
         max_claim_renew_age_ms: 180_000,
         recovery: RecoveryConfig::default(),
+        retention: RetentionConfig::default(),
         resilience: WorkerResilienceConfig::default(),
         schedule: None,
         resend_on_transient_err: false,
@@ -44,17 +48,15 @@ pub fn fast_recovery_app_config() -> AppConfig {
         running_stale_threshold_ms: 2_000,
         finalizing_stale_threshold_ms: 2_000,
         crashed_worker_recovery_grace_ms: 2_000,
+        phase2_quarantine_after_attempts: 25,
         check_interval_ms: 1_000,
         runner_heartbeat_interval_ms: 1_000,
         claimer_heartbeat_interval_ms: 1_000,
         worker_state_snapshot_interval_ms: 1_000,
-        heartbeat_retention_hours: Some(1),
-        worker_state_retention_hours: Some(1),
-        terminal_record_retention_hours: Some(1),
-        queue_terminal_record_retention_hours: std::collections::HashMap::new(),
-        retention_sweep_interval_s: 30,
-        retention_delete_batch_size: 500,
     };
+    config.retention.worker_state_retention_hours = Some(1);
+    config.retention.terminal_record_retention_hours = Some(1);
+    config.retention.retention_sweep_interval_s = 30;
     config
 }
 
@@ -67,6 +69,7 @@ pub fn test_postgres_config() -> PostgresConfig {
         pool_pre_ping: true,
         pool_size: 5,
         max_overflow: 5,
+        retain_rerun_input_default: false,
         pool_timeout: 10,
         pool_recycle: 600,
         echo: false,

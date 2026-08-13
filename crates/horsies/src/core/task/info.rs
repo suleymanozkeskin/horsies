@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
 use crate::core::types::status::TaskAttemptOutcome;
@@ -8,7 +9,7 @@ use crate::core::types::TaskStatus;
 /// Metadata for a broker-backed task.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskInfo {
-    pub task_id: String,
+    pub task_id: Uuid,
     pub task_name: String,
     pub status: TaskStatus,
     pub queue_name: String,
@@ -53,7 +54,7 @@ pub struct TaskInfo {
 /// Mirrors Python's `TaskAttemptInfo` dataclass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAttemptInfo {
-    pub task_id: String,
+    pub task_id: Uuid,
     pub attempt: i32,
     pub outcome: TaskAttemptOutcome,
     pub will_retry: bool,
@@ -82,7 +83,7 @@ mod tests {
     /// Helper to build a minimal TaskInfo for testing.
     fn make_task_info(result: Option<TaskResult<serde_json::Value>>) -> TaskInfo {
         TaskInfo {
-            task_id: "task-001".to_owned(),
+            task_id: Uuid::nil(),
             task_name: "my_task".to_owned(),
             status: TaskStatus::Completed,
             queue_name: "default".to_owned(),
@@ -132,7 +133,7 @@ mod tests {
     #[test]
     fn deserialize_without_result_field() {
         let json = serde_json::json!({
-            "task_id": "task-002",
+            "task_id": "00000000-0000-0000-0000-000000000002",
             "task_name": "another_task",
             "status": "PENDING",
             "queue_name": "default",
@@ -142,14 +143,17 @@ mod tests {
             "enqueued_at": "2025-01-01T00:00:00Z"
         });
         let info: TaskInfo = serde_json::from_value(json).unwrap();
-        assert_eq!(info.task_id, "task-002");
+        assert_eq!(
+            info.task_id,
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+        );
         assert!(info.result.is_none());
     }
 
     #[test]
     fn deserialize_with_result_field() {
         let json = serde_json::json!({
-            "task_id": "task-003",
+            "task_id": "00000000-0000-0000-0000-000000000003",
             "task_name": "result_task",
             "status": "COMPLETED",
             "queue_name": "high",

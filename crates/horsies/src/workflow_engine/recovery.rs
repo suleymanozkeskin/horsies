@@ -1,9 +1,9 @@
-use sqlx::PgPool;
-use uuid::Uuid;
-
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
+use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueueInputEligibility};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::{TaskResult, WorkflowSpecRegistry};
+use sqlx::PgPool;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
@@ -183,16 +183,24 @@ const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
     status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at
+    enqueue_sha, is_workflow_task, created_at, updated_at,
+    command_fingerprint_version, command_fingerprint, retention_class_key,
+    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
+    retain_rerun_input, prepared_rerun_input_disposition,
+    prepared_rerun_input_version, prepared_rerun_input_codec,
+    prepared_rerun_input_content_type, prepared_rerun_input_digest,
+    prepared_rerun_input_inline, prepared_rerun_input_reference
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10, TRUE, NOW(), NOW())";
+VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
+        TRUE, NOW(), NOW(), $11, $12, $13, $14, NULL, NULL, NULL, $15, $16,
+        $17, $18, $19, $20, $21, NULL)";
 
 /// Link workflow_task to a newly created horsies_task.
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1, status = 'ENQUEUED', started_at = NOW()
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
-WHERE wt.workflow_id = $2 AND wt.task_index = $3
+WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
@@ -310,6 +318,7 @@ pub async fn recover_stuck_workflows(
     registry: &WorkflowSpecRegistry,
     finalizing_grace_ms: u64,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
     recover_stuck_workflows_with_cap(
         pool,
@@ -317,6 +326,7 @@ pub async fn recover_stuck_workflows(
         Some(GLOBAL_SCAN_ROW_CAP),
         finalizing_grace_ms,
         payload,
+        retention,
     )
     .await
 }
@@ -336,15 +346,25 @@ pub(crate) async fn recover_stuck_workflows_with_cap(
     max_rows: Option<i64>,
     finalizing_grace_ms: u64,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<RecoveryReport, WorkflowError> {
     let mut report = RecoveryReport::default();
 
-    recover_case0(pool, registry, max_rows, &mut report, payload).await;
-    recover_case1(pool, max_rows, &mut report).await;
-    recover_case1_5(pool, registry, max_rows, &mut report).await;
-    recover_case1_6(pool, registry, max_rows, &mut report, payload).await;
-    recover_case1_7(pool, registry, max_rows, finalizing_grace_ms, &mut report, payload).await;
-    recover_case2_3(pool, registry, max_rows, &mut report, payload).await;
+    recover_case0(pool, registry, max_rows, &mut report, payload, retention).await;
+    recover_case1(pool, max_rows, &mut report, retention).await;
+    recover_case1_5(pool, registry, max_rows, &mut report, retention).await;
+    recover_case1_6(pool, registry, max_rows, &mut report, payload, retention).await;
+    recover_case1_7(
+        pool,
+        registry,
+        max_rows,
+        finalizing_grace_ms,
+        &mut report,
+        payload,
+        retention,
+    )
+    .await;
+    recover_case2_3(pool, registry, max_rows, &mut report, payload, retention).await;
     recover_case4(pool, max_rows, &mut report).await;
 
     if report.total() > 0 {
@@ -375,6 +395,7 @@ async fn recover_case0(
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     let rows = match sqlx::query_as::<_, StuckPendingRow>(CASE0_STUCK_PENDING_SQL)
         .bind(max_rows)
@@ -394,7 +415,16 @@ async fn recover_case0(
             continue;
         };
 
-        match engine::process_dependents(pool, &row.workflow_id, dep_index, registry, payload).await {
+        match engine::process_dependents(
+            pool,
+            &row.workflow_id,
+            dep_index,
+            registry,
+            payload,
+            retention,
+        )
+        .await
+        {
             Ok(()) => {
                 report.case0_pending_reevaluated += 1;
                 tracing::debug!(
@@ -417,7 +447,12 @@ async fn recover_case0(
 }
 
 /// Case 1: Re-enqueue READY regular tasks with no horsies_tasks row.
-async fn recover_case1(pool: &PgPool, max_rows: Option<i64>, report: &mut RecoveryReport) {
+async fn recover_case1(
+    pool: &PgPool,
+    max_rows: Option<i64>,
+    report: &mut RecoveryReport,
+    retention: &RetentionConfig,
+) {
     let rows = match sqlx::query_as::<_, ReadyTaskRow>(CASE1_READY_NO_TASK_SQL)
         .bind(max_rows)
         .fetch_all(pool)
@@ -432,7 +467,7 @@ async fn recover_case1(pool: &PgPool, max_rows: Option<i64>, report: &mut Recove
     };
 
     for row in rows {
-        match enqueue_ready_task(pool, &row).await {
+        match enqueue_ready_task(pool, &row, retention).await {
             Ok(true) => {
                 report.case1_ready_enqueued += 1;
                 tracing::debug!(
@@ -464,6 +499,7 @@ async fn recover_case1_5(
     registry: &WorkflowSpecRegistry,
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
+    retention: &RetentionConfig,
 ) {
     let rows = match sqlx::query_as::<_, ReadySubworkflowRow>(CASE1_5_READY_SUBWORKFLOW_SQL)
         .bind(max_rows)
@@ -479,7 +515,7 @@ async fn recover_case1_5(
     };
 
     for row in rows {
-        match start_stuck_subworkflow(pool, registry, &row).await {
+        match start_stuck_subworkflow(pool, registry, &row, retention).await {
             Ok(()) => {
                 report.case1_5_subworkflow_started += 1;
                 tracing::debug!(
@@ -508,6 +544,7 @@ async fn recover_case1_6(
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     let rows = match sqlx::query_as::<_, StaleSubworkflowRow>(CASE1_6_STALE_SUBWORKFLOW_SQL)
         .bind(max_rows)
@@ -532,6 +569,7 @@ async fn recover_case1_6(
             row.child_result.as_deref(),
             registry,
             payload,
+            retention,
         )
         .await
         {
@@ -565,6 +603,7 @@ async fn recover_case1_7(
     finalizing_grace_ms: u64,
     report: &mut RecoveryReport,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     let rows = match sqlx::query_as::<_, StaleLinkedTaskRow>(CASE1_7_STALE_LINKED_TASK_SQL)
         .bind(max_rows)
@@ -641,6 +680,7 @@ async fn recover_case1_7(
             is_success,
             registry,
             payload,
+            retention,
         )
         .await
         {
@@ -672,6 +712,7 @@ async fn recover_case2_3(
     max_rows: Option<i64>,
     report: &mut RecoveryReport,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     let rows = match sqlx::query_as::<_, StuckWorkflowRow>(CASE2_3_STUCK_WORKFLOW_SQL)
         .bind(max_rows)
@@ -687,7 +728,15 @@ async fn recover_case2_3(
     };
 
     for row in rows {
-        match engine::check_workflow_completion(pool, &row.workflow_id, registry, payload).await {
+        match engine::check_workflow_completion(
+            pool,
+            &row.workflow_id,
+            registry,
+            payload,
+            retention,
+        )
+        .await
+        {
             Ok(()) => {
                 report.case2_3_workflow_completed += 1;
                 tracing::debug!(
@@ -768,8 +817,16 @@ async fn recover_case4(pool: &PgPool, max_rows: Option<i64>, report: &mut Recove
 ///
 /// Returns `true` when the workflow_task was linked (recovered), `false` when
 /// the LINK matched 0 rows and the inserted row was rolled back.
-async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<bool, WorkflowError> {
-    let task_id = Uuid::new_v4().to_string();
+async fn enqueue_ready_task(
+    pool: &PgPool,
+    row: &ReadyTaskRow,
+    retention: &RetentionConfig,
+) -> Result<bool, WorkflowError> {
+    let task_id = crate::core::history::identity::uuid7::mint_task_id()
+        .map(|task_id| task_id.to_string())
+        .map_err(|error| {
+            WorkflowError::Validation(format!("task identity mint failed: {error}"))
+        })?;
     let max_retries = parse_max_retries(row.task_options.as_deref());
 
     let merged_kwargs = merge_args_from_for_ready(
@@ -795,6 +852,23 @@ async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<bool, W
     .await?;
 
     let enqueue_sha = format!("wf-{}", task_id);
+    let good_until = parse_good_until_from_options(row.task_options.as_deref());
+    let retention_class_key = retention.resolve_queue_class(&row.queue_name);
+    let facts = prepare_enqueue_facts(
+        &row.task_name,
+        &row.queue_name,
+        row.priority,
+        row.task_args.as_deref(),
+        merged_kwargs.as_deref(),
+        good_until,
+        None,
+        row.task_options.as_deref(),
+        retention_class_key.as_deref(),
+        false,
+        None,
+        EnqueueInputEligibility::NeverEligible,
+    )
+    .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
     // INSERT + LINK in a single transaction so a row whose LINK matches 0 rows
     // (workflow no longer RUNNING / task no longer READY, or a concurrent
@@ -810,10 +884,26 @@ async fn enqueue_ready_task(pool: &PgPool, row: &ReadyTaskRow) -> Result<bool, W
         .bind(row.priority)
         .bind(&row.task_args)
         .bind(&merged_kwargs)
-        .bind(parse_good_until_from_options(row.task_options.as_deref()))
+        .bind(good_until)
         .bind(max_retries)
         .bind(&row.task_options)
         .bind(&enqueue_sha)
+        .bind(facts.command_fingerprint_version)
+        .bind(facts.command_fingerprint.as_slice())
+        .bind(&facts.retention_class_key)
+        .bind(facts.input_digest.as_slice())
+        .bind(facts.retain_rerun_input)
+        .bind(facts.prepared_rerun_input_disposition.as_str())
+        .bind(facts.prepared_rerun_input_version)
+        .bind(facts.prepared_rerun_input_codec)
+        .bind(facts.prepared_rerun_input_content_type)
+        .bind(
+            facts
+                .prepared_rerun_input_digest
+                .as_ref()
+                .map(|digest| digest.as_slice()),
+        )
+        .bind(facts.prepared_rerun_input_inline.as_deref())
         .execute(&mut *tx)
         .await?;
 
@@ -844,6 +934,7 @@ async fn start_stuck_subworkflow(
     pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     row: &ReadySubworkflowRow,
+    retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = row
         .task_name
@@ -901,6 +992,7 @@ async fn start_stuck_subworkflow(
         parent_depth + 1,
         root_wf_id,
         registry,
+        retention,
     )
     .await?;
 
@@ -1004,18 +1096,126 @@ mod cap_tests {
         let registry = WorkflowSpecRegistry::new();
 
         // Capped at 2: exactly 2 of the 3 orphans are failed this pass.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, Some(2), 0, &PayloadPolicy::default())
-            .await
-            .unwrap();
+        let report = recover_stuck_workflows_with_cap(
+            &pool,
+            &registry,
+            Some(2),
+            0,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(report.case4_orphaned_failed, 2);
         assert_eq!(failed_count(&pool, &ids).await, 2);
 
         // Uncapped: the remaining orphan is failed.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 0, &PayloadPolicy::default())
-            .await
-            .unwrap();
+        let report = recover_stuck_workflows_with_cap(
+            &pool,
+            &registry,
+            None,
+            0,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(report.case4_orphaned_failed, 1);
         assert_eq!(failed_count(&pool, &ids).await, 3);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn p6_workflow_enqueue_recovery_persists_never_eligible_facts() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let workflow_id = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index,
+                definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at
+             ) VALUES (
+                $1::uuid, 'p6_recovery_wf', 'RUNNING', 'fail', NULL,
+                'p6.recovery.v1', 0, $1::uuid, NOW(), NOW(), NOW(), NOW()
+             )",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert recovery workflow");
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+             ) VALUES (
+                $1::uuid, $2::uuid, 0, 'p6_recovery', 'p6_recovery_task', '[1]', '{}',
+                'bulk', 17, '{}', FALSE, 'all', 'READY', FALSE, NOW()
+             )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert ready recovery node");
+        let row = ReadyTaskRow {
+            workflow_id: workflow_id.clone(),
+            task_index: 0,
+            task_name: "p6_recovery_task".to_owned(),
+            task_args: Some("[1]".to_owned()),
+            task_kwargs: Some("{}".to_owned()),
+            queue_name: "bulk".to_owned(),
+            priority: 17,
+            task_options: None,
+            args_from: None,
+            workflow_ctx_from: None,
+            dependencies: Vec::new(),
+        };
+        let mut retention = RetentionConfig::default();
+        retention
+            .queue_retention
+            .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
+        assert!(enqueue_ready_task(&pool, &row, &retention)
+            .await
+            .expect("recovery enqueue path"));
+        let facts: (String, String, i32, i32, bool, Option<i32>) = sqlx::query_as(
+            "SELECT t.retention_class_key, t.prepared_rerun_input_disposition,
+                    octet_length(t.command_fingerprint), octet_length(t.input_digest),
+                    t.retain_rerun_input, octet_length(t.prepared_rerun_input_inline)
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read recovery enqueue facts");
+        assert_eq!(facts.0, "q_bulk_7d");
+        assert_eq!(facts.1, "NEVER_ELIGIBLE");
+        assert_eq!(facts.2, 32);
+        assert_eq!(facts.3, 32);
+        assert!(!facts.4);
+        assert!(facts.5.is_none());
+
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid
+             )",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
+            .bind(&workflow_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     /// Case 1.7 must not recover a just-terminal task within the grace, but must
@@ -1024,7 +1224,9 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn case1_7_grace_defers_then_recovers() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
 
@@ -1045,9 +1247,12 @@ mod cap_tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, enqueued_at, completed_at, terminal_at, result, max_retries, retry_count,
-                enqueue_sha, is_workflow_task, created_at, updated_at)
+                enqueue_sha, is_workflow_task, created_at, updated_at,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, prepared_rerun_input_disposition)
              VALUES ($1, 'grace_task', 'default', 0, '[]', '{}', 'COMPLETED',
-                NOW(), NOW(), NOW(), NOW(), '{\"Ok\":1}', 0, 0, $1, TRUE, NOW(), NOW())",
+                NOW(), NOW(), NOW(), NOW(), '{\"Ok\":1}', 0, 0, $1, TRUE, NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE')",
         )
         .bind(&task_id)
         .execute(&pool)
@@ -1078,21 +1283,40 @@ mod cap_tests {
         };
 
         // Within the 10s grace: Case 1.7 defers.
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000, &PayloadPolicy::default())
-            .await
-            .unwrap();
-        assert_eq!(report.case1_7_task_completed, 0, "within grace: not recovered");
+        let report = recover_stuck_workflows_with_cap(
+            &pool,
+            &registry,
+            None,
+            10_000,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            report.case1_7_task_completed, 0,
+            "within grace: not recovered"
+        );
         assert_eq!(wt_status(pool.clone(), wf_id.clone()).await, "ENQUEUED");
 
         // Age the terminal stamp past the grace.
-        sqlx::query("UPDATE horsies_tasks SET completed_at = NOW() - INTERVAL '20 seconds' WHERE id = $1")
-            .bind(&task_id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        let report = recover_stuck_workflows_with_cap(&pool, &registry, None, 10_000, &PayloadPolicy::default())
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE horsies_tasks SET completed_at = NOW() - INTERVAL '20 seconds' WHERE id = $1",
+        )
+        .bind(&task_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let report = recover_stuck_workflows_with_cap(
+            &pool,
+            &registry,
+            None,
+            10_000,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(report.case1_7_task_completed, 1, "past grace: recovered");
         assert_eq!(wt_status(pool.clone(), wf_id.clone()).await, "COMPLETED");
 
@@ -1122,7 +1346,9 @@ mod cap_tests {
     #[tokio::test]
     #[serial]
     async fn pending_expiry_then_case1_7_repairs_workflow() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
@@ -1144,9 +1370,12 @@ mod cap_tests {
         sqlx::query(
             "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, enqueued_at, good_until, max_retries, retry_count, enqueue_sha,
-                is_workflow_task, created_at, updated_at)
+                is_workflow_task, created_at, updated_at, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition)
              VALUES ($1, 'pending_expiry_task', 'default', 100, '[]', '{}', 'PENDING',
-                NOW(), NOW(), NOW() - INTERVAL '1 second', 0, 0, $1, TRUE, NOW(), NOW())",
+                NOW(), NOW(), NOW() - INTERVAL '1 second', 0, 0, $1, TRUE, NOW(), NOW(),
+                1, decode(repeat('00', 32), 'hex'), 'standard_30d', FALSE, 'NEVER_ELIGIBLE')",
         )
         .bind(&task_id)
         .execute(&pool)
@@ -1211,14 +1440,26 @@ mod cap_tests {
         assert_eq!(task_status, "EXPIRED");
 
         // The window this test pins: the expiry alone advances nothing.
-        assert_eq!(node_status(pool.clone(), wf_id.clone(), 0).await, "ENQUEUED");
-        assert_eq!(workflow_status(pool.clone(), wf_id.clone()).await, "RUNNING");
+        assert_eq!(
+            node_status(pool.clone(), wf_id.clone(), 0).await,
+            "ENQUEUED"
+        );
+        assert_eq!(
+            workflow_status(pool.clone(), wf_id.clone()).await,
+            "RUNNING"
+        );
 
         // Case 1.7 (grace 0) repairs the workflow. The scan is global (shared
         // test DB), so assert on this workflow's rows, not the report count.
-        let report = recover_stuck_workflows(&pool, &registry, 0, &PayloadPolicy::default())
-            .await
-            .expect("recovery pass");
+        let report = recover_stuck_workflows(
+            &pool,
+            &registry,
+            0,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("recovery pass");
         assert!(report.case1_7_task_completed >= 1, "case 1.7 must fire");
 
         assert_eq!(node_status(pool.clone(), wf_id.clone(), 0).await, "FAILED");
@@ -1231,7 +1472,11 @@ mod cap_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        let stored = format!("{} {}", wf_result.unwrap_or_default(), wf_error.unwrap_or_default());
+        let stored = format!(
+            "{} {}",
+            wf_result.unwrap_or_default(),
+            wf_error.unwrap_or_default()
+        );
         assert!(
             stored.contains("TASK_EXPIRED"),
             "workflow failure must carry the stored TASK_EXPIRED result; got: {stored}",

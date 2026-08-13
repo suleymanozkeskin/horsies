@@ -97,8 +97,13 @@ async fn enqueue_contract_task(
             None,
             label,
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
+        .map(|task_id| task_id.to_string())
 }
 
 #[tokio::test]
@@ -336,9 +341,19 @@ async fn worker_processes_task_and_workflow_through_pgbouncer_split_urls(
                 None,
                 "pgbouncer-e2e-task",
                 None,
+                None,
+                None,
+                None,
+                None,
             )
             .await?;
-        wait_for_task_status(&pool, &task_id, "COMPLETED", Duration::from_secs(15)).await;
+        wait_for_task_status(
+            &pool,
+            &task_id.to_string(),
+            "COMPLETED",
+            Duration::from_secs(15),
+        )
+        .await;
 
         let mut app = Horsies::new(config)?;
         horsies_test_worker::tasks::register(&mut app).unwrap();

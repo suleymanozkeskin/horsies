@@ -45,6 +45,10 @@ pub struct PostgresConfig {
     #[serde(default = "default_max_overflow")]
     pub max_overflow: u32,
 
+    /// Default policy for retaining canonical rerun input at enqueue.
+    #[serde(default)]
+    pub retain_rerun_input_default: bool,
+
     /// Timeout in seconds for acquiring a connection from the pool.
     #[serde(default = "default_pool_timeout")]
     pub pool_timeout: u32,
@@ -81,10 +85,17 @@ impl std::fmt::Debug for PostgresConfig {
                 "session_database_url",
                 &self.session_database_url.as_deref().map(mask_url),
             )
-            .field("pgbouncer_transaction_mode", &self.pgbouncer_transaction_mode)
+            .field(
+                "pgbouncer_transaction_mode",
+                &self.pgbouncer_transaction_mode,
+            )
             .field("pool_pre_ping", &self.pool_pre_ping)
             .field("pool_size", &self.pool_size)
             .field("max_overflow", &self.max_overflow)
+            .field(
+                "retain_rerun_input_default",
+                &self.retain_rerun_input_default,
+            )
             .field("pool_timeout", &self.pool_timeout)
             .field("pool_recycle", &self.pool_recycle)
             .field("echo", &self.echo)
@@ -134,6 +145,7 @@ impl PostgresConfig {
             pool_pre_ping: default_true(),
             pool_size: default_pool_size(),
             max_overflow: default_max_overflow(),
+            retain_rerun_input_default: false,
             pool_timeout: default_pool_timeout(),
             pool_recycle: default_pool_recycle(),
             echo: false,
@@ -225,6 +237,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 10,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -243,6 +256,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -259,6 +273,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -275,6 +290,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -292,6 +308,7 @@ mod tests {
         assert!(!config.echo);
         assert!(config.session_database_url.is_none());
         assert!(!config.pgbouncer_transaction_mode);
+        assert!(!config.retain_rerun_input_default);
     }
 
     #[test]

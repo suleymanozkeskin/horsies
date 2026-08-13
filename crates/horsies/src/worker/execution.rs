@@ -23,11 +23,12 @@ use crate::broker::terminalization::{
 };
 use crate::broker::{ClaimedTaskRow, PostgresBroker, SetRunningRow};
 use crate::core::config::payload::{enforce_payload_policy, PayloadKind, PayloadPolicy};
+use crate::core::config::recovery::RecoveryConfig;
+use crate::core::config::retention::RetentionConfig;
 use crate::core::lifecycle::{
     OwnedClaim, PriorLockedRead, TerminalizationCommand, TerminalizationKind,
     TerminalizationOutcome,
 };
-use crate::core::config::recovery::RecoveryConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::error::{OperationalErrorCode, OutcomeCode, TaskError};
 use crate::core::task::fn_trait::RegisteredTask;
@@ -468,7 +469,11 @@ pub(crate) fn build_task_envelope(
     row: &ClaimedTaskRow,
     accepts_workflow_ctx: bool,
 ) -> Result<Vec<u8>, TaskError> {
-    build_envelope_from_parts(row.args.as_deref(), row.kwargs.as_deref(), accepts_workflow_ctx)
+    build_envelope_from_parts(
+        row.args.as_deref(),
+        row.kwargs.as_deref(),
+        accepts_workflow_ctx,
+    )
 }
 
 /// Build the worker args/kwargs envelope from raw args/kwargs JSON strings.
@@ -1117,7 +1122,10 @@ async fn persist_failure_locked(
                     Some(worker_id),
                     context.worker_hostname.as_deref().or(Some(hostname)),
                     context.worker_pid.or(Some(pid)),
-                    context.worker_process_name.as_deref().or(Some(process_name)),
+                    context
+                        .worker_process_name
+                        .as_deref()
+                        .or(Some(process_name)),
                 )
                 .await?;
         }
@@ -1229,6 +1237,7 @@ pub(crate) async fn finalize_workflow_phase(
     is_workflow_task: bool,
     capacity_notified: bool,
     payload_policy: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<(), FinalizeError> {
     // Workflow membership is carried on the task row (is_workflow_task), set at
     // insert time — no per-task JOIN to horsies_workflow_tasks needed here.
@@ -1240,6 +1249,7 @@ pub(crate) async fn finalize_workflow_phase(
             is_success,
             workflow_registry,
             payload_policy,
+            retention,
         )
         .await
         .map_err(|e| {
@@ -1335,7 +1345,7 @@ pub(crate) async fn finalize_pre_execution_failure(
     payload_policy: PayloadPolicy,
     orphan_self_heal: bool,
 ) -> Option<Phase2Work> {
-    let task_id = row.id.clone();
+    let task_id = row.id.to_string();
     let queue_name = row.queue_name.clone();
     let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
@@ -1419,7 +1429,7 @@ pub(crate) async fn execute_and_finalize(
     recovery: RecoveryConfig,
     payload_policy: PayloadPolicy,
 ) -> Option<Phase2Work> {
-    let task_id = row.id.clone();
+    let task_id = row.id.to_string();
     let queue_name = row.queue_name.clone();
     let is_workflow_task = row.is_workflow_task;
     let pid = std::process::id() as i32;
@@ -1533,6 +1543,7 @@ pub(crate) async fn run_phase2(
     workflow_registry: &WorkflowSpecRegistry,
     work: Phase2Work,
     payload_policy: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     retry_phase2(
         pool,
@@ -1544,6 +1555,7 @@ pub(crate) async fn run_phase2(
         work.is_workflow_task,
         work.capacity_notified,
         payload_policy,
+        retention,
     )
     .await;
 }
@@ -1661,6 +1673,7 @@ async fn retry_phase2(
     is_workflow_task: bool,
     capacity_notified: bool,
     payload_policy: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) {
     // First attempt with the in-memory result.
     match finalize_workflow_phase(
@@ -1673,6 +1686,7 @@ async fn retry_phase2(
         is_workflow_task,
         capacity_notified,
         payload_policy,
+        retention,
     )
     .await
     {
@@ -1734,6 +1748,7 @@ async fn retry_phase2(
             is_workflow_task,
             capacity_notified,
             payload_policy,
+            retention,
         )
         .await
         {
@@ -1862,8 +1877,7 @@ mod result_wrap_tests {
         let wrapped_json = serde_json::to_string(&TaskResult::Ok(raw)).expect("wrap serializes");
 
         assert_eq!(
-            wrapped_json,
-            r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
+            wrapped_json, r#"{"__type":"ok","value":{"amount": 1.2300, "id": 7}}"#,
             "result bytes must be embedded verbatim",
         );
 
@@ -1974,18 +1988,26 @@ mod replay_reload_tests {
         pool
     }
 
-    async fn insert_terminal_task(pool: &PgPool, task_id: &str, status: &str, result: Option<&str>) {
+    async fn insert_terminal_task(
+        pool: &PgPool,
+        task_id: &str,
+        status: &str,
+        result: Option<&str>,
+    ) {
         sqlx::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status, result,
                 sent_at, created_at, updated_at, terminal_at,
-                retry_count, max_retries, enqueue_sha
+                retry_count, max_retries, enqueue_sha, command_fingerprint_version,
+                command_fingerprint, retention_class_key, retain_rerun_input,
+                prepared_rerun_input_disposition
             ) VALUES (
                 $1, 'replay_reload_task', 'default', 100, '[]', '{}', $2, $3,
                 NOW(), NOW(), NOW(),
                 CASE WHEN $2 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
                      THEN NOW() END,
-                0, 0, $1
+                0, 0, $1, 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
             )",
         )
         .bind(task_id)
@@ -2013,7 +2035,8 @@ mod replay_reload_tests {
     async fn expired_err_result_reloads_for_phase2_replay() {
         let pool = test_pool().await;
         let task_id = Uuid::new_v4().to_string();
-        let stored = r#"{"ok":null,"err":{"error_code":"TASK_EXPIRED","message":"expired before start"}}"#;
+        let stored =
+            r#"{"ok":null,"err":{"error_code":"TASK_EXPIRED","message":"expired before start"}}"#;
         insert_terminal_task(&pool, &task_id, "EXPIRED", Some(stored)).await;
 
         let (result_json, is_success) = load_persisted_task_result(&pool, &task_id)
@@ -2080,9 +2103,13 @@ mod set_running_gate_tests {
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, args, kwargs, status,
                 sent_at, claimed_at, created_at, updated_at, claimed,
-                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha
+                claimed_by_worker_id, retry_count, max_retries, is_workflow_task, enqueue_sha,
+                command_fingerprint_version, command_fingerprint, retention_class_key,
+                retain_rerun_input, prepared_rerun_input_disposition
             ) VALUES ($1, 'p1_task', 'default', 100, '[]', '{}', 'CLAIMED',
-                      NOW(), NOW(), NOW(), NOW(), TRUE, 'w1', 0, 3, $2, $1)",
+                      NOW(), NOW(), NOW(), NOW(), TRUE, 'w1', 0, 3, $2, $1,
+                      1, decode(repeat('00', 32), 'hex'), 'standard_30d',
+                      FALSE, 'NEVER_ELIGIBLE')",
         )
         .bind(task_id)
         .bind(is_wf)
@@ -2094,7 +2121,9 @@ mod set_running_gate_tests {
     #[tokio::test]
     #[serial]
     async fn workflow_task_still_transitions_node_to_running() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         let pool = broker.pool().clone();
         let wf_id = Uuid::new_v4().to_string();
         let task_id = Uuid::new_v4().to_string();
@@ -2127,7 +2156,8 @@ mod set_running_gate_tests {
         seed_claimed(&pool, &task_id, true).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true, None, false).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", true, None, false)
+                .await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let node_status: String =
@@ -2136,23 +2166,41 @@ mod set_running_gate_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(node_status, "RUNNING", "workflow node must transition to RUNNING (gate must not skip it)");
+        assert_eq!(
+            node_status, "RUNNING",
+            "workflow node must transition to RUNNING (gate must not skip it)"
+        );
 
-        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1").bind(&wf_id).execute(&pool).await.ok();
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1").bind(&task_id).execute(&pool).await.ok();
-        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1").bind(&wf_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(&wf_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     #[tokio::test]
     #[serial]
     async fn plain_task_starts_running_without_workflow_update() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         let pool = broker.pool().clone();
         let task_id = Uuid::new_v4().to_string();
         seed_claimed(&pool, &task_id, false).await;
 
         let outcome =
-            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false, None, false).await;
+            confirm_ownership_and_set_running(&broker, &task_id, "w1", 1, "h1", false, None, false)
+                .await;
         assert!(matches!(outcome, OwnershipOutcome::Running(_)));
 
         let status: String = sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id = $1")
@@ -2162,6 +2210,10 @@ mod set_running_gate_tests {
             .unwrap();
         assert_eq!(status, "RUNNING");
 
-        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1").bind(&task_id).execute(&pool).await.ok();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(&task_id)
+            .execute(&pool)
+            .await
+            .ok();
     }
 }

@@ -423,8 +423,12 @@ async fn reaper_phase2_rejects_task_with_fresh_heartbeat() {
     // Insert a RUNNING task with started_at well in the past.
     let task_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO horsies_tasks (id, task_name, queue_name, status, started_at, max_retries, enqueue_sha) \
-         VALUES ($1, 'test_task', 'default', 'RUNNING', NOW() - INTERVAL '10 minutes', 0, 'sha-test')",
+        "INSERT INTO horsies_tasks (id, task_name, queue_name, status, started_at, max_retries,
+             enqueue_sha, command_fingerprint_version, command_fingerprint, retention_class_key,
+             retain_rerun_input, prepared_rerun_input_disposition) \
+         VALUES ($1, 'test_task', 'default', 'RUNNING', NOW() - INTERVAL '10 minutes', 0,
+             'sha-test', 1, decode(repeat('00', 32), 'hex'), 'standard_30d',
+             FALSE, 'NEVER_ELIGIBLE')",
     )
     .bind(&task_id)
     .execute(&pool)

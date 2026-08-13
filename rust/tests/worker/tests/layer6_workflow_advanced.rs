@@ -353,9 +353,9 @@ async fn test_unresolvable_subworkflow_marks_parent_failed() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let ok_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(
-        serde_json::json!("completed_A"),
-    ))
+    let ok_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(serde_json::json!(
+        "completed_A"
+    )))
     .unwrap();
     horsies::on_workflow_task_complete(
         &pool,
@@ -364,9 +364,10 @@ async fn test_unresolvable_subworkflow_marks_parent_failed() {
         true,
         &reg,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Parent sub-workflow task (index 1) is FAILED with a load-failure error, and
     // the workflow finalizes FAILED instead of hanging in RUNNING.
@@ -428,8 +429,7 @@ async fn test_subworkflow_complete_does_not_rewrite_terminal_parent_node() {
     let wf_id = start_wf(&pool, &spec).await;
 
     let preserved_result =
-        serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(serde_json::json!(11)))
-            .unwrap();
+        serde_json::to_string(&TaskResult::<serde_json::Value>::Ok(serde_json::json!(11))).unwrap();
     sqlx::query(
         "UPDATE horsies_workflow_tasks \
          SET is_subworkflow = TRUE, \
@@ -456,21 +456,21 @@ async fn test_subworkflow_complete_does_not_rewrite_terminal_parent_node() {
         None,
         &reg,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Parent node B is unchanged on CAS-miss: status, result, and completed_at
     // (which UPDATE_SUBWORKFLOW_FAILED_SQL would have set to NOW()) are preserved.
-    let (status, result, completed_at_preserved): (String, Option<String>, bool) =
-        sqlx::query_as(
-            "SELECT status, result, completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
+    let (status, result, completed_at_preserved): (String, Option<String>, bool) = sqlx::query_as(
+        "SELECT status, result, completed_at = TIMESTAMPTZ '2020-01-01 00:00:00+00' \
              FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 1",
-        )
-        .bind(&wf_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(status, "COMPLETED");
     assert_eq!(result.as_deref(), Some(preserved_result.as_str()));
     assert!(
@@ -681,9 +681,15 @@ async fn test_resume_continues_workflow() {
     pause_workflow(&pool, &wf_id).await.unwrap();
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(3)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let resumed = resume_workflow(
+        &pool,
+        &wf_id,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
     assert!(resumed, "resume should succeed");
 
     let status = wait_for_workflow_completion(&pool, &wf_id, Duration::from_secs(15)).await;
@@ -1005,9 +1011,15 @@ async fn test_on_error_pause_resume_completes() {
     let wf_id = start_wf(&pool, &spec).await;
     wait_for_wf_status(&pool, &wf_id, "PAUSED", Duration::from_secs(15)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let resumed = resume_workflow(
+        &pool,
+        &wf_id,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
     assert!(resumed);
 
     let status = wait_for_workflow_terminal(&pool, &wf_id, Duration::from_secs(15)).await;
@@ -1064,12 +1076,13 @@ async fn test_on_error_pause_cascades_to_running_child() {
     .unwrap();
 
     // Resolve the root task's horsies_tasks id, then fail it.
-    let task_id: String =
-        sqlx::query_scalar("SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0")
-            .bind(&wf_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let task_id: String = sqlx::query_scalar(
+        "SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1 AND task_index = 0",
+    )
+    .bind(&wf_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
 
     let failed_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
         TaskError::new("PARENT_FAIL", "parent failed"),
@@ -1083,9 +1096,10 @@ async fn test_on_error_pause_cascades_to_running_child() {
         false,
         &reg,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
 
     // Parent paused on error, and the running child was paused by the cascade.
     let parent_status: String =
@@ -1162,8 +1176,10 @@ async fn test_on_error_fail_keeps_first_failed_error_by_index() {
     let task_id_1 = task_id_for(1).await;
 
     let err_result = |code: &str, msg: &str| {
-        serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::new(code, msg)))
-            .unwrap()
+        serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::new(
+            code, msg,
+        )))
+        .unwrap()
     };
 
     // Fail the higher index (1) first in time...
@@ -1174,6 +1190,7 @@ async fn test_on_error_fail_keeps_first_failed_error_by_index() {
         false,
         &reg,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
     .await
     .unwrap();
@@ -1185,6 +1202,7 @@ async fn test_on_error_fail_keeps_first_failed_error_by_index() {
         false,
         &reg,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
     .await
     .unwrap();
@@ -1256,9 +1274,15 @@ async fn test_recovery_preserves_results() {
     .unwrap();
 
     // Run recovery.
-    let _report = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let _report = horsies::recover_stuck_workflows(
+        &pool,
+        &reg,
+        0,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // Verify recovered back to COMPLETED.
     let final_status: String =
@@ -1318,9 +1342,15 @@ async fn test_recovery_preserves_failed_state() {
     .unwrap();
 
     // Run recovery.
-    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let _ = horsies::recover_stuck_workflows(
+        &pool,
+        &reg,
+        0,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // Should be back to FAILED (not COMPLETED).
     let final_status: String =
@@ -1410,9 +1440,15 @@ async fn test_recovery_recomputes_first_failed_error() {
     .unwrap();
 
     // Run recovery.
-    let _ = horsies::recover_stuck_workflows(&pool, &reg, 0, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let _ = horsies::recover_stuck_workflows(
+        &pool,
+        &reg,
+        0,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // Workflow finalizes FAILED with the deterministic first failed task error,
     // replacing the stale later error.
@@ -1541,9 +1577,15 @@ async fn test_resume_on_running_noop() {
     // Wait until workflow is RUNNING.
     wait_for_wf_status(&pool, &wf_id, "RUNNING", Duration::from_secs(5)).await;
 
-    let resumed = resume_workflow(&pool, &wf_id, &reg, &horsies::PayloadPolicy::default())
-        .await
-        .unwrap();
+    let resumed = resume_workflow(
+        &pool,
+        &wf_id,
+        &reg,
+        &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
+    )
+    .await
+    .unwrap();
     assert!(!resumed, "resume on RUNNING workflow should return false");
 }
 
@@ -1780,8 +1822,9 @@ fn write_recovery_custom_config() -> tempfile::NamedTempFile {
             "running_stale_threshold_ms": 2000,
             "check_interval_ms": 1000,
             "runner_heartbeat_interval_ms": 1000,
-            "claimer_heartbeat_interval_ms": 1000,
-            "heartbeat_retention_hours": 1,
+            "claimer_heartbeat_interval_ms": 1000
+        },
+        "retention": {
             "worker_state_retention_hours": 1,
             "terminal_record_retention_hours": 1
         },
@@ -2118,13 +2161,11 @@ async fn set_workflow_status(pool: &sqlx::PgPool, wf_id: &str, status: &str) {
 }
 
 async fn task_claim_row(pool: &sqlx::PgPool, task_id: &str) -> (String, bool, Option<String>) {
-    sqlx::query_as(
-        "SELECT status, claimed, claimed_by_worker_id FROM horsies_tasks WHERE id = $1",
-    )
-    .bind(task_id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
+    sqlx::query_as("SELECT status, claimed, claimed_by_worker_id FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
@@ -2218,7 +2259,10 @@ async fn filter_nonrunnable_does_not_touch_other_workers_cancelled_task() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(wt_status, "ENQUEUED", "must not cancel another worker's row");
+    assert_eq!(
+        wt_status, "ENQUEUED",
+        "must not cancel another worker's row"
+    );
 }
 
 #[tokio::test]
@@ -2346,7 +2390,9 @@ async fn test_cancel_makes_queued_backing_task_unclaimable() {
         .await
         .unwrap();
     assert!(
-        claimed.iter().all(|r| r.id != task_id),
+        claimed
+            .iter()
+            .all(|r| r.id != uuid::Uuid::parse_str(&task_id).unwrap()),
         "cancelled backing task must not be claimable",
     );
 }
@@ -2385,7 +2431,9 @@ async fn test_backing_task_lock_blocks_concurrent_claim() {
         .await
         .unwrap();
     assert!(
-        claimed.iter().all(|r| r.id != task_id),
+        claimed
+            .iter()
+            .all(|r| r.id != uuid::Uuid::parse_str(&task_id).unwrap()),
         "claim must skip a backing task locked by an in-flight cancellation",
     );
 

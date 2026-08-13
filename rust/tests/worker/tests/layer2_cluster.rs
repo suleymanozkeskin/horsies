@@ -57,9 +57,14 @@ async fn enqueue_task(broker: &PostgresBroker, task_name: &str, kwargs: &str) ->
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 async fn enqueue_no_args(broker: &PostgresBroker, task_name: &str) -> String {
@@ -99,9 +104,14 @@ async fn enqueue_with_retry(
             Some(&task_options_str),
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 /// Write a fast-recovery AppConfig to a temp JSON file. Returns the path.
@@ -127,8 +137,9 @@ fn write_fast_recovery_config() -> tempfile::NamedTempFile {
             "running_stale_threshold_ms": 3000,
             "check_interval_ms": 1000,
             "runner_heartbeat_interval_ms": 1000,
-            "claimer_heartbeat_interval_ms": 1000,
-            "heartbeat_retention_hours": 1,
+            "claimer_heartbeat_interval_ms": 1000
+        },
+        "retention": {
             "worker_state_retention_hours": 1,
             "terminal_record_retention_hours": 1
         },
@@ -854,9 +865,14 @@ async fn enqueue_to_queue(
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

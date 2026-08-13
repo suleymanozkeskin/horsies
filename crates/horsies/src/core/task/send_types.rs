@@ -2,6 +2,7 @@
 ///
 /// Mirrors Python's `horsies/core/models/task_send_types.py`.
 use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 /// Categorized task send failure codes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -49,6 +50,9 @@ pub struct TaskSendPayload {
     pub enqueue_delay_seconds: Option<i64>,
     pub task_options: Option<String>,
     pub enqueue_sha: String,
+    pub idempotency_key: Option<String>,
+    /// `None` is the explicit forever class, never an omitted choice.
+    pub retention_class_key: Option<String>,
 }
 
 /// Error from task send/schedule operations.
@@ -61,7 +65,7 @@ pub struct TaskSendError {
     /// Whether the caller can retry with the same task_id.
     pub retryable: bool,
     /// Generated task ID (None for SendSuppressed).
-    pub task_id: Option<String>,
+    pub task_id: Option<Uuid>,
     /// Serialized envelope for replay (None when no serialization happened).
     pub payload: Option<TaskSendPayload>,
 }
@@ -107,7 +111,7 @@ mod tests {
             code: TaskSendErrorCode::EnqueueFailed,
             message: "connection refused".to_owned(),
             retryable: true,
-            task_id: Some("abc-123".to_owned()),
+            task_id: Some(Uuid::nil()),
             payload: Some(TaskSendPayload {
                 task_name: "my_task".to_owned(),
                 queue_name: "default".to_owned(),
@@ -119,12 +123,14 @@ mod tests {
                 enqueue_delay_seconds: None,
                 task_options: None,
                 enqueue_sha: "deadbeef".to_owned(),
+                idempotency_key: None,
+                retention_class_key: Some("standard_30d".to_owned()),
             }),
         };
         let display = format!("{}", err);
         // Must NOT contain the sensitive args
         assert!(!display.contains("sensitive data"));
         assert!(display.contains("ENQUEUE_FAILED"));
-        assert!(display.contains("abc-123"));
+        assert!(display.contains("00000000-0000-0000-0000-000000000000"));
     }
 }

@@ -8,6 +8,7 @@
 pub mod archive;
 pub mod commands;
 pub mod ddl;
+pub mod enqueue;
 pub mod errors;
 pub mod heartbeats;
 pub mod identity;

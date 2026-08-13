@@ -5,6 +5,7 @@ use super::payload::PayloadPolicy;
 use super::queue::{CustomQueueConfig, QueueMode};
 use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
+use super::retention::RetentionConfig;
 use super::schedule::ScheduleConfig;
 use crate::core::defaults::{DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS};
 
@@ -53,6 +54,10 @@ pub struct AppConfig {
     #[serde(default)]
     pub recovery: RecoveryConfig,
 
+    /// Data-lifecycle and task-history retention policy.
+    #[serde(default)]
+    pub retention: RetentionConfig,
+
     /// Worker resilience configuration (DB retry backoff, poll interval).
     #[serde(default)]
     pub resilience: WorkerResilienceConfig,
@@ -100,11 +105,29 @@ pub enum AppConfigError {
     #[error("{0}")]
     Recovery(String),
     #[error("{0}")]
+    Retention(String),
+    #[error("{0}")]
     Resilience(String),
     #[error("{0}")]
     Schedule(String),
     #[error("{0}")]
     Payload(String),
+}
+
+impl AppConfigError {
+    pub fn error_code(&self) -> Option<crate::core::error::ErrorCode> {
+        match self {
+            Self::Retention(_) => Some(crate::core::error::ErrorCode::ConfigInvalidRetention),
+            Self::QueueMode(_)
+            | Self::ClusterCap(_)
+            | Self::Prefetch(_)
+            | Self::Broker(_)
+            | Self::Recovery(_)
+            | Self::Resilience(_)
+            | Self::Schedule(_)
+            | Self::Payload(_) => None,
+        }
+    }
 }
 
 impl AppConfig {
@@ -138,6 +161,7 @@ impl AppConfig {
             max_claim_renew_age_ms: default_max_claim_renew_age_ms(),
             payload: PayloadPolicy::default(),
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -228,6 +252,24 @@ impl AppConfig {
             self.recovery.worker_state_snapshot_interval_ms,
         ));
 
+        lines.push("  retention:".to_owned());
+        lines.push(format!(
+            "    history_leaf_horizon_days: {}",
+            self.retention.history_leaf_horizon_days,
+        ));
+        lines.push(format!(
+            "    heartbeat_leaf_horizon_hours: {}",
+            self.retention.heartbeat_leaf_horizon_hours,
+        ));
+        lines.push(format!(
+            "    retention_classes: {}",
+            self.retention.retention_classes.len(),
+        ));
+        lines.push(format!(
+            "    queue_retention: {}",
+            self.retention.queue_retention.len(),
+        ));
+
         // Resilience config
         lines.push("  resilience:".to_owned());
         lines.push(format!(
@@ -315,39 +357,20 @@ impl AppConfig {
             }
         }
 
-        // Retention overrides must name declared queues: a typo'd key would
-        // otherwise be a silent no-op (an inert override plus a phantom
-        // exclusion that matches nothing).
-        if !self
-            .recovery
-            .queue_terminal_record_retention_hours
-            .is_empty()
-        {
-            let declared: std::collections::HashSet<&str> = match self.queue_mode {
-                QueueMode::Default => std::iter::once("default").collect(),
-                QueueMode::Custom => self
-                    .custom_queues
-                    .iter()
-                    .flatten()
-                    .map(|q| q.name.as_str())
-                    .collect(),
-            };
-            let mut unknown: Vec<&str> = self
-                .recovery
-                .queue_terminal_record_retention_hours
-                .keys()
-                .map(String::as_str)
-                .filter(|q| !declared.contains(q))
-                .collect();
-            unknown.sort_unstable();
-            if !unknown.is_empty() {
-                let mut declared_sorted: Vec<&str> = declared.into_iter().collect();
-                declared_sorted.sort_unstable();
-                errors.push(AppConfigError::QueueMode(format!(
-                    "queue_terminal_record_retention_hours references unknown queue(s): \
-                     {unknown:?} (declared queues: {declared_sorted:?})",
-                )));
-            }
+        let declared_queues: Vec<&str> = match self.queue_mode {
+            QueueMode::Default => vec!["default"],
+            QueueMode::Custom => self
+                .custom_queues
+                .iter()
+                .flatten()
+                .map(|queue| queue.name.as_str())
+                .collect(),
+        };
+        for error in self.retention.validate() {
+            errors.push(AppConfigError::Retention(error.to_string()));
+        }
+        for error in self.retention.validate_queues(declared_queues) {
+            errors.push(AppConfigError::Retention(error.to_string()));
         }
 
         // Cluster-wide cap
@@ -485,6 +508,7 @@ mod tests {
             pool_pre_ping: true,
             pool_size: 30,
             max_overflow: 30,
+            retain_rerun_input_default: false,
             pool_timeout: 30,
             pool_recycle: 1800,
             echo: false,
@@ -503,6 +527,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -515,10 +540,10 @@ mod tests {
     /// a silent no-op. Parity with horsies PR #207.
     #[test]
     fn queue_retention_override_must_name_declared_queue() {
-        let overrides = |queue: &str| RecoveryConfig {
-            queue_terminal_record_retention_hours: std::collections::HashMap::from([(
+        let overrides = |queue: &str| RetentionConfig {
+            queue_retention: std::collections::HashMap::from([(
                 queue.to_owned(),
-                24,
+                Some(chrono::Duration::hours(24)),
             )]),
             ..Default::default()
         };
@@ -533,13 +558,15 @@ mod tests {
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
-            recovery: overrides("default"),
+            recovery: RecoveryConfig::default(),
+            retention: overrides("default"),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
         };
         assert!(config.validate().is_empty());
-        config.recovery = overrides("metricz");
+        config.recovery = RecoveryConfig::default();
+        config.retention = overrides("metricz");
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].to_string().contains("metricz"));
@@ -551,9 +578,9 @@ mod tests {
             priority: 1,
             max_concurrency: Some(5),
         }]);
-        config.recovery = overrides("metrics");
+        config.retention = overrides("metrics");
         assert!(config.validate().is_empty());
-        config.recovery = overrides("default");
+        config.retention = overrides("default");
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].to_string().contains("default"));
@@ -575,6 +602,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -595,6 +623,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -615,6 +644,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -636,6 +666,7 @@ mod tests {
             claim_lease_ms: Some(60_000),
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -657,6 +688,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -666,6 +698,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -691,6 +724,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -719,6 +753,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -779,6 +814,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -788,6 +824,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -814,6 +851,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: MAX_CLAIM_RENEW_AGE_MS,
             recovery: RecoveryConfig::default(),
+            retention: RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,

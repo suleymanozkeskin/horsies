@@ -101,6 +101,10 @@ async fn planetscale_split_urls_concurrent_cold_start_task_and_workflow(
                         None,
                         &format!("pgbouncer-manual-cold-start-{i}"),
                         None,
+                        None,
+                        None,
+                        None,
+                        None,
                     )
                     .await?;
                 Ok::<(), horsies::BrokerError>(())
@@ -147,10 +151,14 @@ async fn planetscale_split_urls_concurrent_cold_start_task_and_workflow(
                     None,
                     "pgbouncer-manual-task",
                     None,
+                    None,
+                    None,
+                    None,
+                    None,
                 )
                 .await?;
             let task_result: TaskResult<i64> = broker
-                .get_result(&task_id, Some(Duration::from_secs(20)))
+                .get_result(task_id, Some(Duration::from_secs(20)))
                 .await?;
             assert_eq!(task_result.unwrap(), 42);
 

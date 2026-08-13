@@ -43,7 +43,7 @@ impl MonotonicUuid7Generator {
         Self::new(system_clock_ms, system_entropy_62_bits)
     }
 
-    pub fn mint(&mut self) -> Result<String, Uuid7Error> {
+    pub fn mint(&mut self) -> Result<Uuid, Uuid7Error> {
         let (milliseconds, counter) = self.advance()?;
         let entropy = (self.entropy_62_bits)();
         if entropy > RAND_B_MASK {
@@ -54,7 +54,7 @@ impl MonotonicUuid7Generator {
             | ((counter as u128) << 64)
             | (0b10_u128 << 62)
             | entropy as u128;
-        Ok(Uuid::from_u128(value).hyphenated().to_string())
+        Ok(Uuid::from_u128(value))
     }
 
     fn advance(&mut self) -> Result<(i64, u16), Uuid7Error> {
@@ -99,7 +99,7 @@ fn system_entropy_62_bits() -> u64 {
 
 static PROCESS_GENERATOR: OnceLock<Mutex<MonotonicUuid7Generator>> = OnceLock::new();
 
-pub fn mint_task_id() -> Result<String, Uuid7Error> {
+pub fn mint_task_id() -> Result<Uuid, Uuid7Error> {
     PROCESS_GENERATOR
         .get_or_init(|| Mutex::new(MonotonicUuid7Generator::system()))
         .lock()

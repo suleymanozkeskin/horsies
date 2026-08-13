@@ -2,6 +2,8 @@
 ///
 /// Only infrastructure-level errors. Task-level outcomes (success, failure,
 /// timeout, not-found, cancelled) are represented via `TaskResult<T>`.
+use uuid::Uuid;
+
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
     /// Database connection or query error.
@@ -35,7 +37,7 @@ pub enum BrokerError {
 
     /// Enqueue conflict: same task_id but different payload (SHA mismatch).
     #[error("payload mismatch for task_id {task_id}: existing row has different enqueue_sha")]
-    PayloadMismatch { task_id: String },
+    PayloadMismatch { task_id: Uuid },
 
     /// Enqueue observed a conflict, but the conflicting row disappeared before
     /// its `enqueue_sha` could be compared — payload identity cannot be proven.
@@ -43,7 +45,21 @@ pub enum BrokerError {
         "task_id {task_id} conflict detected but row disappeared before verification \
          for {task_name}; cannot verify payload identity"
     )]
-    EnqueueConflictUnverifiable { task_id: String, task_name: String },
+    EnqueueConflictUnverifiable { task_id: Uuid, task_name: String },
+
+    /// The caller-provided idempotency key already owns a different command.
+    #[error(
+        "idempotency key for {task_name} is reserved by task {task_id} with a different command"
+    )]
+    IdempotencyKeyConflict { task_name: String, task_id: Uuid },
+
+    /// Enqueue-time history facts could not be prepared or decoded.
+    #[error("enqueue contract violation: {0}")]
+    EnqueueContract(String),
+
+    /// The broker's keyed-enqueue reservation window is outside `(0, 30d]`.
+    #[error("invalid idempotency reservation window: {0}")]
+    InvalidIdempotencyReservationWindow(String),
 
     /// The shared LISTEN/NOTIFY listener was closed or its background task stopped.
     #[error("shared listener closed")]
@@ -74,6 +90,9 @@ impl BrokerError {
             | Self::InvalidStatus(_)
             | Self::PayloadMismatch { .. }
             | Self::EnqueueConflictUnverifiable { .. }
+            | Self::IdempotencyKeyConflict { .. }
+            | Self::EnqueueContract(_)
+            | Self::InvalidIdempotencyReservationWindow(_)
             | Self::TerminalizationContract(_) => false,
         }
     }

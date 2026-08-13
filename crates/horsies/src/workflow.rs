@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 
 use crate::core::app as core_app;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
 use crate::core::{
     AnyNode, HorsiesError, NodeRef, OnError, SubWorkflowNode, SuccessPolicy, TaskNode,
     TypedNodeRef, WorkerResilienceConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
@@ -119,6 +120,7 @@ pub struct WorkflowFunction<T> {
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
     payload: PayloadPolicy,
+    retention: RetentionConfig,
     _phantom: PhantomData<T>,
 }
 
@@ -130,6 +132,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
         payload: PayloadPolicy,
+        retention: RetentionConfig,
     ) -> Self {
         Self {
             spec,
@@ -138,6 +141,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
             resend_on_transient_err,
             resilience,
             payload,
+            retention,
             _phantom: PhantomData,
         }
     }
@@ -221,6 +225,7 @@ impl<T: DeserializeOwned + Clone> WorkflowFunction<T> {
             Arc::new(registry),
             self.resend_on_transient_err,
             self.payload.clone(),
+            self.retention.clone(),
         ))
     }
 
@@ -341,6 +346,7 @@ pub(crate) struct WorkflowStarter {
     resend_on_transient_err: bool,
     resilience: WorkerResilienceConfig,
     payload: PayloadPolicy,
+    retention: RetentionConfig,
 }
 
 impl WorkflowStarter {
@@ -350,6 +356,7 @@ impl WorkflowStarter {
         resend_on_transient_err: bool,
         resilience: WorkerResilienceConfig,
         payload: PayloadPolicy,
+        retention: RetentionConfig,
     ) -> Self {
         Self {
             broker,
@@ -357,6 +364,7 @@ impl WorkflowStarter {
             resend_on_transient_err,
             resilience,
             payload,
+            retention,
         }
     }
 
@@ -399,6 +407,7 @@ impl WorkflowStarter {
             Arc::new(registry),
             self.resend_on_transient_err,
             self.payload.clone(),
+            self.retention.clone(),
         );
         bound.start().await
     }
@@ -444,6 +453,7 @@ impl WorkflowStarter {
             Arc::new(registry),
             self.resend_on_transient_err,
             self.payload.clone(),
+            self.retention.clone(),
         );
         bound.start_with_id(workflow_id).await
     }
@@ -498,6 +508,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -507,6 +518,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,

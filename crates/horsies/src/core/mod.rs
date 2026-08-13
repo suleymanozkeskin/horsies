@@ -19,7 +19,8 @@ pub use config::{
     CronSchedule, CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector,
     HourlySchedule, IntervalSchedule, Month, MonthlySchedule, PayloadPolicy, PostgresConfig,
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError, ResilienceConfigError,
-    ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
+    RetentionChoice, RetentionClassConfig, RetentionConfig, RetentionConfigError, ScheduleConfig,
+    SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
 pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
 pub use registry::{RegisteredWorkflowSpec, SpecBuilderFn, TaskRegistry, WorkflowSpecRegistry};

@@ -115,6 +115,7 @@ pub async fn complete_task(
         is_success,
         registry,
         &horsies::PayloadPolicy::default(),
+        &horsies::RetentionConfig::default(),
     )
     .await
     .expect("on_workflow_task_complete failed");
@@ -190,10 +191,14 @@ pub async fn insert_task(
 ) {
     sqlx::query(
         "INSERT INTO horsies_tasks (id, task_name, queue_name, priority, status, \
-         enqueued_at, enqueue_sha, created_at, updated_at, terminal_at) \
+         enqueued_at, enqueue_sha, created_at, updated_at, terminal_at,
+         command_fingerprint_version, command_fingerprint, retention_class_key,
+         retain_rerun_input, prepared_rerun_input_disposition) \
          VALUES ($1, $2, $3, 100, $4, NOW(), 'test-sha', NOW(), NOW(), \
                  CASE WHEN $4 IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') \
-                      THEN NOW() END)",
+                      THEN NOW() END,
+                 1, decode(repeat('00', 32), 'hex'), 'standard_30d',
+                 FALSE, 'NEVER_ELIGIBLE')",
     )
     .bind(task_id)
     .bind(task_name)

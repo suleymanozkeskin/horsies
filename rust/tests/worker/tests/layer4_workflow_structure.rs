@@ -112,9 +112,14 @@ async fn enqueue_blocker_task(pool: &PgPool, duration_ms: i64) -> String {
             None,
             &format!("test-{}", uuid::Uuid::new_v4()),
             None,
+            None,
+            None,
+            None,
+            None,
         )
         .await
         .unwrap()
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------

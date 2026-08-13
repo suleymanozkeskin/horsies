@@ -1,12 +1,12 @@
 use std::collections::VecDeque;
 
-use sqlx::PgPool;
-use uuid::Uuid;
-
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
+use crate::core::history::enqueue::{prepare_enqueue_facts, EnqueueInputEligibility};
 use crate::core::task::retry_utils::parse_max_retries;
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
 use crate::core::WorkflowSpecRegistry;
+use sqlx::PgPool;
 
 use crate::workflow_engine::engine;
 use crate::workflow_engine::error::WorkflowError;
@@ -105,7 +105,7 @@ SELECT task_index, dependencies, task_name, task_args, task_kwargs,
        allow_failed_deps, join_type, min_success,
        node_id, task_options
 FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND status = 'PENDING'";
+WHERE workflow_id = $1::uuid AND status = 'PENDING'";
 
 const FIND_READY_TASKS_SQL: &str = "\
 SELECT task_index, task_name, task_args, task_kwargs,
@@ -113,7 +113,7 @@ SELECT task_index, task_name, task_args, task_kwargs,
        args_from, workflow_ctx_from, dependencies, is_subworkflow,
        sub_workflow_name, sub_definition_key
 FROM horsies_workflow_tasks
-WHERE workflow_id = $1 AND status = 'READY'";
+WHERE workflow_id = $1::uuid AND status = 'READY'";
 
 /// Find terminal deps for a PENDING task (used for resume re-evaluation).
 const FIND_TERMINAL_DEPS_SQL: &str = "\
@@ -126,15 +126,23 @@ const ENQUEUE_TASK_SQL: &str = "\
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, args, kwargs,
     status, sent_at, enqueued_at, good_until, max_retries, task_options,
-    enqueue_sha, is_workflow_task, created_at, updated_at
+    enqueue_sha, is_workflow_task, created_at, updated_at,
+    command_fingerprint_version, command_fingerprint, retention_class_key,
+    input_digest, rerun_of_task_id, rerun_root_task_id, idempotency_key_digest,
+    retain_rerun_input, prepared_rerun_input_disposition,
+    prepared_rerun_input_version, prepared_rerun_input_codec,
+    prepared_rerun_input_content_type, prepared_rerun_input_digest,
+    prepared_rerun_input_inline, prepared_rerun_input_reference
 )
-VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10, TRUE, NOW(), NOW())";
+VALUES ($1::uuid, $2, $3, $4, $5, $6, 'PENDING', NOW(), NOW(), $7, $8, $9, $10,
+        TRUE, NOW(), NOW(), $11, $12, $13, $14, NULL, NULL, NULL, $15, $16,
+        $17, $18, $19, $20, $21, NULL)";
 
 const LINK_ENQUEUED_TASK_SQL: &str = "\
 UPDATE horsies_workflow_tasks wt
-SET task_id = $1, status = 'ENQUEUED', started_at = NOW()
+SET task_id = $1::uuid, status = 'ENQUEUED', started_at = NOW()
 FROM horsies_workflows w
-WHERE wt.workflow_id = $2 AND wt.task_index = $3
+WHERE wt.workflow_id = $2::uuid AND wt.task_index = $3
   AND wt.status = 'READY'
   AND w.id = wt.workflow_id
   AND w.status = 'RUNNING'";
@@ -488,8 +496,9 @@ pub async fn resume_workflow(
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> HandleResult<bool> {
-    resume_workflow_inner(pool, workflow_id, registry, payload)
+    resume_workflow_inner(pool, workflow_id, registry, payload, retention)
         .await
         .map_err(|e| to_handle_error(e, workflow_id))
 }
@@ -499,6 +508,7 @@ async fn resume_workflow_inner(
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<bool, WorkflowError> {
     let resumed: Option<IdRow> = sqlx::query_as(RESUME_WORKFLOW_SQL)
         .bind(workflow_id)
@@ -538,15 +548,17 @@ async fn resume_workflow_inner(
     }
 
     // Re-evaluate and enqueue tasks for this workflow.
-    let nodes_enqueued = reevaluate_and_enqueue(pool, workflow_id, registry, payload).await?;
+    let nodes_enqueued =
+        reevaluate_and_enqueue(pool, workflow_id, registry, payload, retention).await?;
 
     // Cascade resume to paused child workflows (iterative BFS).
-    let children_resumed = cascade_resume_to_children(pool, workflow_id, registry, payload).await?;
+    let children_resumed =
+        cascade_resume_to_children(pool, workflow_id, registry, payload, retention).await?;
 
     // Check if all tasks are already terminal (e.g., all pending tasks were
     // skipped during re-evaluation because upstream deps failed). Without
     // this, the workflow would remain stuck in RUNNING forever.
-    engine::check_workflow_completion(pool, workflow_id, registry, payload).await?;
+    engine::check_workflow_completion(pool, workflow_id, registry, payload, retention).await?;
 
     // Recovery completion pass: a child workflow may have COMPLETED while the
     // parent was paused, leaving the parent's sub-workflow node stale. Run the
@@ -557,7 +569,7 @@ async fn resume_workflow_inner(
     // finalizing_grace_ms = 0: resume recovers immediately (the grace only applies
     // to the periodic reaper smoothing the Phase 1→Phase 2 finalize window).
     if let Err(e) = crate::workflow_engine::recovery::recover_stuck_workflows_with_cap(
-        pool, registry, None, 0, payload,
+        pool, registry, None, 0, payload, retention,
     )
     .await
     {
@@ -631,10 +643,7 @@ pub(crate) async fn cascade_pause_to_children(
 /// horsies PR #66/#67). The `workflow_done` NOTIFY is fired by the status-flip
 /// DB trigger, so no manual notify is needed. Without this cascade, cancelling
 /// a parent leaves RUNNING child workflows executing.
-async fn cascade_cancel_to_children(
-    pool: &PgPool,
-    workflow_id: &str,
-) -> Result<(), WorkflowError> {
+async fn cascade_cancel_to_children(pool: &PgPool, workflow_id: &str) -> Result<(), WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
 
@@ -676,6 +685,7 @@ async fn cascade_resume_to_children(
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<usize, WorkflowError> {
     let mut queue: VecDeque<String> = VecDeque::new();
     queue.push_back(workflow_id.to_owned());
@@ -703,10 +713,11 @@ async fn cascade_resume_to_children(
             );
 
             // Re-evaluate and enqueue tasks for the resumed child.
-            reevaluate_and_enqueue(pool, &child.id, registry, payload).await?;
+            reevaluate_and_enqueue(pool, &child.id, registry, payload, retention).await?;
 
             // Check if child is already complete after re-evaluation.
-            engine::check_workflow_completion(pool, &child.id, registry, payload).await?;
+            engine::check_workflow_completion(pool, &child.id, registry, payload, retention)
+                .await?;
 
             // Add to queue to resume its children.
             queue.push_back(child.id);
@@ -736,6 +747,7 @@ async fn reevaluate_and_enqueue(
     workflow_id: &str,
     registry: &WorkflowSpecRegistry,
     payload: &PayloadPolicy,
+    retention: &RetentionConfig,
 ) -> Result<usize, WorkflowError> {
     let mut enqueued = 0usize;
     // 1. Re-evaluate PENDING tasks using full join evaluation.
@@ -766,9 +778,15 @@ async fn reevaluate_and_enqueue(
         for dep in &terminal_deps {
             if triggered_dep_indices.insert(dep.task_index) {
                 // Trigger full join evaluation via process_dependents.
-                if let Err(e) =
-                    engine::process_dependents(pool, workflow_id, dep.task_index, registry, payload)
-                        .await
+                if let Err(e) = engine::process_dependents(
+                    pool,
+                    workflow_id,
+                    dep.task_index,
+                    registry,
+                    payload,
+                    retention,
+                )
+                .await
                 {
                     tracing::error!(
                         workflow_id,
@@ -792,7 +810,8 @@ async fn reevaluate_and_enqueue(
     for task in &ready_tasks {
         if task.is_subworkflow {
             // Sub-workflow READY task: launch child workflow.
-            match enqueue_subworkflow_on_resume(pool, workflow_id, task, registry).await {
+            match enqueue_subworkflow_on_resume(pool, workflow_id, task, registry, retention).await
+            {
                 Ok(()) => enqueued += 1,
                 Err(e) => {
                     tracing::error!(
@@ -805,7 +824,11 @@ async fn reevaluate_and_enqueue(
             }
         } else {
             // Regular READY task: enqueue into horsies_tasks.
-            let task_id = Uuid::new_v4().to_string();
+            let task_id = crate::core::history::identity::uuid7::mint_task_id()
+                .map(|task_id| task_id.to_string())
+                .map_err(|error| {
+                    WorkflowError::Validation(format!("task identity mint failed: {error}"))
+                })?;
             let max_retries = parse_max_retries(task.task_options.as_deref());
 
             // Merge args_from if present.
@@ -833,6 +856,23 @@ async fn reevaluate_and_enqueue(
             .await?;
 
             let enqueue_sha = format!("wf-{}", task_id);
+            let good_until = parse_good_until_from_options(task.task_options.as_deref());
+            let retention_class_key = retention.resolve_queue_class(&task.queue_name);
+            let facts = prepare_enqueue_facts(
+                &task.task_name,
+                &task.queue_name,
+                task.priority,
+                task.task_args.as_deref(),
+                merged_kwargs.as_deref(),
+                good_until,
+                None,
+                task.task_options.as_deref(),
+                retention_class_key.as_deref(),
+                false,
+                None,
+                EnqueueInputEligibility::NeverEligible,
+            )
+            .map_err(|error| WorkflowError::Validation(error.to_string()))?;
 
             // INSERT + LINK in a single transaction so a row whose LINK matches
             // 0 rows (workflow no longer RUNNING / task no longer READY) is
@@ -847,10 +887,26 @@ async fn reevaluate_and_enqueue(
                 .bind(task.priority)
                 .bind(&task.task_args)
                 .bind(&merged_kwargs)
-                .bind(parse_good_until_from_options(task.task_options.as_deref()))
+                .bind(good_until)
                 .bind(max_retries)
                 .bind(&task.task_options)
                 .bind(&enqueue_sha)
+                .bind(facts.command_fingerprint_version)
+                .bind(facts.command_fingerprint.as_slice())
+                .bind(&facts.retention_class_key)
+                .bind(facts.input_digest.as_slice())
+                .bind(facts.retain_rerun_input)
+                .bind(facts.prepared_rerun_input_disposition.as_str())
+                .bind(facts.prepared_rerun_input_version)
+                .bind(facts.prepared_rerun_input_codec)
+                .bind(facts.prepared_rerun_input_content_type)
+                .bind(
+                    facts
+                        .prepared_rerun_input_digest
+                        .as_ref()
+                        .map(|digest| digest.as_slice()),
+                )
+                .bind(facts.prepared_rerun_input_inline.as_deref())
                 .execute(&mut *tx)
                 .await?;
 
@@ -899,6 +955,7 @@ async fn enqueue_subworkflow_on_resume(
     workflow_id: &str,
     task: &ReadyTaskRow,
     registry: &WorkflowSpecRegistry,
+    retention: &RetentionConfig,
 ) -> Result<(), WorkflowError> {
     let spec_name = task
         .task_name
@@ -956,6 +1013,7 @@ async fn enqueue_subworkflow_on_resume(
         parent_depth + 1,
         root_wf_id,
         registry,
+        retention,
     )
     .await?;
 
@@ -1003,6 +1061,7 @@ mod resume_idempotency_tests {
     use super::*;
     use crate::broker::PostgresBroker;
     use serial_test::serial;
+    use uuid::Uuid;
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -1031,8 +1090,8 @@ mod resume_idempotency_tests {
                 definition_key, depth, root_workflow_id, parent_workflow_id,
                 sent_at, created_at, started_at, updated_at
             ) VALUES (
-                $1, 'c8_wf', $2, 'fail', NULL,
-                'test.c8.v1', 0, $3, $4,
+                $1::uuid, 'c8_wf', $2, 'fail', NULL,
+                'test.c8.v1', 0, $3::uuid, $4::uuid,
                 NOW(), NOW(), NOW(), NOW()
             )",
         )
@@ -1075,7 +1134,7 @@ mod resume_idempotency_tests {
 
     async fn cleanup(pool: &PgPool, ids: &[&str]) {
         for id in ids {
-            sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid")
                 .bind(id)
                 .execute(pool)
                 .await
@@ -1083,7 +1142,7 @@ mod resume_idempotency_tests {
         }
         // Delete children before parents (FK).
         for id in ids.iter().rev() {
-            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            sqlx::query("DELETE FROM horsies_workflows WHERE id = $1::uuid")
                 .bind(id)
                 .execute(pool)
                 .await
@@ -1094,7 +1153,9 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_on_running_parent_recovers_stranded_paused_child() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
@@ -1107,10 +1168,19 @@ mod resume_idempotency_tests {
         insert_workflow(&pool, &child, "PAUSED", Some(&parent)).await;
         insert_running_task(&pool, &child).await;
 
-        let resumed = resume_workflow(&pool, &parent, &registry, &PayloadPolicy::default())
-            .await
-            .expect("resume");
-        assert!(resumed, "idempotent resume must report it recovered the child");
+        let resumed = resume_workflow(
+            &pool,
+            &parent,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("resume");
+        assert!(
+            resumed,
+            "idempotent resume must report it recovered the child"
+        );
         assert_eq!(
             status_of(&pool, &child).await,
             "RUNNING",
@@ -1123,7 +1193,9 @@ mod resume_idempotency_tests {
     #[tokio::test]
     #[serial]
     async fn resume_on_consistent_running_workflow_is_noop_false() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
         let registry = WorkflowSpecRegistry::new();
@@ -1133,12 +1205,88 @@ mod resume_idempotency_tests {
         insert_running_task(&pool, &id).await;
 
         // No paused children, no ready nodes → genuinely nothing to do.
-        let resumed = resume_workflow(&pool, &id, &registry, &PayloadPolicy::default())
-            .await
-            .expect("resume");
-        assert!(!resumed, "a consistent RUNNING workflow resume must return Ok(false)");
+        let resumed = resume_workflow(
+            &pool,
+            &id,
+            &registry,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .expect("resume");
+        assert!(
+            !resumed,
+            "a consistent RUNNING workflow resume must return Ok(false)"
+        );
 
         cleanup(&pool, &[&id]).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn p6_workflow_enqueue_lifecycle_resume_persists_never_eligible_facts() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let workflow_id = Uuid::new_v4().to_string();
+        insert_workflow(&pool, &workflow_id, "RUNNING", None).await;
+        sqlx::query(
+            "INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, node_id, task_name, task_args, task_kwargs,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, created_at
+             ) VALUES (
+                $1::uuid, $2::uuid, 0, 'p6_resume', 'p6_resume_task', '[1]', '{}',
+                'bulk', 17, '{}', FALSE, 'all', 'READY', FALSE, NOW()
+             )",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .expect("insert ready resume node");
+        let mut retention = RetentionConfig::default();
+        retention
+            .queue_retention
+            .insert("bulk".to_owned(), Some(chrono::Duration::days(7)));
+
+        let enqueued = reevaluate_and_enqueue(
+            &pool,
+            &workflow_id,
+            &WorkflowSpecRegistry::new(),
+            &PayloadPolicy::default(),
+            &retention,
+        )
+        .await
+        .expect("resume enqueue path");
+        assert_eq!(enqueued, 1);
+        let facts: (String, String, i32, i32, bool, Option<i32>) = sqlx::query_as(
+            "SELECT t.retention_class_key, t.prepared_rerun_input_disposition,
+                    octet_length(t.command_fingerprint), octet_length(t.input_digest),
+                    t.retain_rerun_input, octet_length(t.prepared_rerun_input_inline)
+             FROM horsies_tasks t
+             JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
+             WHERE wt.workflow_id = $1::uuid AND wt.task_index = 0",
+        )
+        .bind(&workflow_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read resume enqueue facts");
+        assert_eq!(facts.0, "q_bulk_7d");
+        assert_eq!(facts.1, "NEVER_ELIGIBLE");
+        assert_eq!(facts.2, 32);
+        assert_eq!(facts.3, 32);
+        assert!(!facts.4);
+        assert!(facts.5.is_none());
+
+        sqlx::query(
+            "DELETE FROM horsies_tasks WHERE id IN (
+                SELECT task_id FROM horsies_workflow_tasks WHERE workflow_id = $1::uuid
+             )",
+        )
+        .bind(&workflow_id)
+        .execute(&pool)
+        .await
+        .ok();
+        cleanup(&pool, &[&workflow_id]).await;
     }
 }
 
@@ -1153,6 +1301,7 @@ mod cancel_lock_order_tests {
     use super::*;
     use crate::broker::PostgresBroker;
     use serial_test::serial;
+    use uuid::Uuid;
 
     fn test_db_url() -> String {
         if let Ok(url) = std::env::var("DATABASE_URL") {
@@ -1234,7 +1383,9 @@ mod cancel_lock_order_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[serial]
     async fn cancel_matches_completion_lock_order_no_deadlock() {
-        let broker = PostgresBroker::connect(&test_db_url()).await.expect("connect");
+        let broker = PostgresBroker::connect(&test_db_url())
+            .await
+            .expect("connect");
         broker.ensure_schema_initialized().await.expect("schema");
         let pool = broker.pool().clone();
 

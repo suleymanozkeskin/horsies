@@ -43,9 +43,8 @@ struct ExistenceCheckCadence {
 impl ExistenceCheckCadence {
     fn new(check_interval_seconds: u32) -> Self {
         let seconds = check_interval_seconds.max(1);
-        let interval_ticks = ((f64::from(EXISTENCE_CHECK_INTERVAL_S) / f64::from(seconds)).round()
-            as u32)
-            .max(1);
+        let interval_ticks =
+            ((f64::from(EXISTENCE_CHECK_INTERVAL_S) / f64::from(seconds)).round() as u32).max(1);
         Self {
             interval_ticks,
             ticks_until_check: 0,
@@ -423,7 +422,7 @@ async fn process_schedule(
         // Partial-progress: track successful enqueues. If one fails, persist
         // progress for the successful ones so they aren't retried next tick.
         let mut caught_up: Vec<chrono::DateTime<Utc>> = Vec::new();
-        let mut last_task_id = String::new();
+        let mut last_task_id = None;
         for missed_time in &missed_runs {
             match enqueue_scheduled_task(broker, schedule, app_config, *missed_time).await {
                 Ok(task_id) => {
@@ -433,7 +432,7 @@ async fn process_schedule(
                         missed_run_at = ?missed_time,
                         "catch-up run enqueued",
                     );
-                    last_task_id = task_id;
+                    last_task_id = Some(task_id);
                     caught_up.push(*missed_time);
                 }
                 Err(e) => {
@@ -464,7 +463,7 @@ async fn process_schedule(
                 &schedule.name,
                 Some(now),
                 next,
-                Some(&last_task_id),
+                last_task_id,
                 state_row.run_count + 1,
                 state_row.config_hash.as_deref(),
             )
@@ -509,7 +508,7 @@ async fn process_schedule(
                     &schedule.name,
                     state_row.last_run_at,
                     Some(next),
-                    state_row.last_task_id.as_deref(),
+                    state_row.last_task_id,
                     state_row.run_count,
                     state_row.config_hash.as_deref(),
                 )
@@ -538,7 +537,7 @@ async fn process_schedule(
             &schedule.name,
             Some(now),
             next,
-            Some(&task_id),
+            Some(task_id),
             state_row.run_count + 1,
             state_row.config_hash.as_deref(),
         )
@@ -643,12 +642,11 @@ fn canon_dt(dt: DateTime<Utc>) -> String {
 
 /// Deterministic task_id for a schedule name + slot time.
 /// Same schedule + same slot -> same UUID5 -> idempotent on conflict.
-fn schedule_slot_task_id(schedule_name: &str, slot_time: DateTime<Utc>) -> String {
+fn schedule_slot_task_id(schedule_name: &str, slot_time: DateTime<Utc>) -> Uuid {
     Uuid::new_v5(
         &SCHEDULE_NAMESPACE,
         format!("{}:{}", schedule_name, canon_dt(slot_time)).as_bytes(),
     )
-    .to_string()
 }
 
 async fn enqueue_scheduled_task(
@@ -656,7 +654,7 @@ async fn enqueue_scheduled_task(
     schedule: &TaskSchedule,
     app_config: &AppConfig,
     slot_time: DateTime<Utc>,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Uuid, Box<dyn std::error::Error + Send + Sync>> {
     let args_json = if schedule.args == serde_json::Value::Null {
         None
     } else {
@@ -691,6 +689,7 @@ async fn enqueue_scheduled_task(
 
     let queue = schedule.queue_name.as_deref().unwrap_or("default");
     let priority = resolve_queue_priority(app_config, queue);
+    let retention_class_key = app_config.retention.resolve_queue_class(queue);
 
     // Deterministic task_id from schedule + slot (idempotent on retry).
     let task_id = schedule_slot_task_id(&schedule.name, slot_time);
@@ -720,7 +719,11 @@ async fn enqueue_scheduled_task(
             None,            // good_until
             None,            // task_options
             &enqueue_sha,
-            Some(&task_id), // predetermined deterministic task_id
+            Some(task_id), // predetermined deterministic task_id
+            None,
+            None,
+            retention_class_key.as_deref(),
+            None,
         )
         .await?;
 
@@ -752,6 +755,7 @@ mod tests {
         SchedulePattern, WorkerResilienceConfig,
     };
     use chrono::{TimeZone, Utc};
+    use serial_test::serial;
 
     fn default_app_config() -> AppConfig {
         AppConfig {
@@ -765,6 +769,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -774,6 +779,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -915,7 +921,8 @@ mod tests {
         let hash = compute_config_hash(&schedule);
         assert_eq!(hash.len(), 64, "expected 64-char SHA-256 hex");
         assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            hash.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
             "hash must be lowercase hex: {hash}",
         );
         // Golden value pins the exact algorithm + serialization basis.
@@ -1005,6 +1012,51 @@ mod tests {
         let missed = calculate_missed_runs(&schedule, first_due, now, 3);
 
         assert!(missed.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn scheduled_enqueue_persists_mapped_class_and_shared_facts() {
+        let pool = crate::broker::enqueue_history_tests::migrated_pool().await;
+        let task_name = "p6_scheduled_facts";
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name = $1")
+            .bind(task_name)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let mut schedule = interval_schedule_secs("p6-scheduled-facts", 60);
+        schedule.task_name = task_name.to_owned();
+        schedule.queue_name = Some("bulk".to_owned());
+        schedule.args = serde_json::json!([1]);
+        schedule.kwargs = serde_json::json!({"named": true});
+        let mut app_config = default_app_config();
+        app_config
+            .retention
+            .queue_retention
+            .insert("bulk".to_owned(), Some(chrono::Duration::hours(36)));
+        let slot = Utc::now() - chrono::Duration::seconds(1);
+
+        let task_id = enqueue_scheduled_task(&broker, &schedule, &app_config, slot)
+            .await
+            .expect("enqueue scheduled task");
+        let row: (String, String, String, i32, bool) = sqlx::query_as(
+            "SELECT id::text, retention_class_key,
+                    prepared_rerun_input_disposition,
+                    octet_length(command_fingerprint), retain_rerun_input
+             FROM horsies_tasks WHERE id = $1::uuid",
+        )
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row.0, task_id.to_string());
+        assert_eq!(row.1, "q_bulk_36h");
+        assert_eq!(row.2, "DECLINED_BY_POLICY");
+        assert_eq!(row.3, 32);
+        assert!(!row.4);
+        assert_eq!(task_id.get_version_num(), 5);
     }
 
     // ---- DB-backed: slot-anchored advancement (parity with horsies PR #46) ----
@@ -1219,7 +1271,10 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 17).unwrap();
         let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
         assert_eq!(slot, Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 15).unwrap());
-        assert_eq!(next, Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap()));
+        assert_eq!(
+            next,
+            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 20).unwrap())
+        );
         assert_eq!(skipped, 3);
     }
 
@@ -1231,7 +1286,10 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 3).unwrap();
         let (slot, next, skipped) = advance_to_latest_due_slot(&schedule, first_due, now);
         assert_eq!(slot, first_due);
-        assert_eq!(next, Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap()));
+        assert_eq!(
+            next,
+            Some(Utc.with_ymd_and_hms(2025, 6, 1, 12, 0, 5).unwrap())
+        );
         assert_eq!(skipped, 0);
     }
 

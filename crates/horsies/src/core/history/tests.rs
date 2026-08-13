@@ -377,9 +377,7 @@ fn uuid7_is_monotonic_across_same_and_backward_milliseconds() {
         move || clock_for_generator.lock().unwrap().pop_front().unwrap(),
         || 7,
     );
-    let ids: Vec<Uuid> = (0..4)
-        .map(|_| Uuid::parse_str(&generator.mint().unwrap()).unwrap())
-        .collect();
+    let ids: Vec<Uuid> = (0..4).map(|_| generator.mint().unwrap()).collect();
     assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
     assert_eq!(
         uuid7_birth_at(ids[0]).unwrap(),
@@ -403,9 +401,9 @@ fn uuid7_counter_exhaustion_waits_for_clock_advance() {
         },
         || 0,
     );
-    let mut previous = Uuid::parse_str(&generator.mint().unwrap()).unwrap();
+    let mut previous = generator.mint().unwrap();
     for _ in 1..=4_096 {
-        let current = Uuid::parse_str(&generator.mint().unwrap()).unwrap();
+        let current = generator.mint().unwrap();
         assert!(previous < current);
         previous = current;
     }

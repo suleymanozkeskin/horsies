@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::core::task::result::TaskResult;
 use crate::core::{OperationalErrorCode, TaskError, TaskInfo};
@@ -14,14 +15,14 @@ use crate::broker::postgres::PostgresBroker;
 /// This is the canonical user-facing task handle in Rust, mirroring Python's
 /// single `TaskHandle` concept.
 pub struct TaskHandle<T> {
-    task_id: String,
+    task_id: Uuid,
     broker: Arc<PostgresBroker>,
     cached_result: Mutex<Option<TaskResult<T>>>,
 }
 
 impl<T> TaskHandle<T> {
     /// Create a new task handle for a known task ID and broker.
-    pub fn new(task_id: String, broker: Arc<PostgresBroker>) -> Self {
+    pub fn new(task_id: Uuid, broker: Arc<PostgresBroker>) -> Self {
         Self {
             task_id,
             broker,
@@ -30,8 +31,8 @@ impl<T> TaskHandle<T> {
     }
 
     /// Get the underlying task ID.
-    pub fn task_id(&self) -> &str {
-        &self.task_id
+    pub fn task_id(&self) -> Uuid {
+        self.task_id
     }
 }
 
@@ -49,7 +50,7 @@ impl<T: DeserializeOwned + Clone> TaskHandle<T> {
             }
         }
 
-        let result = match self.broker.get_result::<T>(&self.task_id, timeout).await {
+        let result = match self.broker.get_result::<T>(self.task_id, timeout).await {
             Ok(task_result) => task_result,
             Err(broker_err) => TaskResult::Err(TaskError::builtin(
                 OperationalErrorCode::BrokerError,
@@ -77,14 +78,14 @@ impl<T: DeserializeOwned + Clone> TaskHandle<T> {
     ) -> crate::broker::result_types::BrokerResult<Option<TaskInfo>> {
         let mut info = self
             .broker
-            .get_task_info(&self.task_id, include_result, include_failed_reason)
+            .get_task_info(self.task_id, include_result, include_failed_reason)
             .await?;
 
         if include_attempts {
             if let Some(ref mut task_info) = info {
                 let rows = self
                     .broker
-                    .get_task_attempts(&self.task_id)
+                    .get_task_attempts(self.task_id)
                     .await
                     .map_err(|e| crate::broker::result_types::BrokerOperationError {
                         code: crate::broker::result_types::BrokerErrorCode::TaskInfoQueryFailed,

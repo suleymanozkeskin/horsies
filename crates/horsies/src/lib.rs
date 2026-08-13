@@ -50,22 +50,23 @@ pub use crate::core::RegisteredTask;
 pub use crate::core::{
     mask_database_url, resolve_node_task_options, AnyNode, AppConfigError, BackoffStrategy,
     BuiltInTaskCode, ContractCode, CronEnumTerm, CronNumericTerm, CronOrdinal, CronSchedule,
-    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory, ErrorCode,
-    HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
+    CustomQueueConfig, CustomQueueConfigError, DailySchedule, DaySelector, ErrorCategory,
+    ErrorCode, HandleErrorCode, HandleOperationError, HandleResult, HourlySchedule, InputField,
     IntervalSchedule, JoinType, Month, MonthlySchedule, NodeKey, NodeRef, OnError,
     OperationalErrorCode, OutcomeCode, PayloadPolicy, PostgresConfig, PostgresConfigError,
     QueueMode, RecoveryConfig, RecoveryConfigError,
-    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec,
-    ResilienceConfigError, ResolvedEnqueue, RetrievalCode, RetryPolicy, RetryPolicyError,
-    ScheduleConfig, SchedulePattern, SpecBuilderFn, SubWorkflowError, SubWorkflowNode,
-    SubWorkflowSummary, SuccessCase, SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError,
-    TaskErrorCode, TaskInfo, TaskNode, TaskOptions, TaskRegistry, TaskResult, TaskSchedule,
-    TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, TypedNodeRef,
-    ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowMeta, WorkflowSpec, WorkflowSpecBuilder,
-    WorkflowSpecRegistry, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
-    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES,
-    WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    RegisteredWorkflowSpec as CoreRegisteredWorkflowSpec, ResilienceConfigError, ResolvedEnqueue,
+    RetentionChoice, RetentionClassConfig, RetentionConfig, RetentionConfigError, RetrievalCode,
+    RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern, SpecBuilderFn,
+    SubWorkflowError, SubWorkflowNode, SubWorkflowSummary, SuccessCase, SuccessPolicy,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskInfo, TaskNode, TaskOptions,
+    TaskRegistry, TaskResult, TaskSchedule, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResult, TaskStatus, TypedNodeRef, ValidationReport, Weekday, WeeklySchedule,
+    WorkerResilienceConfig, WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowMeta,
+    WorkflowSpec, WorkflowSpecBuilder, WorkflowSpecRegistry, WorkflowStartError,
+    WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
+    TASK_TERMINAL_STATES, WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES,
+    WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 
@@ -361,6 +362,7 @@ impl Horsies {
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
             self.core.config().payload.clone(),
+            self.core.config().retention.clone(),
         ))
     }
 
@@ -404,6 +406,7 @@ impl Horsies {
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
             self.core.config().payload.clone(),
+            self.core.config().retention.clone(),
         )
     }
 
@@ -457,6 +460,7 @@ impl Horsies {
             self.core.config().resend_on_transient_err,
             self.core.config().resilience.clone(),
             self.core.config().payload.clone(),
+            self.core.config().retention.clone(),
         ))
     }
 
@@ -742,6 +746,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -751,6 +756,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,

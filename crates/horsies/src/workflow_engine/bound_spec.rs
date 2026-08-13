@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::{WorkflowSpec, WorkflowStartError, WorkflowStartResult};
 
@@ -22,6 +23,7 @@ pub struct BoundWorkflowSpec<T> {
     registry: Arc<WorkflowSpecRegistry>,
     resend_on_transient_err: bool,
     payload: PayloadPolicy,
+    retention: RetentionConfig,
     _phantom: PhantomData<T>,
 }
 
@@ -36,6 +38,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
         registry: Arc<WorkflowSpecRegistry>,
         resend_on_transient_err: bool,
         payload: PayloadPolicy,
+        retention: RetentionConfig,
     ) -> Self {
         Self {
             spec,
@@ -43,6 +46,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             registry,
             resend_on_transient_err,
             payload,
+            retention,
             _phantom: PhantomData,
         }
     }
@@ -56,6 +60,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             &self.registry,
             self.resend_on_transient_err,
             &self.payload,
+            &self.retention,
         )
         .await
     }
@@ -72,6 +77,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             &self.registry,
             self.resend_on_transient_err,
             &self.payload,
+            &self.retention,
         )
         .await
     }
@@ -87,6 +93,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             error,
             &self.registry,
             &self.payload,
+            &self.retention,
         )
         .await
     }
@@ -98,6 +105,7 @@ impl<T: DeserializeOwned> BoundWorkflowSpec<T> {
             Arc::clone(&self.broker),
             Arc::clone(&self.registry),
             self.payload.clone(),
+            self.retention.clone(),
         )
     }
 }
@@ -123,8 +131,14 @@ mod tests {
             broker: Arc<PostgresBroker>,
             registry: Arc<WorkflowSpecRegistry>,
         ) {
-            let _bound: BoundWorkflowSpec<String> =
-                BoundWorkflowSpec::from_broker(spec, broker, registry, true, PayloadPolicy::default());
+            let _bound: BoundWorkflowSpec<String> = BoundWorkflowSpec::from_broker(
+                spec,
+                broker,
+                registry,
+                true,
+                PayloadPolicy::default(),
+                RetentionConfig::default(),
+            );
         }
 
         let _ = _assert_from_broker;

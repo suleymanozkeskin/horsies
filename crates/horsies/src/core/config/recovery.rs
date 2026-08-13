@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 /// Configuration for automatic stale task detection and crash recovery.
 ///
@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// - RUNNING tasks that go stale: mark as FAILED (may not be idempotent)
 ///
 /// All time values are in milliseconds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RecoveryConfig {
     /// Automatically requeue tasks stuck in CLAIMED (safe — user code never ran).
     #[serde(default = "default_true")]
@@ -50,6 +50,10 @@ pub struct RecoveryConfig {
     #[serde(default = "default_crashed_worker_recovery_grace")]
     pub crashed_worker_recovery_grace_ms: u64,
 
+    /// Recovery passes allowed before an unresolvable phase-2 row is quarantined.
+    #[serde(default = "default_phase2_quarantine_after_attempts")]
+    pub phase2_quarantine_after_attempts: u32,
+
     /// How often the reaper checks for stale tasks (1s–10min).
     #[serde(default = "default_check_interval")]
     pub check_interval_ms: u64,
@@ -67,36 +71,92 @@ pub struct RecoveryConfig {
     /// `horsies_worker_states`, so shorter intervals grow the table faster.
     #[serde(default = "default_worker_state_snapshot_interval")]
     pub worker_state_snapshot_interval_ms: u64,
+}
 
-    /// How long to keep heartbeat rows in hours. None disables pruning.
-    #[serde(default = "default_heartbeat_retention")]
-    pub heartbeat_retention_hours: Option<u32>,
+const MOVED_TO_RETENTION: [&str; 9] = [
+    "heartbeat_leaf_horizon_hours",
+    "history_leaf_horizon_days",
+    "partition_maintenance_interval_s",
+    "paused_workflow_auto_cancel_after",
+    "retention_classes",
+    "retention_delete_batch_size",
+    "retention_sweep_interval_s",
+    "terminal_record_retention_hours",
+    "worker_state_retention_hours",
+];
 
-    /// How long to keep worker_state snapshots in hours. None disables pruning.
-    #[serde(default = "default_worker_state_retention")]
-    pub worker_state_retention_hours: Option<u32>,
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecoveryConfigWire {
+    #[serde(default = "default_true")]
+    auto_requeue_stale_claimed: bool,
+    #[serde(default = "default_claimed_stale_threshold")]
+    claimed_stale_threshold_ms: u64,
+    #[serde(default = "default_true")]
+    auto_fail_stale_running: bool,
+    #[serde(default = "default_true")]
+    auto_terminate_orphaned_workflow_tasks: bool,
+    #[serde(default = "default_running_stale_threshold")]
+    running_stale_threshold_ms: u64,
+    #[serde(default = "default_finalizing_stale_threshold")]
+    finalizing_stale_threshold_ms: u64,
+    #[serde(default = "default_crashed_worker_recovery_grace")]
+    crashed_worker_recovery_grace_ms: u64,
+    #[serde(default = "default_phase2_quarantine_after_attempts")]
+    phase2_quarantine_after_attempts: u32,
+    #[serde(default = "default_check_interval")]
+    check_interval_ms: u64,
+    #[serde(default = "default_heartbeat_interval")]
+    runner_heartbeat_interval_ms: u64,
+    #[serde(default = "default_heartbeat_interval")]
+    claimer_heartbeat_interval_ms: u64,
+    #[serde(default = "default_worker_state_snapshot_interval")]
+    worker_state_snapshot_interval_ms: u64,
+}
 
-    /// How long to keep terminal task/workflow rows in hours. None disables pruning.
-    #[serde(default = "default_terminal_record_retention")]
-    pub terminal_record_retention_hours: Option<u32>,
+impl<'de> Deserialize<'de> for RecoveryConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        if let Some(fields) = value.as_object() {
+            let moved: Vec<_> = MOVED_TO_RETENTION
+                .iter()
+                .filter(|name| fields.contains_key(**name))
+                .map(|name| format!("{name} moved to AppConfig.retention.{name}"))
+                .collect();
+            if !moved.is_empty() {
+                return Err(D::Error::custom(moved.join("; ")));
+            }
+            if fields.contains_key("queue_terminal_record_retention_hours") {
+                return Err(D::Error::custom(
+                    "queue_terminal_record_retention_hours was removed in 0.5.0: terminal task rows age by their retention class in the task-history archive; map the queue in AppConfig.retention.queue_retention instead, which takes a duration and drops partitions rather than deleting rows",
+                ));
+            }
+            if fields.contains_key("heartbeat_retention_hours") {
+                return Err(D::Error::custom(
+                    "heartbeat_retention_hours was removed in 0.5.0: heartbeat rows live in time-partitioned leaves that drop whole; a row-delete window no longer exists",
+                ));
+            }
+        }
 
-    /// Per-queue overrides of `terminal_record_retention_hours` for plain
-    /// (non-workflow) tasks; queues not listed use the global window.
-    /// Overrides apply even when the global window is `None`. Workflow-backing
-    /// task rows always age under the global window so a workflow and its task
-    /// rows are retained as a unit. Values in hours, 1h–5y.
-    #[serde(default)]
-    pub queue_terminal_record_retention_hours: std::collections::HashMap<String, u32>,
-
-    /// Seconds between retention sweep passes (30s–24h). Frequent small
-    /// sweeps keep each pass short instead of accumulating an hourly spike.
-    #[serde(default = "default_retention_sweep_interval")]
-    pub retention_sweep_interval_s: u64,
-
-    /// Rows per retention DELETE batch (50–10_000). Bounds per-statement
-    /// duration, row locks, and WAL; each batch commits independently.
-    #[serde(default = "default_retention_delete_batch_size")]
-    pub retention_delete_batch_size: u32,
+        let wire: RecoveryConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self {
+            auto_requeue_stale_claimed: wire.auto_requeue_stale_claimed,
+            claimed_stale_threshold_ms: wire.claimed_stale_threshold_ms,
+            auto_fail_stale_running: wire.auto_fail_stale_running,
+            auto_terminate_orphaned_workflow_tasks: wire.auto_terminate_orphaned_workflow_tasks,
+            running_stale_threshold_ms: wire.running_stale_threshold_ms,
+            finalizing_stale_threshold_ms: wire.finalizing_stale_threshold_ms,
+            crashed_worker_recovery_grace_ms: wire.crashed_worker_recovery_grace_ms,
+            phase2_quarantine_after_attempts: wire.phase2_quarantine_after_attempts,
+            check_interval_ms: wire.check_interval_ms,
+            runner_heartbeat_interval_ms: wire.runner_heartbeat_interval_ms,
+            claimer_heartbeat_interval_ms: wire.claimer_heartbeat_interval_ms,
+            worker_state_snapshot_interval_ms: wire.worker_state_snapshot_interval_ms,
+        })
+    }
 }
 
 fn default_true() -> bool {
@@ -114,6 +174,9 @@ fn default_finalizing_stale_threshold() -> u64 {
 fn default_crashed_worker_recovery_grace() -> u64 {
     10_000
 }
+fn default_phase2_quarantine_after_attempts() -> u32 {
+    25
+}
 fn default_check_interval() -> u64 {
     30_000
 }
@@ -123,22 +186,6 @@ fn default_heartbeat_interval() -> u64 {
 fn default_worker_state_snapshot_interval() -> u64 {
     30_000
 }
-fn default_heartbeat_retention() -> Option<u32> {
-    Some(24)
-}
-fn default_worker_state_retention() -> Option<u32> {
-    Some(24 * 7)
-}
-fn default_terminal_record_retention() -> Option<u32> {
-    Some(24 * 30)
-}
-fn default_retention_sweep_interval() -> u64 {
-    300
-}
-fn default_retention_delete_batch_size() -> u32 {
-    500
-}
-
 impl Default for RecoveryConfig {
     fn default() -> Self {
         Self {
@@ -149,16 +196,11 @@ impl Default for RecoveryConfig {
             running_stale_threshold_ms: 300_000,
             finalizing_stale_threshold_ms: 300_000,
             crashed_worker_recovery_grace_ms: 10_000,
+            phase2_quarantine_after_attempts: 25,
             check_interval_ms: 30_000,
             runner_heartbeat_interval_ms: 30_000,
             claimer_heartbeat_interval_ms: 30_000,
             worker_state_snapshot_interval_ms: 30_000,
-            heartbeat_retention_hours: Some(24),
-            worker_state_retention_hours: Some(24 * 7),
-            terminal_record_retention_hours: Some(24 * 30),
-            queue_terminal_record_retention_hours: std::collections::HashMap::new(),
-            retention_sweep_interval_s: 300,
-            retention_delete_batch_size: 500,
         }
     }
 }
@@ -192,11 +234,6 @@ pub enum RecoveryConfigError {
         heartbeat: u64,
         minimum: u64,
     },
-
-    #[error(
-        "queue_terminal_record_retention_hours['{queue}'] ({value}h) must be within 1..={max}h"
-    )]
-    QueueRetentionOutOfRange { queue: String, value: u32, max: u32 },
 
     #[error("{field} ({value}) must be >= {min}")]
     BelowMinimum {
@@ -275,6 +312,20 @@ impl RecoveryConfig {
             });
         }
 
+        if self.phase2_quarantine_after_attempts < 3 {
+            errors.push(RecoveryConfigError::BelowMinimum {
+                field: "phase2_quarantine_after_attempts",
+                value: u64::from(self.phase2_quarantine_after_attempts),
+                min: 3,
+            });
+        } else if self.phase2_quarantine_after_attempts > 1_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "phase2_quarantine_after_attempts",
+                value: u64::from(self.phase2_quarantine_after_attempts),
+                max: 1_000,
+            });
+        }
+
         // Maximum bounds per doc-comment ranges.
         if self.check_interval_ms > 600_000 {
             errors.push(RecoveryConfigError::AboveMaximum {
@@ -323,52 +374,6 @@ impl RecoveryConfig {
                 field: "claimed_stale_threshold_ms",
                 value: self.claimed_stale_threshold_ms,
                 max: 3_600_000,
-            });
-        }
-
-        // Per-queue retention overrides: hours bounded 1h–5y per queue.
-        const QUEUE_RETENTION_MAX_HOURS: u32 = 24 * 365 * 5;
-        let mut override_queues: Vec<&String> =
-            self.queue_terminal_record_retention_hours.keys().collect();
-        override_queues.sort();
-        for queue in override_queues {
-            let value = self.queue_terminal_record_retention_hours[queue];
-            if !(1..=QUEUE_RETENTION_MAX_HOURS).contains(&value) {
-                errors.push(RecoveryConfigError::QueueRetentionOutOfRange {
-                    queue: queue.clone(),
-                    value,
-                    max: QUEUE_RETENTION_MAX_HOURS,
-                });
-            }
-        }
-
-        // Retention sweep cadence (seconds) and batch size (rows).
-        if self.retention_sweep_interval_s < 30 {
-            errors.push(RecoveryConfigError::BelowMinimum {
-                field: "retention_sweep_interval_s",
-                value: self.retention_sweep_interval_s,
-                min: 30,
-            });
-        }
-        if self.retention_sweep_interval_s > 86_400 {
-            errors.push(RecoveryConfigError::AboveMaximum {
-                field: "retention_sweep_interval_s",
-                value: self.retention_sweep_interval_s,
-                max: 86_400,
-            });
-        }
-        if self.retention_delete_batch_size < 50 {
-            errors.push(RecoveryConfigError::BelowMinimum {
-                field: "retention_delete_batch_size",
-                value: u64::from(self.retention_delete_batch_size),
-                min: 50,
-            });
-        }
-        if self.retention_delete_batch_size > 10_000 {
-            errors.push(RecoveryConfigError::AboveMaximum {
-                field: "retention_delete_batch_size",
-                value: u64::from(self.retention_delete_batch_size),
-                max: 10_000,
             });
         }
 
@@ -673,123 +678,49 @@ mod tests {
     }
 
     #[test]
-    fn retention_sweep_and_batch_defaults() {
-        assert_eq!(RecoveryConfig::default().retention_sweep_interval_s, 300);
-        assert_eq!(RecoveryConfig::default().retention_delete_batch_size, 500);
+    fn phase2_quarantine_attempt_bounds_and_default_are_exact() {
         let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
-        assert_eq!(from_empty.retention_sweep_interval_s, 300);
-        assert_eq!(from_empty.retention_delete_batch_size, 500);
-    }
+        assert_eq!(from_empty.phase2_quarantine_after_attempts, 25);
 
-    #[test]
-    fn retention_sweep_interval_bounds() {
-        let at_min = RecoveryConfig {
-            retention_sweep_interval_s: 30,
-            ..Default::default()
-        };
-        assert!(at_min.validate().is_empty());
-
-        let at_max = RecoveryConfig {
-            retention_sweep_interval_s: 86_400,
-            ..Default::default()
-        };
-        assert!(at_max.validate().is_empty());
-
-        let below = RecoveryConfig {
-            retention_sweep_interval_s: 29,
-            ..Default::default()
-        };
-        let errors = below.validate();
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0],
-            RecoveryConfigError::BelowMinimum {
-                field: "retention_sweep_interval_s",
-                ..
-            }
-        ));
-
-        let above = RecoveryConfig {
-            retention_sweep_interval_s: 86_401,
-            ..Default::default()
-        };
-        let errors = above.validate();
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0],
-            RecoveryConfigError::AboveMaximum {
-                field: "retention_sweep_interval_s",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn retention_delete_batch_size_bounds() {
-        let at_min = RecoveryConfig {
-            retention_delete_batch_size: 50,
-            ..Default::default()
-        };
-        assert!(at_min.validate().is_empty());
-
-        let at_max = RecoveryConfig {
-            retention_delete_batch_size: 10_000,
-            ..Default::default()
-        };
-        assert!(at_max.validate().is_empty());
-
-        let below = RecoveryConfig {
-            retention_delete_batch_size: 49,
-            ..Default::default()
-        };
-        let errors = below.validate();
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0],
-            RecoveryConfigError::BelowMinimum {
-                field: "retention_delete_batch_size",
-                ..
-            }
-        ));
-
-        let above = RecoveryConfig {
-            retention_delete_batch_size: 10_001,
-            ..Default::default()
-        };
-        let errors = above.validate();
-        assert_eq!(errors.len(), 1);
-        assert!(matches!(
-            errors[0],
-            RecoveryConfigError::AboveMaximum {
-                field: "retention_delete_batch_size",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn queue_retention_override_bounds() {
-        let mk = |value: u32| RecoveryConfig {
-            queue_terminal_record_retention_hours: std::collections::HashMap::from([(
-                "metrics".to_owned(),
-                value,
-            )]),
-            ..Default::default()
-        };
-
-        assert!(mk(1).validate().is_empty());
-        assert!(mk(24 * 365 * 5).validate().is_empty());
-        assert!(RecoveryConfig::default().validate().is_empty());
-
-        for bad in [0, 24 * 365 * 5 + 1] {
-            let errors = mk(bad).validate();
-            assert_eq!(errors.len(), 1);
-            assert!(matches!(
-                &errors[0],
-                RecoveryConfigError::QueueRetentionOutOfRange { queue, value, .. }
-                    if queue == "metrics" && *value == bad
-            ));
+        for value in [3, 1_000] {
+            let config = RecoveryConfig {
+                phase2_quarantine_after_attempts: value,
+                ..Default::default()
+            };
+            assert!(config.validate().is_empty());
         }
+        for value in [2, 1_001] {
+            let config = RecoveryConfig {
+                phase2_quarantine_after_attempts: value,
+                ..Default::default()
+            };
+            assert_eq!(config.validate().len(), 1);
+        }
+    }
+
+    #[test]
+    fn moved_and_removed_retention_fields_fail_closed_with_successors() {
+        for name in MOVED_TO_RETENTION {
+            let json = format!(r#"{{"{name}": 1}}"#);
+            let error = serde_json::from_str::<RecoveryConfig>(&json).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{name} moved to AppConfig.retention.{name}")),
+                "{error}",
+            );
+        }
+
+        let queue_error = serde_json::from_str::<RecoveryConfig>(
+            r#"{"queue_terminal_record_retention_hours":{"default":24}}"#,
+        )
+        .unwrap_err();
+        assert!(queue_error.to_string().contains("retention class"));
+
+        let heartbeat_error =
+            serde_json::from_str::<RecoveryConfig>(r#"{"heartbeat_retention_hours":24}"#)
+                .unwrap_err();
+        assert!(heartbeat_error.to_string().contains("drop whole"));
     }
 
     // --- Edge cases: exactly at minimum / maximum ---

@@ -121,6 +121,7 @@ mod tests {
                 pool_pre_ping: true,
                 pool_size: 30,
                 max_overflow: 30,
+                retain_rerun_input_default: false,
                 pool_timeout: 30,
                 pool_recycle: 1800,
                 echo: false,
@@ -130,6 +131,7 @@ mod tests {
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig::default(),
             schedule: None,
             resend_on_transient_err: false,
@@ -160,7 +162,11 @@ mod tests {
             .await
             .expect("panic must escalate");
         assert_eq!(exit.service, "panicking");
-        assert!(exit.reason.contains("panicked: boom"), "reason: {}", exit.reason);
+        assert!(
+            exit.reason.contains("panicked: boom"),
+            "reason: {}",
+            exit.reason
+        );
         assert!(cancel.is_cancelled(), "worker must stop claiming");
     }
 
@@ -224,7 +230,12 @@ mod tests {
             check_interval_ms: 3_600_000,
             ..RecoveryConfig::default()
         };
-        let handle = spawn_reaper(pool, config, cancel.clone());
+        let handle = spawn_reaper(
+            pool,
+            config,
+            crate::core::RetentionConfig::default(),
+            cancel.clone(),
+        );
         run_loop_death_case("reaper", cancel, handle).await;
     }
 
@@ -243,6 +254,7 @@ mod tests {
             Arc::new(WorkflowSpecRegistry::new()),
             config,
             crate::core::config::payload::PayloadPolicy::default(),
+            crate::core::RetentionConfig::default(),
             cancel.clone(),
         );
         run_loop_death_case("workflow-recovery", cancel, handle).await;

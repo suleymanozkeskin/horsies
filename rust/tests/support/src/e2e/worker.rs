@@ -359,9 +359,13 @@ fn try_enqueue_healthcheck(
             sqlx::query(
                 "INSERT INTO horsies_tasks (
                     id, task_name, queue_name, priority, args, kwargs,
-                    status, sent_at, enqueue_sha, created_at, updated_at
+                    status, sent_at, enqueue_sha, created_at, updated_at,
+                    command_fingerprint_version, command_fingerprint, retention_class_key,
+                    retain_rerun_input, prepared_rerun_input_disposition
                 ) VALUES ($1, 'e2e_healthcheck', $3, 100, NULL, '{}',
-                          'PENDING', NOW(), $2, NOW(), NOW())",
+                          'PENDING', NOW(), $2, NOW(), NOW(),
+                          1, decode(repeat('00', 32), 'hex'), 'standard_30d',
+                          FALSE, 'NEVER_ELIGIBLE')",
             )
             .bind(&task_id)
             .bind(&sha)

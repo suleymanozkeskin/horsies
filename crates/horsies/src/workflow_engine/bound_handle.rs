@@ -6,6 +6,7 @@ use serde::de::DeserializeOwned;
 
 use crate::broker::PostgresBroker;
 use crate::core::config::payload::PayloadPolicy;
+use crate::core::config::retention::RetentionConfig;
 use crate::core::registry::workflow::WorkflowSpecRegistry;
 use crate::core::task::{TaskError, TaskResult};
 use crate::core::workflow::handle_types::{HandleErrorCode, HandleOperationError, HandleResult};
@@ -31,6 +32,7 @@ pub struct WorkflowHandle<T> {
     broker: Arc<PostgresBroker>,
     registry: Arc<WorkflowSpecRegistry>,
     payload: PayloadPolicy,
+    retention: RetentionConfig,
     _phantom: std::marker::PhantomData<T>,
 }
 
@@ -46,12 +48,14 @@ impl<T> WorkflowHandle<T> {
         broker: Arc<PostgresBroker>,
         registry: Arc<WorkflowSpecRegistry>,
         payload: PayloadPolicy,
+        retention: RetentionConfig,
     ) -> Self {
         Self {
             workflow_id,
             broker,
             registry,
             payload,
+            retention,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -167,7 +171,8 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
     ///
     /// This is a wrap-strategy method.
     pub async fn pause(&self) -> HandleResult<bool> {
-        crate::workflow_engine::lifecycle::pause_workflow(self.broker.pool(), &self.workflow_id).await
+        crate::workflow_engine::lifecycle::pause_workflow(self.broker.pool(), &self.workflow_id)
+            .await
     }
 
     /// Resume the workflow (PAUSED -> RUNNING).
@@ -179,6 +184,7 @@ impl<T: DeserializeOwned> WorkflowHandle<T> {
             &self.workflow_id,
             &self.registry,
             &self.payload,
+            &self.retention,
         )
         .await
     }
@@ -242,6 +248,7 @@ mod tests {
             )),
             Arc::new(WorkflowSpecRegistry::new()),
             PayloadPolicy::default(),
+            RetentionConfig::default(),
         );
 
         let result =
@@ -271,6 +278,7 @@ mod tests {
             )),
             Arc::new(WorkflowSpecRegistry::new()),
             PayloadPolicy::default(),
+            RetentionConfig::default(),
         );
 
         let result = handle.fold_task_result_error::<serde_json::Value>(
@@ -327,7 +335,11 @@ mod shared_listener_tests {
     #[tokio::test]
     #[serial]
     async fn many_waiting_handles_share_one_listener() {
-        let broker = Arc::new(PostgresBroker::connect(&test_db_url()).await.expect("connect"));
+        let broker = Arc::new(
+            PostgresBroker::connect(&test_db_url())
+                .await
+                .expect("connect"),
+        );
         let pool = broker.pool().clone();
         let registry = Arc::new(WorkflowSpecRegistry::new());
         let wf_id = Uuid::new_v4().to_string();
@@ -353,6 +365,7 @@ mod shared_listener_tests {
                 Arc::clone(&broker),
                 Arc::clone(&registry),
                 PayloadPolicy::default(),
+                RetentionConfig::default(),
             );
             futures.push(async move { handle.get(Some(Duration::from_millis(400))).await });
         }

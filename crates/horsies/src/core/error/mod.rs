@@ -89,6 +89,7 @@ pub enum ErrorCode {
     WorkerInvalidLocator,
     BrokerInitFailed,
     CheckReservedCodeCollision,
+    ConfigInvalidRetention,
 
     // Registry (HRS-300–HRS-399)
     TaskNotRegistered,
@@ -140,6 +141,7 @@ impl ErrorCode {
             Self::WorkerInvalidLocator => "HRS-207",
             Self::BrokerInitFailed => "HRS-211",
             Self::CheckReservedCodeCollision => "HRS-212",
+            Self::ConfigInvalidRetention => "HRS-216",
             Self::TaskNotRegistered => "HRS-300",
             Self::TaskDuplicateName => "HRS-301",
             Self::WorkflowUnregisteredTask => "HRS-302",
@@ -195,7 +197,8 @@ impl ErrorCode {
             | Self::CliInvalidArgs
             | Self::WorkerInvalidLocator
             | Self::BrokerInitFailed
-            | Self::CheckReservedCodeCollision => ErrorCategory::Config,
+            | Self::CheckReservedCodeCollision
+            | Self::ConfigInvalidRetention => ErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
                 ErrorCategory::Registry
@@ -261,6 +264,7 @@ impl ErrorCode {
                 | Self::WorkerInvalidLocator
                 | Self::BrokerInitFailed
                 | Self::CheckReservedCodeCollision
+                | Self::ConfigInvalidRetention
         )
     }
 
@@ -409,6 +413,12 @@ impl ValidationReport {
             n => {
                 let message = format!("aborting due to {} previous errors", n);
                 let mut combined = HorsiesError::new(message);
+                let common_code = self.errors.first().and_then(|first| {
+                    first
+                        .code
+                        .filter(|code| self.errors.iter().all(|error| error.code == Some(*code)))
+                });
+                combined.code = common_code;
                 for error in &self.errors {
                     combined.notes.push(format!("{}", error));
                 }
@@ -439,6 +449,12 @@ mod tests {
     fn error_code_display() {
         assert_eq!(ErrorCode::WorkflowCycleDetected.to_string(), "HRS-007");
         assert_eq!(ErrorCode::TaskNotRegistered.to_string(), "HRS-300");
+        assert_eq!(ErrorCode::ConfigInvalidRetention.to_string(), "HRS-216");
+        assert_eq!(
+            ErrorCode::ConfigInvalidRetention.category(),
+            ErrorCategory::Config,
+        );
+        assert!(ErrorCode::ConfigInvalidRetention.is_config_error());
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                             task_id: None,
                             payload: None,
                         })?
-                        .send_with_options(self.options, __args)
+                        .send_with_options(self.options.clone(), __args)
                         .await
                 }
 
@@ -150,7 +150,7 @@ pub fn generate_task(attrs: TaskAttrs, func: ItemFn, blocking: bool) -> syn::Res
                             task_id: None,
                             payload: None,
                         })?
-                        .schedule_with_options(self.options, delay, __args)
+                        .schedule_with_options(self.options.clone(), delay, __args)
                         .await
                 }
             }
