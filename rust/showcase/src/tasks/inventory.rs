@@ -1,6 +1,6 @@
 use horsies::{Horsies, HorsiesError};
 
-use super::{fixed_options, register_json, QUEUE_FULFILLMENT};
+use super::{fixed_options, register_json, JsonTask, QUEUE_FULFILLMENT};
 
 pub const TASK_NAMES: &[&str] = &[
     "reserve_stock",
@@ -10,10 +10,21 @@ pub const TASK_NAMES: &[&str] = &[
     "update_stock_levels",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
-    register_json(app, "reserve_stock", QUEUE_FULFILLMENT, fixed_options())?;
-    register_json(app, "release_stock", QUEUE_FULFILLMENT, fixed_options())?;
+pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+    let mut handles = Vec::new();
+    handles.push(register_json(
+        app,
+        "reserve_stock",
+        QUEUE_FULFILLMENT,
+        fixed_options(),
+    )?);
+    handles.push(register_json(
+        app,
+        "release_stock",
+        QUEUE_FULFILLMENT,
+        fixed_options(),
+    )?);
     // These names are owned by analytics::register. The source modules share
     // the same task registry, so this module only documents their ownership.
-    Ok(())
+    Ok(handles)
 }

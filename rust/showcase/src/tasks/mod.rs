@@ -1,8 +1,10 @@
 //! Registered Acme tasks.
 
+use std::collections::HashMap;
+
 use horsies::{
     async_task_fn, Horsies, HorsiesError, OperationalErrorCode, RetryPolicy, TaskError,
-    TaskErrorCode, TaskOptions,
+    TaskErrorCode, TaskFunction, TaskOptions,
 };
 use serde_json::Value;
 
@@ -15,12 +17,16 @@ pub mod orders;
 pub mod payments;
 pub mod promotions;
 pub mod returns;
+pub mod runtime;
 pub mod shipping;
 
 pub const QUEUE_PAYMENTS: &str = "payments";
 pub const QUEUE_FULFILLMENT: &str = "fulfillment";
 pub const QUEUE_NOTIFICATIONS: &str = "notifications";
 pub const QUEUE_ANALYTICS: &str = "analytics";
+
+pub type JsonTask = TaskFunction<Value, Value>;
+pub type TaskHandles = HashMap<String, JsonTask>;
 
 /// The complete task surface from the pinned showcase source.
 pub const ALL_TASK_NAMES: &[&str] = &[
@@ -95,12 +101,25 @@ pub(crate) fn register_json(
     name: &str,
     queue: &str,
     options: TaskOptions,
-) -> Result<(), HorsiesError> {
-    app.task::<Value, Value>(name, async_task_fn!(generic_task, Value))?
+) -> Result<JsonTask, HorsiesError> {
+    let registered = match name {
+        "validate_order" => async_task_fn!(runtime::validate_order, Value),
+        "reserve_stock" => async_task_fn!(runtime::reserve_stock, Value),
+        "authorize_payment" => async_task_fn!(runtime::authorize_payment, Value),
+        "capture_payment" => async_task_fn!(runtime::capture_payment, Value),
+        "pick_pack" => async_task_fn!(runtime::pick_pack, Value),
+        "generate_invoice" => async_task_fn!(runtime::generate_invoice, Value),
+        "book_courier" => async_task_fn!(runtime::book_courier, Value),
+        "print_label" => async_task_fn!(runtime::print_label, Value),
+        "tracking_seed" => async_task_fn!(runtime::tracking_seed, Value),
+        "send_order_email" => async_task_fn!(runtime::send_order_email, Value),
+        _ => async_task_fn!(generic_task, Value),
+    };
+    Ok(app
+        .task::<Value, Value>(name, registered)?
         .queue(queue)
         .task_options(options)
-        .finish()?;
-    Ok(())
+        .finish()?)
 }
 
 pub(crate) fn options_with_timeout(timeout_ms: u32) -> TaskOptions {
@@ -132,24 +151,26 @@ pub(crate) fn supplier_options() -> TaskOptions {
     )
 }
 
-pub fn register_all(app: &mut Horsies) -> Result<(), HorsiesError> {
-    analytics::register(app)?;
-    inventory::register(app)?;
-    notify::register(app)?;
-    orders::register(app)?;
-    payments::register(app)?;
-    promotions::register(app)?;
-    returns::register(app)?;
-    shipping::register(app)?;
-    Ok(())
+pub fn register_all(app: &mut Horsies) -> Result<TaskHandles, HorsiesError> {
+    let mut handles = TaskHandles::new();
+    for handle in analytics::register(app)?
+        .into_iter()
+        .chain(inventory::register(app)?)
+        .chain(notify::register(app)?)
+        .chain(orders::register(app)?)
+        .chain(payments::register(app)?)
+        .chain(promotions::register(app)?)
+        .chain(returns::register(app)?)
+        .chain(shipping::register(app)?)
+    {
+        handles.insert(handle.task_name().to_owned(), handle);
+    }
+    Ok(handles)
 }
 
 /// Convert an Acme store failure at the task boundary.
-pub fn store_failure(operation: &str, message: impl Into<String>) -> TaskError {
-    let mut error = TaskError::new(
-        STORE_UNAVAILABLE,
-        format!("{operation} failed: {}", message.into()),
-    );
+pub fn store_failure(operation: &str, message: impl std::fmt::Display) -> TaskError {
+    let mut error = TaskError::new(STORE_UNAVAILABLE, format!("{operation} failed: {message}"));
     error.data = Some(serde_json::json!({ "operation": operation }));
     error
 }

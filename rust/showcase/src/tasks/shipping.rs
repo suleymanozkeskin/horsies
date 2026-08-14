@@ -1,11 +1,12 @@
 use horsies::{Horsies, HorsiesError, OperationalErrorCode};
 
-use super::{exponential_options, fixed_options, register_json, QUEUE_FULFILLMENT};
+use super::{exponential_options, fixed_options, register_json, JsonTask, QUEUE_FULFILLMENT};
 
 pub const TASK_NAMES: &[&str] = &["book_courier", "print_label", "tracking_seed"];
 
-pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
-    register_json(
+pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+    let mut handles = Vec::new();
+    handles.push(register_json(
         app,
         "book_courier",
         QUEUE_FULFILLMENT,
@@ -17,8 +18,18 @@ pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
                 OperationalErrorCode::WorkerCrashed.into(),
             ],
         ),
-    )?;
-    register_json(app, "print_label", QUEUE_FULFILLMENT, fixed_options())?;
-    register_json(app, "tracking_seed", QUEUE_FULFILLMENT, fixed_options())?;
-    Ok(())
+    )?);
+    handles.push(register_json(
+        app,
+        "print_label",
+        QUEUE_FULFILLMENT,
+        fixed_options(),
+    )?);
+    handles.push(register_json(
+        app,
+        "tracking_seed",
+        QUEUE_FULFILLMENT,
+        fixed_options(),
+    )?);
+    Ok(handles)
 }

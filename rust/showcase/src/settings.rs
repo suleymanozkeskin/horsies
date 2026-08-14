@@ -12,10 +12,14 @@ pub const ACME_URL_VARIABLE: &str = "ACME_DATABASE_URL";
 pub const SHARED_URL_VARIABLE: &str = "DATABASE_URL";
 pub const ACME_DATABASE_NAME: &str = "acme_demo";
 pub const MAINTENANCE_DATABASE_NAME: &str = "postgres";
+/// Python's SQLAlchemy/psycopg URL form. Accepted for `.env` compatibility.
 pub const SQLALCHEMY_SCHEME: &str = "postgresql+psycopg";
+/// Native libpq and SQLx URL forms accepted by the Rust showcase.
+pub const POSTGRESQL_SCHEME: &str = "postgresql";
+pub const POSTGRES_SCHEME: &str = "postgres";
+/// Canonical scheme used for SQLx connections after normalization.
 pub const PSYCOPG_SCHEME: &str = "postgresql";
-pub const DEFAULT_DATABASE_URL: &str =
-    "postgresql+psycopg://postgres:postgres@localhost:5432/acme_demo";
+pub const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/acme_demo";
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -23,7 +27,7 @@ pub struct SettingsError(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseSettings {
-    /// The resolved SQLAlchemy-shaped URL, kept for parity with the source.
+    /// The URL selected by the five resolution rules.
     pub url: String,
     /// The same target in a libpq/SQLx-compatible form.
     pub psycopg_dsn: String,
@@ -94,13 +98,16 @@ fn replace_scheme(input: &str, scheme: &str) -> Result<String, SettingsError> {
 }
 
 fn validate_url(url: &str, source: &str) -> Result<String, SettingsError> {
-    if !url.starts_with(&format!("{SQLALCHEMY_SCHEME}://")) {
-        return Err(SettingsError(format!(
-            "{source} must start with {SQLALCHEMY_SCHEME}:// — got {url:?}"
-        )));
-    }
     let parsed = Url::parse(url)
         .map_err(|error| SettingsError(format!("{source} is not a valid URL: {error}")))?;
+    if !matches!(
+        parsed.scheme(),
+        SQLALCHEMY_SCHEME | POSTGRESQL_SCHEME | POSTGRES_SCHEME
+    ) {
+        return Err(SettingsError(format!(
+            "{source} must use one of {POSTGRESQL_SCHEME}://, {POSTGRES_SCHEME}://, or {SQLALCHEMY_SCHEME}:// — got {url:?}"
+        )));
+    }
     let database_name = parsed.path().trim_start_matches('/');
     if database_name.is_empty() {
         return Err(SettingsError(format!(
@@ -189,13 +196,13 @@ mod tests {
 
     #[test]
     fn resolution_rules_have_the_pinned_precedence() {
-        let direct = maps(&[(ACME_URL_VARIABLE, "postgresql+psycopg://a:b@h:9/direct")]);
-        let file_direct = maps(&[(ACME_URL_VARIABLE, "postgresql+psycopg://a:b@h:9/file")]);
+        let direct = maps(&[(ACME_URL_VARIABLE, "postgresql://a:b@h:9/direct")]);
+        let file_direct = maps(&[(ACME_URL_VARIABLE, "postgresql://a:b@h:9/file")]);
         let shared = maps(&[(
             SHARED_URL_VARIABLE,
-            "postgresql+psycopg://a:b@h:9/horsies?sslmode=require",
+            "postgresql://a:b@h:9/horsies?sslmode=require",
         )]);
-        let file_shared = maps(&[(SHARED_URL_VARIABLE, "postgresql+psycopg://a:b@h:9/other")]);
+        let file_shared = maps(&[(SHARED_URL_VARIABLE, "postgresql://a:b@h:9/other")]);
         assert_eq!(
             resolve_database_settings_from(&direct, &file_direct)
                 .unwrap()
@@ -223,6 +230,69 @@ mod tests {
     }
 
     #[test]
+    fn every_resolution_rule_accepts_native_and_python_url_forms() {
+        let accepted = [POSTGRESQL_SCHEME, POSTGRES_SCHEME, SQLALCHEMY_SCHEME];
+        for scheme in accepted {
+            let direct_env = maps(&[(ACME_URL_VARIABLE, &format!("{scheme}://a:b@h:9/direct"))]);
+            assert_eq!(
+                resolve_database_settings_from(&direct_env, &BTreeMap::new())
+                    .unwrap()
+                    .database_name,
+                "direct"
+            );
+
+            let direct_file = maps(&[(ACME_URL_VARIABLE, &format!("{scheme}://a:b@h:9/file"))]);
+            assert_eq!(
+                resolve_database_settings_from(&BTreeMap::new(), &direct_file)
+                    .unwrap()
+                    .database_name,
+                "file"
+            );
+
+            let shared_env = maps(&[(
+                SHARED_URL_VARIABLE,
+                &format!("{scheme}://a:b@h:9/shared?sslmode=require"),
+            )]);
+            let shared = resolve_database_settings_from(&shared_env, &BTreeMap::new()).unwrap();
+            assert_eq!(shared.database_name, ACME_DATABASE_NAME);
+            assert_eq!(
+                shared.psycopg_dsn,
+                "postgresql://a:b@h:9/acme_demo?sslmode=require"
+            );
+
+            let shared_file = maps(&[(
+                SHARED_URL_VARIABLE,
+                &format!("{scheme}://a:b@h:9/file-shared"),
+            )]);
+            assert_eq!(
+                resolve_database_settings_from(&BTreeMap::new(), &shared_file)
+                    .unwrap()
+                    .database_name,
+                ACME_DATABASE_NAME
+            );
+        }
+
+        let default = resolve_database_settings_from(&BTreeMap::new(), &BTreeMap::new()).unwrap();
+        assert_eq!(default.url, DEFAULT_DATABASE_URL);
+        assert_eq!(default.psycopg_dsn, DEFAULT_DATABASE_URL);
+    }
+
+    #[test]
+    fn every_external_resolution_rule_rejects_an_invalid_scheme() {
+        let invalid = "mysql://a:b@h:9/acme_demo";
+        let direct_env = maps(&[(ACME_URL_VARIABLE, invalid)]);
+        let direct_file = maps(&[(ACME_URL_VARIABLE, invalid)]);
+        let shared_env = maps(&[(SHARED_URL_VARIABLE, invalid)]);
+        let shared_file = maps(&[(SHARED_URL_VARIABLE, invalid)]);
+
+        assert!(resolve_database_settings_from(&direct_env, &BTreeMap::new()).is_err());
+        assert!(resolve_database_settings_from(&BTreeMap::new(), &direct_file).is_err());
+        assert!(resolve_database_settings_from(&shared_env, &BTreeMap::new()).is_err());
+        assert!(resolve_database_settings_from(&BTreeMap::new(), &shared_file).is_err());
+        assert!(validate_url(invalid, "built-in default").is_err());
+    }
+
+    #[test]
     fn shared_rewrite_preserves_authority_query_and_only_changes_name() {
         let source = maps(&[(
             SHARED_URL_VARIABLE,
@@ -243,7 +313,7 @@ mod tests {
     fn invalid_scheme_and_missing_name_fail_closed() {
         let bad = maps(&[(ACME_URL_VARIABLE, "mysql://localhost/acme_demo")]);
         assert!(resolve_database_settings_from(&bad, &BTreeMap::new()).is_err());
-        let missing = maps(&[(ACME_URL_VARIABLE, "postgresql+psycopg://localhost")]);
+        let missing = maps(&[(ACME_URL_VARIABLE, "postgresql://localhost")]);
         assert!(resolve_database_settings_from(&missing, &BTreeMap::new()).is_err());
     }
 }

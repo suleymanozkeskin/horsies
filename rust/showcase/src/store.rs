@@ -190,7 +190,8 @@ impl Store {
     where
         F: for<'a> FnOnce(
             &'a mut Transaction<'_, Postgres>,
-        ) -> Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + 'a>>,
+        )
+            -> Pin<Box<dyn Future<Output = Result<T, sqlx::Error>> + Send + 'a>>,
     {
         let mut tx = self
             .pool

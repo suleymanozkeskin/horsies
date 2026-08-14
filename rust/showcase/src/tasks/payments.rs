@@ -1,6 +1,6 @@
 use horsies::{Horsies, HorsiesError, OperationalErrorCode};
 
-use super::{exponential_options, fixed_options, register_json, QUEUE_PAYMENTS};
+use super::{exponential_options, fixed_options, register_json, JsonTask, QUEUE_PAYMENTS};
 
 pub const TASK_NAMES: &[&str] = &[
     "authorize_payment",
@@ -9,8 +9,9 @@ pub const TASK_NAMES: &[&str] = &[
     "reconcile_payments",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
-    register_json(
+pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+    let mut handles = Vec::new();
+    handles.push(register_json(
         app,
         "authorize_payment",
         QUEUE_PAYMENTS,
@@ -22,9 +23,9 @@ pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
                 OperationalErrorCode::WorkerCrashed.into(),
             ],
         ),
-    )?;
+    )?);
     for name in ["capture_payment", "refund_payment", "reconcile_payments"] {
-        register_json(app, name, QUEUE_PAYMENTS, fixed_options())?;
+        handles.push(register_json(app, name, QUEUE_PAYMENTS, fixed_options())?);
     }
-    Ok(())
+    Ok(handles)
 }

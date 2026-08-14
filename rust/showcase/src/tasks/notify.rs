@@ -1,6 +1,6 @@
 use horsies::{Horsies, HorsiesError};
 
-use super::{fixed_options, register_json, QUEUE_NOTIFICATIONS};
+use super::{fixed_options, register_json, JsonTask, QUEUE_NOTIFICATIONS};
 
 pub const TASK_NAMES: &[&str] = &[
     "send_order_email",
@@ -9,9 +9,15 @@ pub const TASK_NAMES: &[&str] = &[
     "winback_blast",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
+pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+    let mut handles = Vec::new();
     for name in TASK_NAMES {
-        register_json(app, name, QUEUE_NOTIFICATIONS, fixed_options())?;
+        handles.push(register_json(
+            app,
+            name,
+            QUEUE_NOTIFICATIONS,
+            fixed_options(),
+        )?);
     }
-    Ok(())
+    Ok(handles)
 }

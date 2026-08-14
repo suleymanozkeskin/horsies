@@ -10,7 +10,7 @@ use crate::domain::{
 };
 use crate::{simulate, tuning};
 
-use super::{fixed_options, register_json, QUEUE_ANALYTICS, QUEUE_FULFILLMENT};
+use super::{fixed_options, register_json, JsonTask, QUEUE_ANALYTICS, QUEUE_FULFILLMENT};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionArgs {
@@ -162,11 +162,12 @@ pub fn register_story(app: &mut Horsies) -> Result<StoryTaskHandles, HorsiesErro
     Ok(StoryTaskHandles { apply, loyalty })
 }
 
-pub fn register(app: &mut Horsies) -> Result<(), HorsiesError> {
+pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
     let _ = register_story(app)?;
-    register_json(app, "publish_cdn", QUEUE_FULFILLMENT, fixed_options())?;
-    register_json(app, "publish_origin", QUEUE_FULFILLMENT, fixed_options())?;
-    Ok(())
+    Ok(vec![
+        register_json(app, "publish_cdn", QUEUE_FULFILLMENT, fixed_options())?,
+        register_json(app, "publish_origin", QUEUE_FULFILLMENT, fixed_options())?,
+    ])
 }
 
 #[cfg(test)]
