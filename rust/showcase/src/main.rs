@@ -12,7 +12,7 @@ enum Command {
     /// Create the Acme database, tables, and deterministic catalog.
     Seed,
     /// Run the long-lived task worker.
-    Worker,
+    Worker(WorkerOptions),
     /// Run the long-lived scheduler.
     Scheduler,
     /// Serve the Horsies monitoring UI.
@@ -68,7 +68,13 @@ fn settings() -> Result<acme_showcase::DatabaseSettings, String> {
     acme_showcase::resolve_database_settings().map_err(|error| error.to_string())
 }
 
-async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, clap::Args)]
+struct WorkerOptions {
+    /// Concurrent task slots in this worker process.
+    #[arg(long, default_value_t = 12)]    concurrency: u32,
+}
+
+async fn run_worker(options: WorkerOptions) -> Result<(), Box<dyn std::error::Error>> {
     let settings = settings()?;
     let app = acme_showcase::app::build_app_for_url(settings.sqlx_url())?;
     let mut config = horsies::WorkerConfig {
@@ -76,7 +82,7 @@ async fn run_worker() -> Result<(), Box<dyn std::error::Error>> {
             .iter()
             .map(|(name, _, _)| (*name).to_owned())
             .collect(),
-        concurrency: 12,
+        concurrency: options.concurrency,
         ..horsies::WorkerConfig::default()
     };
     config.max_claim_batch = 0;
@@ -125,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Seed => acme_showcase::scenarios::seed::run()
             .await
             .map_err(Into::into),
-        Command::Worker => run_worker().await,
+        Command::Worker(options) => run_worker(options).await,
         Command::Scheduler => run_scheduler().await,
         Command::Web(options) => run_web(options).await,
         Command::Steady {
