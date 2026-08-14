@@ -127,3 +127,10 @@ cargo test -p acme-showcase --features web --all-targets
 
 Database tests are opt-in through `ACME_DATABASE_URL`. Use a disposable
 database and drop it after the run.
+
+## Deployment inputs
+
+The release-build recipe, environment contract, and systemd unit content are
+in [deployment/README.md](deployment/README.md). The showcase is built from
+the repository because its package is not published. The deployment owner
+chooses the host, database, proxy, cadence, and rollback.
