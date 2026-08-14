@@ -5,6 +5,16 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.28] - 2026-08-14
+
+### Fixed
+
+- Worker panic conversion on the blocking and join paths now reports
+  `UNHANDLED_ERROR`. These paths reported `TASK_ERROR` before. The
+  documented vocabulary maps a worker-captured panic to
+  `UNHANDLED_ERROR` and a returned `Err(TaskError)` to `TASK_ERROR`.
+  The async panic path already followed the documented mapping.
+
 ## [0.1.0-alpha.27] - 2026-08-13
 
 This release adds the browser monitoring dashboard and its transport-free read
