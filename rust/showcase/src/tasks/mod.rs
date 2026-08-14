@@ -113,6 +113,8 @@ pub(crate) fn register_json(
         "print_label" => async_task_fn!(runtime::print_label, Value),
         "tracking_seed" => async_task_fn!(runtime::tracking_seed, Value),
         "send_order_email" => async_task_fn!(runtime::send_order_email, Value),
+        "apply_promotions" => async_task_fn!(runtime::apply_promotions, Value),
+        "compute_loyalty_points" => async_task_fn!(runtime::compute_loyalty_points, Value),
         _ => async_task_fn!(generic_task, Value),
     };
     Ok(app

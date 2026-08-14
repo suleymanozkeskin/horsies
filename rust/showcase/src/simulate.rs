@@ -1,5 +1,7 @@
 //! Deterministic simulation primitives.
 
+use chrono::{DateTime, Timelike, Utc};
+use chrono_tz::Tz;
 use sha2::{Digest, Sha256};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,38 @@ pub fn integer(low: i64, high: i64, parts: &[&str]) -> i64 {
 
 pub fn duration_ms(envelope: WorkEnvelope, parts: &[&str]) -> u64 {
     integer(envelope.low_ms as i64, envelope.high_ms as i64, parts) as u64
+}
+
+pub fn perform(envelope: WorkEnvelope, parts: &[&str]) -> u64 {
+    let slept_ms = duration_ms(envelope, parts);
+    std::thread::sleep(std::time::Duration::from_millis(slept_ms));
+    slept_ms
+}
+
+pub fn stall(stall_ms: u64) -> u64 {
+    std::thread::sleep(std::time::Duration::from_millis(stall_ms));
+    stall_ms
+}
+
+pub fn demand_factor(epoch_seconds: f64) -> f64 {
+    let seconds = epoch_seconds.max(0.0);
+    let whole = seconds.floor() as i64;
+    let nanos = ((seconds - whole as f64) * 1_000_000_000.0) as u32;
+    let now = DateTime::<Utc>::from_timestamp(whole, nanos).expect("valid epoch");
+    let zone: Tz = crate::tuning::STEADY_TIMEZONE
+        .parse()
+        .expect("valid showcase timezone");
+    let local = now.with_timezone(&zone);
+    let hour = local.hour() as f64 + f64::from(local.minute()) / 60.0;
+    let low = crate::tuning::STEADY_HOURLY_DEMAND[local.hour() as usize];
+    let high = crate::tuning::STEADY_HOURLY_DEMAND[(local.hour() as usize + 1) % 24];
+    let base = low + (high - low) * (hour.fract());
+    let ripple = 1.0
+        + crate::tuning::STEADY_RIPPLE_AMPLITUDE
+            * (std::f64::consts::TAU * seconds
+                / (crate::tuning::STEADY_RIPPLE_PERIOD_MINUTES as f64 * 60.0))
+                .sin();
+    (base * ripple).max(0.05)
 }
 
 pub fn choice<T: Clone>(options: &[T], parts: &[&str]) -> T {

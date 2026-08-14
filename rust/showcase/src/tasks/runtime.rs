@@ -17,6 +17,7 @@ use crate::settings::resolve_database_settings;
 use crate::store::Store;
 use crate::{simulate, tuning};
 
+use super::promotions::{self, LoyaltyArgs, PromotionArgs};
 use super::store_failure;
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +64,18 @@ struct LabelArgs {
 #[derive(Debug, Deserialize)]
 struct EmailArgs {
     order_id: String,
+}
+
+pub async fn apply_promotions(input: Value) -> Result<Value, TaskError> {
+    let args: PromotionArgs = parse(input)?;
+    let result = promotions::apply_promotions(args).await?;
+    serde_json::to_value(result).map_err(|error| invalid_input(error.to_string()))
+}
+
+pub async fn compute_loyalty_points(input: Value) -> Result<Value, TaskError> {
+    let args: LoyaltyArgs = parse(input)?;
+    let result = promotions::compute_loyalty_points(args).await?;
+    serde_json::to_value(result).map_err(|error| invalid_input(error.to_string()))
 }
 
 fn invalid_input(message: impl Into<String>) -> TaskError {

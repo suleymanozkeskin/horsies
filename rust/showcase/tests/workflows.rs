@@ -94,9 +94,12 @@ async fn seed_successful_order(store: &Store, prefix: &str, stock: i32, quantity
 }
 
 async fn run_order(order: Order, url: &str) -> TaskResult<serde_json::Value> {
-    let (app, _handles, order_template) =
-        build_app_with_handles_for_url(url).expect("showcase app");
-    let handle = order_template.start(order).await.expect("start workflow");
+    let (app, _handles, workflows) = build_app_with_handles_for_url(url).expect("showcase app");
+    let handle = workflows
+        .order_fulfillment
+        .start(order)
+        .await
+        .expect("start workflow");
     let (config, registry, workflow_registry, broker) = app.into_parts().await.expect("broker");
     let mut worker_config = WorkerConfig {
         queues: vec![
@@ -168,8 +171,7 @@ async fn order_fulfillment_courier_retry_records_attempts_before_success() {
         .expect("courier retry identity");
     let order = seed_order_with_id(&store, order_id.clone(), "courier", 4, 1).await;
     let args = json!({"order_id": order.order_id, "courier": "fleetline", "express": false});
-    let (app, handles, _order_template) =
-        build_app_with_handles_for_url(&url).expect("showcase app");
+    let (app, handles, _workflows) = build_app_with_handles_for_url(&url).expect("showcase app");
     let (config, registry, workflow_registry, broker) = app.into_parts().await.expect("broker");
     let mut worker_config = WorkerConfig {
         queues: vec!["fulfillment".into()],

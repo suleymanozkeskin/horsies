@@ -1,0 +1,3 @@
+worker: cargo run -p acme-showcase --features web --bin acme -- worker
+scheduler: cargo run -p acme-showcase --features web --bin acme -- scheduler
+web: cargo run -p acme-showcase --features web --bin acme -- web --auth none

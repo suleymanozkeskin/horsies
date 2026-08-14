@@ -1,8 +1,10 @@
 //! Acme workflow definitions and scheduler-facing registration.
 
+use std::collections::HashMap;
+
 use horsies::{
     AnyNode, Horsies, HorsiesError, OnError, SubWorkflowNode, SuccessCase, SuccessPolicy, TaskNode,
-    WorkflowSpec, WorkflowSpecBuilder, WorkflowTemplate,
+    WorkflowFunction, WorkflowSpec, WorkflowSpecBuilder, WorkflowTemplate,
 };
 use serde_json::Value;
 
@@ -25,6 +27,13 @@ pub mod warehouse_transfer;
 #[derive(Clone)]
 pub struct WorkflowTasks {
     handles: TaskHandles,
+}
+
+/// Registered workflow entry points retained by the demo-owned command layer.
+#[derive(Clone)]
+pub struct RegisteredWorkflows {
+    pub order_fulfillment: WorkflowTemplate<crate::domain::Order, Value>,
+    pub static_specs: HashMap<String, WorkflowFunction<Value>>,
 }
 
 impl WorkflowTasks {
@@ -133,7 +142,7 @@ pub(crate) fn success_policy(
 pub fn register_all(
     app: &mut Horsies,
     handles: TaskHandles,
-) -> Result<WorkflowTemplate<crate::domain::Order, Value>, HorsiesError> {
+) -> Result<RegisteredWorkflows, HorsiesError> {
     let tasks = WorkflowTasks::new(handles);
 
     let shipping_tasks = tasks.clone();
@@ -172,50 +181,73 @@ pub fn register_all(
         "acme.order_fulfillment.v1",
         move |order| order_fulfillment::build(&order_tasks, &order),
     )?;
-    app.register_workflow_spec::<Value>(catalog_import::build(
+    let mut static_specs = HashMap::new();
+    let catalog_import = app.register_workflow_spec::<Value>(catalog_import::build(
         &tasks,
         "CHECK-IMPORT",
         crate::tuning::CATALOG_IMPORT_CHUNKS,
     )?)?;
-    app.register_workflow_spec::<Value>(customer_winback::build(
+    static_specs.insert(catalog_import.name().to_owned(), catalog_import);
+    let customer_winback = app.register_workflow_spec::<Value>(customer_winback::build(
         &tasks,
         "CHECK-SEGMENT",
         crate::tuning::ABANDONED_CART_AGE_MINUTES,
     )?)?;
-    app.register_workflow_spec::<Value>(daily_report::build(
+    static_specs.insert(customer_winback.name().to_owned(), customer_winback);
+    let daily_report = app.register_workflow_spec::<Value>(daily_report::build(
         &tasks,
         "CHECK",
         crate::tuning::ABANDONED_CART_AGE_MINUTES,
     )?)?;
-    app.register_workflow_spec::<Value>(flash_sale::build(
+    static_specs.insert(daily_report.name().to_owned(), daily_report);
+    let flash_sale = app.register_workflow_spec::<Value>(flash_sale::build(
         &tasks,
         "FLASH-CHECK",
         "ACME-SKU-0001",
     )?)?;
-    app.register_workflow_spec::<Value>(fraud_review::build(&tasks, "ACME-CHECK-0001", 4_900)?)?;
-    app.register_workflow_spec::<Value>(price_sync::build(&tasks, "SYNC-CHECK", "ACME-SKU-0001")?)?;
-    app.register_workflow_spec::<Value>(restock::build(
+    static_specs.insert(flash_sale.name().to_owned(), flash_sale);
+    let fraud_review = app.register_workflow_spec::<Value>(fraud_review::build(
+        &tasks,
+        "ACME-CHECK-0001",
+        4_900,
+    )?)?;
+    static_specs.insert(fraud_review.name().to_owned(), fraud_review);
+    let price_sync = app.register_workflow_spec::<Value>(price_sync::build(
+        &tasks,
+        "SYNC-CHECK",
+        "ACME-SKU-0001",
+    )?)?;
+    static_specs.insert(price_sync.name().to_owned(), price_sync);
+    let restock = app.register_workflow_spec::<Value>(restock::build(
         &tasks,
         crate::tuning::SUPPLIERS
             .iter()
             .map(|supplier| (*supplier).to_owned())
             .collect(),
     )?)?;
-    app.register_workflow_spec::<Value>(returns_review::build(
+    static_specs.insert(restock.name().to_owned(), restock);
+    let returns_review = app.register_workflow_spec::<Value>(returns_review::build(
         &tasks,
         "RET-CHECK",
         "ACME-CHECK-0001",
         "ACME-SKU-0001",
         1,
     )?)?;
-    app.register_workflow_spec::<Value>(seasonal_markdown::build(
+    static_specs.insert(returns_review.name().to_owned(), returns_review);
+    let seasonal_markdown = app.register_workflow_spec::<Value>(seasonal_markdown::build(
         &tasks,
         "MARKDOWN-CHECK",
         (1..=6)
             .map(|index| format!("ACME-SKU-{index:04}"))
             .collect(),
     )?)?;
-    app.register_workflow_spec::<Value>(warehouse_transfer::build(&tasks, "ACME-SKU-0001", 5)?)?;
+    static_specs.insert(seasonal_markdown.name().to_owned(), seasonal_markdown);
+    let warehouse_transfer = app.register_workflow_spec::<Value>(warehouse_transfer::build(
+        &tasks,
+        "ACME-SKU-0001",
+        5,
+    )?)?;
+    static_specs.insert(warehouse_transfer.name().to_owned(), warehouse_transfer);
 
     let check_tasks = tasks.clone();
     let mut order_builder = app
@@ -225,7 +257,10 @@ pub fn register_all(
     order_builder.case(order_fulfillment::check_order());
     order_builder.register()?;
 
-    Ok(order_template)
+    Ok(RegisteredWorkflows {
+        order_fulfillment: order_template,
+        static_specs,
+    })
 }
 
 pub fn build_order(

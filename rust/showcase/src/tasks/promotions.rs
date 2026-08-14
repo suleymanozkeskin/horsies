@@ -163,8 +163,14 @@ pub fn register_story(app: &mut Horsies) -> Result<StoryTaskHandles, HorsiesErro
 }
 
 pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
-    let _ = register_story(app)?;
     Ok(vec![
+        register_json(app, "apply_promotions", QUEUE_FULFILLMENT, fixed_options())?,
+        register_json(
+            app,
+            "compute_loyalty_points",
+            QUEUE_ANALYTICS,
+            fixed_options(),
+        )?,
         register_json(app, "publish_cdn", QUEUE_FULFILLMENT, fixed_options())?,
         register_json(app, "publish_origin", QUEUE_FULFILLMENT, fixed_options())?,
     ])

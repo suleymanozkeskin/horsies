@@ -7,8 +7,13 @@ description = "Acme Clothing showcase for horsies"
 license = "MIT"
 repository = "https://github.com/suleymanozkeskin/horsies-rust"
 
+[features]
+default = []
+web = ["horsies/web"]
+
 [dependencies]
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 horsies = { path = "../horsies", version = "0.1.0-alpha.27" }
 serde = { version = "1", features = ["derive"] }

@@ -5,9 +5,8 @@ use horsies::{
     AppConfig, CronEnumTerm, CronNumericTerm, CronSchedule, CustomQueueConfig, DailySchedule,
     DaySelector, Horsies, HorsiesError, HourlySchedule, IntervalSchedule, Month, MonthlySchedule,
     QueueMode, ScheduleConfig, SchedulePattern, TaskSchedule, Weekday, WeeklySchedule,
-    WorkflowTemplate,
 };
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::settings::{resolve_database_settings, SettingsError};
 use crate::tasks::{self, QUEUE_ANALYTICS, QUEUE_FULFILLMENT, QUEUE_NOTIFICATIONS, QUEUE_PAYMENTS};
@@ -56,14 +55,7 @@ pub fn build_app_for_url(url: &str) -> Result<Horsies, ShowcaseAppError> {
 /// workflow starts in integration tests and demo scenarios.
 pub fn build_app_with_handles_for_url(
     url: &str,
-) -> Result<
-    (
-        Horsies,
-        tasks::TaskHandles,
-        WorkflowTemplate<crate::domain::Order, Value>,
-    ),
-    ShowcaseAppError,
-> {
+) -> Result<(Horsies, tasks::TaskHandles, workflows::RegisteredWorkflows), ShowcaseAppError> {
     let mut app = Horsies::new(config_for_url(url)).map_err(ShowcaseAppError::Horsies)?;
     let handles = tasks::register_all(&mut app).map_err(ShowcaseAppError::Horsies)?;
     let order_template =

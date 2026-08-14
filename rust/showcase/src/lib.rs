@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod domain;
+pub mod scenarios;
 pub mod settings;
 pub mod simulate;
 pub mod store;
