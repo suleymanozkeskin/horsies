@@ -23,6 +23,9 @@ enum Command {
         orders: Option<usize>,
         #[arg(long)]
         cover_errors: bool,
+        /// Divide the tuned inter-arrival delay by this factor.
+        #[arg(long, default_value_t = 1.0)]
+        pace: f64,
     },
     /// Submit the high-volume rush scenario.
     Rush,
@@ -137,7 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Steady {
             orders,
             cover_errors,
-        } => acme_showcase::scenarios::steady::run(orders, cover_errors)
+            pace,
+        } => acme_showcase::scenarios::steady::run(orders, cover_errors, pace)
             .await
             .map_err(Into::into),
         Command::Rush => acme_showcase::scenarios::rush::run()

@@ -112,7 +112,7 @@ async fn cover_failure_table(
     Ok(())
 }
 
-pub async fn run(max_orders: Option<usize>, cover_errors: bool) -> ScenarioResult<()> {
+pub async fn run(max_orders: Option<usize>, cover_errors: bool, pace: f64) -> ScenarioResult<()> {
     heading("Acme Clothing — steady");
     let (settings, store) = super::prepare_database().await?;
     let catalog = load_catalog(&store).await?;
@@ -151,7 +151,8 @@ pub async fn run(max_orders: Option<usize>, cover_errors: bool) -> ScenarioResul
                         .map_err(|error| error.to_string())?
                         .as_secs_f64(),
                 );
-            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+            let pace = if pace.is_finite() && pace >= 1.0 { pace } else { 1.0 };
+            tokio::time::sleep(Duration::from_secs_f64(delay / pace)).await;
         }
     }
     say(format!("placed {placed} orders"));
