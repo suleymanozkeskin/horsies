@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "horsies",
     "macros",
+    "showcase",
     "examples",
     "tests/support",
     "tests/worker",
