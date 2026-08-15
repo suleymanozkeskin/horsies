@@ -1,7 +1,16 @@
 use horsies::{HorsiesError, OnError, WorkflowSpec};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::{builder, finish, WorkflowTasks};
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReturnsParams {
+    pub return_id: String,
+    pub order_id: String,
+    pub sku: String,
+    pub quantity: i32,
+}
 
 pub fn build(
     tasks: &WorkflowTasks,

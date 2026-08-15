@@ -99,6 +99,9 @@ operation or use the history rerun API when a retained task is eligible.
 Each scenario uses the same deterministic hash over its domain identifiers.
 Rates and work envelopes live in `showcase/src/tuning.rs`.
 
+`steady` places orders at the tuned demand rate. It starts a return workflow
+for every sixth order and a supplier restock workflow for every twentieth.
+
 ```text
 cargo run -p acme-showcase --bin acme -- rush
 cargo run -p acme-showcase --bin acme -- problem-child

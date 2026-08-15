@@ -33,6 +33,7 @@ pub struct WorkflowTasks {
 #[derive(Clone)]
 pub struct RegisteredWorkflows {
     pub order_fulfillment: WorkflowTemplate<crate::domain::Order, Value>,
+    pub returns_review: WorkflowTemplate<returns_review::ReturnsParams, Value>,
     pub static_specs: HashMap<String, WorkflowFunction<Value>>,
 }
 
@@ -181,6 +182,21 @@ pub fn register_all(
         "acme.order_fulfillment.v1",
         move |order| order_fulfillment::build(&order_tasks, &order),
     )?;
+    let returns_tasks = tasks.clone();
+    let returns_template = app
+        .register_parameterized_workflow::<returns_review::ReturnsParams, Value, _>(
+            "returns_review",
+            "acme.returns_review.v1",
+            move |params| {
+                returns_review::build(
+                    &returns_tasks,
+                    &params.return_id,
+                    &params.order_id,
+                    &params.sku,
+                    params.quantity,
+                )
+            },
+        )?;
     let mut static_specs = HashMap::new();
     let catalog_import = app.register_workflow_spec::<Value>(catalog_import::build(
         &tasks,
@@ -226,14 +242,6 @@ pub fn register_all(
             .collect(),
     )?)?;
     static_specs.insert(restock.name().to_owned(), restock);
-    let returns_review = app.register_workflow_spec::<Value>(returns_review::build(
-        &tasks,
-        "RET-CHECK",
-        "ACME-CHECK-0001",
-        "ACME-SKU-0001",
-        1,
-    )?)?;
-    static_specs.insert(returns_review.name().to_owned(), returns_review);
     let seasonal_markdown = app.register_workflow_spec::<Value>(seasonal_markdown::build(
         &tasks,
         "MARKDOWN-CHECK",
@@ -256,9 +264,30 @@ pub fn register_all(
         })?;
     order_builder.case(order_fulfillment::check_order());
     order_builder.register()?;
+    let returns_check_tasks = tasks.clone();
+    let mut returns_builder = app.check_workflow_builder(
+        "returns_review",
+        move |params: &returns_review::ReturnsParams| {
+            returns_review::build(
+                &returns_check_tasks,
+                &params.return_id,
+                &params.order_id,
+                &params.sku,
+                params.quantity,
+            )
+        },
+    )?;
+    returns_builder.case(returns_review::ReturnsParams {
+        return_id: "RET-CHECK".to_owned(),
+        order_id: "ACME-CHECK-0001".to_owned(),
+        sku: "ACME-SKU-0001".to_owned(),
+        quantity: 1,
+    });
+    returns_builder.register()?;
 
     Ok(RegisteredWorkflows {
         order_fulfillment: order_template,
+        returns_review: returns_template,
         static_specs,
     })
 }
