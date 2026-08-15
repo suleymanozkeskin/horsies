@@ -105,6 +105,8 @@ pub(crate) fn register_json(
     let registered = match name {
         "validate_order" => async_task_fn!(runtime::validate_order, Value),
         "reserve_stock" => async_task_fn!(runtime::reserve_stock, Value),
+        "release_stock" => async_task_fn!(runtime::release_stock, Value),
+        "replenish_catalog" => async_task_fn!(runtime::replenish_catalog, Value),
         "authorize_payment" => async_task_fn!(runtime::authorize_payment, Value),
         "capture_payment" => async_task_fn!(runtime::capture_payment, Value),
         "pick_pack" => async_task_fn!(runtime::pick_pack, Value),

@@ -10,8 +10,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::domain::{
-    CARD_DECLINED, COURIER_UNAVAILABLE, INSUFFICIENT_STOCK, ORDER_NOT_FOUND, SHIPMENT_NOT_FOUND,
-    UNKNOWN_SKU,
+    CARD_DECLINED, COURIER_UNAVAILABLE, INSUFFICIENT_STOCK, ORDER_CLOSED, ORDER_NOT_FOUND,
+    SHIPMENT_NOT_FOUND, UNKNOWN_SKU,
 };
 use crate::settings::resolve_database_settings;
 use crate::store::Store;
@@ -66,9 +66,28 @@ struct EmailArgs {
     order_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReleaseArgs {
+    sku: String,
+    quantity: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct StocktakeArgs {
+    target_units: i32,
+}
+
 pub async fn apply_promotions(input: Value) -> Result<Value, TaskError> {
     let args: PromotionArgs = parse(input)?;
-    let result = promotions::apply_promotions(args).await?;
+    let result = match promotions::apply_promotions(args.clone()).await {
+        Ok(result) => result,
+        Err(error) => {
+            if let Ok(store) = store().await {
+                compensate_failed_order(&store, &args.order_id).await;
+            }
+            return Err(error);
+        }
+    };
     serde_json::to_value(result).map_err(|error| invalid_input(error.to_string()))
 }
 
@@ -123,13 +142,21 @@ pub async fn reserve_stock(input: Value) -> Result<Value, TaskError> {
         .reserve_line(&args.order_id, args.line_no, &args.sku, args.quantity)
         .await
         .map_err(|error| store_failure("reserve_line", error))?;
+    if !outcome.order_open {
+        return Err(TaskError::new(
+            ORDER_CLOSED,
+            format!("order {} no longer accepts reservations", args.order_id),
+        ));
+    }
     if !outcome.known_sku {
+        compensate_failed_order(&store, &args.order_id).await;
         return Err(TaskError::new(
             UNKNOWN_SKU,
             format!("{} is not in the catalog", args.sku),
         ));
     }
     if !outcome.reserved {
+        compensate_failed_order(&store, &args.order_id).await;
         return Err(TaskError::new(
             INSUFFICIENT_STOCK,
             format!(
@@ -144,6 +171,43 @@ pub async fn reserve_stock(input: Value) -> Result<Value, TaskError> {
         "quantity": args.quantity,
         "available_after": outcome.available,
         "replayed": outcome.replayed,
+    }))
+}
+
+async fn compensate_failed_order(store: &Store, order_id: &str) {
+    if let Err(error) = store.fail_order_and_release_reservations(order_id).await {
+        eprintln!("reservation compensation failed for {order_id}: {error}");
+    }
+}
+
+pub async fn release_stock(input: Value) -> Result<Value, TaskError> {
+    let args: ReleaseArgs = parse(input)?;
+    let store = store().await?;
+    let available = store
+        .release_line(&args.sku, args.quantity)
+        .await
+        .map_err(|error| store_failure("release_line", error))?
+        .ok_or_else(|| {
+            TaskError::new(UNKNOWN_SKU, format!("{} is not in the catalog", args.sku))
+        })?;
+    Ok(json!({
+        "sku": args.sku,
+        "quantity": args.quantity,
+        "available_after": available,
+    }))
+}
+
+pub async fn replenish_catalog(input: Value) -> Result<Value, TaskError> {
+    let args: StocktakeArgs = parse(input)?;
+    let store = store().await?;
+    let (topped_up, reservations_cleared) = store
+        .nightly_stocktake(args.target_units, tuning::STOCKTAKE_CEILING_UNITS)
+        .await
+        .map_err(|error| store_failure("nightly_stocktake", error))?;
+    Ok(json!({
+        "skus_topped_up": topped_up,
+        "reservations_cleared": reservations_cleared,
+        "target_units": args.target_units,
     }))
 }
 
@@ -170,6 +234,7 @@ pub async fn authorize_payment(input: Value) -> Result<Value, TaskError> {
         }));
     }
     if simulate::draw(tuning::CARD_DECLINE_RATE, &[&args.order_id, "card"]) {
+        compensate_failed_order(&store, &args.order_id).await;
         return Err(TaskError::new(CARD_DECLINED, "issuer declined the card"));
     }
     if simulate::draw(tuning::PSP_UNAVAILABLE_RATE, &[&args.order_id, "psp"])

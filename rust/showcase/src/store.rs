@@ -1,5 +1,6 @@
 //! SQLx store for the `acme_*` tables.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -94,6 +95,7 @@ pub struct ReservationOutcome {
     pub reserved: bool,
     pub replayed: bool,
     pub known_sku: bool,
+    pub order_open: bool,
     pub available: i32,
 }
 
@@ -379,9 +381,40 @@ impl Store {
         let order_id = order_id.to_owned();
         let sku = sku.to_owned();
         self.transaction("reserve_line", |tx| Box::pin(async move {
+            let order_status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM acme_orders WHERE order_id=$1 FOR UPDATE",
+            )
+            .bind(&order_id)
+            .fetch_optional(&mut **tx)
+            .await?;
+            let Some(order_status) = order_status else {
+                return Ok(ReservationOutcome {
+                    reserved: false,
+                    replayed: false,
+                    known_sku: false,
+                    order_open: false,
+                    available: 0,
+                });
+            };
+            if !matches!(order_status.as_str(), "placed" | "validated") {
+                let available = sqlx::query_scalar::<_, i32>(
+                    "SELECT on_hand-reserved FROM acme_stock WHERE sku=$1",
+                )
+                .bind(&sku)
+                .fetch_optional(&mut **tx)
+                .await?
+                .unwrap_or_default();
+                return Ok(ReservationOutcome {
+                    reserved: false,
+                    replayed: false,
+                    known_sku: true,
+                    order_open: false,
+                    available,
+                });
+            }
             let line = sqlx::query("SELECT reserved FROM acme_order_lines WHERE order_id=$1 AND line_no=$2 FOR UPDATE")
                 .bind(&order_id).bind(line_no).fetch_optional(&mut **tx).await?;
-            let Some(line) = line else { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: false, available: 0 }) };
+            let Some(line) = line else { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: false, order_open: true, available: 0 }) };
             if line.try_get::<bool, _>("reserved")? {
                 let available = sqlx::query_scalar::<_, i32>(
                     "SELECT on_hand-reserved FROM acme_stock WHERE sku=$1",
@@ -394,17 +427,100 @@ impl Store {
                     reserved: true,
                     replayed: true,
                     known_sku: true,
+                    order_open: true,
                     available,
                 });
             }
             let available: Option<i32> = sqlx::query_scalar("SELECT on_hand-reserved FROM acme_stock WHERE sku=$1").bind(&sku).fetch_optional(&mut **tx).await?;
-            let Some(available) = available else { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: false, available: 0 }) };
-            if available < quantity { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: true, available }) }
+            let Some(available) = available else { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: false, order_open: true, available: 0 }) };
+            if available < quantity { return Ok(ReservationOutcome { reserved: false, replayed: false, known_sku: true, order_open: true, available }) }
             let after: i32 = sqlx::query_scalar("UPDATE acme_stock SET reserved=reserved+$1,updated_at=now() WHERE sku=$2 AND on_hand-reserved >= $1 RETURNING on_hand-reserved")
                 .bind(quantity).bind(&sku).fetch_one(&mut **tx).await?;
             sqlx::query("UPDATE acme_order_lines SET reserved=true WHERE order_id=$1 AND line_no=$2").bind(&order_id).bind(line_no).execute(&mut **tx).await?;
-            Ok(ReservationOutcome { reserved: true, replayed: false, known_sku: true, available: after })
+            Ok(ReservationOutcome { reserved: true, replayed: false, known_sku: true, order_open: true, available: after })
         })).await
+    }
+
+    /// Release all unconsumed reservations for an order.
+    ///
+    /// The order row is locked before its lines. Reservation workers use the
+    /// same lock, so compensation cannot race a later reservation.
+    pub async fn release_order_reservations(&self, order_id: &str) -> StoreResult<i32> {
+        self.release_order_reservations_with_status(order_id, false)
+            .await
+    }
+
+    /// Mark an active order failed and release its unconsumed reservations in
+    /// one transaction. Repeated calls are idempotent.
+    pub async fn fail_order_and_release_reservations(&self, order_id: &str) -> StoreResult<i32> {
+        self.release_order_reservations_with_status(order_id, true)
+            .await
+    }
+
+    async fn release_order_reservations_with_status(
+        &self,
+        order_id: &str,
+        mark_failed: bool,
+    ) -> StoreResult<i32> {
+        let order_id = order_id.to_owned();
+        self.transaction("release_order_reservations", |tx| {
+            Box::pin(async move {
+                let status = sqlx::query_scalar::<_, String>(
+                    "SELECT status FROM acme_orders WHERE order_id=$1 FOR UPDATE",
+                )
+                .bind(&order_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+                let Some(status) = status else { return Ok(0) };
+                if mark_failed
+                    && matches!(
+                        status.as_str(),
+                        "placed" | "validated" | "reserved" | "authorized"
+                    )
+                {
+                    sqlx::query(
+                        "UPDATE acme_orders SET status='failed',updated_at=now() WHERE order_id=$1",
+                    )
+                    .bind(&order_id)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+                let lines = sqlx::query(
+                    "SELECT sku,quantity FROM acme_order_lines \
+                     WHERE order_id=$1 AND reserved=true AND consumed=false \
+                     ORDER BY sku, line_no FOR UPDATE",
+                )
+                .bind(&order_id)
+                .fetch_all(&mut **tx)
+                .await?;
+                let mut released_by_sku = BTreeMap::<String, i32>::new();
+                let mut released_units = 0_i32;
+                for line in lines {
+                    let sku: String = line.try_get("sku")?;
+                    let quantity: i32 = line.try_get("quantity")?;
+                    *released_by_sku.entry(sku).or_default() += quantity;
+                    released_units += quantity;
+                }
+                for (sku, quantity) in released_by_sku {
+                    sqlx::query(
+                        "UPDATE acme_stock SET reserved=greatest(0,reserved-$1),updated_at=now() WHERE sku=$2",
+                    )
+                    .bind(quantity)
+                    .bind(sku)
+                    .execute(&mut **tx)
+                    .await?;
+                }
+                sqlx::query(
+                    "UPDATE acme_order_lines SET reserved=false \
+                     WHERE order_id=$1 AND reserved=true AND consumed=false",
+                )
+                .bind(&order_id)
+                .execute(&mut **tx)
+                .await?;
+                Ok(released_units)
+            })
+        })
+        .await
     }
 
     pub async fn consume_line(
