@@ -11,6 +11,12 @@ categories = ["asynchronous", "database"]
 
 [features]
 default = []
+# Retain the source lexeme of every JSON number, for byte-exact rerun-input
+# fingerprints over integers outside the i64/u64 domain. The flag changes
+# `serde_json` number handling for the whole build graph, so it is opt-in:
+# with it on, every `#[serde(flatten)]`, `#[serde(tag)]` and
+# `#[serde(untagged)]` container in the graph rejects typed floats.
+arbitrary-precision = ["serde_json/arbitrary_precision"]
 web = [
     "dep:async-stream",
     "dep:async-trait",
@@ -38,7 +44,7 @@ tower = { version = "0.5", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "signal", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
+serde_json = "1"
 serde_plain = "1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"

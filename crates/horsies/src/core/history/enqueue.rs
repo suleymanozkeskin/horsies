@@ -12,8 +12,8 @@ use super::identity::fingerprint::{
 };
 use super::identity::keys::{IdempotencyKeyError, ScopedIdempotencyKey};
 use super::rerun::input_envelope::{
-    encode_input_envelope_v1, INPUT_ENVELOPE_CODEC, INPUT_ENVELOPE_CONTENT_TYPE,
-    INPUT_ENVELOPE_INLINE_MAX_BYTES, INPUT_ENVELOPE_VERSION,
+    encode_input_envelope_v1, validate_integer_domain, INPUT_ENVELOPE_CODEC,
+    INPUT_ENVELOPE_CONTENT_TYPE, INPUT_ENVELOPE_INLINE_MAX_BYTES, INPUT_ENVELOPE_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,8 @@ pub enum EnqueuePreparationError {
         field: &'static str,
         source: serde_json::Error,
     },
+    #[error("{field} JSON carries a number outside the supported domain: {detail}")]
+    NumberDomain { field: &'static str, detail: String },
     #[error("args JSON must encode positional values")]
     InvalidArgs,
     #[error("kwargs JSON must encode an object")]
@@ -199,6 +201,10 @@ fn parse_args(value: Option<&str>) -> Result<Vec<Value>, EnqueuePreparationError
             field: "args",
             source,
         })?;
+    validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
+        field: "args",
+        detail,
+    })?;
     Ok(match parsed {
         Value::Array(values) => values,
         Value::Null => Vec::new(),
@@ -217,6 +223,8 @@ fn parse_object(
     };
     let parsed: Value = serde_json::from_str(value)
         .map_err(|source| EnqueuePreparationError::Json { field, source })?;
+    validate_integer_domain(value)
+        .map_err(|detail| EnqueuePreparationError::NumberDomain { field, detail })?;
     match parsed {
         Value::Object(object) => Ok(object),
         Value::Null => Ok(Map::new()),
@@ -235,6 +243,10 @@ fn parse_optional_object(
             field: "task_options",
             source,
         })?;
+    validate_integer_domain(value).map_err(|detail| EnqueuePreparationError::NumberDomain {
+        field: "task_options",
+        detail,
+    })?;
     match parsed {
         Value::Object(object) => Ok(Some(object)),
         Value::Null => Ok(None),
@@ -245,6 +257,50 @@ fn parse_optional_object(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn out_of_domain_integers_are_rejected_per_input_field() {
+        let big = "123456789012345678901234567890";
+        for (args, kwargs, options, field) in [
+            (format!("[{big}]"), "{}".to_owned(), "{}".to_owned(), "args"),
+            (
+                "[]".to_owned(),
+                format!("{{\"k\":{big}}}"),
+                "{}".to_owned(),
+                "kwargs",
+            ),
+            (
+                "[]".to_owned(),
+                "{}".to_owned(),
+                format!("{{\"k\":{big}}}"),
+                "task_options",
+            ),
+        ] {
+            let error = prepare_enqueue_facts(
+                "task",
+                "default",
+                50,
+                Some(&args),
+                Some(&kwargs),
+                None,
+                None,
+                Some(&options),
+                Some("standard_30d"),
+                true,
+                None,
+                EnqueueInputEligibility::Ordinary,
+            )
+            .expect_err("an out-of-domain integer must not be rounded silently");
+            assert!(
+                matches!(
+                    error,
+                    EnqueuePreparationError::NumberDomain { field: got, .. } if got == field
+                ),
+                "{field}: {error}"
+            );
+        }
+    }
 
     #[test]
     fn ordinary_facts_pin_inline_declined_over_bound_and_forever() {

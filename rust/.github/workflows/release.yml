@@ -75,6 +75,11 @@ jobs:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
         run: cargo test --workspace --features horsies/web
 
+      - name: Run arbitrary-precision workspace tests
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
+        run: cargo test --workspace --features horsies/arbitrary-precision
+
   frontend:
     needs: metadata
     runs-on: ubuntu-latest

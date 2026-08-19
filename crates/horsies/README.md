@@ -125,6 +125,22 @@ impl WorkflowDefinition for ExampleWorkflow {
 - [Scheduler Overview](https://suleymanozkeskin.github.io/horsies-rust/scheduling/scheduler-overview/)
 - [Web UI Overview](https://suleymanozkeskin.github.io/horsies-rust/monitoring/web-ui-overview/)
 
+## Cargo features
+
+| Feature | Default | Purpose |
+| --- | --- | --- |
+| `web` | off | Embedded browser dashboard and axum API. |
+| `arbitrary-precision` | off | Byte-exact rerun-input fingerprints over integers outside the i64/u64 domain. |
+
+`arbitrary-precision` turns on `serde_json/arbitrary_precision`, which changes
+`serde_json` number handling for the whole build graph. Under it, every
+`#[serde(flatten)]`, `#[serde(tag = "...")]` and `#[serde(untagged)]` container
+in the graph rejects a typed float. Leave it off unless you need the exact
+integer lexeme.
+
+Without the feature, an integer literal outside the i64/u64 domain is rejected
+at enqueue rather than rounded.
+
 ## Monitoring
 
 Enable the `web` feature to use the embedded browser dashboard and axum API.

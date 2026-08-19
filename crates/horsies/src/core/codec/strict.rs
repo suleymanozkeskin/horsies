@@ -22,7 +22,9 @@ use serde::ser::{
 /// Serialize `value` to JSON bytes, rejecting any non-finite float.
 ///
 /// Byte-for-byte identical to `serde_json::to_vec` for finite inputs.
-pub fn to_json_bytes_strict<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+pub fn to_json_bytes_strict<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<Vec<u8>, serde_json::Error> {
     let mut buf = Vec::with_capacity(128);
     let mut ser = serde_json::Serializer::new(&mut buf);
     value.serialize(RejectNonFinite(&mut ser))?;
@@ -341,6 +343,42 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
 
+    /// `serde_json/arbitrary_precision` re-routes every number through a map
+    /// token, which every serde buffering path then rejects for a typed float.
+    /// The flag applies to the whole build graph, so turning it on here would
+    /// break `#[serde(flatten)]`, `#[serde(tag)]` and `#[serde(untagged)]`
+    /// containers in consumer crates that horsies never sees. It stays behind
+    /// the off-by-default `arbitrary-precision` feature.
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn default_build_leaves_serde_buffering_paths_usable_for_floats() {
+        #[derive(Deserialize)]
+        struct Area {
+            rooms: f64,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(tag = "category")]
+        enum Tagged {
+            Flat(Area),
+        }
+
+        #[derive(Deserialize)]
+        struct Flattened {
+            #[serde(flatten)]
+            area: Area,
+        }
+
+        let tagged: Tagged =
+            serde_json::from_str(r#"{"category":"Flat","rooms":1.5}"#).expect("tagged enum");
+        let Tagged::Flat(area) = tagged;
+        assert_eq!(area.rooms, 1.5);
+
+        let flattened: Flattened =
+            serde_json::from_str(r#"{"rooms":1.5}"#).expect("flattened struct");
+        assert_eq!(flattened.area.rooms, 1.5);
+    }
+
     #[derive(Serialize, Deserialize)]
     struct Metric {
         name: String,
@@ -394,7 +432,10 @@ mod tests {
                 name: "bad".to_owned(),
                 value,
             };
-            assert!(to_json_value_strict(&m).is_err(), "±Infinity must be rejected");
+            assert!(
+                to_json_value_strict(&m).is_err(),
+                "±Infinity must be rejected"
+            );
         }
     }
 
@@ -418,23 +459,38 @@ mod tests {
             }],
             ratio: 1.0,
         };
-        assert!(to_json_bytes_strict(&n).is_err(), "nested NaN must be rejected");
+        assert!(
+            to_json_bytes_strict(&n).is_err(),
+            "nested NaN must be rejected"
+        );
 
         // Inside a map value.
         let mut map: HashMap<String, f64> = HashMap::new();
         map.insert("k".to_owned(), f64::INFINITY);
-        assert!(to_json_value_strict(&map).is_err(), "map-value Inf must be rejected");
+        assert!(
+            to_json_value_strict(&map).is_err(),
+            "map-value Inf must be rejected"
+        );
 
         // As a bare positional value (top-level).
-        assert!(to_json_bytes_strict(&f64::NAN).is_err(), "top-level NaN must be rejected");
+        assert!(
+            to_json_bytes_strict(&f64::NAN).is_err(),
+            "top-level NaN must be rejected"
+        );
     }
 
     #[test]
     fn integers_and_strings_pass_through() {
         // i128/u128 must not regress to the trait's "unsupported" default.
         let big: i128 = i128::MAX;
-        assert_eq!(to_json_bytes_strict(&big).unwrap(), serde_json::to_vec(&big).unwrap());
+        assert_eq!(
+            to_json_bytes_strict(&big).unwrap(),
+            serde_json::to_vec(&big).unwrap()
+        );
         let s = "hello";
-        assert_eq!(to_json_bytes_strict(&s).unwrap(), serde_json::to_vec(&s).unwrap());
+        assert_eq!(
+            to_json_bytes_strict(&s).unwrap(),
+            serde_json::to_vec(&s).unwrap()
+        );
     }
 }

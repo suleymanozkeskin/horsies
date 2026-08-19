@@ -199,10 +199,14 @@ pub fn decode_input_envelope(
             "payload digest disagrees with the stored digest".to_owned(),
         ));
     }
-    let parsed: Value = serde_json::from_slice(payload).map_err(|error| {
+    let text = std::str::from_utf8(payload).map_err(|error| {
+        InputEnvelopeDecodeError::Corrupt(format!("payload is not UTF-8: {error}"))
+    })?;
+    let parsed: Value = serde_json::from_str(text).map_err(|error| {
         InputEnvelopeDecodeError::Corrupt(format!("payload is not JSON: {error}"))
     })?;
     validate_finite_float_domain(&parsed)?;
+    validate_integer_domain(text).map_err(InputEnvelopeDecodeError::Corrupt)?;
     let mut content = parsed
         .as_object()
         .cloned()
@@ -265,6 +269,91 @@ fn validate_finite_float_domain(value: &Value) -> Result<(), InputEnvelopeDecode
         Value::Null | Value::Bool(_) | Value::String(_) => {}
     }
     Ok(())
+}
+
+/// Reject integer literals that the parse would silently round.
+///
+/// Without `arbitrary-precision`, `serde_json` parses an integer literal
+/// outside the i64/u64 domain into binary64 and loses digits with no error.
+/// The digest would then cover a different value than the caller sent, and a
+/// later build with the feature on would fingerprint the same input
+/// differently. Fail closed instead.
+///
+/// Runs after a successful parse, so the text is well-formed JSON: a number
+/// token starts only where this scan looks for one.
+#[cfg(not(feature = "arbitrary-precision"))]
+pub(crate) fn validate_integer_domain(text: &str) -> Result<(), String> {
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => index = end_of_string(bytes, index),
+            b'-' | b'0'..=b'9' => {
+                let start = index;
+                index = end_of_number(bytes, index);
+                check_integer_lexeme(&text[start..index])?;
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
+/// The source lexeme is retained, so every integer literal survives the parse.
+#[cfg(feature = "arbitrary-precision")]
+pub(crate) fn validate_integer_domain(_text: &str) -> Result<(), String> {
+    Ok(())
+}
+
+/// Index one past the string's closing quote.
+#[cfg(not(feature = "arbitrary-precision"))]
+fn end_of_string(bytes: &[u8], open: usize) -> usize {
+    let mut index = open + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+/// Index one past the number token's last byte.
+#[cfg(not(feature = "arbitrary-precision"))]
+fn end_of_number(bytes: &[u8], start: usize) -> usize {
+    let mut index = start;
+    while index < bytes.len()
+        && matches!(bytes[index], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+    {
+        index += 1;
+    }
+    index
+}
+
+#[cfg(not(feature = "arbitrary-precision"))]
+fn check_integer_lexeme(lexeme: &str) -> Result<(), String> {
+    let is_float_lexeme = lexeme.contains(['.', 'e', 'E']);
+    let fits_integer_domain = lexeme.parse::<i64>().is_ok() || lexeme.parse::<u64>().is_ok();
+    match (is_float_lexeme, fits_integer_domain) {
+        (true, _) | (_, true) => Ok(()),
+        (false, false) => Err(format!(
+            "integer literal {} is outside the i64/u64 domain; \
+             build with the `arbitrary-precision` feature to retain it",
+            elide_lexeme(lexeme)
+        )),
+    }
+}
+
+/// Keep the rejected literal short enough for a log line.
+#[cfg(not(feature = "arbitrary-precision"))]
+fn elide_lexeme(lexeme: &str) -> String {
+    const MAX_SHOWN: usize = 32;
+    match lexeme.len() > MAX_SHOWN {
+        // The scan only accepts ASCII number bytes, so this slice is safe.
+        true => format!("{}...", &lexeme[..MAX_SHOWN]),
+        false => lexeme.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -349,6 +438,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "arbitrary-precision")]
     #[test]
     fn arbitrary_precision_integers_survive_decode_and_reencode() {
         let payload = br#"{"args":[123456789012345678901234567890],"kwargs":{},"options":null}"#;
@@ -363,22 +453,92 @@ mod tests {
 
     #[test]
     fn source_number_lexemes_normalize_like_python_loads_then_dumps() {
-        let payload = br#"{"args":[0.000010,1.2300,1e0,-0,-0.0],"kwargs":{},"options":null}"#;
+        let payload = br#"{"args":[0.000010,1.2300,1e0,-0.0],"kwargs":{},"options":null}"#;
         let decoded = decode_input_envelope(1, payload, &Sha256::digest(payload)).unwrap();
         let encoded = encode_input_envelope_v1(&decoded.args, &decoded.kwargs, None).unwrap();
         assert_eq!(
             encoded,
-            br#"{"args":[1e-05,1.23,1.0,0,-0.0],"kwargs":{},"options":null}"#
+            br#"{"args":[1e-05,1.23,1.0,-0.0],"kwargs":{},"options":null}"#
         );
+    }
+
+    /// `-0` is an integer lexeme, and Python renders it `0`. Reproducing that
+    /// needs the source lexeme: without it `-0` and `-0.0` both arrive as
+    /// binary64 negative zero and share one rendering.
+    #[cfg(feature = "arbitrary-precision")]
+    #[test]
+    fn negative_zero_integer_lexeme_renders_like_python() {
+        let payload = br#"{"args":[-0],"kwargs":{},"options":null}"#;
+        let decoded = decode_input_envelope(1, payload, &Sha256::digest(payload)).unwrap();
+        let encoded = encode_input_envelope_v1(&decoded.args, &decoded.kwargs, None).unwrap();
+        assert_eq!(encoded, br#"{"args":[0],"kwargs":{},"options":null}"#);
+    }
+
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn negative_zero_integer_lexeme_renders_as_negative_zero_float() {
+        let payload = br#"{"args":[-0],"kwargs":{},"options":null}"#;
+        let decoded = decode_input_envelope(1, payload, &Sha256::digest(payload)).unwrap();
+        let encoded = encode_input_envelope_v1(&decoded.args, &decoded.kwargs, None).unwrap();
+        assert_eq!(encoded, br#"{"args":[-0.0],"kwargs":{},"options":null}"#);
     }
 
     #[test]
     fn out_of_binary64_float_range_fails_closed_without_panicking() {
         let payload = br#"{"args":[1e9999],"kwargs":{},"options":null}"#;
+        // With the feature the lexeme parses and the float-domain check
+        // rejects it; without it `serde_json` rejects the overflow itself.
+        let expected_detail = match cfg!(feature = "arbitrary-precision") {
+            true => "finite binary64",
+            false => "payload is not JSON",
+        };
         assert!(matches!(
             decode_input_envelope(1, payload, &Sha256::digest(payload)),
             Err(InputEnvelopeDecodeError::Corrupt(ref detail))
-                if detail.contains("finite binary64")
+                if detail.contains(expected_detail)
         ));
+    }
+
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn out_of_domain_integer_fails_closed_instead_of_rounding() {
+        let payload = br#"{"args":[123456789012345678901234567890],"kwargs":{},"options":null}"#;
+        assert!(matches!(
+            decode_input_envelope(1, payload, &Sha256::digest(payload)),
+            Err(InputEnvelopeDecodeError::Corrupt(ref detail))
+                if detail.contains("outside the i64/u64 domain")
+        ));
+    }
+
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn integer_domain_scan_reads_numbers_only_outside_strings() {
+        for accepted in [
+            r#"{"a":[-9223372036854775808,18446744073709551615]}"#,
+            r#"{"a":1.7976931348623157e308,"b":-0.0,"c":1e-7}"#,
+            r#"{"123456789012345678901234567890":"123456789012345678901234567890"}"#,
+            r#"{"a":"escaped quote \" then 123456789012345678901234567890"}"#,
+            r#"[true,false,null,{"deep":[[[7]]]}]"#,
+        ] {
+            assert_eq!(validate_integer_domain(accepted), Ok(()), "{accepted}");
+        }
+        for rejected in [
+            "18446744073709551616",
+            r#"{"a":[1,{"b":-9223372036854775809}]}"#,
+        ] {
+            assert!(validate_integer_domain(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[cfg(not(feature = "arbitrary-precision"))]
+    #[test]
+    fn rejected_integer_lexeme_is_elided_in_the_message() {
+        let long = "1".repeat(64);
+        let detail = validate_integer_domain(&long).unwrap_err();
+        assert!(
+            detail.contains(&format!("{}...", "1".repeat(32))),
+            "{detail}"
+        );
+        assert!(!detail.contains(&long), "{detail}");
     }
 }
