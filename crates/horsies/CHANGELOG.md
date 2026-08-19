@@ -5,6 +5,33 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.29] - 2026-08-19
+
+### Fixed
+
+- `serde_json/arbitrary_precision` now sits behind the off-by-default
+  `arbitrary-precision` Cargo feature. The flag changes `serde_json` number
+  handling for the whole build graph, and Cargo has no negative features, so
+  every crate that depended on horsies inherited it. Under the flag, any
+  `#[serde(flatten)]`, `#[serde(tag = "...")]` or `#[serde(untagged)]`
+  container rejects a typed float with `invalid type: map, expected f64`,
+  including containers horsies never sees. Enable the feature only for
+  byte-exact rerun-input fingerprints over integers outside the i64/u64
+  domain.
+
+### Changed
+
+- The default build rejects an integer literal outside the i64/u64 domain in
+  `args`, `kwargs`, `task_options`, and in a stored rerun-input envelope.
+  Without the retained source lexeme, such a literal parses to binary64 and
+  loses digits with no error, which would anchor the input digest to a value
+  the caller did not send. Build with `arbitrary-precision` to accept these
+  literals.
+- Without `arbitrary-precision`, the canonical form of the `-0` literal is
+  `-0.0` rather than `0`. The parse cannot separate `-0` from `-0.0` without
+  the source lexeme. Turning the feature on therefore changes the input
+  digest for inputs that carry `-0`.
+
 ## [0.1.0-alpha.28] - 2026-08-14
 
 ### Fixed
