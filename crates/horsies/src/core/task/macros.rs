@@ -22,12 +22,13 @@ pub fn decode_task_input<T>(args: &[u8]) -> Result<T, crate::core::task::TaskErr
 where
     T: DeserializeOwned,
 {
-    let mut envelope: serde_json::Value = crate::core::codec::from_json_bytes(args).map_err(|e| {
-        crate::core::task::TaskError::builtin(
-            crate::core::task::OperationalErrorCode::WorkerSerializationError,
-            format!("failed to parse args/kwargs envelope: {}", e),
-        )
-    })?;
+    let mut envelope: serde_json::Value =
+        crate::core::codec::from_json_bytes(args).map_err(|e| {
+            crate::core::task::TaskError::builtin(
+                crate::core::task::OperationalErrorCode::WorkerSerializationError,
+                format!("failed to parse args/kwargs envelope: {}", e),
+            )
+        })?;
 
     // Take ownership of the envelope's slots instead of deep-cloning them: the
     // envelope is discarded after selection, so `Value::take` (leaves Null

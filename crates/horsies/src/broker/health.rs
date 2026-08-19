@@ -107,10 +107,8 @@ mod tests {
     #[test]
     fn ping_request_target_defaults_when_absent() {
         // A broadcast ping omits target_worker_id on the wire.
-        let req: WorkerPingRequest = serde_json::from_str(
-            r#"{"correlation_id":"c","reply_channel":"r"}"#,
-        )
-        .unwrap();
+        let req: WorkerPingRequest =
+            serde_json::from_str(r#"{"correlation_id":"c","reply_channel":"r"}"#).unwrap();
         assert!(req.target_worker_id.is_none());
     }
 

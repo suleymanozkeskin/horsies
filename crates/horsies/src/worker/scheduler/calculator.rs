@@ -222,9 +222,13 @@ fn build_day_matcher(day: &DaySelector) -> Box<dyn Fn(NaiveDate) -> bool> {
 /// candidate wall-clock time via `from_local_datetime(..).earliest()` so DST
 /// gaps (nonexistent local times) are skipped. Fires at second :00.
 fn next_cron(cron: &CronSchedule, local: DateTime<Tz>, tz: Tz) -> Option<DateTime<Utc>> {
-    let mut minutes: Vec<i64> = expand_numeric_field(&cron.minute, 0, 59).into_iter().collect();
+    let mut minutes: Vec<i64> = expand_numeric_field(&cron.minute, 0, 59)
+        .into_iter()
+        .collect();
     minutes.sort_unstable();
-    let mut hours: Vec<i64> = expand_numeric_field(&cron.hour, 0, 23).into_iter().collect();
+    let mut hours: Vec<i64> = expand_numeric_field(&cron.hour, 0, 23)
+        .into_iter()
+        .collect();
     hours.sort_unstable();
     let month_set = expand_enum_field(&cron.month, 1, 12);
     let day_matches = build_day_matcher(&cron.day);
@@ -524,7 +528,10 @@ mod tests {
         }));
         // base is Sunday 2026-05-31; next Friday is 2026-06-05 (before the 13th).
         let next = next_run_at(&pattern, utc(2026, 5, 31, 12, 0, 0), "UTC").unwrap();
-        assert_eq!(next.date_naive(), NaiveDate::from_ymd_opt(2026, 6, 5).unwrap());
+        assert_eq!(
+            next.date_naive(),
+            NaiveDate::from_ymd_opt(2026, 6, 5).unwrap()
+        );
     }
 
     #[test]

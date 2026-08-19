@@ -74,7 +74,8 @@ fn settings() -> Result<acme_showcase::DatabaseSettings, String> {
 #[derive(Debug, clap::Args)]
 struct WorkerOptions {
     /// Concurrent task slots in this worker process.
-    #[arg(long, default_value_t = 12)]    concurrency: u32,
+    #[arg(long, default_value_t = 12)]
+    concurrency: u32,
 }
 
 async fn run_worker(options: WorkerOptions) -> Result<(), Box<dyn std::error::Error>> {

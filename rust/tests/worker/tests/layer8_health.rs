@@ -111,22 +111,65 @@ async fn test_list_worker_states_fresh_stale_and_single_snapshot() {
     let now = chrono::Utc::now();
     let days_ago = now - chrono::Duration::days(3);
     // Fresh worker: old + recent snapshots.
-    insert_snapshot(&pool, "worker-fresh", now - chrono::Duration::seconds(30), 1, days_ago).await;
-    insert_snapshot(&pool, "worker-fresh", now - chrono::Duration::seconds(5), 4, days_ago).await;
+    insert_snapshot(
+        &pool,
+        "worker-fresh",
+        now - chrono::Duration::seconds(30),
+        1,
+        days_ago,
+    )
+    .await;
+    insert_snapshot(
+        &pool,
+        "worker-fresh",
+        now - chrono::Duration::seconds(5),
+        4,
+        days_ago,
+    )
+    .await;
     // Stale worker: days-old snapshots only — no time-window filter, still listed.
     insert_snapshot(&pool, "worker-stale", days_ago, 2, days_ago).await;
-    insert_snapshot(&pool, "worker-stale", days_ago + chrono::Duration::minutes(1), 3, days_ago).await;
+    insert_snapshot(
+        &pool,
+        "worker-stale",
+        days_ago + chrono::Duration::minutes(1),
+        3,
+        days_ago,
+    )
+    .await;
     // Single-snapshot worker.
-    insert_snapshot(&pool, "worker-single", now - chrono::Duration::seconds(10), 7, days_ago).await;
+    insert_snapshot(
+        &pool,
+        "worker-single",
+        now - chrono::Duration::seconds(10),
+        7,
+        days_ago,
+    )
+    .await;
 
     let states = broker.list_worker_states().await.unwrap();
     assert_eq!(states.len(), 3, "each worker appears exactly once");
 
-    let fresh = states.iter().find(|s| s.worker_id == "worker-fresh").unwrap();
-    assert_eq!(fresh.tasks_running, 4, "newest snapshot for the fresh worker");
-    let stale = states.iter().find(|s| s.worker_id == "worker-stale").unwrap();
-    assert_eq!(stale.tasks_running, 3, "newest snapshot for the stale worker");
-    let single = states.iter().find(|s| s.worker_id == "worker-single").unwrap();
+    let fresh = states
+        .iter()
+        .find(|s| s.worker_id == "worker-fresh")
+        .unwrap();
+    assert_eq!(
+        fresh.tasks_running, 4,
+        "newest snapshot for the fresh worker"
+    );
+    let stale = states
+        .iter()
+        .find(|s| s.worker_id == "worker-stale")
+        .unwrap();
+    assert_eq!(
+        stale.tasks_running, 3,
+        "newest snapshot for the stale worker"
+    );
+    let single = states
+        .iter()
+        .find(|s| s.worker_id == "worker-single")
+        .unwrap();
     assert_eq!(single.tasks_running, 7, "single snapshot returned as-is");
 }
 
@@ -166,7 +209,10 @@ async fn test_get_worker_state_history_newest_first_and_limit() {
     }
 
     // No limit returns all, newest first.
-    let all = broker.get_worker_state_history("worker-a", None).await.unwrap();
+    let all = broker
+        .get_worker_state_history("worker-a", None)
+        .await
+        .unwrap();
     assert_eq!(all.len(), 3);
     assert!(
         all[0].snapshot_at > all[1].snapshot_at && all[1].snapshot_at > all[2].snapshot_at,
@@ -279,7 +325,11 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
 
     // Targeted: only the addressed worker replies.
     let targeted = broker
-        .ping_workers(Some(&pong.worker_id), std::time::Duration::from_secs(2), None)
+        .ping_workers(
+            Some(&pong.worker_id),
+            std::time::Duration::from_secs(2),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(targeted.len(), 1, "exactly the targeted worker replies");
@@ -301,7 +351,10 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
     let start = std::time::Instant::now();
     let gated = broker.ping_workers(None, window, Some(1)).await.unwrap();
     let elapsed = start.elapsed();
-    assert!(!gated.is_empty(), "fast gate should collect at least one pong");
+    assert!(
+        !gated.is_empty(),
+        "fast gate should collect at least one pong"
+    );
     assert!(
         elapsed < std::time::Duration::from_secs(3),
         "min_responses=1 must return well before the {}s window, took {:?}",

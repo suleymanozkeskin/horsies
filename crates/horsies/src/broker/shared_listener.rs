@@ -221,7 +221,11 @@ mod tests {
         let listener = SharedNotifyListener::new_for_test();
         {
             let _sub = listener.subscribe("task-42");
-            assert_eq!(listener.active_channel_count(), 1, "subscribe registers the id");
+            assert_eq!(
+                listener.active_channel_count(),
+                1,
+                "subscribe registers the id"
+            );
         }
         assert_eq!(
             listener.active_channel_count(),
@@ -245,7 +249,11 @@ mod tests {
             1,
             "one drop must not remove the other subscriber",
         );
-        assert_eq!(listener.active_channel_count(), 1, "id stays while a subscriber remains");
+        assert_eq!(
+            listener.active_channel_count(),
+            1,
+            "id stays while a subscriber remains"
+        );
 
         drop(sub2);
         assert_eq!(

@@ -77,8 +77,7 @@ fn serde_string(attrs: &[Attribute], key: &str) -> Option<String> {
         let Meta::List(list) = &attr.meta else {
             continue;
         };
-        let Ok(metas) =
-            list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        let Ok(metas) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
         else {
             continue;
         };

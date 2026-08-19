@@ -345,9 +345,7 @@ pub enum DaySelector {
     /// Both day-of-month and day-of-week unrestricted.
     EveryDay,
     /// Restrict by day-of-month only.
-    ByMonthDay {
-        day_of_month: Vec<CronNumericTerm>,
-    },
+    ByMonthDay { day_of_month: Vec<CronNumericTerm> },
     /// Restrict by day-of-week only.
     ByWeekday {
         day_of_week: Vec<CronEnumTerm<Weekday>>,
@@ -520,13 +518,19 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
         DaySelector::EveryDay => Ok(()),
         DaySelector::ByMonthDay { day_of_month } => {
             if day_of_month.is_empty() {
-                return Err(invalid_cron_field("day_of_month", "must have at least one term"));
+                return Err(invalid_cron_field(
+                    "day_of_month",
+                    "must have at least one term",
+                ));
             }
             validate_numeric_terms(day_of_month, "day_of_month", 1, 31)
         }
         DaySelector::ByWeekday { day_of_week } => {
             if day_of_week.is_empty() {
-                return Err(invalid_cron_field("day_of_week", "must have at least one term"));
+                return Err(invalid_cron_field(
+                    "day_of_week",
+                    "must have at least one term",
+                ));
             }
             validate_enum_terms(day_of_week, "day_of_week", 6)
         }
@@ -539,10 +543,16 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
             day_of_week,
         } => {
             if day_of_month.is_empty() {
-                return Err(invalid_cron_field("day_of_month", "must have at least one term"));
+                return Err(invalid_cron_field(
+                    "day_of_month",
+                    "must have at least one term",
+                ));
             }
             if day_of_week.is_empty() {
-                return Err(invalid_cron_field("day_of_week", "must have at least one term"));
+                return Err(invalid_cron_field(
+                    "day_of_week",
+                    "must have at least one term",
+                ));
             }
             validate_numeric_terms(day_of_month, "day_of_month", 1, 31)?;
             validate_enum_terms(day_of_week, "day_of_week", 6)
@@ -557,11 +567,12 @@ fn validate_day_selector(day: &DaySelector) -> Result<(), String> {
 /// its weekday branch; `ByWeekday`/`EveryDay` are always satisfiable.
 fn validate_satisfiable(month: &[CronEnumTerm<Month>], day: &DaySelector) -> Result<(), String> {
     let day_of_month = match day {
-        DaySelector::ByMonthDay { day_of_month }
-        | DaySelector::BothDays { day_of_month, .. } => day_of_month,
-        DaySelector::EveryDay
-        | DaySelector::ByWeekday { .. }
-        | DaySelector::EitherDay { .. } => return Ok(()),
+        DaySelector::ByMonthDay { day_of_month } | DaySelector::BothDays { day_of_month, .. } => {
+            day_of_month
+        }
+        DaySelector::EveryDay | DaySelector::ByWeekday { .. } | DaySelector::EitherDay { .. } => {
+            return Ok(())
+        }
     };
     let month_set = expand_enum_field(month, 1, 12);
     let dom_set = expand_numeric_field(day_of_month, 1, 31);

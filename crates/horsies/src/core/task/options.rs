@@ -204,9 +204,7 @@ impl TaskOptions {
     /// map silently never reaches the DB (the bug horsies PR #102 fixed for
     /// timeout_ms).
     pub fn serialize_retry_options(&self) -> Option<String> {
-        if self.auto_retry_for.is_none()
-            && self.retry_policy.is_none()
-            && self.timeout_ms.is_none()
+        if self.auto_retry_for.is_none() && self.retry_policy.is_none() && self.timeout_ms.is_none()
         {
             return None;
         }

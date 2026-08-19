@@ -15,11 +15,7 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
     // `e2e_healthcheck` to the first queue passed via `--queues`, so this
     // task must be registered before the harness will consider the worker
     // ready.
-    app.register_with_queue(
-        "e2e_healthcheck",
-        async_task_fn!(healthcheck, ()),
-        "high",
-    )?;
+    app.register_with_queue("e2e_healthcheck", async_task_fn!(healthcheck, ()), "high")?;
 
     app.register_with_queue("e2e_high", async_task_fn!(healthcheck, ()), "high")?;
     app.register_with_queue("e2e_normal", async_task_fn!(healthcheck, ()), "normal")?;

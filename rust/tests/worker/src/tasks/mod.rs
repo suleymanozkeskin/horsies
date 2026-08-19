@@ -33,11 +33,7 @@ pub fn register(app: &mut Horsies) -> Result<(), Box<dyn std::error::Error>> {
             } else if names.contains("recovery") {
                 custom_default_recovery::register(app)
             } else {
-                Err(format!(
-                    "no task-registration scheme for custom_queues: {:?}",
-                    names,
-                )
-                .into())
+                Err(format!("no task-registration scheme for custom_queues: {:?}", names,).into())
             }
         }
     }

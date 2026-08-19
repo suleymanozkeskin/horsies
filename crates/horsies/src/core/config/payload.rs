@@ -88,7 +88,10 @@ fn warned() -> &'static Mutex<HashSet<(String, &'static str)>> {
 
 /// Clear the warn rate-limit registry (test isolation).
 pub fn reset_payload_warnings() {
-    warned().lock().expect("payload warn registry poisoned").clear();
+    warned()
+        .lock()
+        .expect("payload warn registry poisoned")
+        .clear();
 }
 
 /// Apply the payload policy to one serialized payload.

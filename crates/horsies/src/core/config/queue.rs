@@ -163,7 +163,10 @@ mod tests {
             priority: 1,
             max_concurrency: Some(5),
         };
-        assert!(config.validate().is_empty(), "52-byte name must be accepted");
+        assert!(
+            config.validate().is_empty(),
+            "52-byte name must be accepted"
+        );
     }
 
     #[test]
@@ -180,7 +183,11 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert!(matches!(
             errors[0],
-            CustomQueueConfigError::NameTooLong { len: 53, max: 52, .. }
+            CustomQueueConfigError::NameTooLong {
+                len: 53,
+                max: 52,
+                ..
+            }
         ));
     }
 
