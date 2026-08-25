@@ -70,7 +70,7 @@ from ..outcomes import (
     LeafIndexRepaired,
     LeafMaintenanceBusy,
 )
-from ..partitions.catalog import database_now
+from ..partitions.catalog import INDEX_SCHEMA_VERSION, database_now
 from ..partitions.manager import create_daily_leaf, ensure_leaf_coverage
 from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
 from ..reads.detail import staged_detail_published
@@ -93,8 +93,8 @@ expected_registration AS (
     SELECT *
     FROM jsonb_to_recordset(CAST(:registrations AS jsonb)) AS expected(
         class_key text,
-        duration_seconds double precision,
-        interval_seconds double precision,
+        duration_microseconds bigint,
+        interval_microseconds bigint,
         parent_name text
     )
 ),
@@ -106,11 +106,13 @@ registration_health AS (
             LEFT JOIN {RETENTION_CLASSES} AS registered
               ON registered.class_key = expected.class_key
             WHERE registered.class_key IS NULL
-               OR extract(epoch FROM registered.duration)
-                    <> expected.duration_seconds
-               OR extract(epoch FROM registered.partition_interval)
-                    <> expected.interval_seconds
-               OR registered.finite_parent_name <> expected.parent_name
+               OR (extract(epoch FROM registered.duration) * 1000000)::bigint
+                    IS DISTINCT FROM expected.duration_microseconds
+               OR (extract(epoch FROM registered.partition_interval)
+                    * 1000000)::bigint
+                    IS DISTINCT FROM expected.interval_microseconds
+               OR registered.finite_parent_name
+                    IS DISTINCT FROM expected.parent_name
         )
         AND NOT EXISTS (
             SELECT 1
@@ -125,11 +127,21 @@ registration_health AS (
                     )
                     OR (
                         registered.class_key <> :forever_class
+                        AND registered.duration IS NOT NULL
                         AND registered.duration > interval '0 seconds'
+                        AND registered.partition_interval IS NOT NULL
                         AND registered.partition_interval = interval '1 day'
                         AND registered.finite_parent_name IS NOT NULL
                     )
               )
+        )
+        AND EXISTS (
+            SELECT 1
+            FROM {RETENTION_CLASSES} AS registered
+            WHERE registered.class_key = :forever_class
+              AND registered.duration IS NULL
+              AND registered.partition_interval IS NULL
+              AND registered.finite_parent_name IS NULL
         ) AS healthy
 ),
 history_classes AS (
@@ -204,6 +216,7 @@ leaf_health AS (
             AND catalog.class_key = expected.class_key
             AND catalog.lower_anchor = expected.lower_anchor
             AND catalog.upper_anchor = expected.upper_anchor
+            AND catalog.index_schema_version = :index_schema_version
             AND catalog.dropped_at IS NULL
             AND child.oid IS NOT NULL
             AND parent.oid IS NOT NULL
@@ -377,27 +390,36 @@ def _expected_registrations(
     classes = [
         {
             'class_key': HEARTBEAT_CLASS_KEY,
-            'duration_seconds': heartbeat_horizon_hours * 3600,
-            'interval_seconds': 3600,
+            'duration_microseconds': heartbeat_horizon_hours * 3_600_000_000,
+            'interval_microseconds': 3_600_000_000,
             'parent_name': HEARTBEATS_TABLE,
         },
         {
             'class_key': DEFAULT_RETENTION_CLASS_KEY,
-            'duration_seconds': int(DEFAULT_RETENTION_DURATION.total_seconds()),
-            'interval_seconds': 86400,
+            'duration_microseconds': _timedelta_microseconds(
+                DEFAULT_RETENTION_DURATION
+            ),
+            'interval_microseconds': 86_400_000_000,
             'parent_name': finite_class_parent_name(DEFAULT_RETENTION_CLASS_KEY),
         },
     ]
     classes.extend(
         {
             'class_key': class_key,
-            'duration_seconds': int(duration.total_seconds()),
-            'interval_seconds': 86400,
+            'duration_microseconds': _timedelta_microseconds(duration),
+            'interval_microseconds': 86_400_000_000,
             'parent_name': finite_class_parent_name(class_key),
         }
         for class_key, duration in declared_classes
     )
     return json.dumps(classes, separators=(',', ':'))
+
+
+def _timedelta_microseconds(value: timedelta) -> int:
+    return (
+        (value.days * 86_400 + value.seconds) * 1_000_000
+        + value.microseconds
+    )
 
 
 async def _probe_complete_coverage(
@@ -418,6 +440,7 @@ async def _probe_complete_coverage(
                 ),
                 'history_horizon': history_horizon_days,
                 'heartbeat_horizon': heartbeat_horizon_hours,
+                'index_schema_version': INDEX_SCHEMA_VERSION,
                 'heartbeat_class': HEARTBEAT_CLASS_KEY,
                 'heartbeat_parent': HEARTBEATS_TABLE,
                 'forever_class': FOREVER_CLASS_KEY,
@@ -799,8 +822,16 @@ async def maintain_partition_coverage(
     created_history = 0
     created_heartbeats = 0
     failures: list[str] = []
+    failed_history_classes: set[str] = set()
     for leaf in probe.damaged_history:
-        outcome = await _maintain_history_leaf(database, leaf, publisher)
+        if leaf.class_key in failed_history_classes:
+            continue
+        try:
+            outcome = await _maintain_history_leaf(database, leaf, publisher)
+        except Exception as leaf_error:
+            failures.append(f'{leaf.class_key}: {leaf_error!r}')
+            failed_history_classes.add(leaf.class_key)
+            continue
         match outcome:
             case LeafCreated():
                 created_history += 1
@@ -808,9 +839,14 @@ async def maintain_partition_coverage(
                 pass
             case _:
                 failures.append(f'{leaf.class_key}: {outcome!r}')
+                failed_history_classes.add(leaf.class_key)
 
     for leaf in probe.damaged_heartbeats:
-        outcome = await _maintain_heartbeat_leaf(database, leaf)
+        try:
+            outcome = await _maintain_heartbeat_leaf(database, leaf)
+        except Exception as leaf_error:
+            failures.append(f'{HEARTBEAT_CLASS_KEY}: {leaf_error!r}')
+            break
         match outcome:
             case LeafCreated():
                 created_heartbeats += 1
@@ -818,6 +854,7 @@ async def maintain_partition_coverage(
                 pass
             case _:
                 failures.append(f'{HEARTBEAT_CLASS_KEY}: {outcome!r}')
+                break
 
     republished = False
     async with database.begin() as connection:

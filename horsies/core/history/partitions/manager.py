@@ -414,6 +414,7 @@ async def _read_daily_leaf_creation_state(
         or catalog.class_key != leaf.class_key
         or catalog.lower_anchor != leaf.bounds.lower
         or catalog.upper_anchor != leaf.bounds.upper
+        or catalog.index_schema_version != INDEX_SCHEMA_VERSION
         or catalog.dropped_at is not None
     ):
         outcome: LeafCreation | None = LeafCatalogConflict(
@@ -533,14 +534,14 @@ async def detach_expired_leaf(
             case _:
                 return inspection
 
-        lock_attempt = await try_lock_leaf_for_session(
-            connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-        )
-        if lock_attempt is LeafLockAttempt.BUSY:
-            return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+        lock_acquired = False
         prior_timeouts: _SessionTimeouts | None = None
         cancelled = False
         try:
+            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
+            if lock_attempt is LeafLockAttempt.BUSY:
+                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+            lock_acquired = True
             inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
             match inspection:
                 case LeafDetachable():
@@ -605,12 +606,13 @@ async def detach_expired_leaf(
             cancelled = True
             raise
         finally:
-            await _cleanup_session_leaf_lock(
-                connection,
-                leaf=leaf,
-                prior_timeouts=prior_timeouts,
-                uncertain=cancelled,
-            )
+            if lock_acquired:
+                await _cleanup_session_leaf_lock(
+                    connection,
+                    leaf=leaf,
+                    prior_timeouts=prior_timeouts,
+                    uncertain=cancelled,
+                )
 
 
 async def finalize_interrupted_detach(
@@ -634,14 +636,14 @@ async def finalize_interrupted_detach(
             case _:
                 return inspection
 
-        lock_attempt = await try_lock_leaf_for_session(
-            connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-        )
-        if lock_attempt is LeafLockAttempt.BUSY:
-            return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+        lock_acquired = False
         prior_timeouts: _SessionTimeouts | None = None
         cancelled = False
         try:
+            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
+            if lock_attempt is LeafLockAttempt.BUSY:
+                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+            lock_acquired = True
             inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
             match inspection:
                 case LeafDetached():
@@ -682,12 +684,13 @@ async def finalize_interrupted_detach(
             cancelled = True
             raise
         finally:
-            await _cleanup_session_leaf_lock(
-                connection,
-                leaf=leaf,
-                prior_timeouts=prior_timeouts,
-                uncertain=cancelled,
-            )
+            if lock_acquired:
+                await _cleanup_session_leaf_lock(
+                    connection,
+                    leaf=leaf,
+                    prior_timeouts=prior_timeouts,
+                    uncertain=cancelled,
+                )
 
 
 async def drop_detached_leaf(
@@ -794,6 +797,23 @@ async def _cleanup_session_leaf_lock(
             )
         await unlock_leaf_for_session(
             connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
+        )
+    except BaseException as error:
+        await connection.invalidate(error)
+        raise
+
+
+async def _try_session_leaf_lock(
+    connection: AsyncConnection,
+    *,
+    leaf: LeafRef,
+) -> LeafLockAttempt:
+    """Invalidate the connection when lock acquisition is uncertain."""
+    try:
+        return await try_lock_leaf_for_session(
+            connection,
+            class_key=leaf.class_key,
+            anchor=leaf.bounds.lower,
         )
     except BaseException as error:
         await connection.invalidate(error)

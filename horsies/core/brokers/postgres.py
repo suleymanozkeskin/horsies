@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, uuid
 from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
+import psycopg
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -658,7 +659,7 @@ class PostgresBroker:
             await probe_session_capability(
                 to_psycopg_url(self.config.effective_session_database_url)
             )
-        except asyncio.TimeoutError as exc:
+        except (asyncio.TimeoutError, psycopg.Error) as exc:
             raise ConfigurationError(
                 message='broker session capability check failed',
                 code=ErrorCode.BROKER_INVALID_URL,

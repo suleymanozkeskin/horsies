@@ -134,6 +134,33 @@ def test_transaction_pool_rejected_as_session_url(
 
 
 @pytest.mark.asyncio(loop_scope="function")
+async def test_transaction_pool_session_behavior_is_rejected(
+    pgbouncer_urls: PgbouncerUrls,
+) -> None:
+    separator = "&" if "?" in pgbouncer_urls.transaction else "?"
+    session_url = (
+        f"{pgbouncer_urls.transaction}{separator}"
+        "application_name=horsies_bad_session_probe"
+    )
+    config = PostgresConfig(
+        database_url=pgbouncer_urls.transaction,
+        session_database_url=session_url,
+        pgbouncer_transaction_mode=True,
+        pool_size=2,
+        max_overflow=0,
+    )
+    broker = PostgresBroker(config)
+    try:
+        with pytest.raises(
+            ConfigurationError,
+            match="broker session capability check failed",
+        ):
+            await broker.validate_worker_database_paths()
+    finally:
+        await broker.close_async()
+
+
+@pytest.mark.asyncio(loop_scope="function")
 async def test_session_pool_works_without_transaction_mode(
     pgbouncer_urls: PgbouncerUrls,
 ) -> None:

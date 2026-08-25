@@ -36,7 +36,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..archive.versions import JSON_UTF8_CODEC
-from ..names import TASK_HISTORY_PARENT
+from ..names import LEAF_CATALOG, TASK_HISTORY_PARENT
 from ..partitions.locks import LeafLockAttempt, try_lock_leaf_for_transaction
 from .jobs import (
     TRANSCODE_BATCHES,
@@ -776,6 +776,25 @@ async def swap_transcode(
                 f'{relation.partition_bound}'
             )
         )
+        catalog_update = await connection.execute(
+            text(
+                f'UPDATE {LEAF_CATALOG} '
+                'SET id_index_name = :id_index_name '
+                'WHERE leaf_name = :leaf_name '
+                'AND parent_name = :parent_name'
+            ),
+            {
+                'id_index_name': replacement_index_name(
+                    job_id, relation.relation_ordinal
+                ),
+                'leaf_name': relation.source_relation_name,
+                'parent_name': relation.parent_relation_name,
+            },
+        )
+        if catalog_update.rowcount != 1:
+            raise TranscodeStateError(
+                'swapped relation did not update one leaf catalog row'
+            )
         await connection.execute(
             text(
                 f"UPDATE {TRANSCODE_RELATIONS} SET state = 'SWAPPED', "

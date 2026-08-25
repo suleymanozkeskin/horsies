@@ -51,6 +51,7 @@ from horsies.core.history.outcomes import (
 )
 from horsies.core.history.partitions.catalog import daily_leaf_name
 from horsies.core.history.partitions.health import collect_partition_health
+from horsies.core.history.partitions import manager as partition_manager
 from horsies.core.history.partitions.manager import (
     create_daily_leaf,
     detach_expired_leaf,
@@ -794,6 +795,79 @@ class TestLockContention:
         finally:
             await transaction.rollback()
             await holder.close()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_lock_acquisition_invalidates_session(
+        self,
+        history_schema: HistorySchema,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent_name)
+        direct_engine = create_async_engine(
+            history_schema.engine.url.render_as_string(hide_password=False),
+            pool_size=1,
+            max_overflow=0,
+            connect_args={
+                'options': f'-csearch_path={history_schema.schema_name}'
+            },
+        )
+        database = PartitionMaintenanceDatabase(direct_engine)
+        original = partition_manager.try_lock_leaf_for_session
+
+        async def acquire_then_cancel(
+            connection: AsyncConnection,
+            *,
+            class_key: str,
+            anchor: datetime,
+        ) -> None:
+            await original(
+                connection,
+                class_key=class_key,
+                anchor=anchor,
+            )
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(
+            partition_manager,
+            'try_lock_leaf_for_session',
+            acquire_then_cancel,
+        )
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await detach_expired_leaf(
+                    database,
+                    DetachExpiredHistoryLeaf(
+                        leaf=ref,
+                        quarantine_horizon=None,
+                        statement_timeout_ms=9000,
+                    ),
+                    UnpublishedLoader(),
+                )
+
+            async with history_schema.engine.connect() as probe:
+                acquired = (
+                    await probe.execute(
+                        text(
+                            'SELECT pg_try_advisory_lock('
+                            'horsies_task_history_leaf_lock_key('
+                            ':class_key, :anchor))'
+                        ),
+                        {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                    )
+                ).scalar_one()
+                assert acquired
+                await probe.execute(
+                    text(
+                        'SELECT pg_advisory_unlock('
+                        'horsies_task_history_leaf_lock_key('
+                        ':class_key, :anchor))'
+                    ),
+                    {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                )
+        finally:
+            await direct_engine.dispose()
 
 
 class TestHealth:

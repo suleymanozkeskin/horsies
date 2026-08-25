@@ -323,6 +323,23 @@ class TestFullLifecycle:
                 assert await read_leaf_ordering_index_exists(
                     connection, leaf_name
                 ), leaf_name
+            catalog_indexes = (
+                await connection.execute(
+                    text(
+                        'SELECT catalog.leaf_name, '
+                        'task_index.indrelid = to_regclass(catalog.leaf_name) '
+                        'AS belongs_to_leaf '
+                        'FROM horsies_task_history_leaf_catalog AS catalog '
+                        'JOIN pg_index AS task_index '
+                        'ON task_index.indexrelid '
+                        '= to_regclass(catalog.id_index_name) '
+                        'WHERE catalog.leaf_name = ANY(:leaf_names)'
+                    ),
+                    {'leaf_names': swapped_leaves},
+                )
+            ).all()
+            assert len(catalog_indexes) == len(swapped_leaves)
+            assert all(row.belongs_to_leaf for row in catalog_indexes)
 
             finalized = await finalize_transcode(
                 connection, job_id=job_id

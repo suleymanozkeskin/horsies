@@ -44,7 +44,7 @@ from ..commands import (
     LeafRef,
     is_safe_identifier,
 )
-from ..errors import HistoryContractError
+from ..errors import HistoryContractError, HistoryParentAbsent
 from ..names import (
     HEARTBEAT_CLASS_KEY,
     HEARTBEATS_TABLE,
@@ -418,6 +418,10 @@ async def _read_hourly_leaf_creation_state(
         parent_name=HEARTBEATS_TABLE,
         id_index_name=(catalog.id_index_name if catalog is not None else index_name),
     )
+    if not physical.parent_exists:
+        raise HistoryParentAbsent(
+            f'heartbeat parent {HEARTBEATS_TABLE!r} does not exist'
+        )
     if physical.relation_exists != (catalog is not None):
         return _HourlyLeafCreationState(
             catalog,
@@ -439,6 +443,7 @@ async def _read_hourly_leaf_creation_state(
         or catalog.class_key != leaf.class_key
         or catalog.lower_anchor != leaf.bounds.lower
         or catalog.upper_anchor != leaf.bounds.upper
+        or catalog.index_schema_version != INDEX_SCHEMA_VERSION
         or catalog.dropped_at is not None
     ):
         outcome: LeafCreation | None = LeafCatalogConflict(
