@@ -183,6 +183,13 @@ class LeafIndexRepaired:
 
 
 @dataclass(frozen=True, slots=True)
+class LeafMaintenanceBusy:
+    """Another owner holds the leaf or relation lock; retry later."""
+
+    leaf_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class ClassIntervalMismatch:
     """The retention class does not use the requested partition interval."""
 
@@ -194,6 +201,7 @@ type LeafCreation = (
     LeafCreated
     | LeafAlreadyConformant
     | LeafIndexRepaired
+    | LeafMaintenanceBusy
     | RetentionClassAbsent
     | ForeverClassLeaf
     | ClassIntervalMismatch
@@ -219,7 +227,12 @@ class DropRefusedLoaderReferences:
     leaf_name: str
 
 
-type LeafDrop = LeafDropped | DropRefusedLoaderReferences | LeafInspection
+type LeafDrop = (
+    LeafDropped
+    | DropRefusedLoaderReferences
+    | LeafMaintenanceBusy
+    | LeafInspection
+)
 """Outcome of one drop attempt; non-detached inspections pass through."""
 
 

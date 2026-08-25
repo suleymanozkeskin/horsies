@@ -820,6 +820,18 @@ class Worker(
             # process-safe and must not be inherited by child processes.
             await self._create_warmed_executor()
 
+            # The parent opens database connections only after child processes
+            # exist, so no psycopg socket is inherited across a fork. A worker
+            # broker proves both database paths before maintenance starts.
+            match self.broker:
+                case None:
+                    raise RuntimeError(
+                        'worker startup requires a PostgresBroker with a '
+                        'session-capable partition maintenance database'
+                    )
+                case broker:
+                    await broker.validate_worker_database_paths()
+
             # Partitioned writes need their partitions before the first
             # claim: heartbeat leaves for this worker's liveness rows,
             # history leaves for terminalizations, staged readers published.
@@ -828,24 +840,20 @@ class Worker(
             # of on the first RUNNING transition.
             from horsies.core.history.maintenance.coverage import (
                 StartupCoverageRefused,
-                ensure_startup_coverage,
+                ensure_startup_coverage_in_database,
             )
 
             from horsies.core.models.retention import RetentionConfig
 
-            retention_cfg = (
-                self.cfg.retention_config or RetentionConfig()
+            retention_cfg = self.cfg.retention_config or RetentionConfig()
+            startup_coverage = await ensure_startup_coverage_in_database(
+                broker.partition_maintenance,
+                history_horizon_days=retention_cfg.history_leaf_horizon_days,
+                heartbeat_horizon_hours=(
+                    retention_cfg.heartbeat_leaf_horizon_hours
+                ),
+                declared_classes=retention_cfg.registrable_classes(),
             )
-            async with self.sf() as coverage_session:
-                startup_coverage = await ensure_startup_coverage(
-                    await coverage_session.connection(),
-                    history_horizon_days=retention_cfg.history_leaf_horizon_days,
-                    heartbeat_horizon_hours=(
-                        retention_cfg.heartbeat_leaf_horizon_hours
-                    ),
-                    declared_classes=retention_cfg.registrable_classes(),
-                )
-                await coverage_session.commit()
             match startup_coverage:
                 case StartupCoverageRefused(outcome=refused_outcome):
                     raise RuntimeError(

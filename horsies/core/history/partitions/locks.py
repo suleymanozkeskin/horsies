@@ -17,10 +17,13 @@ false means this code's lock discipline is broken somewhere.
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..commands import is_safe_identifier
 from ..errors import LeafLockNotHeld
 from ..names import LEAF_LOCK_KEY_FUNCTION
 
@@ -32,44 +35,95 @@ def _validate(class_key: str, anchor: datetime) -> None:
         raise ValueError('history anchor must be timezone-aware')
 
 
-async def lock_leaf_for_transaction(
+class LeafLockAttempt(Enum):
+    """Result of one nonblocking advisory or relation lock request."""
+
+    ACQUIRED = 'ACQUIRED'
+    BUSY = 'BUSY'
+
+
+def _sqlstate(error: DBAPIError) -> str | None:
+    original = getattr(error, 'orig', error)
+    value = getattr(original, 'sqlstate', None)
+    if isinstance(value, str):
+        return value
+    value = getattr(original, 'pgcode', None)
+    return value if isinstance(value, str) else None
+
+
+def is_lock_not_available(error: DBAPIError) -> bool:
+    """Return true for PostgreSQL's lock-not-available SQLSTATE."""
+    return _sqlstate(error) == '55P03'
+
+
+async def try_lock_leaf_for_transaction(
     connection: AsyncConnection,
     *,
     class_key: str,
     anchor: datetime,
-) -> None:
-    """Hold the leaf's advisory lock until the transaction ends."""
+) -> LeafLockAttempt:
+    """Try to hold the leaf lock until the transaction ends."""
     _validate(class_key, anchor)
-    await connection.execute(
-        text(
-            f"""
-            SELECT pg_advisory_xact_lock(
-                {LEAF_LOCK_KEY_FUNCTION}(:class_key, :anchor)
-            )
-            """
-        ),
-        {'class_key': class_key, 'anchor': anchor},
-    )
+    acquired = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT pg_try_advisory_xact_lock(
+                    {LEAF_LOCK_KEY_FUNCTION}(:class_key, :anchor)
+                )
+                """
+            ),
+            {'class_key': class_key, 'anchor': anchor},
+        )
+    ).scalar_one()
+    return LeafLockAttempt.ACQUIRED if acquired else LeafLockAttempt.BUSY
 
 
-async def lock_leaf_for_session(
+async def try_lock_leaf_for_session(
     connection: AsyncConnection,
     *,
     class_key: str,
     anchor: datetime,
-) -> None:
-    """Hold the leaf's advisory lock until explicitly released."""
+) -> LeafLockAttempt:
+    """Try to hold the leaf lock until explicitly released."""
     _validate(class_key, anchor)
-    await connection.execute(
-        text(
-            f"""
-            SELECT pg_advisory_lock(
-                {LEAF_LOCK_KEY_FUNCTION}(:class_key, :anchor)
+    acquired = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT pg_try_advisory_lock(
+                    {LEAF_LOCK_KEY_FUNCTION}(:class_key, :anchor)
+                )
+                """
+            ),
+            {'class_key': class_key, 'anchor': anchor},
+        )
+    ).scalar_one()
+    return LeafLockAttempt.ACQUIRED if acquired else LeafLockAttempt.BUSY
+
+
+async def try_lock_relation_exclusive_for_transaction(
+    connection: AsyncConnection,
+    relation_name: str,
+) -> LeafLockAttempt:
+    """Request the relation's DDL lock without waiting.
+
+    PostgreSQL marks the transaction failed after ``LOCK ... NOWAIT`` returns
+    SQLSTATE 55P03.  The savepoint contains that failure before it becomes the
+    typed busy outcome.
+    """
+    if not is_safe_identifier(relation_name):
+        raise ValueError(f'{relation_name!r} is not a safe relation name')
+    try:
+        async with connection.begin_nested():
+            await connection.execute(
+                text(f'LOCK TABLE {relation_name} ' 'IN ACCESS EXCLUSIVE MODE NOWAIT')
             )
-            """
-        ),
-        {'class_key': class_key, 'anchor': anchor},
-    )
+    except DBAPIError as error:
+        if is_lock_not_available(error):
+            return LeafLockAttempt.BUSY
+        raise
+    return LeafLockAttempt.ACQUIRED
 
 
 async def unlock_leaf_for_session(

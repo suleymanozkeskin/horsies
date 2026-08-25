@@ -20,8 +20,15 @@ dropped relation remains probed by it.
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass
+from datetime import timedelta
+
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.exc import DBAPIError
+from sqlalchemy.ext.asyncio import AsyncConnection
+
+from ..maintenance.database import PartitionMaintenanceDatabase
 
 from ..commands import (
     CreateDailyHistoryLeaf,
@@ -56,6 +63,7 @@ from ..outcomes import (
     LeafDropped,
     LeafIndexRepaired,
     LeafInspection,
+    LeafMaintenanceBusy,
     LeafMissing,
     LeafNotExpired,
     LeafPendingBlocked,
@@ -63,6 +71,8 @@ from ..outcomes import (
 )
 from .catalog import (
     INDEX_SCHEMA_VERSION,
+    LeafCatalogRow,
+    LeafPhysicalState,
     RetentionClassRow,
     capture_partition_bound_utc,
     daily_leaf_name,
@@ -75,8 +85,11 @@ from .catalog import (
     read_retention_class,
 )
 from .locks import (
-    lock_leaf_for_session,
-    lock_leaf_for_transaction,
+    LeafLockAttempt,
+    is_lock_not_available,
+    try_lock_leaf_for_session,
+    try_lock_leaf_for_transaction,
+    try_lock_relation_exclusive_for_transaction,
     unlock_leaf_for_session,
 )
 from .publication import LoaderPublication
@@ -86,10 +99,15 @@ from ..phase2.quarantine import (
     quarantine_over_horizon_blockers,
 )
 
-from datetime import timedelta
-
-
 _DAILY = timedelta(days=1)
+
+
+@dataclass(frozen=True, slots=True)
+class _DailyLeafCreationState:
+    catalog: LeafCatalogRow | None
+    physical: LeafPhysicalState
+    ordering_index_exists: bool
+    outcome: LeafCreation | None
 
 
 def _history_class_parent(
@@ -248,76 +266,52 @@ async def create_daily_leaf(
     if parent_name is None:
         return ForeverClassLeaf(class_key=leaf.class_key)
 
-    await lock_leaf_for_transaction(
+    state = await _read_daily_leaf_creation_state(
+        connection, leaf=leaf, parent_name=parent_name
+    )
+    if state.outcome is not None:
+        return state.outcome
+
+    lock_attempt = await try_lock_leaf_for_transaction(
         connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
     )
+    if lock_attempt is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
 
-    catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
-    physical = await read_leaf_physical_state(
-        connection,
-        leaf_name=leaf.leaf_name,
-        parent_name=parent_name,
-        id_index_name=(
-            catalog.id_index_name
-            if catalog is not None
-            else leaf_id_index_name(leaf.leaf_name)
-        ),
+    state = await _read_daily_leaf_creation_state(
+        connection, leaf=leaf, parent_name=parent_name
     )
+    if state.outcome is not None:
+        return state.outcome
 
-    if physical.relation_exists != (catalog is not None):
-        return LeafCatalogConflict(
-            leaf_name=leaf.leaf_name,
-            kind=CatalogConflictKind.RELATION_WITHOUT_CATALOG,
-            detail=(
-                'relation exists without a catalog row'
-                if physical.relation_exists
-                else 'catalog row exists without a relation'
-            ),
-        )
+    catalog = state.catalog
+    relation_name = leaf.leaf_name if catalog is not None else parent_name
+    relation_lock = await try_lock_relation_exclusive_for_transaction(
+        connection, relation_name
+    )
+    if relation_lock is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
 
     if catalog is not None:
-        if (
-            catalog.parent_name != parent_name
-            or catalog.class_key != leaf.class_key
-            or catalog.lower_anchor != leaf.bounds.lower
-            or catalog.upper_anchor != leaf.bounds.upper
-            or catalog.dropped_at is not None
-        ):
-            return LeafCatalogConflict(
-                leaf_name=leaf.leaf_name,
-                kind=CatalogConflictKind.METADATA_MISMATCH,
-                detail='existing leaf metadata differs from the request',
+        if not state.physical.id_index_exists:
+            await connection.execute(
+                text(
+                    f'CREATE INDEX {catalog.id_index_name} '
+                    f'ON {leaf.leaf_name} (task_id)'
+                )
             )
-        if physical.partition_bound != catalog.partition_bound:
-            return LeafCatalogConflict(
-                leaf_name=leaf.leaf_name,
-                kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
-                detail='attached leaf partition bound differs from catalog',
+        if not state.ordering_index_exists:
+            await connection.execute(
+                text(
+                    f'CREATE INDEX '
+                    f'{leaf_enqueued_index_name(leaf.leaf_name)} '
+                    f'ON {leaf.leaf_name} (enqueued_at)'
+                )
             )
-        ordering_index_exists = await read_leaf_ordering_index_exists(
-            connection, leaf.leaf_name
+        await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
+        return LeafIndexRepaired(
+            leaf_name=leaf.leaf_name, id_index_name=catalog.id_index_name
         )
-        if not physical.id_index_exists or not ordering_index_exists:
-            if not physical.id_index_exists:
-                await connection.execute(
-                    text(
-                        f'CREATE INDEX {catalog.id_index_name} '
-                        f'ON {leaf.leaf_name} (task_id)'
-                    )
-                )
-            if not ordering_index_exists:
-                await connection.execute(
-                    text(
-                        f'CREATE INDEX '
-                        f'{leaf_enqueued_index_name(leaf.leaf_name)} '
-                        f'ON {leaf.leaf_name} (enqueued_at)'
-                    )
-                )
-            await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
-            return LeafIndexRepaired(
-                leaf_name=leaf.leaf_name, id_index_name=catalog.id_index_name
-            )
-        return LeafAlreadyConformant(leaf_name=leaf.leaf_name)
 
     id_index_name = leaf_id_index_name(leaf.leaf_name)
     await connection.execute(
@@ -332,9 +326,7 @@ async def create_daily_leaf(
     )
     # Captured under the UTC rendering convention; every later
     # comparison captures the live bound the same way.
-    recorded_bound = await capture_partition_bound_utc(
-        connection, leaf.leaf_name
-    )
+    recorded_bound = await capture_partition_bound_utc(connection, leaf.leaf_name)
     await connection.execute(
         text(
             f"""
@@ -374,6 +366,79 @@ async def create_daily_leaf(
     await connection.execute(text(f'ANALYZE {leaf.leaf_name}'))
     await publisher.republish(connection)
     return LeafCreated(leaf_name=leaf.leaf_name, id_index_name=id_index_name)
+
+
+async def _read_daily_leaf_creation_state(
+    connection: AsyncConnection,
+    *,
+    leaf: LeafRef,
+    parent_name: str,
+) -> _DailyLeafCreationState:
+    catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
+    physical = await read_leaf_physical_state(
+        connection,
+        leaf_name=leaf.leaf_name,
+        parent_name=parent_name,
+        id_index_name=(
+            catalog.id_index_name
+            if catalog is not None
+            else leaf_id_index_name(leaf.leaf_name)
+        ),
+    )
+    if not physical.parent_exists:
+        raise HistoryParentAbsent(f'history parent {parent_name!r} does not exist')
+    if physical.relation_exists != (catalog is not None):
+        return _DailyLeafCreationState(
+            catalog=catalog,
+            physical=physical,
+            ordering_index_exists=False,
+            outcome=LeafCatalogConflict(
+                leaf_name=leaf.leaf_name,
+                kind=CatalogConflictKind.RELATION_WITHOUT_CATALOG,
+                detail=(
+                    'relation exists without a catalog row'
+                    if physical.relation_exists
+                    else 'catalog row exists without a relation'
+                ),
+            ),
+        )
+    if catalog is None:
+        return _DailyLeafCreationState(
+            catalog=None,
+            physical=physical,
+            ordering_index_exists=False,
+            outcome=None,
+        )
+    if (
+        catalog.parent_name != parent_name
+        or catalog.class_key != leaf.class_key
+        or catalog.lower_anchor != leaf.bounds.lower
+        or catalog.upper_anchor != leaf.bounds.upper
+        or catalog.index_schema_version != INDEX_SCHEMA_VERSION
+        or catalog.dropped_at is not None
+    ):
+        outcome: LeafCreation | None = LeafCatalogConflict(
+            leaf_name=leaf.leaf_name,
+            kind=CatalogConflictKind.METADATA_MISMATCH,
+            detail='existing leaf metadata differs from the request',
+        )
+        return _DailyLeafCreationState(catalog, physical, False, outcome)
+    if physical.partition_bound != catalog.partition_bound:
+        outcome = LeafCatalogConflict(
+            leaf_name=leaf.leaf_name,
+            kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+            detail='attached leaf partition bound differs from catalog',
+        )
+        return _DailyLeafCreationState(catalog, physical, False, outcome)
+    ordering_index_exists = await read_leaf_ordering_index_exists(
+        connection, leaf.leaf_name
+    )
+    outcome = (
+        LeafAlreadyConformant(leaf_name=leaf.leaf_name)
+        if physical.id_index_exists and ordering_index_exists
+        else None
+    )
+    return _DailyLeafCreationState(catalog, physical, ordering_index_exists, outcome)
 
 
 async def ensure_leaf_coverage(
@@ -435,10 +500,10 @@ async def ensure_leaf_coverage(
 
 
 async def detach_expired_leaf(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     command: DetachExpiredHistoryLeaf,
     publisher: LoaderPublication,
-) -> LeafInspection | QuarantineRefused:
+) -> LeafInspection | LeafMaintenanceBusy | QuarantineRefused:
     """Concurrently detach one leaf classified `LeafDetachable`.
 
     Any other classification is returned unchanged and nothing is detached,
@@ -457,13 +522,26 @@ async def detach_expired_leaf(
     function sees a standalone table, never a missing one.
     """
     leaf = command.leaf
-    admin_engine = engine.execution_options(isolation_level='AUTOCOMMIT')
-    async with admin_engine.connect() as connection:
-        await lock_leaf_for_session(
-            connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-        )
-        prior_statement_timeout: str | None = None
+    async with database.autocommit() as connection:
+        inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        match inspection:
+            case LeafDetachable():
+                pass
+            case LeafPendingBlocked(
+                attachment=LeafAttachment.ATTACHED
+            ) if command.quarantine_horizon is not None:
+                pass
+            case _:
+                return inspection
+
+        lock_acquired = False
+        prior_timeouts: _SessionTimeouts | None = None
+        cancelled = False
         try:
+            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
+            if lock_attempt is LeafLockAttempt.BUSY:
+                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+            lock_acquired = True
             inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
             match inspection:
                 case LeafDetachable():
@@ -498,47 +576,50 @@ async def detach_expired_leaf(
                             return inspection
                 case _:
                     return inspection
-            if command.statement_timeout_ms is not None:
-                prior_statement_timeout = (
-                    await connection.execute(text('SHOW statement_timeout'))
-                ).scalar_one()
-                await connection.execute(
-                    text("SELECT set_config('statement_timeout', :value, false)"),
-                    {'value': f'{command.statement_timeout_ms}ms'},
-                )
+            prior_timeouts = await _read_session_timeouts(connection)
+            await _set_session_timeouts(
+                connection,
+                statement_timeout_ms=command.statement_timeout_ms,
+            )
             retention_class = await read_retention_class(connection, leaf.class_key)
             if retention_class is None or retention_class.finite_parent_name is None:
                 raise AssertionError(
                     'detachable classification requires a finite retention class'
                 )
-            await connection.execute(
-                text(
-                    f"""
-                    ALTER TABLE {retention_class.finite_parent_name}
-                    DETACH PARTITION {leaf.leaf_name} CONCURRENTLY
-                    """
+            try:
+                await connection.execute(
+                    text(
+                        f"""
+                        ALTER TABLE {retention_class.finite_parent_name}
+                        DETACH PARTITION {leaf.leaf_name} CONCURRENTLY
+                        """
+                    )
                 )
-            )
+            except DBAPIError as error:
+                if is_lock_not_available(error):
+                    return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                raise
             await _record_detached(connection, leaf.leaf_name)
             await publisher.republish(connection)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            await connection.rollback()
-            if prior_statement_timeout is not None:
-                await connection.execute(
-                    text("SELECT set_config('statement_timeout', :value, false)"),
-                    {'value': prior_statement_timeout},
+            if lock_acquired:
+                await _cleanup_session_leaf_lock(
+                    connection,
+                    leaf=leaf,
+                    prior_timeouts=prior_timeouts,
+                    uncertain=cancelled,
                 )
-            await unlock_leaf_for_session(
-                connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-            )
 
 
 async def finalize_interrupted_detach(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     command: FinalizeInterruptedLeafDetach,
     publisher: LoaderPublication,
-) -> LeafInspection:
+) -> LeafInspection | LeafMaintenanceBusy:
     """Complete a concurrent detach that a crash left pending.
 
     Acts only on `LeafDetachInterrupted`; a leaf found already fully
@@ -547,59 +628,69 @@ async def finalize_interrupted_detach(
     pending until its recovery evidence drains or is quarantined.
     """
     leaf = command.leaf
-    admin_engine = engine.execution_options(isolation_level='AUTOCOMMIT')
-    async with admin_engine.connect() as connection:
-        await lock_leaf_for_session(
-            connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-        )
-        prior_statement_timeout: str | None = None
+    async with database.autocommit() as connection:
+        inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        match inspection:
+            case LeafDetached() | LeafDetachInterrupted():
+                pass
+            case _:
+                return inspection
+
+        lock_acquired = False
+        prior_timeouts: _SessionTimeouts | None = None
+        cancelled = False
         try:
-            if command.statement_timeout_ms is not None:
-                prior_statement_timeout = (
-                    await connection.execute(text('SHOW statement_timeout'))
-                ).scalar_one()
-                await connection.execute(
-                    text("SELECT set_config('statement_timeout', :value, false)"),
-                    {'value': f'{command.statement_timeout_ms}ms'},
-                )
+            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
+            if lock_attempt is LeafLockAttempt.BUSY:
+                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+            lock_acquired = True
             inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
             match inspection:
                 case LeafDetached():
                     await _record_detached(connection, leaf.leaf_name)
                     await publisher.republish(connection)
-                    return await inspect_leaf(
-                        connection, InspectHistoryLeaf(leaf=leaf)
-                    )
+                    return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
                 case LeafDetachInterrupted():
                     pass
                 case _:
                     return inspection
+            prior_timeouts = await _read_session_timeouts(connection)
+            await _set_session_timeouts(
+                connection,
+                statement_timeout_ms=command.statement_timeout_ms,
+            )
             retention_class = await read_retention_class(connection, leaf.class_key)
             if retention_class is None or retention_class.finite_parent_name is None:
                 raise AssertionError(
                     'interrupted-detach classification requires a finite class'
                 )
-            await connection.execute(
-                text(
-                    f"""
-                    ALTER TABLE {retention_class.finite_parent_name}
-                    DETACH PARTITION {leaf.leaf_name} FINALIZE
-                    """
+            try:
+                await connection.execute(
+                    text(
+                        f"""
+                        ALTER TABLE {retention_class.finite_parent_name}
+                        DETACH PARTITION {leaf.leaf_name} FINALIZE
+                        """
+                    )
                 )
-            )
+            except DBAPIError as error:
+                if is_lock_not_available(error):
+                    return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                raise
             await _record_detached(connection, leaf.leaf_name)
             await publisher.republish(connection)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
         finally:
-            await connection.rollback()
-            if prior_statement_timeout is not None:
-                await connection.execute(
-                    text("SELECT set_config('statement_timeout', :value, false)"),
-                    {'value': prior_statement_timeout},
+            if lock_acquired:
+                await _cleanup_session_leaf_lock(
+                    connection,
+                    leaf=leaf,
+                    prior_timeouts=prior_timeouts,
+                    uncertain=cancelled,
                 )
-            await unlock_leaf_for_session(
-                connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
-            )
 
 
 async def drop_detached_leaf(
@@ -614,9 +705,17 @@ async def drop_detached_leaf(
     retains the dropped leaf's row as durable memory that it existed.
     """
     leaf = command.leaf
-    await lock_leaf_for_transaction(
+    inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+    match inspection:
+        case LeafDetached():
+            pass
+        case _:
+            return inspection
+    lock_attempt = await try_lock_leaf_for_transaction(
         connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
     )
+    if lock_attempt is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
     match inspection:
         case LeafDetached():
@@ -625,6 +724,11 @@ async def drop_detached_leaf(
             return inspection
     if await publisher.references_leaf(connection, leaf.leaf_name):
         return DropRefusedLoaderReferences(leaf_name=leaf.leaf_name)
+    relation_lock = await try_lock_relation_exclusive_for_transaction(
+        connection, leaf.leaf_name
+    )
+    if relation_lock is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     await connection.execute(text(f'DROP TABLE {leaf.leaf_name}'))
     await connection.execute(
         text(
@@ -638,6 +742,82 @@ async def drop_detached_leaf(
         {'leaf_name': leaf.leaf_name},
     )
     return LeafDropped(leaf_name=leaf.leaf_name)
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionTimeouts:
+    statement_timeout: str
+    lock_timeout: str
+
+
+async def _read_session_timeouts(
+    connection: AsyncConnection,
+) -> _SessionTimeouts:
+    return _SessionTimeouts(
+        statement_timeout=(
+            await connection.execute(text('SHOW statement_timeout'))
+        ).scalar_one(),
+        lock_timeout=(await connection.execute(text('SHOW lock_timeout'))).scalar_one(),
+    )
+
+
+async def _set_session_timeouts(
+    connection: AsyncConnection,
+    *,
+    statement_timeout_ms: int | None,
+) -> None:
+    if statement_timeout_ms is not None:
+        await connection.execute(
+            text("SELECT set_config('statement_timeout', :value, false)"),
+            {'value': f'{statement_timeout_ms}ms'},
+        )
+    await connection.execute(text("SELECT set_config('lock_timeout', '2000ms', false)"))
+
+
+async def _cleanup_session_leaf_lock(
+    connection: AsyncConnection,
+    *,
+    leaf: LeafRef,
+    prior_timeouts: _SessionTimeouts | None,
+    uncertain: bool,
+) -> None:
+    if uncertain:
+        await connection.invalidate()
+        return
+    try:
+        await connection.rollback()
+        if prior_timeouts is not None:
+            await connection.execute(
+                text("SELECT set_config('statement_timeout', :value, false)"),
+                {'value': prior_timeouts.statement_timeout},
+            )
+            await connection.execute(
+                text("SELECT set_config('lock_timeout', :value, false)"),
+                {'value': prior_timeouts.lock_timeout},
+            )
+        await unlock_leaf_for_session(
+            connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
+        )
+    except BaseException as error:
+        await connection.invalidate(error)
+        raise
+
+
+async def _try_session_leaf_lock(
+    connection: AsyncConnection,
+    *,
+    leaf: LeafRef,
+) -> LeafLockAttempt:
+    """Invalidate the connection when lock acquisition is uncertain."""
+    try:
+        return await try_lock_leaf_for_session(
+            connection,
+            class_key=leaf.class_key,
+            anchor=leaf.bounds.lower,
+        )
+    except BaseException as error:
+        await connection.invalidate(error)
+        raise
 
 
 async def _record_detached(connection: AsyncConnection, leaf_name: str) -> None:

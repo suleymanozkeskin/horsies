@@ -36,6 +36,7 @@ from horsies.core.history.heartbeats.partitioning import (
 from horsies.core.history.maintenance.pruning import (
     prune_expired_partitions,
 )
+from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 from horsies.core.history.outcomes import (
     LeafCreated,
     LeafDetachInterrupted,
@@ -213,7 +214,7 @@ class TestHeartbeatPruning:
             assert isinstance(created_current, LeafCreated)
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.dropped_count == 1
@@ -259,7 +260,7 @@ class TestDeclaredDurationGovernsTheDrop:
         )
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.errors == ()
@@ -307,7 +308,7 @@ class TestDeclaredDurationGovernsTheDrop:
         )
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.errors == ()
@@ -330,7 +331,7 @@ class TestHistoryPruning:
         fresh = await _make_history_leaf(schema, parent_name, days_ago=0)
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.dropped_count == 1
@@ -358,7 +359,7 @@ class TestHistoryPruning:
             )
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.dropped_count == 0
@@ -393,7 +394,7 @@ class TestHistoryPruning:
             )
             with pytest.raises(DBAPIError):
                 await detach_expired_leaf(
-                    schema.engine,
+                    PartitionMaintenanceDatabase(schema.engine),
                     DetachExpiredHistoryLeaf(
                         leaf=expired,
                         quarantine_horizon=None,
@@ -412,7 +413,7 @@ class TestHistoryPruning:
         assert isinstance(inspection, LeafDetachInterrupted)
 
         pruned = await prune_expired_partitions(
-            schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(schema.engine), UnpublishedLoader()
         )
 
         assert pruned.finalized_leaves == (expired.leaf_name,)

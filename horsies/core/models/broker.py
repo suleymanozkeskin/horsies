@@ -26,7 +26,10 @@ class PostgresConfig(BaseModel):
     database_url: SecretStr = Field(..., description='The URL of the PostgreSQL database')
     session_database_url: SecretStr | None = Field(
         default=None,
-        description='Direct/session-capable PostgreSQL URL for LISTEN/NOTIFY and schema DDL',
+        description=(
+            'Direct/session-capable PostgreSQL URL for schema DDL, partition '
+            'maintenance, and LISTEN/NOTIFY'
+        ),
     )
     pgbouncer_transaction_mode: bool = Field(
         default=False,
@@ -148,9 +151,21 @@ class PostgresConfig(BaseModel):
                 message='session_database_url required when pgbouncer_transaction_mode=True',
                 code=ErrorCode.BROKER_INVALID_URL,
                 notes=[
-                    'PgBouncer transaction pooling cannot support persistent LISTEN sessions',
+                    'PgBouncer transaction pooling cannot support session locks or persistent LISTEN sessions',
                 ],
-                help_text='use a direct/session-capable Postgres URL for LISTEN/NOTIFY',
+                help_text='use a direct/session-capable Postgres URL for session_database_url',
+            )
+        if (
+            self.pgbouncer_transaction_mode
+            and self.session_database_url == self.database_url
+        ):
+            raise ConfigurationError(
+                message='session_database_url must not use the transaction-pool URL',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=[
+                    'partition maintenance and LISTEN require PostgreSQL session affinity',
+                ],
+                help_text='use a direct/session-capable Postgres URL for session_database_url',
             )
         if self.worker_pool_size is not None and self.worker_pool_size < 1:
             raise ConfigurationError(

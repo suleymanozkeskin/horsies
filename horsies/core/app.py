@@ -896,13 +896,13 @@ class Horsies:
         long-lived broker/session pool inside an ephemeral asyncio.run loop.
         """
         import asyncio
-        import contextlib
-        import uuid
 
         import psycopg
-        from psycopg import sql
         from sqlalchemy import text
         from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+        from horsies.core.brokers.session_capability import (
+            probe_session_capability,
+        )
         from horsies.core.utils.url import to_psycopg_url
 
         HEALTH_CHECK_SQL = text("""SELECT 1""")
@@ -931,44 +931,14 @@ class Horsies:
                     await health_engine.dispose()
 
             async def _run_listener_probe() -> None:
-                channel = f'horsies_check_{uuid.uuid4().hex}'
-                payload = 'ok'
-                listener_conn = None
-                notifier_conn = None
-                wait_task: asyncio.Task[None] | None = None
-
-                async def _wait_for_notification() -> None:
-                    async for notify in listener_conn.notifies():  # type: ignore[union-attr]
-                        if notify.channel == channel and notify.payload == payload:
-                            return
-
                 try:
-                    listener_conn = await psycopg.AsyncConnection.connect(
+                    await probe_session_capability(
                         to_psycopg_url(
                             self.config.broker.effective_session_database_url
                         ),
-                        autocommit=True,
+                        timeout_seconds=LISTENER_PROBE_TIMEOUT_SECONDS,
                     )
-                    await listener_conn.execute(
-                        sql.SQL('LISTEN {}').format(sql.Identifier(channel))
-                    )
-                    wait_task = asyncio.create_task(_wait_for_notification())
-
-                    notifier_conn = await psycopg.AsyncConnection.connect(
-                        to_psycopg_url(
-                            self.config.broker.effective_session_database_url
-                        ),
-                        autocommit=True,
-                    )
-                    await notifier_conn.execute(
-                        'SELECT pg_notify(%s, %s)',
-                        (channel, payload),
-                    )
-                    await asyncio.wait_for(
-                        wait_task,
-                        timeout=LISTENER_PROBE_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError as exc:
+                except (asyncio.TimeoutError, psycopg.Error) as exc:
                     raise ConfigurationError(
                         message='broker listener capability check failed',
                         code=ErrorCode.BROKER_INVALID_URL,
@@ -977,22 +947,6 @@ class Horsies:
                         ],
                         help_text='use a direct/session-capable Postgres URL for session_database_url',
                     ) from exc
-                finally:
-                    if wait_task is not None and not wait_task.done():
-                        wait_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError, Exception):
-                            await wait_task
-                    if listener_conn is not None:
-                        with contextlib.suppress(Exception):
-                            await listener_conn.execute(
-                                sql.SQL('UNLISTEN {}').format(sql.Identifier(channel))
-                            )
-                    if notifier_conn is not None:
-                        with contextlib.suppress(Exception):
-                            await notifier_conn.close()
-                    if listener_conn is not None:
-                        with contextlib.suppress(Exception):
-                            await listener_conn.close()
 
             async def _test_all_connections() -> None:
                 await _test_connection(

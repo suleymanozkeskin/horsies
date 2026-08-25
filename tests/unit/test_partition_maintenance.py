@@ -107,7 +107,7 @@ class TestPruningWiring:
 
         source = inspect.getsource(ReaperMixin._run_reaper_pass)
         positions = [
-            source.index('ensure_partition_coverage('),
+            source.index('maintain_partition_coverage('),
             source.index('prune_expired_partitions('),
             source.index('state.next_partition_maintenance_at = ('),
         ]

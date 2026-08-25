@@ -382,7 +382,7 @@ class ReaperMixin:
             from horsies.core.history.maintenance.coverage import (
                 CoverageEnsureFailed,
                 CoverageEnsured,
-                ensure_partition_coverage,
+                maintain_partition_coverage,
             )
             from horsies.core.history.maintenance.pruning import (
                 prune_expired_partitions,
@@ -392,17 +392,16 @@ class ReaperMixin:
             )
 
             try:
-                async with temp_broker.async_engine.begin() as coverage_conn:
-                    coverage = await ensure_partition_coverage(
-                        coverage_conn,
-                        history_horizon_days=(
-                            retention_cfg.history_leaf_horizon_days
-                        ),
-                        heartbeat_horizon_hours=(
-                            retention_cfg.heartbeat_leaf_horizon_hours
-                        ),
-                        declared_classes=retention_cfg.registrable_classes(),
-                    )
+                coverage = await maintain_partition_coverage(
+                    temp_broker.partition_maintenance,
+                    history_horizon_days=(
+                        retention_cfg.history_leaf_horizon_days
+                    ),
+                    heartbeat_horizon_hours=(
+                        retention_cfg.heartbeat_leaf_horizon_hours
+                    ),
+                    declared_classes=retention_cfg.registrable_classes(),
+                )
                 # A leaf the catalog still calls attached whose relation
                 # is gone means someone dropped it behind the manager's
                 # back. The readers have already been regenerated without
@@ -479,7 +478,8 @@ class ReaperMixin:
             # dict; the skipped leaf is the next pass's candidate.
             try:
                 prune = await prune_expired_partitions(
-                    temp_broker.async_engine, StagedLoaderPublisher()
+                    temp_broker.partition_maintenance,
+                    StagedLoaderPublisher(),
                 )
                 if prune.acted:
                     summary = (

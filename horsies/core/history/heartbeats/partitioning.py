@@ -32,8 +32,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ..maintenance.database import PartitionMaintenanceDatabase
 from ..commands import (
     DETACH_STATEMENT_TIMEOUT_MS,
     DetachExpiredHistoryLeaf,
@@ -43,8 +44,13 @@ from ..commands import (
     LeafRef,
     is_safe_identifier,
 )
-from ..errors import HistoryContractError
-from ..names import HEARTBEAT_CLASS_KEY, HEARTBEATS_TABLE, LEAF_CATALOG, RETENTION_CLASSES
+from ..errors import HistoryContractError, HistoryParentAbsent
+from ..names import (
+    HEARTBEAT_CLASS_KEY,
+    HEARTBEATS_TABLE,
+    LEAF_CATALOG,
+    RETENTION_CLASSES,
+)
 from ..outcomes import (
     CatalogConflictKind,
     LeafAlreadyConformant,
@@ -55,10 +61,13 @@ from ..outcomes import (
     LeafDrop,
     LeafIndexRepaired,
     LeafInspection,
+    LeafMaintenanceBusy,
     RetentionClassAbsent,
 )
 from ..partitions.catalog import (
     INDEX_SCHEMA_VERSION,
+    LeafCatalogRow,
+    LeafPhysicalState,
     RetentionClassRow,
     capture_partition_bound_utc,
     database_now,
@@ -66,7 +75,11 @@ from ..partitions.catalog import (
     read_leaf_physical_state,
     read_retention_class,
 )
-from ..partitions.locks import lock_leaf_for_transaction
+from ..partitions.locks import (
+    LeafLockAttempt,
+    try_lock_leaf_for_transaction,
+    try_lock_relation_exclusive_for_transaction,
+)
 from ..partitions.manager import detach_expired_leaf, drop_detached_leaf, inspect_leaf
 from ..partitions.publication import LoaderPublication
 from ..phase2.quarantine import QuarantineRefused
@@ -243,9 +256,7 @@ async def register_heartbeat_class(
                 ),
                 {'duration': horizon, 'class_key': HEARTBEAT_CLASS_KEY},
             )
-            return HeartbeatHorizonUpdated(
-                previous_horizon=stored, horizon=horizon
-            )
+            return HeartbeatHorizonUpdated(previous_horizon=stored, horizon=horizon)
         case RetentionClassRow():
             raise HistoryContractError(
                 'heartbeat class row carries a non-heartbeat shape'
@@ -288,6 +299,13 @@ class EnsureHeartbeatCoverage:
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _HourlyLeafCreationState:
+    catalog: LeafCatalogRow | None
+    physical: LeafPhysicalState
+    outcome: LeafCreation | None
+
+
 async def create_hourly_heartbeat_leaf(
     connection: AsyncConnection,
     command: CreateHourlyHeartbeatLeaf,
@@ -303,52 +321,30 @@ async def create_hourly_heartbeat_leaf(
     if retention_class is None:
         return RetentionClassAbsent(class_key=leaf.class_key)
 
-    await lock_leaf_for_transaction(
+    state = await _read_hourly_leaf_creation_state(connection, leaf)
+    if state.outcome is not None:
+        return state.outcome
+
+    lock_attempt = await try_lock_leaf_for_transaction(
         connection, class_key=leaf.class_key, anchor=leaf.bounds.lower
     )
+    if lock_attempt is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+
+    state = await _read_hourly_leaf_creation_state(connection, leaf)
+    if state.outcome is not None:
+        return state.outcome
+    catalog = state.catalog
+    relation_name = leaf.leaf_name if catalog is not None else HEARTBEATS_TABLE
+    relation_lock = await try_lock_relation_exclusive_for_transaction(
+        connection, relation_name
+    )
+    if relation_lock is LeafLockAttempt.BUSY:
+        return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
 
     index_name = probe_index_name(leaf.leaf_name)
-    catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
-    physical = await read_leaf_physical_state(
-        connection,
-        leaf_name=leaf.leaf_name,
-        parent_name=HEARTBEATS_TABLE,
-        id_index_name=(
-            catalog.id_index_name if catalog is not None else index_name
-        ),
-    )
-
-    if physical.relation_exists != (catalog is not None):
-        return LeafCatalogConflict(
-            leaf_name=leaf.leaf_name,
-            kind=CatalogConflictKind.RELATION_WITHOUT_CATALOG,
-            detail=(
-                'relation exists without a catalog row'
-                if physical.relation_exists
-                else 'catalog row exists without a relation'
-            ),
-        )
-
     if catalog is not None:
-        if (
-            catalog.parent_name != HEARTBEATS_TABLE
-            or catalog.class_key != leaf.class_key
-            or catalog.lower_anchor != leaf.bounds.lower
-            or catalog.upper_anchor != leaf.bounds.upper
-            or catalog.dropped_at is not None
-        ):
-            return LeafCatalogConflict(
-                leaf_name=leaf.leaf_name,
-                kind=CatalogConflictKind.METADATA_MISMATCH,
-                detail='existing leaf metadata differs from the request',
-            )
-        if physical.partition_bound != catalog.partition_bound:
-            return LeafCatalogConflict(
-                leaf_name=leaf.leaf_name,
-                kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
-                detail='attached leaf partition bound differs from catalog',
-            )
-        if not physical.id_index_exists:
+        if not state.physical.id_index_exists:
             await connection.execute(
                 text(
                     f'CREATE INDEX {catalog.id_index_name} '
@@ -359,7 +355,7 @@ async def create_hourly_heartbeat_leaf(
                 leaf_name=leaf.leaf_name,
                 id_index_name=catalog.id_index_name,
             )
-        return LeafAlreadyConformant(leaf_name=leaf.leaf_name)
+        raise AssertionError('a conformant heartbeat leaf returned no outcome')
 
     await connection.execute(
         text(
@@ -373,9 +369,7 @@ async def create_hourly_heartbeat_leaf(
     )
     # Captured under the UTC rendering convention; every later
     # comparison captures the live bound the same way.
-    recorded_bound = await capture_partition_bound_utc(
-        connection, leaf.leaf_name
-    )
+    recorded_bound = await capture_partition_bound_utc(connection, leaf.leaf_name)
     await connection.execute(
         text(
             f"""
@@ -410,6 +404,67 @@ async def create_hourly_heartbeat_leaf(
         )
     )
     return LeafCreated(leaf_name=leaf.leaf_name, id_index_name=index_name)
+
+
+async def _read_hourly_leaf_creation_state(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+) -> _HourlyLeafCreationState:
+    index_name = probe_index_name(leaf.leaf_name)
+    catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
+    physical = await read_leaf_physical_state(
+        connection,
+        leaf_name=leaf.leaf_name,
+        parent_name=HEARTBEATS_TABLE,
+        id_index_name=(catalog.id_index_name if catalog is not None else index_name),
+    )
+    if not physical.parent_exists:
+        raise HistoryParentAbsent(
+            f'heartbeat parent {HEARTBEATS_TABLE!r} does not exist'
+        )
+    if physical.relation_exists != (catalog is not None):
+        return _HourlyLeafCreationState(
+            catalog,
+            physical,
+            LeafCatalogConflict(
+                leaf_name=leaf.leaf_name,
+                kind=CatalogConflictKind.RELATION_WITHOUT_CATALOG,
+                detail=(
+                    'relation exists without a catalog row'
+                    if physical.relation_exists
+                    else 'catalog row exists without a relation'
+                ),
+            ),
+        )
+    if catalog is None:
+        return _HourlyLeafCreationState(None, physical, None)
+    if (
+        catalog.parent_name != HEARTBEATS_TABLE
+        or catalog.class_key != leaf.class_key
+        or catalog.lower_anchor != leaf.bounds.lower
+        or catalog.upper_anchor != leaf.bounds.upper
+        or catalog.index_schema_version != INDEX_SCHEMA_VERSION
+        or catalog.dropped_at is not None
+    ):
+        outcome: LeafCreation | None = LeafCatalogConflict(
+            leaf_name=leaf.leaf_name,
+            kind=CatalogConflictKind.METADATA_MISMATCH,
+            detail='existing leaf metadata differs from the request',
+        )
+        return _HourlyLeafCreationState(catalog, physical, outcome)
+    if physical.partition_bound != catalog.partition_bound:
+        outcome = LeafCatalogConflict(
+            leaf_name=leaf.leaf_name,
+            kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+            detail='attached leaf partition bound differs from catalog',
+        )
+        return _HourlyLeafCreationState(catalog, physical, outcome)
+    outcome = (
+        LeafAlreadyConformant(leaf_name=leaf.leaf_name)
+        if physical.id_index_exists
+        else None
+    )
+    return _HourlyLeafCreationState(catalog, physical, outcome)
 
 
 def hourly_leaf_ref(lower: datetime) -> LeafRef:
@@ -459,12 +514,12 @@ class HeartbeatLeafSwept:
     the leaf reached the detached state, the drop outcome."""
 
     leaf_name: str
-    detach: LeafInspection | QuarantineRefused
+    detach: LeafInspection | LeafMaintenanceBusy | QuarantineRefused
     drop: LeafDrop | None
 
 
 async def sweep_expired_heartbeat_leaves(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
 ) -> tuple[HeartbeatLeafSwept, ...]:
     """Detach and drop every heartbeat leaf past its horizon.
@@ -476,7 +531,7 @@ async def sweep_expired_heartbeat_leaves(
     locator carries the reserved class, so the horizon posture is None.
     One leaf per transaction (the inherited bounded-relations invariant).
     """
-    async with engine.connect() as connection:
+    async with database.connect() as connection:
         rows = (
             await connection.execute(
                 text(
@@ -504,7 +559,7 @@ async def sweep_expired_heartbeat_leaves(
             bounds=LeafBounds(lower=row.lower_anchor, upper=row.upper_anchor),
         )
         detach_outcome = await detach_expired_leaf(
-            engine,
+            database,
             DetachExpiredHistoryLeaf(
                 leaf=ref,
                 quarantine_horizon=None,
@@ -517,13 +572,13 @@ async def sweep_expired_heartbeat_leaves(
         if not detached:
             # A crash between detach and drop leaves a detached leaf the
             # next sweep must still drop; re-inspect for that state.
-            async with engine.connect() as connection:
+            async with database.connect() as connection:
                 inspection = await inspect_leaf(
                     connection, InspectHistoryLeaf(leaf=ref)
                 )
             detached = isinstance(inspection, LeafDetached)
         if detached:
-            async with engine.begin() as connection:
+            async with database.begin() as connection:
                 drop_outcome = await drop_detached_leaf(
                     connection,
                     DropDetachedHistoryLeaf(leaf=ref),

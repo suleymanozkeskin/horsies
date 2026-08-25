@@ -87,8 +87,8 @@ PostgresConfig(
 
 Use a split configuration when the main SQL URL points to PgBouncer transaction
 pooling. `database_url` is used for ordinary SQL work. `session_database_url` is
-used for schema setup and PostgreSQL `LISTEN`/`NOTIFY`, which need persistent
-session semantics.
+used for schema setup, partition maintenance, and PostgreSQL `LISTEN`/`NOTIFY`.
+These operations need persistent session semantics.
 
 ```python
 from horsies import AppConfig, PostgresConfig
@@ -111,6 +111,8 @@ direct/session-capable URL into `session_database_url`.
 Rules:
 
 - Workers require `session_database_url` when `pgbouncer_transaction_mode=True`.
+- The two URLs must be different in transaction-pool mode.
+- Worker startup checks session behavior before partition maintenance starts.
 - Syce requires the session URL for real-time updates.
 - PgBouncer-only worker deployment is unsupported.
 - Horsies does not infer PgBouncer mode from port numbers.
@@ -161,14 +163,15 @@ and uses a non-inheriting start method for replacement executors after startup.
 
 ## Multiple Components
 
-The broker creates two connection types:
+The broker creates three connection types:
 
-1. **Async engine** (SQLAlchemy): For queries, inserts, updates
-2. **LISTEN/NOTIFY** (psycopg): For real-time notifications
+1. **Runtime async engine** (SQLAlchemy): For task and workflow SQL.
+2. **Maintenance async engine** (SQLAlchemy): For schema and partition DDL.
+3. **LISTEN/NOTIFY** (psycopg): For real-time notifications.
 
-By default both use `database_url`. With split PgBouncer configuration, ordinary
-SQL uses `database_url`, while schema setup and `LISTEN`/`NOTIFY` use
-`session_database_url`.
+By default all three use `database_url`. With split PgBouncer configuration, ordinary
+SQL uses `database_url`. Schema setup, partition maintenance, and
+`LISTEN`/`NOTIFY` use `session_database_url`.
 
 ## Health Monitoring
 

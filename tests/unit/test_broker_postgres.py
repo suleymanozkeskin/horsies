@@ -253,6 +253,89 @@ class TestSchemaAdvisoryKey:
 class TestPostgresBrokerPgBouncerWiring:
     """Tests for split URL and PgBouncer-specific broker wiring."""
 
+    @pytest.mark.asyncio
+    async def test_worker_validation_rejects_failed_session_behavior(self) -> None:
+        from horsies.core.errors import ConfigurationError
+
+        broker = _make_broker()
+        connection = AsyncMock()
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=connection)
+        context.__aexit__ = AsyncMock(return_value=None)
+        broker.async_engine.connect.return_value = context
+        broker.partition_maintenance = MagicMock()
+        broker.partition_maintenance.connect.return_value = context
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.probe_session_capability',
+                new=AsyncMock(side_effect=asyncio.TimeoutError),
+            ),
+            pytest.raises(
+                ConfigurationError,
+                match='broker session capability check failed',
+            ),
+        ):
+            await broker.validate_worker_database_paths()
+
+    @pytest.mark.asyncio
+    async def test_worker_validation_connects_both_paths_and_probes_session_url(
+        self,
+    ) -> None:
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.models.broker import PostgresConfig
+
+        runtime_engine = MagicMock()
+        session_engine = MagicMock()
+        runtime_engine.dispose = AsyncMock()
+        session_engine.dispose = AsyncMock()
+        runtime_connection = AsyncMock()
+        session_connection = AsyncMock()
+        runtime_context = MagicMock()
+        runtime_context.__aenter__ = AsyncMock(return_value=runtime_connection)
+        runtime_context.__aexit__ = AsyncMock(return_value=None)
+        session_context = MagicMock()
+        session_context.__aenter__ = AsyncMock(return_value=session_connection)
+        session_context.__aexit__ = AsyncMock(return_value=None)
+        runtime_engine.connect.return_value = runtime_context
+        session_engine.connect.return_value = session_context
+        listener = AsyncMock()
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.create_async_engine',
+                side_effect=[runtime_engine, session_engine],
+            ),
+            patch('horsies.core.brokers.postgres.async_sessionmaker'),
+            patch(
+                'horsies.core.brokers.postgres.PostgresListener',
+                return_value=listener,
+            ),
+            patch(
+                'horsies.core.brokers.postgres.probe_session_capability',
+                new=AsyncMock(),
+            ) as probe,
+        ):
+            broker = PostgresBroker(
+                PostgresConfig(
+                    database_url='postgresql+psycopg://u:p@pooler:6432/db',
+                    session_database_url=(
+                        'postgresql+psycopg://u:p@direct:5432/db'
+                    ),
+                    pgbouncer_transaction_mode=True,
+                )
+            )
+            await broker.validate_worker_database_paths()
+            closed = await broker.close_async()
+
+        runtime_connection.execute.assert_awaited_once()
+        session_connection.execute.assert_awaited_once()
+        probe.assert_awaited_once_with('postgresql://u:p@direct:5432/db')
+        assert is_ok(closed)
+        listener.close.assert_awaited_once()
+        runtime_engine.dispose.assert_awaited_once()
+        session_engine.dispose.assert_awaited_once()
+
     def test_runtime_engine_uses_database_url_and_listener_uses_session_url(
         self,
     ) -> None:
@@ -278,14 +361,21 @@ class TestPostgresBrokerPgBouncerWiring:
             )
             PostgresBroker(config)
 
-        mock_engine.assert_called_once()
-        assert mock_engine.call_args.args[0] == database_url
-        assert mock_engine.call_args.kwargs['connect_args'] == {
+        assert mock_engine.call_count == 2
+        assert mock_engine.call_args_list[0].args[0] == database_url
+        assert mock_engine.call_args_list[0].kwargs['connect_args'] == {
             'keepalives': 1,
             'keepalives_idle': 30,
             'keepalives_interval': 10,
             'keepalives_count': 3,
             'prepare_threshold': None,
+        }
+        assert mock_engine.call_args_list[1].args[0] == session_url
+        assert mock_engine.call_args_list[1].kwargs['connect_args'] == {
+            'keepalives': 1,
+            'keepalives_idle': 30,
+            'keepalives_interval': 10,
+            'keepalives_count': 3,
         }
         mock_listener_cls.assert_called_once_with('postgresql://u:p@direct:5432/db')
 
@@ -337,7 +427,7 @@ class TestPostgresBrokerPgBouncerWiring:
 
         assert mock_engine.call_args_list[0].args[0] == database_url
         assert mock_engine.call_args_list[1].args[0] == session_url
-        schema_engine.dispose.assert_awaited_once()
+        schema_engine.dispose.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_schema_initialization_acquires_legacy_then_constant_lock(

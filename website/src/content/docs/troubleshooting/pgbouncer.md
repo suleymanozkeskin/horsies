@@ -34,8 +34,18 @@ session_database_url required when pgbouncer_transaction_mode=True
 
 `pgbouncer_transaction_mode=True` tells Horsies that `database_url` may point to
 transaction pooling. Workers still need PostgreSQL `LISTEN`, and `LISTEN`
-requires a persistent session. Set `session_database_url` to a direct Postgres
-URL or a session-pooling URL.
+requires a persistent session. Partition detach and finalize also use session
+advisory locks. Set `session_database_url` to a direct Postgres URL or a
+session-pooling URL.
+
+## Error: session URL matches the transaction URL
+
+```text
+session_database_url must not use the transaction-pool URL
+```
+
+Use two different URLs. Put the transaction-pool URL in `database_url`. Put a
+direct or session-pooled URL in `session_database_url`.
 
 ## Error: Postgres LISTEN failed
 
