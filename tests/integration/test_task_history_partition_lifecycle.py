@@ -34,6 +34,7 @@ from horsies.core.history.ddl.classes import (
     ClassConflict,
     register_finite_retention_class,
 )
+from horsies.core.history.names import LEAF_CATALOG
 from horsies.core.history.outcomes import (
     CoverageBelowFloor,
     ForeverClassLeaf,
@@ -45,6 +46,7 @@ from horsies.core.history.outcomes import (
     LeafDropped,
     LeafIndexRepaired,
     LeafMaintenanceBusy,
+    LeafNonconformant,
     LeafNotExpired,
     LeafPendingBlocked,
     RetentionClassAbsent,
@@ -937,6 +939,80 @@ class TestHealth:
             assert report.coverage is not None
             assert report.coverage.attached_leaf_count == 4
             assert report.coverage.complete_future_intervals >= 2
+
+    @pytest.mark.asyncio
+    async def test_catalog_bounds_must_match_the_requested_interval(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            await register_class(connection, CLASS_KEY)
+            await ensure_leaf_coverage(
+                connection,
+                EnsureLeafCoverage(class_key=CLASS_KEY, horizon_days=3),
+                UnpublishedLoader(),
+            )
+            changed = await connection.execute(
+                text(
+                    f'UPDATE {LEAF_CATALOG} '
+                    "SET lower_anchor = lower_anchor - interval '100 days', "
+                    "upper_anchor = upper_anchor - interval '100 days' "
+                    'WHERE leaf_name = ('
+                    f'SELECT leaf_name FROM {LEAF_CATALOG} '
+                    'WHERE class_key = :class_key '
+                    'ORDER BY lower_anchor LIMIT 1)'
+                ),
+                {'class_key': CLASS_KEY},
+            )
+            assert changed.rowcount == 1
+            report = await collect_partition_health(
+                connection,
+                CollectPartitionHealth(
+                    class_key=CLASS_KEY,
+                    application_managed=True,
+                ),
+            )
+        assert any(
+            isinstance(fault, LeafNonconformant) for fault in report.faults
+        )
+
+    @pytest.mark.asyncio
+    async def test_required_indexes_must_have_the_canonical_shape(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            await register_class(connection, CLASS_KEY)
+            await ensure_leaf_coverage(
+                connection,
+                EnsureLeafCoverage(class_key=CLASS_KEY, horizon_days=3),
+                UnpublishedLoader(),
+            )
+            leaf = (
+                await connection.execute(
+                    text(
+                        f'SELECT leaf_name, id_index_name FROM {LEAF_CATALOG} '
+                        'WHERE class_key = :class_key '
+                        'ORDER BY lower_anchor LIMIT 1'
+                    ),
+                    {'class_key': CLASS_KEY},
+                )
+            ).one()
+            await connection.execute(text(f'DROP INDEX {leaf.id_index_name}'))
+            await connection.execute(
+                text(
+                    f'CREATE INDEX {leaf.id_index_name} '
+                    f'ON {leaf.leaf_name} (task_id DESC)'
+                )
+            )
+            report = await collect_partition_health(
+                connection,
+                CollectPartitionHealth(
+                    class_key=CLASS_KEY,
+                    application_managed=True,
+                ),
+            )
+        assert any(
+            isinstance(fault, LeafNonconformant) for fault in report.faults
+        )
 
     @pytest.mark.asyncio
     async def test_uncovered_class_goes_red_before_terminalization_would(

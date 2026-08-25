@@ -25,7 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ..commands import CollectPartitionHealth
 from ..errors import HistoryContractError, HistoryParentAbsent
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..names import LEAF_CATALOG, TASK_HISTORY_FOREVER, WORKFLOW_PHASE2_PENDING
+from ..names import (
+    HEARTBEAT_CLASS_KEY,
+    LEAF_CATALOG,
+    TASK_HISTORY_FOREVER,
+    WORKFLOW_PHASE2_PENDING,
+)
 from ..outcomes import (
     CatalogConflictKind,
     ClassCoverage,
@@ -43,6 +48,7 @@ from .catalog import (
     execute_with_utc_rendering,
     read_retention_class,
 )
+from .forever import FOREVER_LEGACY_LEAF
 
 COVERAGE_FLOOR_INTERVALS = 2
 """Complete future daily intervals below which coverage health is red."""
@@ -56,7 +62,9 @@ class _LeafSurvey:
     cataloged_bound: str
     relation_exists: bool
     actual_bound: str | None
-    id_index_exists: bool
+    requested_bound_matches: bool
+    id_index_conformant: bool
+    ordering_index_conformant: bool
     detach_pending: bool | None
     blocker_count: int
 
@@ -136,14 +144,19 @@ async def collect_partition_health(
                 continue
             case False:
                 pass
-        if leaf.actual_bound != leaf.cataloged_bound or not leaf.id_index_exists:
+        if (
+            leaf.actual_bound != leaf.cataloged_bound
+            or not leaf.requested_bound_matches
+            or not leaf.id_index_conformant
+            or not leaf.ordering_index_conformant
+        ):
             faults.append(
                 LeafNonconformant(
                     leaf_name=leaf.leaf_name,
                     kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
                     detail=(
-                        'attached leaf bound or task-ID index disagrees '
-                        'with catalog'
+                        'attached leaf bound or required index '
+                        'is not conformant'
                     ),
                 )
             )
@@ -218,7 +231,160 @@ async def _survey_attached_leaves(
                     (SELECT pg_get_expr(pc.relpartbound, pc.oid)
                      FROM pg_class AS pc
                      WHERE pc.oid = to_regclass(c.leaf_name)) AS actual_bound,
-                    to_regclass(c.id_index_name) IS NOT NULL AS id_index_exists,
+                    COALESCE(
+                        (
+                            c.leaf_name = :forever_legacy_leaf
+                            AND c.class_key = :forever_class
+                        )
+                        OR (SELECT pg_get_expr(pc.relpartbound, pc.oid) = format(
+                                'FOR VALUES FROM (%L) TO (%L)',
+                                c.lower_anchor,
+                                c.upper_anchor
+                            )
+                            FROM pg_class AS pc
+                            WHERE pc.oid = to_regclass(c.leaf_name)),
+                        FALSE
+                    ) AS requested_bound_matches,
+                    EXISTS (
+                        SELECT 1
+                        FROM pg_index AS task_index
+                        JOIN pg_class AS index_relation
+                          ON index_relation.oid = task_index.indexrelid
+                        JOIN pg_am AS access_method
+                          ON access_method.oid = index_relation.relam
+                        WHERE task_index.indexrelid = to_regclass(c.id_index_name)
+                          AND task_index.indrelid = to_regclass(c.leaf_name)
+                          AND access_method.amname = 'btree'
+                          AND task_index.indisvalid
+                          AND task_index.indisready
+                          AND task_index.indislive
+                          AND NOT task_index.indisunique
+                          AND NOT task_index.indisprimary
+                          AND NOT task_index.indisexclusion
+                          AND task_index.indpred IS NULL
+                          AND task_index.indexprs IS NULL
+                          AND (
+                              (
+                                  NOT CAST(:heartbeat_index AS boolean)
+                                  AND task_index.indnkeyatts = 1
+                                  AND task_index.indnatts = 1
+                                  AND task_index.indkey[0] = (
+                                      SELECT attribute.attnum
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'task_id'
+                                  )
+                                  AND task_index.indcollation[0] = (
+                                      SELECT attribute.attcollation
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'task_id'
+                                  )
+                                  AND pg_get_indexdef(
+                                      task_index.indexrelid, 1, false
+                                  ) = 'task_id'
+                                  AND pg_get_indexdef(task_index.indexrelid)
+                                      LIKE '% USING btree (task_id)'
+                                  AND task_index.indoption[0] = 0
+                              )
+                              OR (
+                                  CAST(:heartbeat_index AS boolean)
+                                  AND task_index.indnkeyatts = 3
+                                  AND task_index.indnatts = 3
+                                  AND task_index.indkey[0] = (
+                                      SELECT attribute.attnum
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'task_id'
+                                  )
+                                  AND task_index.indkey[1] = (
+                                      SELECT attribute.attnum
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'role'
+                                  )
+                                  AND task_index.indkey[2] = (
+                                      SELECT attribute.attnum
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'sent_at'
+                                  )
+                                  AND task_index.indcollation[0] = (
+                                      SELECT attribute.attcollation
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'task_id'
+                                  )
+                                  AND task_index.indcollation[1] = (
+                                      SELECT attribute.attcollation
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'role'
+                                  )
+                                  AND task_index.indcollation[2] = (
+                                      SELECT attribute.attcollation
+                                      FROM pg_attribute AS attribute
+                                      WHERE attribute.attrelid
+                                          = to_regclass(c.leaf_name)
+                                        AND attribute.attname = 'sent_at'
+                                  )
+                                  AND pg_get_indexdef(
+                                      task_index.indexrelid, 1, false
+                                  ) = 'task_id'
+                                  AND pg_get_indexdef(
+                                      task_index.indexrelid, 2, false
+                                  ) = 'role'
+                                  AND pg_get_indexdef(
+                                      task_index.indexrelid, 3, false
+                                  ) = 'sent_at'
+                                  AND pg_get_indexdef(task_index.indexrelid)
+                                      LIKE '% USING btree '
+                                           '(task_id, role, sent_at DESC)'
+                                  AND task_index.indoption[0] = 0
+                                  AND task_index.indoption[1] = 0
+                                  AND task_index.indoption[2] = 3
+                              )
+                          )
+                    ) AS id_index_conformant,
+                    CAST(:heartbeat_index AS boolean) OR EXISTS (
+                        SELECT 1
+                        FROM pg_index AS ordering_index
+                        JOIN pg_class AS ordering_relation
+                          ON ordering_relation.oid = ordering_index.indexrelid
+                        JOIN pg_am AS ordering_method
+                          ON ordering_method.oid = ordering_relation.relam
+                        JOIN pg_attribute AS ordering_attribute
+                          ON ordering_attribute.attrelid = ordering_index.indrelid
+                         AND ordering_attribute.attnum = ordering_index.indkey[0]
+                        WHERE ordering_index.indrelid = to_regclass(c.leaf_name)
+                          AND ordering_method.amname = 'btree'
+                          AND ordering_index.indisvalid
+                          AND ordering_index.indisready
+                          AND ordering_index.indislive
+                          AND NOT ordering_index.indisunique
+                          AND NOT ordering_index.indisprimary
+                          AND NOT ordering_index.indisexclusion
+                          AND ordering_index.indpred IS NULL
+                          AND ordering_index.indexprs IS NULL
+                          AND ordering_index.indnkeyatts = 1
+                          AND ordering_index.indnatts = 1
+                          AND ordering_attribute.attname = 'enqueued_at'
+                          AND ordering_index.indcollation[0]
+                              = ordering_attribute.attcollation
+                          AND pg_get_indexdef(
+                              ordering_index.indexrelid, 1, false
+                          ) = 'enqueued_at'
+                          AND pg_get_indexdef(ordering_index.indexrelid)
+                              LIKE '% USING btree (enqueued_at)'
+                          AND ordering_index.indoption[0] = 0
+                    ) AS ordering_index_conformant,
                     (SELECT i.inhdetachpending
                      FROM pg_inherits AS i
                      WHERE i.inhparent = to_regclass(:parent_name)
@@ -237,7 +403,13 @@ async def _survey_attached_leaves(
                 ORDER BY c.lower_anchor
                 """
             ),
-            {'class_key': class_key, 'parent_name': parent_name},
+            {
+                'class_key': class_key,
+                'parent_name': parent_name,
+                'forever_legacy_leaf': FOREVER_LEGACY_LEAF,
+                'forever_class': FOREVER_CLASS_KEY,
+                'heartbeat_index': class_key == HEARTBEAT_CLASS_KEY,
+            },
         )
     ).all()
     survey: list[_LeafSurvey] = []
@@ -258,7 +430,9 @@ async def _survey_attached_leaves(
                 actual_bound=(
                     str(row.actual_bound) if row.actual_bound is not None else None
                 ),
-                id_index_exists=bool(row.id_index_exists),
+                requested_bound_matches=bool(row.requested_bound_matches),
+                id_index_conformant=bool(row.id_index_conformant),
+                ordering_index_conformant=bool(row.ordering_index_conformant),
                 detach_pending=detach_pending,
                 blocker_count=blocker_count,
             )

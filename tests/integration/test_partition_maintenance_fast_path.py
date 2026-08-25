@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy import event
 from sqlalchemy import text
 
-from horsies.core.history.commands import LeafRef
+from horsies.core.history.commands import CollectPartitionHealth, LeafRef
 from horsies.core.history.heartbeats.partitioning import hourly_leaf_ref
 from horsies.core.history.maintenance import coverage as coverage_module
 from horsies.core.history.maintenance.coverage import (
@@ -37,6 +37,7 @@ from horsies.core.history.partitions.catalog import (
     database_now,
     leaf_enqueued_index_name,
 )
+from horsies.core.history.partitions.health import collect_partition_health
 from horsies.core.history.partitions.locks import (
     IndexRelationState,
     IndexRemovalOutcome,
@@ -195,6 +196,30 @@ async def test_current_heartbeat_wrong_physical_range_refuses_startup(
     assert isinstance(startup.outcome, CoverageEnsureFailed)
     assert not startup.outcome.heartbeat_covered_now
     assert 'requested bounds' in startup.outcome.refusal
+
+
+async def test_heartbeat_health_uses_the_heartbeat_index_shape(
+    partition_schema: HistorySchema,
+) -> None:
+    database = PartitionMaintenanceDatabase(
+        partition_schema.engine,
+        connection_capacity=2,
+    )
+    coverage = await maintain_partition_coverage(
+        database,
+        history_horizon_days=2,
+        heartbeat_horizon_hours=2,
+    )
+    assert isinstance(coverage, CoverageEnsured), coverage
+    async with partition_schema.engine.begin() as connection:
+        report = await collect_partition_health(
+            connection,
+            CollectPartitionHealth(
+                class_key=HEARTBEAT_CLASS_KEY,
+                application_managed=False,
+            ),
+        )
+    assert report.is_healthy, report
 
 
 async def test_coverage_repairs_noncanonical_index_metadata(

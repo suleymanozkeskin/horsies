@@ -29,6 +29,7 @@ there is no migration contract between pre-1.0 versions.
   validity, columns, collation, operator class, and sort order. Index repair
   locks and rechecks the exact index relation before removal. Loader
   publication uses a final transaction and compares all manifest metadata.
+  Partition health uses the same bound and index conformance rules.
 
 ## 0.5.2 — 2026-08-12
 
