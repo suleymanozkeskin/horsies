@@ -169,10 +169,13 @@ async fn read_task_stats(
     State(state): State<WebState>,
     RawQuery(raw): RawQuery,
 ) -> Result<Json<Vec<crate::monitoring::StatusCount>>, ApiError> {
+    let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
     let params = TaskStatsParams::from_values(&values)?;
     let query = TaskStatsQuery::new(params.window()?).with_filters(params.filters()?);
-    task_stats(&state.broker, &query)
+    state
+        .task_stats_cache
+        .get_or_try_init(cache_key, || task_stats(&state.broker, &query))
         .await
         .map(Json)
         .map_err(|error| query_failed("Task stats", error))

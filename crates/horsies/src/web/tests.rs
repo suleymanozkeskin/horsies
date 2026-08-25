@@ -34,6 +34,7 @@ use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
 };
 use super::spa::{inject, safe_asset_path, EmbeddedAssets, MemoryAssets, MonitoringUiConfig};
+use super::task_stats_cache::TaskStatsCache;
 
 fn lazy_pool() -> PgPool {
     PgPoolOptions::new()
@@ -105,6 +106,7 @@ fn test_state(
         broker,
         auth_policy,
         schema_probe,
+        task_stats_cache: Arc::new(TaskStatsCache::new()),
         actions_enabled,
         ui_config: MonitoringUiConfig::default(),
         assets,
@@ -833,6 +835,7 @@ async fn migrated_state() -> WebState {
     .unwrap();
     WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
+        task_stats_cache: Arc::new(TaskStatsCache::new()),
         events: EventBroadcaster::with_debounce(Arc::clone(&broker), Duration::from_millis(25)),
         broker,
         auth_policy: Arc::new(AllowAll),
@@ -869,6 +872,48 @@ async fn seed_pending(pool: &PgPool, prefix: &str) -> Uuid {
     .await
     .unwrap();
     id
+}
+
+fn status_count(stats: &serde_json::Value, status: &str) -> i64 {
+    stats
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["status"] == status)
+        .and_then(|entry| entry["count"].as_i64())
+        .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
+    let state = migrated_state().await;
+    let prefix = format!("stats_cache_{}__", Uuid::new_v4().simple());
+    clean_w4(state.broker.pool(), &prefix).await;
+    let task_id = seed_pending(state.broker.pool(), &prefix).await;
+    let task_name = format!("{prefix}task_{}", task_id.simple());
+    let path = format!("/api/tasks/stats?task_name={task_name}");
+    let router = build_router(state.clone());
+
+    let first = router
+        .clone()
+        .oneshot(request(Method::GET, &path))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = json(first).await;
+    assert_eq!(status_count(&first, "PENDING"), 1);
+
+    sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .execute(state.broker.pool())
+        .await
+        .unwrap();
+
+    let second = router.oneshot(request(Method::GET, &path)).await.unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    assert_eq!(json(second).await, first);
+    clean_w4(state.broker.pool(), &prefix).await;
 }
 
 #[tokio::test]

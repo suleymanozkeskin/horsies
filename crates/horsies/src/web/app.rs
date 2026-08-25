@@ -31,6 +31,7 @@ use super::spa::{
     inject, normalize_base_path, safe_asset_path, AssetStore, EmbeddedAssets, MonitoringUiConfig,
     ASSETS_MISSING_DETAIL,
 };
+use super::task_stats_cache::TaskStatsCache;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetaResponse {
@@ -49,6 +50,7 @@ pub(crate) struct WebState {
     pub broker: Arc<PostgresBroker>,
     pub auth_policy: Arc<dyn MonitoringAuthPolicy>,
     pub schema_probe: Arc<SchemaProbe>,
+    pub task_stats_cache: Arc<TaskStatsCache>,
     pub events: Arc<EventBroadcaster>,
     pub actions_enabled: bool,
     pub ui_config: MonitoringUiConfig,
@@ -72,6 +74,7 @@ where
 {
     let state = WebState {
         schema_probe: Arc::new(SchemaProbe::new(Arc::clone(&broker))),
+        task_stats_cache: Arc::new(TaskStatsCache::new()),
         events: EventBroadcaster::new(Arc::clone(&broker)),
         broker,
         auth_policy: Arc::new(auth_policy),

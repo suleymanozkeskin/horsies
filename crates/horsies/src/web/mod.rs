@@ -7,6 +7,7 @@ mod events;
 mod routes;
 mod schema;
 mod spa;
+mod task_stats_cache;
 
 pub use app::{create_monitoring_router, MetaResponse};
 pub use auth::{
