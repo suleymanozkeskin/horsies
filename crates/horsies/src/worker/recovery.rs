@@ -8,6 +8,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::listener::notify_task_queue;
 use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
@@ -1359,13 +1360,7 @@ async fn process_single_stale_task(
             );
 
             // Best-effort NOTIFY to wake workers.
-            let _ = sqlx::query(&format!(
-                "SELECT pg_notify('task_queue_{}', $1)",
-                row.queue_name,
-            ))
-            .bind(task_id)
-            .execute(pool)
-            .await;
+            let _ = notify_task_queue(pool, &row.queue_name, task_id).await;
 
             return Ok(true);
         }

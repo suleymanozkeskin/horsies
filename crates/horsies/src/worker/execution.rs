@@ -20,6 +20,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::broker::listener::notify_task_queue;
 use crate::broker::terminalization::{
     classify_locked_read_miss_in_tx, terminalize, terminalize_in_tx,
 };
@@ -731,12 +732,7 @@ pub(crate) async fn schedule_retry_for_task(
             tokio::spawn(async move {
                 let delay = (next_retry_at - Utc::now()).to_std().unwrap_or_default();
                 tokio::time::sleep(delay).await;
-                let notify_sql = format!("SELECT pg_notify('task_queue_{}', $1)", queue);
-                if let Err(e) = sqlx::query(&notify_sql)
-                    .bind(&notify_task_id)
-                    .execute(&pool)
-                    .await
-                {
+                if let Err(e) = notify_task_queue(&pool, &queue, notify_task_id).await {
                     tracing::warn!(
                         task_id = %notify_task_id,
                         queue = %queue,
