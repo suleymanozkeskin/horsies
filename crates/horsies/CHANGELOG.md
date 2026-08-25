@@ -5,6 +5,31 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.30] - 2026-08-25
+
+### Fixed
+
+- Delayed-retry and stale-task retry wake-ups now send the task UUID to
+  PostgreSQL `pg_notify` as text. PostgreSQL rejected the previous UUID bind.
+  The retry state stayed durable and worker polling found it later, but the
+  direct wake-up did not occur.
+
+### Changed
+
+- The monitoring `/api/tasks/stats` route now caches each successful request
+  scope for 10 seconds. Concurrent requests for the same scope share one
+  aggregate query. Errors are not cached. The cache holds at most 256 scopes.
+
+### Removed
+
+- Migration 0044 drops `idx_horsies_tasks_retention` and
+  `idx_horsies_tasks_queue_retention`. Terminal tasks move to partitioned
+  history, so live-task retention does not use these indexes.
+
+### Upgrade
+
+- Apply migration 0044 before processes use this release.
+
 ## [0.1.0-alpha.29] - 2026-08-19
 
 ### Fixed
