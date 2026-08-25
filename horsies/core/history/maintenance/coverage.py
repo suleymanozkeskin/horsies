@@ -8,10 +8,9 @@ ensures it once for upgraded installs and then hands off — so workers
 own it here: once at startup (before the first claim) and periodically
 under the reaper's cluster-wide gate.
 
-Every step is idempotent. Republication runs only when a leaf was
-actually created, a staged reader is absent, or the published readers
-probe a relation that no longer exists; a healthy fleet's maintenance
-tick performs reads only.
+Every step is idempotent. Republication runs only when the published
+manifest differs from the attached catalog or a staged reader is absent.
+A healthy fleet's maintenance tick performs reads only.
 
 The fatal line is a measured fact, not a birth-state guess: after the
 ensure attempt, heartbeat coverage for the present instant either
@@ -33,7 +32,12 @@ from datetime import datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import EnsureLeafCoverage
+from ..commands import (
+    CreateDailyHistoryLeaf,
+    EnsureLeafCoverage,
+    LeafBounds,
+    LeafRef,
+)
 from ..ddl.classes import (
     ClassAlreadyRegistered,
     ClassRegistered,
@@ -72,11 +76,15 @@ from ..outcomes import (
 )
 from ..partitions.catalog import INDEX_SCHEMA_VERSION, database_now
 from ..partitions.manager import create_daily_leaf, ensure_leaf_coverage
-from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
+from ..partitions.locks import (
+    LeafLockAttempt,
+    try_lock_coverage_for_transaction,
+)
+from ..partitions.publication import UnpublishedLoader
 from ..reads.detail import staged_detail_published
 from ..reads.publisher import (
     StagedLoaderPublisher,
-    published_manifest_absent_leaves,
+    published_manifest_matches_catalog,
 )
 from .database import PartitionMaintenanceDatabase
 
@@ -220,18 +228,118 @@ leaf_health AS (
             AND catalog.lower_anchor = expected.lower_anchor
             AND catalog.upper_anchor = expected.upper_anchor
             AND catalog.index_schema_version = :index_schema_version
+            AND catalog.detached_at IS NULL
             AND catalog.dropped_at IS NULL
             AND child.oid IS NOT NULL
             AND parent.oid IS NOT NULL
             AND inheritance.inhrelid IS NOT NULL
             AND NOT inheritance.inhdetachpending
-            AND pg_get_expr(child.relpartbound, child.oid, true)
+            AND pg_get_expr(child.relpartbound, child.oid)
                 = catalog.partition_bound
+            AND pg_get_expr(child.relpartbound, child.oid) = format(
+                'FOR VALUES FROM (%L) TO (%L)',
+                expected.lower_anchor,
+                expected.upper_anchor
+            )
             AND EXISTS (
                 SELECT 1
                 FROM pg_index AS task_index
+                JOIN pg_class AS task_index_relation
+                  ON task_index_relation.oid = task_index.indexrelid
+                JOIN pg_am AS task_index_method
+                  ON task_index_method.oid = task_index_relation.relam
                 WHERE task_index.indexrelid = to_regclass(catalog.id_index_name)
                   AND task_index.indrelid = child.oid
+                  AND task_index_method.amname = 'btree'
+                  AND task_index.indisvalid
+                  AND task_index.indisready
+                  AND task_index.indislive
+                  AND NOT task_index.indisunique
+                  AND NOT task_index.indisprimary
+                  AND NOT task_index.indisexclusion
+                  AND task_index.indpred IS NULL
+                  AND task_index.indexprs IS NULL
+                  AND (
+                      (
+                          expected.leaf_kind = 'history'
+                          AND task_index.indnkeyatts = 1
+                          AND task_index.indnatts = 1
+                          AND task_index.indkey[0] = (
+                              SELECT attribute.attnum
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'task_id'
+                          )
+                          AND task_index.indcollation[0] = (
+                              SELECT attribute.attcollation
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'task_id'
+                          )
+                          AND pg_get_indexdef(
+                              task_index.indexrelid, 1, false
+                          ) = 'task_id'
+                          AND pg_get_indexdef(task_index.indexrelid)
+                              LIKE '% USING btree (task_id)'
+                          AND task_index.indoption[0] = 0
+                      )
+                      OR (
+                          expected.leaf_kind = 'heartbeat'
+                          AND task_index.indnkeyatts = 3
+                          AND task_index.indnatts = 3
+                          AND task_index.indkey[0] = (
+                              SELECT attribute.attnum
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'task_id'
+                          )
+                          AND task_index.indkey[1] = (
+                              SELECT attribute.attnum
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'role'
+                          )
+                          AND task_index.indkey[2] = (
+                              SELECT attribute.attnum
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'sent_at'
+                          )
+                          AND task_index.indcollation[0] = (
+                              SELECT attribute.attcollation
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'task_id'
+                          )
+                          AND task_index.indcollation[1] = (
+                              SELECT attribute.attcollation
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'role'
+                          )
+                          AND task_index.indcollation[2] = (
+                              SELECT attribute.attcollation
+                              FROM pg_attribute AS attribute
+                              WHERE attribute.attrelid = child.oid
+                                AND attribute.attname = 'sent_at'
+                          )
+                          AND pg_get_indexdef(
+                              task_index.indexrelid, 1, false
+                          ) = 'task_id'
+                          AND pg_get_indexdef(
+                              task_index.indexrelid, 2, false
+                          ) = 'role'
+                          AND pg_get_indexdef(
+                              task_index.indexrelid, 3, false
+                          ) = 'sent_at'
+                          AND pg_get_indexdef(task_index.indexrelid)
+                              LIKE '% USING btree '
+                                   '(task_id, role, sent_at DESC)'
+                          AND task_index.indoption[0] = 0
+                          AND task_index.indoption[1] = 0
+                          AND task_index.indoption[2] = 3
+                      )
+                  )
             )
             AND (
                 expected.leaf_kind = 'heartbeat'
@@ -248,9 +356,25 @@ leaf_health AS (
                          = ordering_index.indkey[0]
                     WHERE ordering_index.indrelid = child.oid
                       AND ordering_method.amname = 'btree'
+                      AND ordering_index.indisvalid
+                      AND ordering_index.indisready
+                      AND ordering_index.indislive
+                      AND NOT ordering_index.indisunique
+                      AND NOT ordering_index.indisprimary
+                      AND NOT ordering_index.indisexclusion
                       AND ordering_index.indpred IS NULL
+                      AND ordering_index.indexprs IS NULL
                       AND ordering_index.indnkeyatts = 1
+                      AND ordering_index.indnatts = 1
                       AND ordering_attribute.attname = 'enqueued_at'
+                      AND ordering_index.indcollation[0]
+                          = ordering_attribute.attcollation
+                      AND pg_get_indexdef(
+                          ordering_index.indexrelid, 1, false
+                      ) = 'enqueued_at'
+                      AND pg_get_indexdef(ordering_index.indexrelid)
+                          LIKE '% USING btree (enqueued_at)'
+                      AND ordering_index.indoption[0] = 0
                 )
             )
         ) AS conformant
@@ -266,7 +390,14 @@ leaf_health AS (
      AND inheritance.inhparent = parent.oid
 ),
 attached_history AS (
-    SELECT catalog.leaf_name
+    SELECT
+        catalog.leaf_name,
+        row_number() OVER (
+            ORDER BY catalog.lower_anchor, catalog.leaf_name
+        ) - 1 AS probe_position,
+        catalog.lower_anchor,
+        catalog.upper_anchor,
+        catalog.min_birth_at
     FROM {LEAF_CATALOG} AS catalog
     WHERE catalog.class_key <> :heartbeat_class
       AND catalog.detached_at IS NULL
@@ -282,14 +413,38 @@ publication_health AS (
             WHERE to_regclass(manifest.leaf_name) IS NULL
         )
         AND NOT EXISTS (
-            SELECT leaf_name FROM attached_history
+            SELECT
+                leaf_name,
+                probe_position,
+                lower_anchor,
+                upper_anchor,
+                min_birth_at
+            FROM attached_history
             EXCEPT
-            SELECT leaf_name FROM {TASK_LOOKUP_MANIFEST}
+            SELECT
+                leaf_name,
+                probe_position::bigint,
+                lower_anchor,
+                upper_anchor,
+                min_birth_at
+            FROM {TASK_LOOKUP_MANIFEST}
         )
         AND NOT EXISTS (
-            SELECT leaf_name FROM {TASK_LOOKUP_MANIFEST}
+            SELECT
+                leaf_name,
+                probe_position::bigint,
+                lower_anchor,
+                upper_anchor,
+                min_birth_at
+            FROM {TASK_LOOKUP_MANIFEST}
             EXCEPT
-            SELECT leaf_name FROM attached_history
+            SELECT
+                leaf_name,
+                probe_position,
+                lower_anchor,
+                upper_anchor,
+                min_birth_at
+            FROM attached_history
         ) AS healthy,
         ARRAY(
             SELECT catalog.leaf_name
@@ -385,6 +540,29 @@ class _CoverageProbe:
         )
 
 
+def _first_damaged_class_key(probe: _CoverageProbe) -> str | None:
+    match probe.damaged_history, probe.damaged_heartbeats:
+        case (first_history, *_), _:
+            return first_history.class_key
+        case (), (first_heartbeat, *_):
+            return first_heartbeat.class_key
+        case (), ():
+            return None
+        case _:
+            raise AssertionError('unexpected coverage damage shape')
+
+
+def _unresolved_coverage_detail(probe: _CoverageProbe) -> str:
+    unresolved: list[str] = []
+    if not probe.registration_healthy:
+        unresolved.append('retention class registration')
+    if not probe.publication_healthy:
+        unresolved.append('loader publication')
+    unresolved.extend(leaf.leaf_name for leaf in probe.damaged_history)
+    unresolved.extend(leaf.leaf_name for leaf in probe.damaged_heartbeats)
+    return 'unresolved coverage state: ' + ', '.join(unresolved)
+
+
 def _expected_registrations(
     *,
     heartbeat_horizon_hours: int,
@@ -419,10 +597,7 @@ def _expected_registrations(
 
 
 def _timedelta_microseconds(value: timedelta) -> int:
-    return (
-        (value.days * 86_400 + value.seconds) * 1_000_000
-        + value.microseconds
-    )
+    return (value.days * 86_400 + value.seconds) * 1_000_000 + value.microseconds
 
 
 async def _probe_complete_coverage(
@@ -735,7 +910,7 @@ async def ensure_partition_coverage(
     absent_leaves: tuple[str, ...] = ()
     if (
         created_history > 0
-        or await published_manifest_absent_leaves(connection)
+        or not await published_manifest_matches_catalog(connection)
         or not await staged_detail_published(connection)
     ):
         republication = await publisher.republish(connection)
@@ -778,12 +953,16 @@ async def maintain_partition_coverage(
     history_horizon_days: int,
     heartbeat_horizon_hours: int,
     declared_classes: Sequence[tuple[str, timedelta]] = (),
+    serialize_damaged_work: bool = True,
 ) -> CoverageOutcome:
     """Ensure the complete set through the maintenance database.
 
     A healthy set uses one set-based probe. A damaged set opens one
     transaction for each changed leaf. A busy lock ends that transaction
-    before the retry delay starts.
+    before the retry delay starts. Startup serializes damaged passes with
+    the coverage gate. The periodic reaper passes ``False`` because it
+    already holds one pool connection for its cluster gate. Per-leaf try
+    locks contain any overlap between a reaper pass and worker startup.
     """
     async with database.begin() as connection:
         probe = await _probe_complete_coverage(
@@ -794,6 +973,63 @@ async def maintain_partition_coverage(
         )
     if probe.healthy:
         return _coverage_ensured_from_probe(probe)
+
+    if not serialize_damaged_work or not database.coverage_gate_enabled:
+        return await _repair_partition_coverage(
+            database,
+            probe=probe,
+            history_horizon_days=history_horizon_days,
+            heartbeat_horizon_hours=heartbeat_horizon_hours,
+            declared_classes=declared_classes,
+        )
+
+    async with database.begin() as gate_connection:
+        gate_attempt = await try_lock_coverage_for_transaction(gate_connection)
+        if gate_attempt is LeafLockAttempt.BUSY:
+            async with database.begin() as connection:
+                busy_probe = await _probe_complete_coverage(
+                    connection,
+                    history_horizon_days=history_horizon_days,
+                    heartbeat_horizon_hours=heartbeat_horizon_hours,
+                    declared_classes=declared_classes,
+                )
+            if busy_probe.healthy:
+                return _coverage_ensured_from_probe(busy_probe)
+            return CoverageEnsureFailed(
+                stage='coverage_gate_busy',
+                class_key=_first_damaged_class_key(busy_probe),
+                refusal='another worker owns the partition coverage gate',
+                heartbeat_covered_now=busy_probe.heartbeat_covered_now,
+                absent_leaves=busy_probe.absent_leaves,
+            )
+
+        async with database.begin() as connection:
+            locked_probe = await _probe_complete_coverage(
+                connection,
+                history_horizon_days=history_horizon_days,
+                heartbeat_horizon_hours=heartbeat_horizon_hours,
+                declared_classes=declared_classes,
+            )
+        if locked_probe.healthy:
+            return _coverage_ensured_from_probe(locked_probe)
+        return await _repair_partition_coverage(
+            database,
+            probe=locked_probe,
+            history_horizon_days=history_horizon_days,
+            heartbeat_horizon_hours=heartbeat_horizon_hours,
+            declared_classes=declared_classes,
+        )
+
+
+async def _repair_partition_coverage(
+    database: PartitionMaintenanceDatabase,
+    *,
+    probe: _CoverageProbe,
+    history_horizon_days: int,
+    heartbeat_horizon_hours: int,
+    declared_classes: Sequence[tuple[str, timedelta]],
+) -> CoverageOutcome:
+    """Repair one damaged probe while an optional outer gate is held."""
 
     if not probe.registration_healthy:
         async with database.begin() as connection:
@@ -821,7 +1057,6 @@ async def maintain_partition_coverage(
                 absent_leaves=probe.absent_leaves,
             )
 
-    publisher = StagedLoaderPublisher()
     created_history = 0
     created_heartbeats = 0
     failures: list[str] = []
@@ -830,7 +1065,7 @@ async def maintain_partition_coverage(
         if leaf.class_key in failed_history_classes:
             continue
         try:
-            outcome = await _maintain_history_leaf(database, leaf, publisher)
+            outcome = await _maintain_history_leaf(database, leaf)
         except Exception as leaf_error:
             failures.append(f'{leaf.class_key}: {leaf_error!r}')
             failed_history_classes.add(leaf.class_key)
@@ -868,6 +1103,7 @@ async def maintain_partition_coverage(
             declared_classes=declared_classes,
         )
         if not final_probe.publication_healthy:
+            publisher = StagedLoaderPublisher()
             await publisher.republish(connection)
             republished = True
             final_probe = await _probe_complete_coverage(
@@ -889,18 +1125,10 @@ async def maintain_partition_coverage(
             absent_leaves=ensured.absent_leaves,
         )
 
-    unresolved = [
-        *(leaf.leaf_name for leaf in final_probe.damaged_history),
-        *(leaf.leaf_name for leaf in final_probe.damaged_heartbeats),
-    ]
-    detail = failures or ['unresolved coverage leaves: ' + ', '.join(unresolved)]
+    detail = failures or [_unresolved_coverage_detail(final_probe)]
     return CoverageEnsureFailed(
         stage='ensure_leaf_coverage',
-        class_key=(
-            final_probe.damaged_history[0].class_key
-            if final_probe.damaged_history
-            else HEARTBEAT_CLASS_KEY
-        ),
+        class_key=_first_damaged_class_key(final_probe),
         refusal='; '.join(detail),
         heartbeat_covered_now=final_probe.heartbeat_covered_now,
         absent_leaves=final_probe.absent_leaves,
@@ -964,7 +1192,6 @@ async def _register_required_classes(
 async def _maintain_history_leaf(
     database: PartitionMaintenanceDatabase,
     leaf: LeafRef,
-    publisher: StagedLoaderPublisher,
 ) -> LeafCreation:
     outcome = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     for attempt in range(_LEAF_MAINTENANCE_ATTEMPTS):
@@ -972,7 +1199,7 @@ async def _maintain_history_leaf(
             outcome = await create_daily_leaf(
                 connection,
                 CreateDailyHistoryLeaf(leaf=leaf),
-                publisher,
+                UnpublishedLoader(),
             )
         match outcome:
             case LeafMaintenanceBusy() if (attempt + 1 < _LEAF_MAINTENANCE_ATTEMPTS):

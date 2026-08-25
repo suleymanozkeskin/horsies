@@ -271,7 +271,9 @@ class TestDetail:
             assert isinstance(resolved, HistoryTaskDetail)
 
         detached = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(terminalization_schema.engine),
+            PartitionMaintenanceDatabase(
+                terminalization_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),

@@ -317,7 +317,9 @@ class TestDetachAndDrop:
             )
             assert isinstance(inspection, LeafDetachable)
         detached = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -370,7 +372,9 @@ class TestDetachAndDrop:
                 },
             )
         refused = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -383,7 +387,9 @@ class TestDetachAndDrop:
                 text('DELETE FROM horsies_workflow_phase2_pending')
             )
         detached = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -404,7 +410,9 @@ class TestDetachAndDrop:
                 connection, ref, task_id=task_id, with_history_row=True
             )
         outcome = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -454,7 +462,9 @@ class TestDetachAndDrop:
                 connection, ref, task_id=task_id, with_history_row=False
             )
         outcome = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -480,7 +490,9 @@ class TestDetachAndDrop:
             ).one()
             assert pending.recovery_source == 'HISTORY'
         still_blocked = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -508,7 +520,9 @@ class TestDetachAndDrop:
                 node_key=None,
             )
         outcome = await detach_expired_leaf(
-            PartitionMaintenanceDatabase(history_schema.engine),
+            PartitionMaintenanceDatabase(
+                history_schema.engine, connection_capacity=2
+            ),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -674,7 +688,9 @@ class TestLockContention:
                 'options': f'-csearch_path={history_schema.schema_name}'
             },
         )
-        database = PartitionMaintenanceDatabase(direct_engine)
+        database = PartitionMaintenanceDatabase(
+            direct_engine, connection_capacity=2
+        )
         try:
             async with database.autocommit() as connection:
                 await connection.execute(text("SET statement_timeout = '13s'"))
@@ -722,7 +738,9 @@ class TestLockContention:
         async with history_schema.engine.begin() as connection:
             parent_name = await register_class(connection, CLASS_KEY)
         ref = await make_expired_leaf(history_schema, parent_name)
-        database = PartitionMaintenanceDatabase(history_schema.engine)
+        database = PartitionMaintenanceDatabase(
+            history_schema.engine, connection_capacity=2
+        )
 
         holder = await history_schema.engine.connect()
         transaction = await holder.begin()
@@ -813,7 +831,9 @@ class TestLockContention:
                 'options': f'-csearch_path={history_schema.schema_name}'
             },
         )
-        database = PartitionMaintenanceDatabase(direct_engine)
+        database = PartitionMaintenanceDatabase(
+            direct_engine, connection_capacity=2
+        )
         original = partition_manager.try_lock_leaf_for_session
 
         async def acquire_then_cancel(

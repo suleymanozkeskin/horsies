@@ -332,7 +332,9 @@ class TestSweep:
             assert isinstance(current, LeafCreated)
 
         swept = await sweep_expired_heartbeat_leaves(
-            PartitionMaintenanceDatabase(terminalization_schema.engine),
+            PartitionMaintenanceDatabase(
+                terminalization_schema.engine, connection_capacity=2
+            ),
             UnpublishedLoader(),
         )
         assert len(swept) == 1
@@ -375,7 +377,9 @@ class TestSweep:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_heartbeat_storage(connection)
         swept = await sweep_expired_heartbeat_leaves(
-            PartitionMaintenanceDatabase(terminalization_schema.engine),
+            PartitionMaintenanceDatabase(
+                terminalization_schema.engine, connection_capacity=2
+            ),
             UnpublishedLoader(),
         )
         assert swept == ()

@@ -42,6 +42,7 @@ from ..commands import (
 )
 from ..errors import HistoryParentAbsent
 from ..names import (
+    HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
     TASK_HISTORY_FOREVER,
     WORKFLOW_PHASE2_PENDING,
@@ -71,8 +72,10 @@ from ..outcomes import (
 )
 from .catalog import (
     INDEX_SCHEMA_VERSION,
+    LeafIndexKind,
     LeafCatalogRow,
     LeafPhysicalState,
+    RequestedPartitionBounds,
     RetentionClassRow,
     capture_partition_bound_utc,
     daily_leaf_name,
@@ -85,8 +88,12 @@ from .catalog import (
     read_retention_class,
 )
 from .locks import (
+    IndexRelationState,
+    IndexRemovalOutcome,
     LeafLockAttempt,
     is_lock_not_available,
+    read_index_relation_state,
+    remove_attached_index_for_repair,
     try_lock_leaf_for_session,
     try_lock_leaf_for_transaction,
     try_lock_relation_exclusive_for_transaction,
@@ -145,6 +152,11 @@ async def inspect_leaf(
         raise AssertionError('finite class invariant enforced by the catalog reader')
 
     catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
+    match leaf.class_key:
+        case value if value == HEARTBEAT_CLASS_KEY:
+            index_kind = LeafIndexKind.HEARTBEAT
+        case _:
+            index_kind = LeafIndexKind.HISTORY
     physical = await read_leaf_physical_state(
         connection,
         leaf_name=leaf.leaf_name,
@@ -154,6 +166,8 @@ async def inspect_leaf(
             if catalog is not None
             else leaf_id_index_name(leaf.leaf_name)
         ),
+        bound_expectation=RequestedPartitionBounds(leaf.bounds),
+        index_kind=index_kind,
     )
     expires_at = leaf.bounds.upper + duration
 
@@ -193,7 +207,8 @@ async def inspect_leaf(
 
     if physical.detach_pending is not None and (
         physical.partition_bound != catalog.partition_bound
-        or not physical.id_index_exists
+        or not physical.partition_bound_matches_expected
+        or not physical.id_index_conformant
     ):
         return LeafCatalogConflict(
             leaf_name=leaf.leaf_name,
@@ -293,7 +308,46 @@ async def create_daily_leaf(
         return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
 
     if catalog is not None:
-        if not state.physical.id_index_exists:
+        state = await _read_daily_leaf_creation_state(
+            connection,
+            leaf=leaf,
+            parent_name=parent_name,
+        )
+        if state.outcome is not None:
+            return state.outcome
+        catalog = state.catalog
+        if catalog is None:
+            raise AssertionError('cataloged history leaf lost its catalog row')
+        if not state.physical.id_index_conformant:
+            index_state = await read_index_relation_state(
+                connection,
+                leaf_name=leaf.leaf_name,
+                index_name=catalog.id_index_name,
+            )
+            match index_state:
+                case IndexRelationState.ABSENT:
+                    pass
+                case IndexRelationState.ATTACHED:
+                    removal = await remove_attached_index_for_repair(
+                        connection,
+                        leaf_name=leaf.leaf_name,
+                        index_name=catalog.id_index_name,
+                    )
+                    match removal:
+                        case IndexRemovalOutcome.BUSY:
+                            return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                        case IndexRemovalOutcome.FOREIGN:
+                            return _foreign_index_conflict(
+                                leaf.leaf_name,
+                                'cataloged task-ID index name',
+                            )
+                        case IndexRemovalOutcome.ABSENT | IndexRemovalOutcome.REMOVED:
+                            pass
+                case IndexRelationState.FOREIGN:
+                    return _foreign_index_conflict(
+                        leaf.leaf_name,
+                        'cataloged task-ID index name',
+                    )
             await connection.execute(
                 text(
                     f'CREATE INDEX {catalog.id_index_name} '
@@ -301,10 +355,39 @@ async def create_daily_leaf(
                 )
             )
         if not state.ordering_index_exists:
+            ordering_name = leaf_enqueued_index_name(leaf.leaf_name)
+            ordering_state = await read_index_relation_state(
+                connection,
+                leaf_name=leaf.leaf_name,
+                index_name=ordering_name,
+            )
+            match ordering_state:
+                case IndexRelationState.ABSENT:
+                    pass
+                case IndexRelationState.ATTACHED:
+                    removal = await remove_attached_index_for_repair(
+                        connection,
+                        leaf_name=leaf.leaf_name,
+                        index_name=ordering_name,
+                    )
+                    match removal:
+                        case IndexRemovalOutcome.BUSY:
+                            return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                        case IndexRemovalOutcome.FOREIGN:
+                            return _foreign_index_conflict(
+                                leaf.leaf_name,
+                                'derived ordering-index name',
+                            )
+                        case IndexRemovalOutcome.ABSENT | IndexRemovalOutcome.REMOVED:
+                            pass
+                case IndexRelationState.FOREIGN:
+                    return _foreign_index_conflict(
+                        leaf.leaf_name,
+                        'derived ordering-index name',
+                    )
             await connection.execute(
                 text(
-                    f'CREATE INDEX '
-                    f'{leaf_enqueued_index_name(leaf.leaf_name)} '
+                    f'CREATE INDEX {ordering_name} '
                     f'ON {leaf.leaf_name} (enqueued_at)'
                 )
             )
@@ -384,6 +467,8 @@ async def _read_daily_leaf_creation_state(
             if catalog is not None
             else leaf_id_index_name(leaf.leaf_name)
         ),
+        bound_expectation=RequestedPartitionBounds(leaf.bounds),
+        index_kind=LeafIndexKind.HISTORY,
     )
     if not physical.parent_exists:
         raise HistoryParentAbsent(f'history parent {parent_name!r} does not exist')
@@ -415,6 +500,7 @@ async def _read_daily_leaf_creation_state(
         or catalog.lower_anchor != leaf.bounds.lower
         or catalog.upper_anchor != leaf.bounds.upper
         or catalog.index_schema_version != INDEX_SCHEMA_VERSION
+        or catalog.detached_at is not None
         or catalog.dropped_at is not None
     ):
         outcome: LeafCreation | None = LeafCatalogConflict(
@@ -423,11 +509,17 @@ async def _read_daily_leaf_creation_state(
             detail='existing leaf metadata differs from the request',
         )
         return _DailyLeafCreationState(catalog, physical, False, outcome)
-    if physical.partition_bound != catalog.partition_bound:
+    if (
+        physical.partition_bound != catalog.partition_bound
+        or not physical.partition_bound_matches_expected
+    ):
         outcome = LeafCatalogConflict(
             leaf_name=leaf.leaf_name,
             kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
-            detail='attached leaf partition bound differs from catalog',
+            detail=(
+                'attached leaf partition bound differs from catalog or '
+                'requested bounds'
+            ),
         )
         return _DailyLeafCreationState(catalog, physical, False, outcome)
     ordering_index_exists = await read_leaf_ordering_index_exists(
@@ -435,10 +527,21 @@ async def _read_daily_leaf_creation_state(
     )
     outcome = (
         LeafAlreadyConformant(leaf_name=leaf.leaf_name)
-        if physical.id_index_exists and ordering_index_exists
+        if physical.id_index_conformant and ordering_index_exists
         else None
     )
     return _DailyLeafCreationState(catalog, physical, ordering_index_exists, outcome)
+
+
+def _foreign_index_conflict(
+    leaf_name: str,
+    index_label: str,
+) -> LeafCatalogConflict:
+    return LeafCatalogConflict(
+        leaf_name=leaf_name,
+        kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+        detail=f'{index_label} belongs to another relation',
+    )
 
 
 async def ensure_leaf_coverage(
