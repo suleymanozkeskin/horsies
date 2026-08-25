@@ -33,9 +33,10 @@ import asyncio
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..archive.versions import JSON_UTF8_CODEC
+from ..maintenance.database import PartitionMaintenanceDatabase
 from ..names import LEAF_CATALOG, TASK_HISTORY_PARENT
 from ..partitions.locks import LeafLockAttempt, try_lock_leaf_for_transaction
 from .jobs import (
@@ -816,7 +817,7 @@ async def swap_transcode(
 
 
 async def swap_with_retries(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     *,
     job_id: str,
 ) -> TranscodeSwapOutcome:
@@ -831,7 +832,7 @@ async def swap_with_retries(
     last_busy: TranscodeSwapBusy | None = None
     while attempts < SWAP_LOCK_ATTEMPTS_MAXIMUM:
         attempts += 1
-        async with engine.begin() as connection:
+        async with database.begin() as connection:
             outcome = await swap_transcode(connection, job_id=job_id)
         match outcome:
             case TranscodeSwapBusy():
@@ -844,7 +845,7 @@ async def swap_with_retries(
     blockers: tuple[SwapBlocker, ...] = ()
     capture_failed = False
     try:
-        async with engine.connect() as connection:
+        async with database.connect() as connection:
             blockers = await _capture_swap_blockers(
                 connection,
                 lock_mode=last_busy.lock_mode,

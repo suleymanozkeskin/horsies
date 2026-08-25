@@ -23,6 +23,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 import horsies.core.history.transcode.executor as executor_module
+from horsies.core.history.maintenance.database import (
+    PartitionMaintenanceDatabase,
+)
 from horsies.core.history.transcode.executor import (
     TranscodeStateError,
     finalize_transcode,
@@ -588,7 +591,8 @@ class TestSwapContention:
                 executor_module, 'SWAP_RETRY_BACKOFF_SECONDS', 0.01
             )
             exhausted = await swap_with_retries(
-                terminalization_schema.engine, job_id=job_id
+                PartitionMaintenanceDatabase(terminalization_schema.engine),
+                job_id=job_id,
             )
             assert isinstance(exhausted, TranscodeSwapExhausted)
             assert exhausted.attempts == 3
