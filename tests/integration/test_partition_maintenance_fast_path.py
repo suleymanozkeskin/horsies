@@ -43,6 +43,11 @@ partition_schema = terminalization_schema_fixture(
 )
 
 
+async def test_complete_probe_uses_24_hour_heartbeat_leaf_names() -> None:
+    assert "'YYYY_MM_DD_HH24'" in coverage_module._COVERAGE_PROBE_SQL
+    assert "'YYYY_MM_DD_HH'" not in coverage_module._COVERAGE_PROBE_SQL
+
+
 async def test_healthy_complete_set_has_constant_statement_budget(
     partition_schema: HistorySchema,
 ) -> None:

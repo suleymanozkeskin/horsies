@@ -186,7 +186,10 @@ expected_heartbeats AS (
         CAST(:heartbeat_class AS text) AS class_key,
         CAST(:heartbeat_parent AS text) AS parent_name,
         :heartbeat_parent || '_' ||
-            to_char(hour_bounds.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD_HH')
+            to_char(
+                hour_bounds.lower_anchor AT TIME ZONE 'UTC',
+                'YYYY_MM_DD_HH24'
+            )
             AS leaf_name,
         hour_bounds.lower_anchor,
         hour_bounds.lower_anchor + interval '1 hour' AS upper_anchor
