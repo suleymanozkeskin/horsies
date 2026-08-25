@@ -311,17 +311,19 @@ class TestFinalizeAppliesItsTimeout:
     def test_finalize_reads_and_sets_the_statement_timeout(self) -> None:
         import inspect as _inspect
 
-        from horsies.core.history.partitions.manager import (
-            finalize_interrupted_detach,
-        )
+        from horsies.core.history.partitions import manager
 
-        source = _inspect.getsource(finalize_interrupted_detach)
+        source = _inspect.getsource(manager.finalize_interrupted_detach)
         assert 'command.statement_timeout_ms' in source, (
             'the finalize executor never reads the timeout it is given'
         )
-        assert "SHOW statement_timeout" in source, (
+        assert '_read_session_timeouts' in source, (
             'the prior timeout is not captured, so it cannot be restored'
         )
-        assert source.count("set_config('statement_timeout'") == 2, (
+        assert '_set_session_timeouts' in source, (
+            'the operation timeout is not applied'
+        )
+        cleanup_source = _inspect.getsource(manager._cleanup_session_leaf_lock)
+        assert "set_config('statement_timeout'" in cleanup_source, (
             'the timeout must be both applied and restored'
         )

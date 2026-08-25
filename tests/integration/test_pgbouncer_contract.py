@@ -9,9 +9,11 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from sqlalchemy import text
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.errors import ConfigurationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err, is_ok
@@ -92,6 +94,24 @@ async def test_transaction_pool_uses_pooled_runtime_and_direct_session(
 
         errors = await asyncio.to_thread(app.check, live=True)
         assert errors == []
+        await broker.validate_worker_database_paths()
+
+        async with broker.partition_maintenance.autocommit() as connection:
+            backend_pid = (
+                await connection.execute(text('SELECT pg_backend_pid()'))
+            ).scalar_one()
+            await connection.execute(text('SELECT pg_advisory_lock(918273645)'))
+            for _ in range(8):
+                current_pid = (
+                    await connection.execute(text('SELECT pg_backend_pid()'))
+                ).scalar_one()
+                assert current_pid == backend_pid
+            released = (
+                await connection.execute(
+                    text('SELECT pg_advisory_unlock(918273645)')
+                )
+            ).scalar_one()
+            assert released
 
         enqueue_r = await _enqueue_probe(broker)
         assert is_ok(enqueue_r)
@@ -102,21 +122,15 @@ async def test_transaction_pool_uses_pooled_runtime_and_direct_session(
 def test_transaction_pool_rejected_as_session_url(
     pgbouncer_urls: PgbouncerUrls,
 ) -> None:
-    app = Horsies(
-        AppConfig(
-            broker=PostgresConfig(
-                database_url=pgbouncer_urls.transaction,
-                session_database_url=pgbouncer_urls.transaction,
-                pgbouncer_transaction_mode=True,
-            )
+    with pytest.raises(
+        ConfigurationError,
+        match='session_database_url must not use the transaction-pool URL',
+    ):
+        PostgresConfig(
+            database_url=pgbouncer_urls.transaction,
+            session_database_url=pgbouncer_urls.transaction,
+            pgbouncer_transaction_mode=True,
         )
-    )
-
-    errors = app.check(live=True)
-
-    assert len(errors) == 1
-    assert errors[0].notes is not None
-    assert "session_database_url appears to be transaction-pooled" in errors[0].notes[0]
 
 
 @pytest.mark.asyncio(loop_scope="function")

@@ -3167,8 +3167,10 @@ class TestStartupRegistersEveryClassItRuns:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage', _ensured
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
         )
+        worker.broker = MagicMock()
+        worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
         worker._create_executor = MagicMock(  # type: ignore[assignment]
             side_effect=lambda **_kwargs: MagicMock()
@@ -3217,9 +3219,11 @@ class TestWorkerStartupCoverageOutcome:
         )
         monkeypatch.setattr(
             coverage_module,
-            'ensure_startup_coverage',
+            'ensure_startup_coverage_in_database',
             AsyncMock(return_value=failure),
         )
+        worker.broker = MagicMock()
+        worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
         worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
@@ -3273,7 +3277,11 @@ class TestWorkerStartConnectionOrdering:
             )
 
         monkeypatch.setattr(
-            coverage_module, 'ensure_startup_coverage', _ensured
+            coverage_module, 'ensure_startup_coverage_in_database', _ensured
+        )
+        worker.broker = MagicMock()
+        worker.broker.validate_worker_database_paths = AsyncMock(
+            side_effect=lambda: events.append('database-paths')
         )
 
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
@@ -3307,6 +3315,7 @@ class TestWorkerStartConnectionOrdering:
         assert events == [
             'create-executor',
             'warm-executor',
+            'database-paths',
             'coverage-ensure',
             'listener-start',
         ]

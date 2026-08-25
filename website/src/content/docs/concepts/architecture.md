@@ -88,9 +88,11 @@ Worker LISTEN        --> session_database_url  --> direct/session Postgres
 Result wait LISTEN   --> session_database_url  --> direct/session Postgres
 Syce LISTEN          --> session_database_url  --> direct/session Postgres
 Schema setup         --> session_database_url  --> direct/session Postgres
+Partition maintenance --> session_database_url --> direct/session Postgres
 ```
 
-Workers intentionally fail startup if the listener URL is not session-capable.
+Workers check session behavior before partition maintenance starts. Startup
+fails if the session URL is not session-capable.
 Producer-side result waits may fall back to polling when notifications are
 unavailable.
 

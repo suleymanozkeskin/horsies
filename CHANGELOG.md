@@ -8,6 +8,17 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Partition maintenance now requires the session-capable database path.**
+  It uses the same direct engine as schema DDL and `LISTEN`/`NOTIFY`.
+  Leaf advisory locks are nonblocking. Relation lock waits return a typed busy
+  result after a bounded wait. Cancellation closes a connection when lock
+  ownership is not certain. Each changed leaf commits before the next leaf or
+  retry starts. A healthy complete coverage check uses one set-based catalog
+  query. Ten declared retention classes with the default horizons stay within
+  three SQL statements on this path.
+
 ## [0.5.2] - 2026-08-12
 
 ### Added

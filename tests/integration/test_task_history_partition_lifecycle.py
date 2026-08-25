@@ -9,13 +9,15 @@ typed outcome, never as an exception.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from time import monotonic
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy import event, text
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from horsies.core.history.commands import (
     CollectPartitionHealth,
@@ -42,6 +44,7 @@ from horsies.core.history.outcomes import (
     LeafDetached,
     LeafDropped,
     LeafIndexRepaired,
+    LeafMaintenanceBusy,
     LeafNotExpired,
     LeafPendingBlocked,
     RetentionClassAbsent,
@@ -56,6 +59,7 @@ from horsies.core.history.partitions.manager import (
     inspect_leaf,
 )
 from horsies.core.history.partitions.publication import UnpublishedLoader
+from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 
 from horsies.core.history.phase2.quarantine import QuarantineRefused
 
@@ -312,7 +316,7 @@ class TestDetachAndDrop:
             )
             assert isinstance(inspection, LeafDetachable)
         detached = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -365,7 +369,7 @@ class TestDetachAndDrop:
                 },
             )
         refused = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -378,7 +382,7 @@ class TestDetachAndDrop:
                 text('DELETE FROM horsies_workflow_phase2_pending')
             )
         detached = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -399,7 +403,7 @@ class TestDetachAndDrop:
                 connection, ref, task_id=task_id, with_history_row=True
             )
         outcome = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -449,7 +453,7 @@ class TestDetachAndDrop:
                 connection, ref, task_id=task_id, with_history_row=False
             )
         outcome = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -475,7 +479,7 @@ class TestDetachAndDrop:
             ).one()
             assert pending.recovery_source == 'HISTORY'
         still_blocked = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),
@@ -503,7 +507,7 @@ class TestDetachAndDrop:
                 node_key=None,
             )
         outcome = await detach_expired_leaf(
-            history_schema.engine,
+            PartitionMaintenanceDatabase(history_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=timedelta(days=7),
                 statement_timeout_ms=None,
@@ -517,6 +521,279 @@ class TestDetachAndDrop:
                 assert refusal.detail is not None
             case _:
                 raise AssertionError(f'unexpected outcome: {outcome!r}')
+
+
+class TestLockContention:
+    @pytest.mark.asyncio
+    async def test_conformant_leaf_skips_busy_advisory_lock(
+        self, history_schema: HistorySchema
+    ) -> None:
+        lower, _ = day_bounds(datetime.now(UTC))
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+            ref = leaf_ref(parent_name, lower)
+            created = await create_daily_leaf(
+                connection,
+                CreateDailyHistoryLeaf(leaf=ref),
+                UnpublishedLoader(),
+            )
+            assert isinstance(created, LeafCreated)
+
+        holder = await history_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            await holder.execute(
+                text(
+                    'SELECT pg_advisory_xact_lock('
+                    'horsies_task_history_leaf_lock_key(:class_key, :anchor))'
+                ),
+                {'class_key': CLASS_KEY, 'anchor': lower},
+            )
+            statements: list[str] = []
+
+            def record_statement(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                statements.append(statement)
+
+            event.listen(
+                history_schema.engine.sync_engine,
+                'before_cursor_execute',
+                record_statement,
+            )
+            try:
+                async with asyncio.timeout(1):
+                    async with history_schema.engine.begin() as connection:
+                        outcome = await create_daily_leaf(
+                            connection,
+                            CreateDailyHistoryLeaf(leaf=ref),
+                            UnpublishedLoader(),
+                        )
+            finally:
+                event.remove(
+                    history_schema.engine.sync_engine,
+                    'before_cursor_execute',
+                    record_statement,
+                )
+            assert isinstance(outcome, LeafAlreadyConformant)
+            assert not any(
+                'pg_try_advisory' in statement for statement in statements
+            )
+        finally:
+            await transaction.rollback()
+            await holder.close()
+
+    @pytest.mark.asyncio
+    async def test_missing_leaf_returns_busy_without_waiting(
+        self, history_schema: HistorySchema
+    ) -> None:
+        lower, _ = day_bounds(datetime.now(UTC) + timedelta(days=2))
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+        ref = leaf_ref(parent_name, lower)
+
+        holder = await history_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            await holder.execute(
+                text(
+                    'SELECT pg_advisory_xact_lock('
+                    'horsies_task_history_leaf_lock_key(:class_key, :anchor))'
+                ),
+                {'class_key': CLASS_KEY, 'anchor': lower},
+            )
+            async with asyncio.timeout(1):
+                async with history_schema.engine.begin() as connection:
+                    outcome = await create_daily_leaf(
+                        connection,
+                        CreateDailyHistoryLeaf(leaf=ref),
+                        UnpublishedLoader(),
+                    )
+            assert isinstance(outcome, LeafMaintenanceBusy)
+        finally:
+            await transaction.rollback()
+            await holder.close()
+
+    @pytest.mark.asyncio
+    async def test_parent_relation_lock_returns_busy_through_nowait(
+        self, history_schema: HistorySchema
+    ) -> None:
+        lower, _ = day_bounds(datetime.now(UTC) + timedelta(days=2))
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+        ref = leaf_ref(parent_name, lower)
+
+        holder = await history_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            await holder.execute(
+                text(f'LOCK TABLE {parent_name} IN ACCESS EXCLUSIVE MODE')
+            )
+            async with asyncio.timeout(1):
+                async with history_schema.engine.begin() as connection:
+                    outcome = await create_daily_leaf(
+                        connection,
+                        CreateDailyHistoryLeaf(leaf=ref),
+                        UnpublishedLoader(),
+                    )
+            assert isinstance(outcome, LeafMaintenanceBusy)
+            async with history_schema.engine.begin() as connection:
+                acquired = (
+                    await connection.execute(
+                        text(
+                            'SELECT pg_try_advisory_xact_lock('
+                            'horsies_task_history_leaf_lock_key('
+                            ':class_key, :anchor))'
+                        ),
+                        {'class_key': CLASS_KEY, 'anchor': lower},
+                    )
+                ).scalar_one()
+            assert acquired
+        finally:
+            await transaction.rollback()
+            await holder.close()
+
+    @pytest.mark.asyncio
+    async def test_detach_relation_wait_is_bounded_and_restores_timeouts(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent_name)
+        direct_engine = create_async_engine(
+            history_schema.engine.url.render_as_string(hide_password=False),
+            pool_size=1,
+            max_overflow=0,
+            connect_args={
+                'options': f'-csearch_path={history_schema.schema_name}'
+            },
+        )
+        database = PartitionMaintenanceDatabase(direct_engine)
+        try:
+            async with database.autocommit() as connection:
+                await connection.execute(text("SET statement_timeout = '13s'"))
+                await connection.execute(text("SET lock_timeout = '17s'"))
+
+            holder = await history_schema.engine.connect()
+            transaction = await holder.begin()
+            try:
+                await holder.execute(
+                    text(f'LOCK TABLE {parent_name} IN SHARE MODE')
+                )
+                started = monotonic()
+                outcome = await detach_expired_leaf(
+                    database,
+                    DetachExpiredHistoryLeaf(
+                        leaf=ref,
+                        quarantine_horizon=None,
+                        statement_timeout_ms=9000,
+                    ),
+                    UnpublishedLoader(),
+                )
+                elapsed = monotonic() - started
+            finally:
+                await transaction.rollback()
+                await holder.close()
+
+            assert isinstance(outcome, LeafMaintenanceBusy)
+            assert elapsed < 3
+            async with database.autocommit() as connection:
+                statement_timeout = (
+                    await connection.execute(text('SHOW statement_timeout'))
+                ).scalar_one()
+                lock_timeout = (
+                    await connection.execute(text('SHOW lock_timeout'))
+                ).scalar_one()
+            assert statement_timeout == '13s'
+            assert lock_timeout == '17s'
+        finally:
+            await direct_engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_detach_releases_session_lock(
+        self, history_schema: HistorySchema
+    ) -> None:
+        async with history_schema.engine.begin() as connection:
+            parent_name = await register_class(connection, CLASS_KEY)
+        ref = await make_expired_leaf(history_schema, parent_name)
+        database = PartitionMaintenanceDatabase(history_schema.engine)
+
+        holder = await history_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            await holder.execute(
+                text(f'LOCK TABLE {parent_name} IN SHARE MODE')
+            )
+            detach_task = asyncio.create_task(
+                detach_expired_leaf(
+                    database,
+                    DetachExpiredHistoryLeaf(
+                        leaf=ref,
+                        quarantine_horizon=None,
+                        statement_timeout_ms=9000,
+                    ),
+                    UnpublishedLoader(),
+                )
+            )
+            lock_observed = False
+            async with history_schema.engine.connect() as probe:
+                for _ in range(100):
+                    acquired = (
+                        await probe.execute(
+                            text(
+                                'SELECT pg_try_advisory_lock('
+                                'horsies_task_history_leaf_lock_key('
+                                ':class_key, :anchor))'
+                            ),
+                            {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                        )
+                    ).scalar_one()
+                    if acquired:
+                        await probe.execute(
+                            text(
+                                'SELECT pg_advisory_unlock('
+                                'horsies_task_history_leaf_lock_key('
+                                ':class_key, :anchor))'
+                            ),
+                            {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                        )
+                        await asyncio.sleep(0.01)
+                        continue
+                    lock_observed = True
+                    break
+            assert lock_observed
+            detach_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await detach_task
+
+            async with history_schema.engine.connect() as probe:
+                acquired = (
+                    await probe.execute(
+                        text(
+                            'SELECT pg_try_advisory_lock('
+                            'horsies_task_history_leaf_lock_key('
+                            ':class_key, :anchor))'
+                        ),
+                        {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                    )
+                ).scalar_one()
+                assert acquired
+                await probe.execute(
+                    text(
+                        'SELECT pg_advisory_unlock('
+                        'horsies_task_history_leaf_lock_key('
+                        ':class_key, :anchor))'
+                    ),
+                    {'class_key': CLASS_KEY, 'anchor': ref.bounds.lower},
+                )
+        finally:
+            await transaction.rollback()
+            await holder.close()
 
 
 class TestHealth:

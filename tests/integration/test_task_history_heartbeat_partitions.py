@@ -37,6 +37,7 @@ from horsies.core.history.outcomes import (
 )
 from horsies.core.history.partitions.catalog import database_now
 from horsies.core.history.partitions.publication import UnpublishedLoader
+from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -331,7 +332,8 @@ class TestSweep:
             assert isinstance(current, LeafCreated)
 
         swept = await sweep_expired_heartbeat_leaves(
-            terminalization_schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(terminalization_schema.engine),
+            UnpublishedLoader(),
         )
         assert len(swept) == 1
         assert swept[0].leaf_name == expired.leaf_name
@@ -373,6 +375,7 @@ class TestSweep:
         async with terminalization_schema.engine.begin() as connection:
             await prepare_heartbeat_storage(connection)
         swept = await sweep_expired_heartbeat_leaves(
-            terminalization_schema.engine, UnpublishedLoader()
+            PartitionMaintenanceDatabase(terminalization_schema.engine),
+            UnpublishedLoader(),
         )
         assert swept == ()

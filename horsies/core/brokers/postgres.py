@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy import text, select
 from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     BrokerOperationError,
@@ -19,6 +20,7 @@ from horsies.core.brokers.result_types import (
     RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.task_pg import TaskModel, Base
 from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
@@ -52,6 +54,9 @@ from horsies.core.models.health import (
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     resolve_retention_class_key,
+)
+from horsies.core.history.maintenance.database import (
+    PartitionMaintenanceDatabase,
 )
 from horsies.core.history.cutover.state import (
     CREATE_CUTOVER_STATE_TABLE_SQL,
@@ -573,6 +578,17 @@ class PostgresBroker:
             self.async_engine, expire_on_commit=False
         )
 
+        session_url = self.config.effective_session_database_url
+        if session_url == self.config.database_url.get_secret_value():
+            self._session_engine = self.async_engine
+        else:
+            self._session_engine = create_async_engine(
+                session_url, **self._session_engine_config()
+            )
+        self.partition_maintenance = PartitionMaintenanceDatabase(
+            self._session_engine
+        )
+
         if assume_initialized:
             self._listener = None
         else:
@@ -603,7 +619,14 @@ class PostgresBroker:
         return engine_cfg
 
     def _schema_engine_config(self) -> dict[str, Any]:
-        return self._base_engine_config()
+        return self._session_engine_config()
+
+    def _session_engine_config(self) -> dict[str, Any]:
+        engine_cfg = self._base_engine_config()
+        connect_args = self.config.keepalive_connect_args()
+        if connect_args:
+            engine_cfg['connect_args'] = connect_args
+        return engine_cfg
 
     @property
     def app(self) -> 'Horsies | None':
@@ -624,6 +647,30 @@ class PostgresBroker:
     @listener.setter
     def listener(self, value: PostgresListener | None) -> None:
         self._listener = value
+
+    async def validate_worker_database_paths(self) -> None:
+        """Connect both worker paths and prove session capability."""
+        async with self.async_engine.connect() as connection:
+            await connection.execute(text('SELECT 1'))
+        async with self.partition_maintenance.connect() as connection:
+            await connection.execute(text('SELECT 1'))
+        try:
+            await probe_session_capability(
+                to_psycopg_url(self.config.effective_session_database_url)
+            )
+        except asyncio.TimeoutError as exc:
+            raise ConfigurationError(
+                message='broker session capability check failed',
+                code=ErrorCode.BROKER_INVALID_URL,
+                notes=[
+                    'session_database_url appears to be transaction-pooled; '
+                    'LISTEN notification was not delivered',
+                ],
+                help_text=(
+                    'use a direct/session-capable Postgres URL for '
+                    'session_database_url'
+                ),
+            ) from exc
 
     def _schema_advisory_key(self) -> int:
         """
@@ -731,16 +778,7 @@ class PostgresBroker:
         await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
 
     async def _run_with_schema_engine(self, fn: Any) -> None:
-        schema_url = self.config.effective_session_database_url
-        if schema_url == self.config.database_url.get_secret_value():
-            await fn(self.async_engine)
-            return
-
-        schema_engine = create_async_engine(schema_url, **self._schema_engine_config())
-        try:
-            await fn(schema_engine)
-        finally:
-            await schema_engine.dispose()
+        await fn(self._session_engine)
 
     async def _read_schema_version(self, conn: Any) -> int:
         result = await conn.execute(READ_SCHEMA_VERSION_SQL)
@@ -2174,6 +2212,11 @@ class PostgresBroker:
             await self.async_engine.dispose()
         except Exception as exc:
             errors.append(exc)
+        if self._session_engine is not self.async_engine:
+            try:
+                await self._session_engine.dispose()
+            except Exception as exc:
+                errors.append(exc)
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         loop_thread = self._loop_runner._thread

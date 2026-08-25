@@ -26,6 +26,7 @@ from horsies.core.history.commands import (
     LeafRef,
 )
 from horsies.core.history.outcomes import LeafCreated, LeafDropped
+from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
 from horsies.core.history.partitions.catalog import daily_leaf_name
 from horsies.core.history.partitions.manager import (
     create_daily_leaf,
@@ -270,7 +271,7 @@ class TestDetail:
             assert isinstance(resolved, HistoryTaskDetail)
 
         detached = await detach_expired_leaf(
-            terminalization_schema.engine,
+            PartitionMaintenanceDatabase(terminalization_schema.engine),
             DetachExpiredHistoryLeaf(
                 leaf=ref, quarantine_horizon=None, statement_timeout_ms=None
             ),

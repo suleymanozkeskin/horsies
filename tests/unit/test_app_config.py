@@ -203,6 +203,18 @@ class TestPostgresConfigPgBouncer:
                 pgbouncer_transaction_mode=True,
             )
 
+    def test_pgbouncer_mode_rejects_runtime_url_as_session_url(self) -> None:
+        url = 'postgresql+psycopg://user:pass@pooler:6432/db'
+        with pytest.raises(
+            ConfigurationError,
+            match='session_database_url must not use the transaction-pool URL',
+        ):
+            PostgresConfig(
+                database_url=url,
+                session_database_url=url,
+                pgbouncer_transaction_mode=True,
+            )
+
     @pytest.mark.parametrize(
         'url',
         [

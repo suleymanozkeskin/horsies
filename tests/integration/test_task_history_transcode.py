@@ -41,6 +41,7 @@ from horsies.core.history.transcode.outcomes import (
     ArchiveComponent,
     TranscodeCopyBatch,
     TranscodeFinalized,
+    TranscodeLeafBusy,
     TranscodePlan,
     TranscodePlanRejected,
     TranscodeReadyForVerification,
@@ -171,6 +172,70 @@ async def run_to_ready(connection: AsyncConnection, job_id: str) -> None:
 
 
 class TestFullLifecycle:
+    @pytest.mark.asyncio
+    async def test_copy_returns_busy_when_partition_maintenance_owns_leaf(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        job_id = str(uuid4())
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await install_job_state(connection)
+            await seed_moved_tasks(connection, 1)
+            await begin_transcode_maintenance(
+                connection, session_id=str(uuid4())
+            )
+            plan = await plan_transcode(
+                connection,
+                job_id=job_id,
+                component=ArchiveComponent.ATTEMPTS,
+                source_version=1,
+                target_version=2,
+                source_codec='json-utf8',
+                target_codec='framed-v2',
+            )
+            assert isinstance(plan, TranscodePlan), plan
+            lock_row = (
+                await connection.execute(
+                    text(
+                        'SELECT catalog.class_key, catalog.lower_anchor, '
+                        'relations.source_relation_name '
+                        'FROM horsies_archive_replacement_relations AS relations '
+                        'JOIN horsies_task_history_leaf_catalog AS catalog '
+                        'ON catalog.leaf_name = relations.source_relation_name '
+                        'WHERE relations.job_id = CAST(:job_id AS uuid) '
+                        'ORDER BY relations.relation_ordinal LIMIT 1'
+                    ),
+                    {'job_id': job_id},
+                )
+            ).one()
+
+        holder = await terminalization_schema.engine.connect()
+        transaction = await holder.begin()
+        try:
+            await holder.execute(
+                text(
+                    'SELECT pg_advisory_xact_lock('
+                    'horsies_task_history_leaf_lock_key(:class_key, :anchor))'
+                ),
+                {
+                    'class_key': lock_row.class_key,
+                    'anchor': lock_row.lower_anchor,
+                },
+            )
+            async with terminalization_schema.engine.begin() as connection:
+                outcome = await run_copy_batch(
+                    connection,
+                    job_id=job_id,
+                    batch_size=2,
+                )
+            assert outcome == TranscodeLeafBusy(
+                job_id=job_id,
+                leaf_name=lock_row.source_relation_name,
+            )
+        finally:
+            await transaction.rollback()
+            await holder.close()
+
     @pytest.mark.asyncio
     async def test_plan_copy_verify_swap_finalize(
         self, terminalization_schema: HistorySchema

@@ -29,7 +29,7 @@ from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import (
     DETACH_STATEMENT_TIMEOUT_MS,
@@ -40,6 +40,7 @@ from ..commands import (
     LeafBounds,
     LeafRef,
 )
+from .database import PartitionMaintenanceDatabase
 from ..heartbeats.partitioning import (
     HeartbeatLeafSwept,
     sweep_expired_heartbeat_leaves,
@@ -51,6 +52,7 @@ from ..outcomes import (
     LeafDrop,
     LeafDropped,
     LeafInspection,
+    LeafMaintenanceBusy,
 )
 from ..partitions.manager import (
     detach_expired_leaf,
@@ -105,7 +107,7 @@ class HistoryLeafSwept:
 
     leaf_name: str
     class_key: str
-    detach: LeafInspection | QuarantineRefused
+    detach: LeafInspection | LeafMaintenanceBusy | QuarantineRefused
     drop: LeafDrop | None
 
 
@@ -169,7 +171,7 @@ async def _expired_candidates(
 
 
 async def _finalize_interrupted_detaches(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
 ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     """Finalize every interrupted detach among expired candidates.
@@ -178,7 +180,7 @@ async def _finalize_interrupted_detaches(
     A blocked finalization is a refusal — the manager returns the leaf
     re-inspected and it stays pending until its blockers drain.
     """
-    async with engine.connect() as connection:
+    async with database.connect() as connection:
         candidates = await _expired_candidates(
             connection, EXPIRED_FINITE_LEAVES_SQL, {}
         )
@@ -198,7 +200,7 @@ async def _finalize_interrupted_detaches(
     for ref in interrupted:
         try:
             outcome = await finalize_interrupted_detach(
-                engine,
+                database,
                 FinalizeInterruptedLeafDetach(
                     leaf=ref,
                     statement_timeout_ms=DETACH_STATEMENT_TIMEOUT_MS,
@@ -219,7 +221,7 @@ async def _finalize_interrupted_detaches(
 
 
 async def sweep_expired_history_leaves(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
 ) -> tuple[tuple[HistoryLeafSwept, ...], tuple[str, ...]]:
     """Detach and drop every finite task-history leaf past its horizon.
@@ -230,7 +232,7 @@ async def sweep_expired_history_leaves(
     detach, and per-leaf error containment so one leaf's failure never
     stops the pass. Returns (swept entries, error strings).
     """
-    async with engine.connect() as connection:
+    async with database.connect() as connection:
         candidates = await _expired_candidates(
             connection,
             EXPIRED_HISTORY_LEAVES_SQL,
@@ -241,7 +243,7 @@ async def sweep_expired_history_leaves(
     for ref in candidates:
         try:
             detach_outcome = await detach_expired_leaf(
-                engine,
+                database,
                 DetachExpiredHistoryLeaf(
                     leaf=ref,
                     quarantine_horizon=None,
@@ -255,13 +257,13 @@ async def sweep_expired_history_leaves(
                 # A crash between detach and drop leaves a detached leaf
                 # the next sweep must still drop; re-inspect for that
                 # state.
-                async with engine.connect() as connection:
+                async with database.connect() as connection:
                     inspection = await inspect_leaf(
                         connection, InspectHistoryLeaf(leaf=ref)
                     )
                 detached = isinstance(inspection, LeafDetached)
             if detached:
-                async with engine.begin() as connection:
+                async with database.begin() as connection:
                     drop_outcome = await drop_detached_leaf(
                         connection,
                         DropDetachedHistoryLeaf(leaf=ref),
@@ -302,7 +304,7 @@ def _sweep_refusals(
 
 
 async def prune_expired_partitions(
-    engine: AsyncEngine,
+    database: PartitionMaintenanceDatabase,
     publisher: LoaderPublication,
 ) -> PrunePass:
     """One pruning pass: finalize interrupted detaches, then both sweeps.
@@ -314,18 +316,18 @@ async def prune_expired_partitions(
     runs, with per-leaf containment of its own.
     """
     finalized, finalize_refusals, errors_list = (
-        await _finalize_interrupted_detaches(engine, publisher)
+        await _finalize_interrupted_detaches(database, publisher)
     )
     errors: list[str] = list(errors_list)
     heartbeat_swept: tuple[HeartbeatLeafSwept, ...] = ()
     try:
         heartbeat_swept = await sweep_expired_heartbeat_leaves(
-            engine, publisher
+            database, publisher
         )
     except SQLAlchemyError as error:
         errors.append(f'heartbeat sweep: {error}')
     history_swept, history_errors = await sweep_expired_history_leaves(
-        engine, publisher
+        database, publisher
     )
     errors.extend(history_errors)
     return PrunePass(

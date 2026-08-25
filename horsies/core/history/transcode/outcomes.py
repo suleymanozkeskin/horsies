@@ -124,8 +124,19 @@ class TranscodeReadyForVerification:
     copied_rows_total: int
 
 
+@dataclass(frozen=True, slots=True)
+class TranscodeLeafBusy:
+    """Partition maintenance owns this source leaf; retry later."""
+
+    job_id: str
+    leaf_name: str
+
+
 type TranscodeCopyOutcome = (
-    TranscodeCopyBatch | TranscodeCopyRejected | TranscodeReadyForVerification
+    TranscodeCopyBatch
+    | TranscodeCopyRejected
+    | TranscodeReadyForVerification
+    | TranscodeLeafBusy
 )
 
 
@@ -146,6 +157,9 @@ class TranscodeVerification:
     invalid_target_rows: int
     copied_rows_total: int
     wal_bytes: int | None
+
+
+type TranscodeVerificationOutcome = TranscodeVerification | TranscodeLeafBusy
 
 
 @dataclass(frozen=True, slots=True)

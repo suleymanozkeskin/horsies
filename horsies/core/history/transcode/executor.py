@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from ..archive.versions import JSON_UTF8_CODEC
 from ..names import TASK_HISTORY_PARENT
-from ..partitions.locks import lock_leaf_for_transaction
+from ..partitions.locks import LeafLockAttempt, try_lock_leaf_for_transaction
 from .jobs import (
     TRANSCODE_BATCHES,
     TRANSCODE_JOBS,
@@ -66,6 +66,7 @@ from .outcomes import (
     TranscodeCopyRejectionKind,
     TranscodeFinalized,
     TranscodeJobState,
+    TranscodeLeafBusy,
     TranscodePlan,
     TranscodePlanOutcome,
     TranscodePlanRejected,
@@ -75,6 +76,7 @@ from .outcomes import (
     TranscodeSwapExhausted,
     TranscodeSwapOutcome,
     TranscodeVerification,
+    TranscodeVerificationOutcome,
 )
 from .signature import relation_schema_signature
 from .transforms import (
@@ -391,7 +393,12 @@ async def run_copy_batch(
             job_id=job_id, copied_rows_total=job.copied_rows_total
         )
     relation = decode_relation_row(relation_mapping)
-    await _lock_relation_leaf(connection, relation)
+    leaf_lock = await _try_lock_relation_leaf(connection, relation)
+    if leaf_lock is LeafLockAttempt.BUSY:
+        return TranscodeLeafBusy(
+            job_id=job_id,
+            leaf_name=relation.source_relation_name,
+        )
 
     if relation.state == 'PLANNED':
         rejection = await _prepare_replacement_relation(
@@ -585,7 +592,7 @@ async def verify_transcode(
     connection: AsyncConnection,
     *,
     job_id: str,
-) -> TranscodeVerification:
+) -> TranscodeVerificationOutcome:
     """Full content verification, committed before any lock."""
     await lock_transcode_program(connection)
     await lock_archive_gate_row(connection)
@@ -602,7 +609,12 @@ async def verify_transcode(
     mismatches = 0
     invalid_targets = 0
     for relation in await _job_relations(connection, job_id):
-        await _lock_relation_leaf(connection, relation)
+        leaf_lock = await _try_lock_relation_leaf(connection, relation)
+        if leaf_lock is LeafLockAttempt.BUSY:
+            return TranscodeLeafBusy(
+                job_id=job_id,
+                leaf_name=relation.source_relation_name,
+            )
         initial_token = await _verification_token(connection, relation)
         if initial_token is None or not await _bindings_match(
             connection, relation
@@ -717,7 +729,13 @@ async def swap_transcode(
     # advisory locks acquire in ordinal order (assigned from sorted
     # relation names at plan) before the table locks.
     for relation in relations:
-        await _lock_relation_leaf(connection, relation)
+        leaf_lock = await _try_lock_relation_leaf(connection, relation)
+        if leaf_lock is LeafLockAttempt.BUSY:
+            return TranscodeSwapBusy(
+                job_id=job_id,
+                lock_mode=SwapLockMode.LEAVES,
+                relation_names=(relation.source_relation_name,),
+            )
     busy = await _try_swap_locks(connection, job_id=job_id, relations=relations)
     if busy is not None:
         return busy
@@ -1047,9 +1065,9 @@ async def _job_relations(
     return tuple(decode_relation_row(mapping) for mapping in mappings)
 
 
-async def _lock_relation_leaf(
+async def _try_lock_relation_leaf(
     connection: AsyncConnection, relation: TranscodeRelationRow
-) -> None:
+) -> LeafLockAttempt:
     """The cataloged leaf lock serializing against partition maintenance."""
     row = (
         await connection.execute(
@@ -1066,7 +1084,7 @@ async def _lock_relation_leaf(
             f'source relation {relation.source_relation_name!r} '
             'has no leaf catalog row'
         )
-    await lock_leaf_for_transaction(
+    return await try_lock_leaf_for_transaction(
         connection, class_key=str(row.class_key), anchor=row.lower_anchor
     )
 
