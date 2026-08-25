@@ -14,6 +14,9 @@ pub enum HistoryError {
     #[error("history leaf advisory lock is not held")]
     LeafLockNotHeld,
 
+    #[error("history leaf advisory lock is busy: {leaf_name}")]
+    LeafLockBusy { leaf_name: String },
+
     #[error("history parent is absent: {0}")]
     HistoryParentAbsent(String),
 }

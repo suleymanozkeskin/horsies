@@ -231,6 +231,7 @@ mod tests {
             ..RecoveryConfig::default()
         };
         let handle = spawn_reaper(
+            pool.clone(),
             pool,
             Arc::new(WorkflowSpecRegistry::new()),
             config,

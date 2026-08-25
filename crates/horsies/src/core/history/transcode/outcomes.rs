@@ -105,6 +105,7 @@ impl TranscodeCopyRejectionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwapLockMode {
+    LeafAdvisory,
     Parent,
     Leaves,
 }
@@ -112,6 +113,7 @@ pub enum SwapLockMode {
 impl SwapLockMode {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::LeafAdvisory => "ADVISORY",
             Self::Parent => "ACCESS_EXCLUSIVE",
             Self::Leaves => "SHARE",
         }

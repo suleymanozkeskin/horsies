@@ -13,8 +13,8 @@ pub struct PostgresConfig {
     /// `pgbouncer_transaction_mode` is true.
     pub database_url: String,
 
-    /// PostgreSQL session connection URL for schema initialization and
-    /// LISTEN/NOTIFY.
+    /// PostgreSQL session connection URL for schema initialization,
+    /// partition maintenance, and LISTEN/NOTIFY.
     ///
     /// PgBouncer transaction pooling cannot preserve session state for
     /// LISTEN/NOTIFY, so pooled runtime deployments must provide a direct or
@@ -128,7 +128,7 @@ pub enum PostgresConfigError {
         "invalid session_database_url scheme: expected 'postgresql://' or 'postgres://', got '{0}'"
     )]
     InvalidSessionUrlScheme(String),
-    #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization and LISTEN/NOTIFY")]
+    #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
     MissingSessionDatabaseUrl,
 }
 
@@ -155,8 +155,8 @@ impl PostgresConfig {
     /// Create a PostgresConfig for PgBouncer transaction pooling.
     ///
     /// `database_url` should be the transaction-pool endpoint. `session_database_url`
-    /// must be a direct or session-pooled endpoint used for schema work and
-    /// LISTEN/NOTIFY. The transaction-pool endpoint must support
+    /// must be a direct or session-pooled endpoint used for schema work,
+    /// partition maintenance, and LISTEN/NOTIFY. The transaction-pool endpoint must support
     /// protocol-level prepared statement tracking (`max_prepared_statements > 0`).
     pub fn from_pgbouncer_urls(
         database_url: impl Into<String>,
@@ -168,7 +168,8 @@ impl PostgresConfig {
         config
     }
 
-    /// Return the URL used for schema initialization and LISTEN/NOTIFY.
+    /// Return the URL used for schema initialization, partition maintenance,
+    /// and LISTEN/NOTIFY.
     pub fn effective_session_database_url(&self) -> &str {
         self.session_database_url
             .as_deref()

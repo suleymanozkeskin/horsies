@@ -63,6 +63,9 @@ pub enum LeafInspection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeafCreation {
+    Busy {
+        leaf_name: String,
+    },
     Created {
         leaf_name: String,
         id_index_name: String,
@@ -93,6 +96,7 @@ pub enum LeafCreation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeafDrop {
+    Busy { leaf_name: String },
     Dropped { leaf_name: String },
     RefusedLoaderReferences { leaf_name: String },
     Inspection(LeafInspection),
@@ -215,6 +219,9 @@ mod tests {
         assert_eq!(inspections.len(), 10);
 
         let creations = [
+            LeafCreation::Busy {
+                leaf_name: "leaf".into(),
+            },
             LeafCreation::Created {
                 leaf_name: "leaf".into(),
                 id_index_name: "leaf_task_idx".into(),
@@ -242,9 +249,12 @@ mod tests {
                 detail: "bound mismatch".into(),
             },
         ];
-        assert_eq!(creations.len(), 7);
+        assert_eq!(creations.len(), 8);
 
         let drops = [
+            LeafDrop::Busy {
+                leaf_name: "leaf".into(),
+            },
             LeafDrop::Dropped {
                 leaf_name: "leaf".into(),
             },
@@ -257,7 +267,7 @@ mod tests {
                 expires_at: None,
             }),
         ];
-        assert_eq!(drops.len(), 3);
+        assert_eq!(drops.len(), 4);
     }
 
     #[test]

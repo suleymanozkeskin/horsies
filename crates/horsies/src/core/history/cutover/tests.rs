@@ -286,13 +286,15 @@ impl P9Database {
         let mut admin = PgConnection::connect_with(&self.base_options.database("postgres"))
             .await
             .unwrap();
-        let active: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = $1")
-                .bind(&self.name)
-                .fetch_one(&mut admin)
-                .await
-                .unwrap();
-        assert_eq!(active, 0, "generated P9 database still has sessions");
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = $1 AND backend_type = 'client backend'",
+        )
+        .bind(&self.name)
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+        assert_eq!(active, 0, "generated P9 database still has client sessions");
         sqlx::query(&format!("DROP DATABASE \"{}\"", self.name))
             .execute(&mut admin)
             .await

@@ -12,8 +12,9 @@ use sqlx::{FromRow, PgConnection, PgPool, Row};
 use uuid::Uuid;
 
 use crate::core::history::archive::versions::JSON_UTF8_CODEC;
+use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_PARENT};
-use crate::core::history::partitions::locks::lock_leaf_for_transaction;
+use crate::core::history::partitions::locks::{try_lock_leaf_for_transaction, LeafLockAttempt};
 
 use super::jobs::{
     job_relations, lock_job, RelationVerificationToken, TranscodeJobRow, TranscodeRelationRow,
@@ -611,7 +612,16 @@ pub async fn swap_transcode(
     require_job_maintenance(&mut *connection, &job).await?;
     let relations = job_relations(&mut *connection, job_id).await?;
     for relation in &relations {
-        lock_relation_leaf(&mut *connection, relation).await?;
+        if matches!(
+            try_lock_relation_leaf(&mut *connection, relation).await?,
+            LeafLockAttempt::Busy
+        ) {
+            return Ok(TranscodeSwapOutcome::Busy(TranscodeSwapBusy {
+                job_id,
+                lock_mode: SwapLockMode::LeafAdvisory,
+                relation_names: vec![relation.source_relation_name.clone()],
+            }));
+        }
     }
     if let Some(busy) = try_swap_locks(&mut *connection, job_id, &relations).await? {
         return Ok(TranscodeSwapOutcome::Busy(busy));
@@ -711,15 +721,18 @@ pub(super) async fn swap_with_retry_policy(
     }
     let last_busy = last_busy
         .ok_or_else(|| TranscodeError::contract("swap retry exhaustion has no busy attempt"))?;
-    let blockers = match pool.acquire().await {
-        Ok(mut connection) => capture_swap_blockers(
-            &mut connection,
-            last_busy.lock_mode,
-            &last_busy.relation_names,
-        )
-        .await
-        .ok(),
-        Err(_) => None,
+    let blockers = match last_busy.lock_mode {
+        SwapLockMode::LeafAdvisory => None,
+        SwapLockMode::Parent | SwapLockMode::Leaves => match pool.acquire().await {
+            Ok(mut connection) => capture_swap_blockers(
+                &mut connection,
+                last_busy.lock_mode,
+                &last_busy.relation_names,
+            )
+            .await
+            .ok(),
+            Err(_) => None,
+        },
     };
     Ok(TranscodeSwapOutcome::Exhausted(build_swap_exhausted(
         job_id, last_busy, attempts, backoff, blockers,
@@ -916,6 +929,18 @@ async fn lock_relation_leaf(
     connection: &mut PgConnection,
     relation: &TranscodeRelationRow,
 ) -> Result<(), TranscodeError> {
+    match try_lock_relation_leaf(connection, relation).await? {
+        LeafLockAttempt::Acquired => Ok(()),
+        LeafLockAttempt::Busy => Err(TranscodeError::History(HistoryError::LeafLockBusy {
+            leaf_name: relation.source_relation_name.clone(),
+        })),
+    }
+}
+
+async fn try_lock_relation_leaf(
+    connection: &mut PgConnection,
+    relation: &TranscodeRelationRow,
+) -> Result<LeafLockAttempt, TranscodeError> {
     let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(&format!(
         "SELECT class_key, lower_anchor FROM {LEAF_CATALOG} WHERE leaf_name = $1"
     ))
@@ -928,8 +953,9 @@ async fn lock_relation_leaf(
             relation.source_relation_name
         ))
     })?;
-    lock_leaf_for_transaction(connection, &class_key, lower_anchor).await?;
-    Ok(())
+    try_lock_leaf_for_transaction(connection, &class_key, lower_anchor)
+        .await
+        .map_err(Into::into)
 }
 
 async fn catalog_attachment_holds(

@@ -1,10 +1,12 @@
 use std::str::FromStr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use chrono::{Duration, Timelike, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{Connection, PgConnection, PgPool};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
@@ -24,7 +26,8 @@ use crate::core::history::heartbeats::partitioning::{
     CreateHourlyHeartbeatLeaf, EnsureHeartbeatCoverage, HeartbeatClassRegistration,
 };
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage, ensure_startup_coverage, CoverageOutcome, StartupCoverageOutcome,
+    ensure_partition_coverage, ensure_partition_coverage_in_pool, ensure_startup_coverage,
+    CoverageOutcome, StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::gate::{
     active_maintenance_session, begin_archive_maintenance, finish_archive_maintenance,
@@ -32,7 +35,8 @@ use crate::core::history::maintenance::gate::{
 };
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::names::{
-    LEAF_CATALOG, RETENTION_CLASSES, TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT,
+    LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
+    TASK_HISTORY_PARENT,
 };
 use crate::core::history::outcomes::{HealthFault, LeafCreation, LeafDrop, LeafInspection};
 
@@ -108,6 +112,33 @@ impl LoaderPublication for ReferencingPublisher {
 struct FailFirstRepublish {
     calls: AtomicUsize,
     reference_calls: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct BlockingPublisher {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl LoaderPublication for BlockingPublisher {
+    async fn republish(
+        &self,
+        _connection: &mut PgConnection,
+    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(LoaderRepublished {
+            absent_leaves: Vec::new(),
+        })
+    }
+
+    async fn references_leaf(
+        &self,
+        _connection: &mut PgConnection,
+        _leaf_name: &str,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        Ok(false)
+    }
 }
 
 impl LoaderPublication for FailFirstRepublish {
@@ -466,6 +497,302 @@ async fn lifecycle_is_idempotent_repairs_index_property_and_is_timezone_independ
 
 #[tokio::test]
 #[serial]
+async fn conformant_leaf_skips_a_busy_lock_and_missing_leaf_returns_busy() {
+    let database = TestDatabase::create_with_connections(3).await;
+    let class_key = "p3_nonblocking_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let now = database_now(&mut clock).await.expect("database now");
+    drop(clock);
+    let today = now
+        .with_hour(0)
+        .and_then(|value| value.with_minute(0))
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate today");
+    let conformant = leaf_ref(&parent, class_key, today);
+    assert!(matches!(
+        create_leaf(&database.pool, &conformant).await,
+        LeafCreation::Created { .. }
+    ));
+
+    let lock_sql = format!("SELECT pg_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let unlock_sql = format!("SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut holder = database.pool.acquire().await.expect("acquire lock holder");
+    sqlx::query(&lock_sql)
+        .bind(class_key)
+        .bind(conformant.bounds().lower())
+        .execute(&mut *holder)
+        .await
+        .expect("hold conformant leaf lock");
+    let mut transaction = database.pool.begin().await.expect("begin fast path");
+    let fast_path = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        create_daily_leaf(
+            transaction.as_mut(),
+            &CreateDailyHistoryLeaf::new(conformant.clone()).expect("conformant command"),
+            &UnpublishedLoader,
+        ),
+    )
+    .await
+    .expect("conformant fast path must not wait")
+    .expect("conformant fast path");
+    assert!(matches!(fast_path, LeafCreation::AlreadyConformant { .. }));
+    transaction.rollback().await.expect("rollback fast path");
+    let released: bool = sqlx::query_scalar(&unlock_sql)
+        .bind(class_key)
+        .bind(conformant.bounds().lower())
+        .fetch_one(&mut *holder)
+        .await
+        .expect("unlock conformant leaf");
+    assert!(released);
+
+    let missing = leaf_ref(&parent, class_key, today + Duration::days(10));
+    sqlx::query(&lock_sql)
+        .bind(class_key)
+        .bind(missing.bounds().lower())
+        .execute(&mut *holder)
+        .await
+        .expect("hold missing leaf lock");
+    let mut transaction = database.pool.begin().await.expect("begin busy create");
+    let busy = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        create_daily_leaf(
+            transaction.as_mut(),
+            &CreateDailyHistoryLeaf::new(missing.clone()).expect("missing command"),
+            &UnpublishedLoader,
+        ),
+    )
+    .await
+    .expect("busy create must not wait")
+    .expect("busy create outcome");
+    assert_eq!(
+        busy,
+        LeafCreation::Busy {
+            leaf_name: missing.leaf_name().to_owned(),
+        }
+    );
+    transaction.rollback().await.expect("rollback busy create");
+    let released: bool = sqlx::query_scalar(&unlock_sql)
+        .bind(class_key)
+        .bind(missing.bounds().lower())
+        .fetch_one(&mut *holder)
+        .await
+        .expect("unlock missing leaf");
+    assert!(released);
+    drop(holder);
+
+    let table_locked = leaf_ref(&parent, class_key, today + Duration::days(11));
+    let mut parent_holder = database.pool.begin().await.expect("begin parent lock");
+    sqlx::query(&format!("LOCK TABLE {parent} IN ACCESS SHARE MODE"))
+        .execute(parent_holder.as_mut())
+        .await
+        .expect("hold parent relation lock");
+    let mut transaction = database
+        .pool
+        .begin()
+        .await
+        .expect("begin parent-busy create");
+    let busy = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        create_daily_leaf(
+            transaction.as_mut(),
+            &CreateDailyHistoryLeaf::new(table_locked.clone()).expect("table-locked command"),
+            &UnpublishedLoader,
+        ),
+    )
+    .await
+    .expect("parent-busy create must not wait")
+    .expect("parent-busy create outcome");
+    assert_eq!(
+        busy,
+        LeafCreation::Busy {
+            leaf_name: table_locked.leaf_name().to_owned(),
+        }
+    );
+    transaction
+        .rollback()
+        .await
+        .expect("rollback parent-busy create");
+    parent_holder
+        .rollback()
+        .await
+        .expect("release parent relation lock");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn detach_returns_busy_without_waiting_for_a_leaf_session_lock() {
+    let database = TestDatabase::create_with_connections(3).await;
+    let class_key = "p3_nb_detach";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let now = database_now(&mut clock).await.expect("database now");
+    drop(clock);
+    let lower = (now - Duration::days(5))
+        .with_hour(0)
+        .and_then(|value| value.with_minute(0))
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate expired day");
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+
+    let lock_sql = format!("SELECT pg_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let unlock_sql = format!("SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut holder = database.pool.acquire().await.expect("acquire lock holder");
+    sqlx::query(&lock_sql)
+        .bind(class_key)
+        .bind(lower)
+        .execute(&mut *holder)
+        .await
+        .expect("hold detach leaf lock");
+    let command =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine),
+    )
+    .await
+    .expect("busy detach must not wait")
+    .expect("busy detach outcome");
+    assert_eq!(
+        outcome,
+        DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }
+    );
+    let released: bool = sqlx::query_scalar(&unlock_sql)
+        .bind(class_key)
+        .bind(lower)
+        .fetch_one(&mut *holder)
+        .await
+        .expect("unlock detach leaf");
+    assert!(released);
+    drop(holder);
+
+    let mut parent_holder = database.pool.begin().await.expect("begin parent lock");
+    sqlx::query(&format!(
+        "LOCK TABLE {parent} IN SHARE UPDATE EXCLUSIVE MODE"
+    ))
+    .execute(parent_holder.as_mut())
+    .await
+    .expect("hold detach parent lock");
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        detach_expired_leaf(&database.pool, &command, &UnpublishedLoader, &NoQuarantine),
+    )
+    .await
+    .expect("parent-busy detach must be bounded")
+    .expect("parent-busy detach outcome");
+    assert_eq!(
+        outcome,
+        DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }
+    );
+    parent_holder
+        .rollback()
+        .await
+        .expect("release detach parent lock");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn cancelled_detach_closes_its_connection_and_releases_the_session_lock() {
+    let database = TestDatabase::create_with_connections(3).await;
+    let class_key = "p3_cancel_detach";
+    let parent = register_class(&database.pool, class_key, 1).await;
+    let mut clock = database.pool.acquire().await.expect("acquire clock");
+    let now = database_now(&mut clock).await.expect("database now");
+    drop(clock);
+    let lower = (now - Duration::days(5))
+        .with_hour(0)
+        .and_then(|value| value.with_minute(0))
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate expired day");
+    let leaf = leaf_ref(&parent, class_key, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let publisher = BlockingPublisher {
+        entered: Arc::clone(&entered),
+        release,
+    };
+    let command =
+        DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).expect("detach command");
+    let pool = database.pool.clone();
+    let detach = tokio::spawn(async move {
+        detach_expired_leaf(&pool, &command, &publisher, &NoQuarantine).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+        .await
+        .expect("detach reached publication while holding the lock");
+    detach.abort();
+    assert!(detach
+        .await
+        .expect_err("detach must be cancelled")
+        .is_cancelled());
+
+    let try_sql = format!("SELECT pg_try_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let unlock_sql = format!("SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut probe = database.pool.acquire().await.expect("acquire lock probe");
+    let mut acquired = false;
+    for _ in 0..20 {
+        acquired = sqlx::query_scalar(&try_sql)
+            .bind(class_key)
+            .bind(lower)
+            .fetch_one(&mut *probe)
+            .await
+            .expect("try cancelled detach lock");
+        if acquired {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(acquired, "cancelled detach must release its session lock");
+    let released: bool = sqlx::query_scalar(&unlock_sql)
+        .bind(class_key)
+        .bind(lower)
+        .fetch_one(&mut *probe)
+        .await
+        .expect("release lock probe");
+    assert!(released);
+    drop(probe);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("pool coverage");
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    let advisory_locks: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+         FROM pg_locks
+         WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .expect("count advisory locks");
+    assert_eq!(advisory_locks, 0);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
 async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconciles_catalog() {
     let database = TestDatabase::create().await;
     let class_key = "p3_retire_1d";
@@ -571,6 +898,10 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         .execute(&database.pool)
         .await
         .expect("set prior timeout");
+    sqlx::query("SELECT set_config('lock_timeout', '3s', false)")
+        .execute(&database.pool)
+        .await
+        .expect("set prior lock timeout");
     let detached = detach_expired_leaf(&database.pool, &detach, &UnpublishedLoader, &NoQuarantine)
         .await
         .expect("detach expired leaf");
@@ -583,6 +914,11 @@ async fn pending_blocker_refuses_then_detach_restores_timeout_and_drop_reconcile
         .await
         .expect("read restored timeout");
     assert_eq!(timeout, "17s");
+    let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+        .fetch_one(&database.pool)
+        .await
+        .expect("read restored lock timeout");
+    assert_eq!(lock_timeout, "3s");
     let mut transaction = database.pool.begin().await.expect("begin drop");
     let dropped = drop_detached_leaf(
         &mut transaction,

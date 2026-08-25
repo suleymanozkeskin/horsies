@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::broker::{ClaimedTaskRow, NotifyListener, PostgresBroker};
 use crate::core::config::app::AppConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_startup_coverage, DeclaredRetentionClass, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, DeclaredRetentionClass, StartupCoverageOutcome,
 };
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::core::registry::task::TaskRegistry;
@@ -262,9 +262,8 @@ impl Worker {
                 duration: class.duration,
             })
             .collect();
-        let mut coverage_tx = self.broker.pool().begin().await?;
-        let startup_coverage = ensure_startup_coverage(
-            coverage_tx.as_mut(),
+        let startup_coverage = ensure_startup_coverage_in_pool(
+            self.broker.session_pool(),
             self.app_config.retention.history_leaf_horizon_days,
             self.app_config.retention.heartbeat_leaf_horizon_hours,
             &declared_classes,
@@ -273,11 +272,9 @@ impl Worker {
         .await?;
         match startup_coverage {
             StartupCoverageOutcome::Ready(outcome) => {
-                coverage_tx.commit().await?;
                 tracing::info!(outcome = ?outcome, "task-history startup coverage ready");
             }
             StartupCoverageOutcome::Refused(outcome) => {
-                coverage_tx.rollback().await?;
                 return Err(WorkerError::Config(format!(
                     "task-history startup coverage refused: {outcome:?}"
                 )));
@@ -382,6 +379,7 @@ impl Worker {
         let reaper_health = new_reaper_health();
         let reaper = spawn_reaper(
             self.broker.pool().clone(),
+            self.broker.session_pool().clone(),
             Arc::clone(&self.workflow_registry),
             self.app_config.recovery.clone(),
             self.app_config.payload.clone(),
@@ -1367,8 +1365,12 @@ mod tests {
             .find("ensure_schema_initialized().await")
             .expect("schema authorization");
         let coverage = run
-            .find("ensure_startup_coverage(")
+            .find("ensure_startup_coverage_in_pool(")
             .expect("startup partition coverage");
+        let session_pool = run[coverage..]
+            .find("self.broker.session_pool()")
+            .map(|offset| coverage + offset)
+            .expect("startup coverage session pool");
         let banner = run.find("print_banner(").expect("startup banner");
         let listener = run
             .find("connect_listener_with_resilience().await")
@@ -1377,7 +1379,13 @@ mod tests {
             .find("spawn_claimer_heartbeat")
             .expect("heartbeat writer startup");
         let claims = run.find("claim_batch(").expect("claim loop");
+        let reaper = run.find("spawn_reaper(").expect("reaper startup");
+        let reaper_call = &run[reaper..reaper + 500];
+        assert!(reaper_call.contains("self.broker.pool().clone()"));
+        assert!(reaper_call.contains("self.broker.session_pool().clone()"));
         assert!(schema < coverage);
+        assert!(coverage < session_pool);
+        assert!(session_pool < banner);
         assert!(coverage < banner);
         assert!(coverage < listener);
         assert!(coverage < heartbeats);

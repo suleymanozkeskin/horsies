@@ -13,7 +13,7 @@ use crate::core::config::payload::PayloadPolicy;
 use crate::core::config::recovery::RecoveryConfig;
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::maintenance::coverage::{
-    ensure_partition_coverage, CoverageOutcome, DeclaredRetentionClass,
+    ensure_partition_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
 };
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
@@ -308,6 +308,7 @@ mod p7_maintenance_tests {
 
         run_reaper_pass(
             &pool,
+            &pool,
             &WorkflowSpecRegistry::new(),
             &recovery,
             &PayloadPolicy::default(),
@@ -373,6 +374,7 @@ mod p7_maintenance_tests {
         let mut orphan_state = OrphanSweepState::default();
 
         run_reaper_pass(
+            &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
             &recovery,
@@ -555,6 +557,7 @@ mod p7_maintenance_tests {
         let mut next_partition_maintenance = tokio::time::Instant::now();
         let mut orphan_state = OrphanSweepState::default();
         run_reaper_pass(
+            &pool,
             &pool,
             &WorkflowSpecRegistry::new(),
             &recovery,
@@ -836,7 +839,8 @@ pub fn new_reaper_health() -> ReaperHealth {
 /// as FAILED or requeuing them respectively.
 #[allow(clippy::needless_pass_by_value)]
 pub fn spawn_reaper(
-    pool: PgPool,
+    runtime_pool: PgPool,
+    maintenance_pool: PgPool,
     registry: Arc<WorkflowSpecRegistry>,
     config: RecoveryConfig,
     payload: PayloadPolicy,
@@ -865,15 +869,15 @@ pub fn spawn_reaper(
                     // Cluster-wide gate: only one worker runs a pass per interval.
                     // The passes are safe to run concurrently (SKIP LOCKED), but
                     // redundant across a cluster; the gate elides the duplicate work.
-                    match acquire_gate(&pool, advisory_key_reaper()).await {
+                    match acquire_gate(&runtime_pool, advisory_key_reaper()).await {
                         GatePass::Skip => {
                             tracing::debug!("reaper pass skipped: another worker holds the gate");
                         }
                         GatePass::Ungated => {
-                            run_reaper_pass(&pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
+                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
                         }
                         GatePass::Held(tx) => {
-                            run_reaper_pass(&pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
+                            run_reaper_pass(&runtime_pool, &maintenance_pool, &registry, &config, &payload, &retention, &health, &mut next_retention_cleanup, &mut next_partition_maintenance, &mut orphan_state).await;
                             release_gate(tx).await;
                         }
                     }
@@ -962,7 +966,8 @@ async fn release_gate(tx: sqlx::Transaction<'static, sqlx::Postgres>) {
 /// Run one reaper pass: stale-RUNNING recovery, PENDING expiry, stale-CLAIMED
 /// requeue, and periodic retention cleanup.
 async fn run_reaper_pass(
-    pool: &PgPool,
+    runtime_pool: &PgPool,
+    maintenance_pool: &PgPool,
     registry: &WorkflowSpecRegistry,
     config: &RecoveryConfig,
     payload: &PayloadPolicy,
@@ -976,7 +981,7 @@ async fn run_reaper_pass(
         let threshold_secs = config.running_stale_threshold_ms as f64 / 1000.0;
         let finalizing_threshold_secs = config.finalizing_stale_threshold_ms as f64 / 1000.0;
         match mark_stale_running_as_failed(
-            pool,
+            runtime_pool,
             threshold_secs,
             finalizing_threshold_secs,
             STALE_RUNNING_SCAN_LIMIT,
@@ -994,7 +999,7 @@ async fn run_reaper_pass(
     }
 
     // Expire unclaimed PENDING tasks whose good_until has passed.
-    match expire_pending_tasks(pool).await {
+    match expire_pending_tasks(runtime_pool).await {
         Ok(count) if count > 0 => {
             tracing::info!(count, "reaper expired unclaimed PENDING tasks");
         }
@@ -1006,7 +1011,7 @@ async fn run_reaper_pass(
 
     if config.auto_requeue_stale_claimed {
         let threshold_secs = config.claimed_stale_threshold_ms as f64 / 1000.0;
-        match requeue_stale_claimed(pool, threshold_secs).await {
+        match requeue_stale_claimed(runtime_pool, threshold_secs).await {
             Ok(count) if count > 0 => {
                 tracing::info!(count, "reaper requeued stale CLAIMED tasks");
             }
@@ -1022,7 +1027,7 @@ async fn run_reaper_pass(
     // otherwise stay CLAIMED forever; cancelling frees claim budget and lets
     // retention sweep them.
     if config.auto_terminate_orphaned_workflow_tasks && !orphan_state.disabled {
-        match terminate_orphaned_workflow_tasks(pool).await {
+        match terminate_orphaned_workflow_tasks(runtime_pool).await {
             Ok(count) => {
                 orphan_state.permanent_failures = 0;
                 if count > 0 {
@@ -1065,7 +1070,7 @@ async fn run_reaper_pass(
     // Exact outbox recovery. Each candidate owns its transaction; retaining
     // dispositions remain visible and count toward bounded quarantine.
     let workflow_recovery = crate::workflow_engine::recovery::recover_stuck_workflows(
-        pool,
+        runtime_pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
         payload,
@@ -1083,7 +1088,7 @@ async fn run_reaper_pass(
     });
 
     let phase2 = crate::workflow_engine::phase2_recovery::drive_phase2_recovery(
-        pool,
+        runtime_pool,
         registry,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
@@ -1109,13 +1114,15 @@ async fn run_reaper_pass(
 
     // Retention cleanup (runs every retention_sweep_interval_s).
     if tokio::time::Instant::now() >= *next_retention_cleanup {
-        run_retention_cleanup(pool, retention).await;
+        run_retention_cleanup(runtime_pool, retention).await;
         *next_retention_cleanup =
             tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
     }
 
     if let Some(age) = retention.paused_workflow_auto_cancel_after {
-        match crate::workflow_engine::lifecycle::expire_paused_workflows(pool, age, 50).await {
+        match crate::workflow_engine::lifecycle::expire_paused_workflows(runtime_pool, age, 50)
+            .await
+        {
             Ok(count) if count > 0 => {
                 tracing::info!(
                     count,
@@ -1138,50 +1145,40 @@ async fn run_reaper_pass(
                 duration: class.duration,
             })
             .collect();
-        let coverage_health = match pool.begin().await {
-            Ok(mut transaction) => match ensure_partition_coverage(
-                transaction.as_mut(),
-                retention.history_leaf_horizon_days,
-                retention.heartbeat_leaf_horizon_hours,
-                &declared,
-                &StagedLoaderPublisher,
-            )
-            .await
-            {
-                Ok(outcome) => {
-                    let encoded = match &outcome {
-                        CoverageOutcome::Ensured(ensured) => serde_json::json!({
-                            "state": "ensured",
-                            "created_history_leaves": ensured.created_history_leaves,
-                            "created_heartbeat_leaves": ensured.created_heartbeat_leaves,
-                            "republished": ensured.republished,
-                            "heartbeat_covered_now": ensured.heartbeat_covered_now,
-                            "history_covered_through": ensured.history_covered_through,
-                            "heartbeats_covered_through": ensured.heartbeats_covered_through,
-                            "absent_leaves": ensured.absent_leaves,
-                        }),
-                        CoverageOutcome::Failed(failed) => serde_json::json!({
-                            "state": "failed",
-                            "stage": failed.stage,
-                            "class_key": failed.class_key,
-                            "refusal": failed.refusal,
-                            "heartbeat_covered_now": failed.heartbeat_covered_now,
-                            "absent_leaves": failed.absent_leaves,
-                        }),
-                    };
-                    if let Err(error) = transaction.commit().await {
-                        tracing::error!(%error, "partition coverage commit failed");
-                    }
-                    Some(encoded)
-                }
-                Err(error) => {
-                    let _ = transaction.rollback().await;
-                    tracing::error!(%error, "partition coverage ensure failed");
-                    Some(serde_json::json!({"state": "error", "error": error.to_string()}))
-                }
-            },
+        let coverage_health = match ensure_partition_coverage_in_pool(
+            maintenance_pool,
+            retention.history_leaf_horizon_days,
+            retention.heartbeat_leaf_horizon_hours,
+            &declared,
+            &StagedLoaderPublisher,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                let encoded = match &outcome {
+                    CoverageOutcome::Ensured(ensured) => serde_json::json!({
+                        "state": "ensured",
+                        "created_history_leaves": ensured.created_history_leaves,
+                        "created_heartbeat_leaves": ensured.created_heartbeat_leaves,
+                        "republished": ensured.republished,
+                        "heartbeat_covered_now": ensured.heartbeat_covered_now,
+                        "history_covered_through": ensured.history_covered_through,
+                        "heartbeats_covered_through": ensured.heartbeats_covered_through,
+                        "absent_leaves": ensured.absent_leaves,
+                    }),
+                    CoverageOutcome::Failed(failed) => serde_json::json!({
+                        "state": "failed",
+                        "stage": failed.stage,
+                        "class_key": failed.class_key,
+                        "refusal": failed.refusal,
+                        "heartbeat_covered_now": failed.heartbeat_covered_now,
+                        "absent_leaves": failed.absent_leaves,
+                    }),
+                };
+                Some(encoded)
+            }
             Err(error) => {
-                tracing::error!(%error, "partition coverage transaction failed");
+                tracing::error!(%error, "partition coverage ensure failed");
                 Some(serde_json::json!({"state": "error", "error": error.to_string()}))
             }
         };
@@ -1189,7 +1186,7 @@ async fn run_reaper_pass(
 
         // Coverage and pruning are independently contained: either half runs
         // and publishes health even when the other refuses.
-        let prune = prune_expired_partitions(pool, &StagedLoaderPublisher).await;
+        let prune = prune_expired_partitions(maintenance_pool, &StagedLoaderPublisher).await;
         health.write().await.partition_pruning = Some(serde_json::json!({
             "finalized": prune.finalized_leaves.len(),
             "detached": prune.detached_count(),

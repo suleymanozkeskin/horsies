@@ -15,7 +15,7 @@ use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_C
 use crate::core::history::outcomes::{LeafDrop, LeafInspection};
 use crate::core::history::partitions::manager::{
     detach_expired_leaf, drop_detached_leaf, finalize_interrupted_detach, inspect_leaf,
-    DetachExpiredLeafOutcome, NoQuarantine,
+    DetachExpiredLeafOutcome, FinalizeInterruptedLeafOutcome, NoQuarantine,
 };
 use crate::core::history::partitions::publication::LoaderPublication;
 
@@ -162,7 +162,9 @@ async fn finalize_interrupted_detaches<P: LoaderPublication>(
             }
         };
         match finalize_interrupted_detach(pool, &command, publisher).await {
-            Ok(LeafInspection::Detached { .. }) => finalized.push(leaf.leaf_name().to_owned()),
+            Ok(FinalizeInterruptedLeafOutcome::Inspection(LeafInspection::Detached { .. })) => {
+                finalized.push(leaf.leaf_name().to_owned());
+            }
             Ok(outcome) => refusals.push(format!("finalize {}: {outcome:?}", leaf.leaf_name())),
             Err(error) => errors.push(format!("finalize {}: {error}", leaf.leaf_name())),
         }
@@ -232,6 +234,7 @@ pub async fn sweep_expired_history_leaves<P: LoaderPublication>(
     (swept, errors)
 }
 
+/// Prune expired partitions through a direct or session-capable pool.
 pub async fn prune_expired_partitions<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,

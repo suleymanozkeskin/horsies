@@ -30,7 +30,7 @@ use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::archive::rerun_input::RerunInputDisposition;
 use crate::core::history::archive::versions::archive_digest;
 use crate::core::history::maintenance::coverage::{ensure_partition_coverage, CoverageOutcome};
-use crate::core::history::names::TASK_HISTORY_PARENT;
+use crate::core::history::names::{LEAF_LOCK_KEY_FUNCTION, TASK_HISTORY_PARENT};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 use crate::worker::cli::{Cli, Command};
 
@@ -136,13 +136,18 @@ impl P10Database {
         let mut admin = PgConnection::connect_with(&self.base_options.database("postgres"))
             .await
             .unwrap();
-        let active: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = $1")
-                .bind(&self.name)
-                .fetch_one(&mut admin)
-                .await
-                .unwrap();
-        assert_eq!(active, 0, "generated P10 database still has sessions");
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity
+             WHERE datname = $1 AND backend_type = 'client backend'",
+        )
+        .bind(&self.name)
+        .fetch_one(&mut admin)
+        .await
+        .unwrap();
+        assert_eq!(
+            active, 0,
+            "generated P10 database still has client sessions"
+        );
         sqlx::query(&format!("DROP DATABASE \"{}\"", self.name))
             .execute(&mut admin)
             .await
@@ -335,6 +340,7 @@ fn vocabulary_transforms_signature_and_cli_are_pinned() {
     assert_eq!(BLOCKER_QUERY_TRUNCATION_CHARS, 1024);
     assert_eq!(SwapLockMode::Parent.as_str(), "ACCESS_EXCLUSIVE");
     assert_eq!(SwapLockMode::Leaves.as_str(), "SHARE");
+    assert_eq!(SwapLockMode::LeafAdvisory.as_str(), "ADVISORY");
     for component in ArchiveComponent::ALL {
         assert_eq!(ArchiveComponent::parse(component.as_str()), Some(component));
         let columns = component_columns(component);
@@ -1067,6 +1073,44 @@ async fn swap_nowait_exhaustion_reports_parent_and_leaf_blockers() {
         transaction.rollback().await.unwrap();
         relation
     };
+
+    let (class_key, lower_anchor): (String, chrono::DateTime<Utc>) = sqlx::query_as(
+        "SELECT class_key, lower_anchor FROM horsies_task_history_leaf_catalog WHERE leaf_name = $1",
+    )
+    .bind(&relation.source_relation_name)
+    .fetch_one(&database.pool)
+    .await
+    .unwrap();
+    let advisory_lock_sql = format!("SELECT pg_advisory_lock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let advisory_unlock_sql =
+        format!("SELECT pg_advisory_unlock({LEAF_LOCK_KEY_FUNCTION}($1, $2))");
+    let mut advisory_holder = database.pool.acquire().await.unwrap();
+    sqlx::query(&advisory_lock_sql)
+        .bind(&class_key)
+        .bind(lower_anchor)
+        .execute(&mut *advisory_holder)
+        .await
+        .unwrap();
+    let exhausted = swap_with_retry_policy(&database.pool, job_id, 2, Duration::from_millis(1))
+        .await
+        .unwrap();
+    let TranscodeSwapOutcome::Exhausted(exhausted) = exhausted else {
+        panic!("expected advisory-lock exhaustion");
+    };
+    assert_eq!(exhausted.lock_mode, SwapLockMode::LeafAdvisory);
+    assert_eq!(
+        exhausted.relation_names,
+        vec![relation.source_relation_name.clone()]
+    );
+    assert!(exhausted.blocker_capture_failed);
+    let unlocked: bool = sqlx::query_scalar(&advisory_unlock_sql)
+        .bind(&class_key)
+        .bind(lower_anchor)
+        .fetch_one(&mut *advisory_holder)
+        .await
+        .unwrap();
+    assert!(unlocked);
+    drop(advisory_holder);
 
     let mut parent_holder = database.pool.begin().await.unwrap();
     sqlx::query("LOCK TABLE horsies_task_history IN ACCESS SHARE MODE")

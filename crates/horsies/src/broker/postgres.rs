@@ -867,7 +867,8 @@ impl PostgresBroker {
         &self.pool
     }
 
-    /// Get the session-capable pool used for schema and LISTEN/NOTIFY.
+    /// Get the session-capable pool used for schema work, partition
+    /// maintenance, and LISTEN/NOTIFY.
     pub fn session_pool(&self) -> &PgPool {
         &self.session_pool
     }

@@ -9,6 +9,13 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Fixed
 
+- Partition startup and periodic maintenance now use the session-capable
+  database pool. PgBouncer transaction-pool connections no longer run session
+  advisory locks or partition DDL.
+- Conformant partition leaves no longer take an advisory lock. Required leaf
+  mutations use `pg_try_advisory_*`, use `NOWAIT` for relation locks, return a
+  typed busy result, and commit one leaf per transaction. Concurrent detach
+  relation waits have a two-second `lock_timeout`.
 - Delayed-retry and stale-task retry wake-ups now send the task UUID to
   PostgreSQL `pg_notify` as text. PostgreSQL rejected the previous UUID bind.
   The retry state stayed durable and worker polling found it later, but the
@@ -16,6 +23,9 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Changed
 
+- Partition mutation outcomes now include explicit `Busy` variants.
+  `finalize_interrupted_detach` now returns
+  `FinalizeInterruptedLeafOutcome`.
 - The monitoring `/api/tasks/stats` route now caches each successful request
   scope for 10 seconds. Concurrent requests for the same scope share one
   aggregate query. Errors are not cached. The cache holds at most 256 scopes.

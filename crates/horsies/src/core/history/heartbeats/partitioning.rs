@@ -17,7 +17,9 @@ use crate::core::history::partitions::catalog::{
     capture_partition_bound_utc, database_now, read_leaf_catalog_row, read_leaf_physical_state,
     read_retention_class, INDEX_SCHEMA_VERSION,
 };
-use crate::core::history::partitions::locks::lock_leaf_for_transaction;
+use crate::core::history::partitions::locks::{
+    try_lock_leaf_for_transaction, try_lock_relation_exclusive_for_transaction, LeafLockAttempt,
+};
 use crate::core::history::partitions::manager::{
     detach_expired_leaf, drop_detached_leaf, inspect_leaf, DetachExpiredLeafOutcome, NoQuarantine,
 };
@@ -224,7 +226,19 @@ pub async fn create_hourly_heartbeat_leaf(
             class_key: leaf.class_key().to_owned(),
         });
     }
-    lock_leaf_for_transaction(connection, leaf.class_key(), leaf.bounds().lower()).await?;
+    if heartbeat_leaf_is_conformant(connection, leaf).await? {
+        return Ok(LeafCreation::AlreadyConformant {
+            leaf_name: leaf.leaf_name().to_owned(),
+        });
+    }
+    if matches!(
+        try_lock_leaf_for_transaction(connection, leaf.class_key(), leaf.bounds().lower()).await?,
+        LeafLockAttempt::Busy
+    ) {
+        return Ok(LeafCreation::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        });
+    }
     let index_name = probe_index_name(leaf.leaf_name())?;
     let catalog = read_leaf_catalog_row(connection, leaf.leaf_name()).await?;
     let physical = read_leaf_physical_state(
@@ -268,6 +282,14 @@ pub async fn create_hourly_heartbeat_leaf(
             });
         }
         if !physical.id_index_exists {
+            if matches!(
+                try_lock_relation_exclusive_for_transaction(connection, leaf.leaf_name()).await?,
+                LeafLockAttempt::Busy
+            ) {
+                return Ok(LeafCreation::Busy {
+                    leaf_name: leaf.leaf_name().to_owned(),
+                });
+            }
             sqlx::query(&format!(
                 "CREATE INDEX {} ON {} (task_id, role, sent_at DESC)",
                 catalog.id_index_name,
@@ -281,6 +303,14 @@ pub async fn create_hourly_heartbeat_leaf(
             });
         }
         return Ok(LeafCreation::AlreadyConformant {
+            leaf_name: leaf.leaf_name().to_owned(),
+        });
+    }
+    if matches!(
+        try_lock_relation_exclusive_for_transaction(connection, HEARTBEATS_TABLE).await?,
+        LeafLockAttempt::Busy
+    ) {
+        return Ok(LeafCreation::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
         });
     }
@@ -321,22 +351,41 @@ pub async fn create_hourly_heartbeat_leaf(
     })
 }
 
+async fn heartbeat_leaf_is_conformant(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+) -> Result<bool, HistoryError> {
+    let Some(catalog) = read_leaf_catalog_row(connection, leaf.leaf_name()).await? else {
+        return Ok(false);
+    };
+    if catalog.parent_name != HEARTBEATS_TABLE
+        || catalog.class_key != leaf.class_key()
+        || catalog.lower_anchor != leaf.bounds().lower()
+        || catalog.upper_anchor != leaf.bounds().upper()
+        || catalog.dropped_at.is_some()
+    {
+        return Ok(false);
+    }
+    let physical = read_leaf_physical_state(
+        connection,
+        leaf.leaf_name(),
+        HEARTBEATS_TABLE,
+        &catalog.id_index_name,
+    )
+    .await?;
+    Ok(physical.relation_exists
+        && physical.id_index_exists
+        && physical.partition_bound.as_deref() == Some(catalog.partition_bound.as_str()))
+}
+
 pub async fn ensure_heartbeat_coverage(
     connection: &mut PgConnection,
     command: &EnsureHeartbeatCoverage,
 ) -> Result<Vec<LeafCreation>, HistoryError> {
-    let now = database_now(connection).await?;
-    let hour = now
-        .with_minute(0)
-        .and_then(|value| value.with_second(0))
-        .and_then(|value| value.with_nanosecond(0))
-        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
-    let mut outcomes = Vec::with_capacity(command.horizon_hours() as usize + 1);
-    for offset in 0..=command.horizon_hours() {
-        let leaf = hourly_leaf_ref(hour + Duration::hours(i64::from(offset)))?;
-        let outcome =
-            create_hourly_heartbeat_leaf(connection, &CreateHourlyHeartbeatLeaf::new(leaf)?)
-                .await?;
+    let commands = plan_heartbeat_coverage(connection, command).await?;
+    let mut outcomes = Vec::with_capacity(commands.len());
+    for create in commands {
+        let outcome = create_hourly_heartbeat_leaf(connection, &create).await?;
         let keep_going = matches!(
             outcome,
             LeafCreation::Created { .. }
@@ -351,6 +400,24 @@ pub async fn ensure_heartbeat_coverage(
     Ok(outcomes)
 }
 
+pub(crate) async fn plan_heartbeat_coverage(
+    connection: &mut PgConnection,
+    command: &EnsureHeartbeatCoverage,
+) -> Result<Vec<CreateHourlyHeartbeatLeaf>, HistoryError> {
+    let now = database_now(connection).await?;
+    let hour = now
+        .with_minute(0)
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .ok_or_else(|| HistoryError::contract("database timestamp cannot be truncated"))?;
+    let mut commands = Vec::with_capacity(command.horizon_hours() as usize + 1);
+    for offset in 0..=command.horizon_hours() {
+        let leaf = hourly_leaf_ref(hour + Duration::hours(i64::from(offset)))?;
+        commands.push(CreateHourlyHeartbeatLeaf::new(leaf)?);
+    }
+    Ok(commands)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeartbeatLeafSwept {
     pub leaf_name: String,
@@ -358,6 +425,7 @@ pub struct HeartbeatLeafSwept {
     pub drop: Option<LeafDrop>,
 }
 
+/// Sweep expired heartbeat leaves through a direct or session-capable pool.
 pub async fn sweep_expired_heartbeat_leaves<P: LoaderPublication>(
     pool: &PgPool,
     publisher: &P,
