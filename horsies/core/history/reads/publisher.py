@@ -34,7 +34,7 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..names import TASK_LOOKUP_MANIFEST
+from ..names import HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_LOOKUP_MANIFEST
 from ..partitions.catalog import read_manifest_leaf_rows
 from ..partitions.publication import LoaderRepublished
 from .lookup_generation import (
@@ -139,6 +139,59 @@ async def published_manifest_absent_leaves(
         )
     ).all()
     return tuple(str(row.leaf_name) for row in rows)
+
+
+async def published_manifest_matches_catalog(
+    connection: AsyncConnection,
+) -> bool:
+    """Whether every published leaf and its probe metadata are current."""
+    matches = (
+        await connection.execute(
+            text(
+                f"""
+                WITH expected AS (
+                    SELECT
+                        leaf_name,
+                        row_number() OVER (
+                            ORDER BY lower_anchor, leaf_name
+                        ) - 1 AS probe_position,
+                        lower_anchor,
+                        upper_anchor,
+                        min_birth_at
+                    FROM {LEAF_CATALOG}
+                    WHERE detached_at IS NULL
+                      AND dropped_at IS NULL
+                      AND class_key <> :heartbeat_class
+                      AND to_regclass(leaf_name) IS NOT NULL
+                ),
+                difference AS (
+                    (
+                        SELECT leaf_name, probe_position,
+                               lower_anchor, upper_anchor, min_birth_at
+                        FROM expected
+                        EXCEPT
+                        SELECT leaf_name, probe_position::bigint,
+                               lower_anchor, upper_anchor, min_birth_at
+                        FROM {TASK_LOOKUP_MANIFEST}
+                    )
+                    UNION ALL
+                    (
+                        SELECT leaf_name, probe_position::bigint,
+                               lower_anchor, upper_anchor, min_birth_at
+                        FROM {TASK_LOOKUP_MANIFEST}
+                        EXCEPT
+                        SELECT leaf_name, probe_position,
+                               lower_anchor, upper_anchor, min_birth_at
+                        FROM expected
+                    )
+                )
+                SELECT NOT EXISTS (SELECT 1 FROM difference)
+                """
+            ),
+            {'heartbeat_class': HEARTBEAT_CLASS_KEY},
+        )
+    ).scalar_one()
+    return bool(matches)
 
 
 async def _rewrite_manifest_table(

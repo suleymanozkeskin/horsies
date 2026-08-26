@@ -66,8 +66,10 @@ from ..outcomes import (
 )
 from ..partitions.catalog import (
     INDEX_SCHEMA_VERSION,
+    LeafIndexKind,
     LeafCatalogRow,
     LeafPhysicalState,
+    RequestedPartitionBounds,
     RetentionClassRow,
     capture_partition_bound_utc,
     database_now,
@@ -76,7 +78,11 @@ from ..partitions.catalog import (
     read_retention_class,
 )
 from ..partitions.locks import (
+    IndexRelationState,
+    IndexRemovalOutcome,
     LeafLockAttempt,
+    read_index_relation_state,
+    remove_attached_index_for_repair,
     try_lock_leaf_for_transaction,
     try_lock_relation_exclusive_for_transaction,
 )
@@ -344,7 +350,36 @@ async def create_hourly_heartbeat_leaf(
 
     index_name = probe_index_name(leaf.leaf_name)
     if catalog is not None:
-        if not state.physical.id_index_exists:
+        state = await _read_hourly_leaf_creation_state(connection, leaf)
+        if state.outcome is not None:
+            return state.outcome
+        catalog = state.catalog
+        if catalog is None:
+            raise AssertionError('cataloged heartbeat leaf lost its catalog row')
+        if not state.physical.id_index_conformant:
+            index_state = await read_index_relation_state(
+                connection,
+                leaf_name=leaf.leaf_name,
+                index_name=catalog.id_index_name,
+            )
+            match index_state:
+                case IndexRelationState.ABSENT:
+                    pass
+                case IndexRelationState.ATTACHED:
+                    removal = await remove_attached_index_for_repair(
+                        connection,
+                        leaf_name=leaf.leaf_name,
+                        index_name=catalog.id_index_name,
+                    )
+                    match removal:
+                        case IndexRemovalOutcome.BUSY:
+                            return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                        case IndexRemovalOutcome.FOREIGN:
+                            return _foreign_index_conflict(leaf.leaf_name)
+                        case IndexRemovalOutcome.ABSENT | IndexRemovalOutcome.REMOVED:
+                            pass
+                case IndexRelationState.FOREIGN:
+                    return _foreign_index_conflict(leaf.leaf_name)
             await connection.execute(
                 text(
                     f'CREATE INDEX {catalog.id_index_name} '
@@ -417,6 +452,8 @@ async def _read_hourly_leaf_creation_state(
         leaf_name=leaf.leaf_name,
         parent_name=HEARTBEATS_TABLE,
         id_index_name=(catalog.id_index_name if catalog is not None else index_name),
+        bound_expectation=RequestedPartitionBounds(leaf.bounds),
+        index_kind=LeafIndexKind.HEARTBEAT,
     )
     if not physical.parent_exists:
         raise HistoryParentAbsent(
@@ -444,6 +481,7 @@ async def _read_hourly_leaf_creation_state(
         or catalog.lower_anchor != leaf.bounds.lower
         or catalog.upper_anchor != leaf.bounds.upper
         or catalog.index_schema_version != INDEX_SCHEMA_VERSION
+        or catalog.detached_at is not None
         or catalog.dropped_at is not None
     ):
         outcome: LeafCreation | None = LeafCatalogConflict(
@@ -452,19 +490,33 @@ async def _read_hourly_leaf_creation_state(
             detail='existing leaf metadata differs from the request',
         )
         return _HourlyLeafCreationState(catalog, physical, outcome)
-    if physical.partition_bound != catalog.partition_bound:
+    if (
+        physical.partition_bound != catalog.partition_bound
+        or not physical.partition_bound_matches_expected
+    ):
         outcome = LeafCatalogConflict(
             leaf_name=leaf.leaf_name,
             kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
-            detail='attached leaf partition bound differs from catalog',
+            detail=(
+                'attached leaf partition bound differs from catalog or '
+                'requested bounds'
+            ),
         )
         return _HourlyLeafCreationState(catalog, physical, outcome)
     outcome = (
         LeafAlreadyConformant(leaf_name=leaf.leaf_name)
-        if physical.id_index_exists
+        if physical.id_index_conformant
         else None
     )
     return _HourlyLeafCreationState(catalog, physical, outcome)
+
+
+def _foreign_index_conflict(leaf_name: str) -> LeafCatalogConflict:
+    return LeafCatalogConflict(
+        leaf_name=leaf_name,
+        kind=CatalogConflictKind.PHYSICAL_NONCONFORMANT,
+        detail='cataloged heartbeat index name belongs to another relation',
+    )
 
 
 def hourly_leaf_ref(lower: datetime) -> LeafRef:

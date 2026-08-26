@@ -587,7 +587,8 @@ class PostgresBroker:
                 session_url, **self._session_engine_config()
             )
         self.partition_maintenance = PartitionMaintenanceDatabase(
-            self._session_engine
+            self._session_engine,
+            connection_capacity=self.config.pool_size + self.config.max_overflow,
         )
 
         if assume_initialized:

@@ -401,6 +401,7 @@ class ReaperMixin:
                         retention_cfg.heartbeat_leaf_horizon_hours
                     ),
                     declared_classes=retention_cfg.registrable_classes(),
+                    serialize_damaged_work=False,
                 )
                 # A leaf the catalog still calls attached whose relation
                 # is gone means someone dropped it behind the manager's

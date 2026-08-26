@@ -69,6 +69,8 @@ from ..ddl.tables import FOREVER_CLASS_KEY
 from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
 from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
 from ..partitions.catalog import (
+    CatalogPartitionBound,
+    LeafIndexKind,
     daily_leaf_name,
     read_leaf_catalog_row,
     read_leaf_physical_state,
@@ -459,6 +461,8 @@ async def _attached_legacy_forever_upper(
         leaf_name=catalog.leaf_name,
         parent_name=catalog.parent_name,
         id_index_name=catalog.id_index_name,
+        bound_expectation=CatalogPartitionBound(),
+        index_kind=LeafIndexKind.HISTORY,
     )
     conformant = (
         physical.detach_pending is False

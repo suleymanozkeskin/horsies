@@ -591,7 +591,9 @@ class TestSwapContention:
                 executor_module, 'SWAP_RETRY_BACKOFF_SECONDS', 0.01
             )
             exhausted = await swap_with_retries(
-                PartitionMaintenanceDatabase(terminalization_schema.engine),
+                PartitionMaintenanceDatabase(
+                    terminalization_schema.engine, connection_capacity=2
+                ),
                 job_id=job_id,
             )
             assert isinstance(exhausted, TranscodeSwapExhausted)
