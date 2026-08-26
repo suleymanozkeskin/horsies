@@ -8,7 +8,19 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-26
+
 ### Fixed
+
+- **Global recovery scans now have bounded work.** Durable `(created_at, id)`
+  cursors give each scan cycle a fixed upper bound. A global pass audits at
+  most 200 `RUNNING` workflows. An orphan-task pass audits at most 500 live
+  workflow tasks. Page claims prevent duplicate global scans, while
+  workflow-tree recovery stays uncapped inside the requested tree. Schema v36
+  adds exact partial recovery indexes and serializes their concurrent repair.
+  `RecoveryConfig.orphan_task_audit_interval_ms` sets the orphan-task audit
+  interval and defaults to 60 seconds. Worker health reports scan work,
+  duration, refusals, and errors.
 
 - **Partition maintenance now requires the session-capable database path.**
   It uses the same direct engine as schema DDL and `LISTEN`/`NOTIFY`.
@@ -26,6 +38,15 @@ and there is no migration contract between pre-1.0 versions.
   locks and rechecks the exact index relation before removal. Loader
   publication uses a final transaction and compares all manifest metadata.
   Partition health uses the same bound and index conformance rules.
+
+### Changed
+
+- **Fresh unkeyed enqueues now use one constant SQL statement and one
+  `AUTOCOMMIT` round trip.** The keyed reservation transaction and conflict
+  checks are unchanged. Task options are parsed once per enqueue. With
+  `send_async`, 64-way concurrency, a pool size of 10, and local PostgreSQL 18,
+  throughput increased from 880 to 2,105 sends per second and CPU time fell
+  from 1.08 ms to 0.43 ms per send.
 
 ## [0.5.2] - 2026-08-12
 
