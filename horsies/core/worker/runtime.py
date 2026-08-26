@@ -147,6 +147,7 @@ class _ReaperPassState:
     mark_failed_disabled: bool = False
     terminate_orphans_permanent_failures: int = 0
     terminate_orphans_disabled: bool = False
+    next_orphan_task_audit_at: float = 0.0
     next_retention_cleanup_at: float = 0.0
     next_partition_maintenance_at: float = 0.0
 

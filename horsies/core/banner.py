@@ -232,6 +232,11 @@ def print_banner(
     )
     _write_kv(
         lines,
+        'orphan_task_audit_interval',
+        _format_ms(recovery.orphan_task_audit_interval_ms),
+    )
+    _write_kv(
+        lines,
         'heartbeat_interval',
         _format_ms(recovery.runner_heartbeat_interval_ms),
     )

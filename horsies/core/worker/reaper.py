@@ -15,6 +15,7 @@ import hashlib
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
+from horsies.core.brokers.result_types import BrokerOperationError
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.worker.runtime import (
@@ -27,6 +28,7 @@ from horsies.core.worker.sql import (
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
+from horsies.core.workflows.recovery import RecoveryPassFailure
 
 if TYPE_CHECKING:
     from sqlalchemy import TextClause
@@ -39,6 +41,34 @@ if TYPE_CHECKING:
     from horsies.core.worker.config import WorkerConfig
 
 logger = get_logger('worker')
+
+
+def _operation_sqlstate(error: BrokerOperationError) -> str | None:
+    cause = error.exception
+    original = getattr(cause, 'orig', cause)
+    sqlstate = getattr(original, 'sqlstate', None)
+    if isinstance(sqlstate, str):
+        return sqlstate
+    pgcode = getattr(original, 'pgcode', None)
+    return pgcode if isinstance(pgcode, str) else None
+
+
+def _orphan_audit_failure_health(
+    error: BrokerOperationError,
+    *,
+    duration_ms: int,
+) -> dict[str, int | str]:
+    refused = _operation_sqlstate(error) == '55P03'
+    return {
+        'state': 'refused' if refused else 'error',
+        'rows_selected': 0,
+        'candidates_returned': 0,
+        'cancelled': 0,
+        'duration_ms': duration_ms,
+        'refusals': 1 if refused else 0,
+        'errors': 0 if refused else 1,
+        'error': error.message,
+    }
 
 
 class ReaperMixin:
@@ -54,6 +84,8 @@ class ReaperMixin:
         _partition_coverage_health: dict[str, Any] | None
         _partition_pruning_health: dict[str, Any] | None
         _phase2_recovery_health: dict[str, Any] | None
+        _workflow_recovery_health: dict[str, Any] | None
+        _orphan_task_recovery_health: dict[str, Any] | None
 
     def _advisory_key_reaper(self) -> int:
         """Fixed 64-bit key gating reaper passes (one reaper per interval)."""
@@ -126,42 +158,85 @@ class ReaperMixin:
         if (
             recovery_cfg.auto_terminate_orphaned_workflow_tasks
             and not state.terminate_orphans_disabled
+            and time.monotonic() >= state.next_orphan_task_audit_at
         ):
-            match await temp_broker.terminate_orphaned_workflow_tasks():
-                case Ok(terminated):
-                    state.terminate_orphans_permanent_failures = 0
-                    if terminated > 0:
+            orphan_audit_started = time.monotonic()
+            try:
+                match await temp_broker.audit_orphaned_workflow_tasks():
+                    case Ok(report):
+                        state.terminate_orphans_permanent_failures = 0
+                        self._orphan_task_recovery_health = report.health()
+                        if report.cancelled > 0:
+                            logger.warning(
+                                f'Reaper cancelled {report.cancelled} orphaned workflow '
+                                f'task(s) (no live workflow_task linkage)',
+                            )
+                    case Err(err) if _operation_sqlstate(err) == '55P03':
+                        state.terminate_orphans_permanent_failures = 0
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
+                        )
                         logger.warning(
-                            f'Reaper cancelled {terminated} orphaned workflow '
-                            f'task(s) (no live workflow_task linkage)',
+                            'Reaper orphan workflow-task audit lock was busy; '
+                            'the next scheduled audit will retry',
                         )
-                case Err(err) if err.retryable:
-                    state.terminate_orphans_permanent_failures = 0
-                    logger.warning(
-                        f'Reaper terminate_orphaned_workflow_tasks transient '
-                        f'failure (will retry next cycle): {err.message}',
-                    )
-                case Err(err):
-                    state.terminate_orphans_permanent_failures += 1
-                    if (
-                        state.terminate_orphans_permanent_failures
-                        >= _REAPER_MAX_PERMANENT_FAILURES
-                    ):
-                        state.terminate_orphans_disabled = True
-                        logger.critical(
-                            f'Reaper terminate_orphaned_workflow_tasks disabled '
-                            f'after {state.terminate_orphans_permanent_failures} '
-                            f'consecutive permanent failures. Last error: '
-                            f'{err.message}. Requires deploy or manual '
-                            f'intervention.',
+                    case Err(err) if err.retryable:
+                        state.terminate_orphans_permanent_failures = 0
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
                         )
-                    else:
                         logger.error(
-                            f'Reaper terminate_orphaned_workflow_tasks permanent '
-                            f'failure ({state.terminate_orphans_permanent_failures}/'
-                            f'{_REAPER_MAX_PERMANENT_FAILURES} before disable): '
+                            f'Reaper orphan workflow-task audit failed '
+                            f'transiently and will retry on its next schedule: '
                             f'{err.message}',
                         )
+                    case Err(err):
+                        self._orphan_task_recovery_health = (
+                            _orphan_audit_failure_health(
+                                err,
+                                duration_ms=int(
+                                    (time.monotonic() - orphan_audit_started)
+                                    * 1000
+                                ),
+                            )
+                        )
+                        state.terminate_orphans_permanent_failures += 1
+                        if (
+                            state.terminate_orphans_permanent_failures
+                            >= _REAPER_MAX_PERMANENT_FAILURES
+                        ):
+                            state.terminate_orphans_disabled = True
+                            logger.critical(
+                                f'Reaper terminate_orphaned_workflow_tasks disabled '
+                                f'after {state.terminate_orphans_permanent_failures} '
+                                f'consecutive permanent failures. Last error: '
+                                f'{err.message}. Requires deploy or manual '
+                                f'intervention.',
+                            )
+                        else:
+                            logger.error(
+                                f'Reaper terminate_orphaned_workflow_tasks permanent '
+                                f'failure ({state.terminate_orphans_permanent_failures}/'
+                                f'{_REAPER_MAX_PERMANENT_FAILURES} before disable): '
+                                f'{err.message}',
+                            )
+            finally:
+                state.next_orphan_task_audit_at = (
+                    time.monotonic()
+                    + recovery_cfg.orphan_task_audit_interval_ms / 1000.0
+                )
 
         # Auto-fail stale RUNNING tasks
         if (
@@ -224,17 +299,27 @@ class ReaperMixin:
         # Recover stuck workflows
         try:
             from horsies.core.workflows.recovery import (
-                recover_stuck_workflows,
+                recover_stuck_workflows_global,
             )
 
-            async with temp_broker.session_factory() as s:
-                recovered = await recover_stuck_workflows(s, temp_broker)
-                if recovered > 0:
-                    logger.info(
-                        f'Reaper recovered {recovered} stuck workflow task(s)'
-                    )
-                await s.commit()
+            recovery_report = await recover_stuck_workflows_global(
+                temp_broker.session_factory,
+                temp_broker,
+            )
+            self._workflow_recovery_health = recovery_report.health()
+            if recovery_report.recovered > 0:
+                logger.info(
+                    f'Reaper recovered {recovery_report.recovered} stuck '
+                    f'workflow item(s)'
+                )
+        except RecoveryPassFailure as wf_err:
+            self._workflow_recovery_health = wf_err.health()
+            logger.error(f'Workflow recovery error: {wf_err.error}')
         except Exception as wf_err:
+            self._workflow_recovery_health = {
+                'state': 'error',
+                'error': str(wf_err),
+            }
             logger.error(f'Workflow recovery error: {wf_err}')
 
         # Phase-2 recovery: the crashed-worker case, driven by the

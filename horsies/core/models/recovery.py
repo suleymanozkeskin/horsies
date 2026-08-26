@@ -1,5 +1,6 @@
 # horsies/core/models/recovery.py
 from __future__ import annotations
+from dataclasses import asdict, dataclass
 from typing import Annotated, Self, cast
 from pydantic import BaseModel, Field, model_validator
 from horsies.core.errors import (
@@ -25,6 +26,24 @@ MOVED_TO_RETENTION: frozenset[str] = frozenset({
 refusal can point at the exact successor rather than a page."""
 
 
+@dataclass(slots=True, frozen=True)
+class OrphanTaskAuditReport:
+    """Metrics for one bounded orphan workflow-task page."""
+
+    rows_selected: int
+    candidates_returned: int
+    cancelled: int
+    duration_ms: int
+
+    def health(self) -> dict[str, int | str]:
+        return {
+            'state': 'ready',
+            **asdict(self),
+            'refusals': 0,
+            'errors': 0,
+        }
+
+
 class RecoveryConfig(BaseModel):
     """
     Configuration for automatic stale task handling and crash recovery.
@@ -48,6 +67,7 @@ class RecoveryConfig(BaseModel):
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
     - check_interval_ms: How often the reaper checks for stale tasks
+    - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
@@ -131,6 +151,17 @@ class RecoveryConfig(BaseModel):
     check_interval_ms: Annotated[int, Field(ge=1_000, le=600_000)] = Field(
         default=30_000,  # 30 seconds
         description='How often the reaper checks for stale tasks in milliseconds (1s-10min)',
+    )
+
+    orphan_task_audit_interval_ms: Annotated[
+        int,
+        Field(ge=1_000, le=86_400_000),
+    ] = Field(
+        default=60_000,
+        description=(
+            'Milliseconds between bounded orphan workflow-task audit pages '
+            '(1s-24hr)'
+        ),
     )
 
     runner_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(

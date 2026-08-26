@@ -1181,7 +1181,7 @@ async def resume_workflow(
         async with broker.session_factory() as recovery_session:
             from horsies.core.workflows.recovery import (
                 GET_WORKFLOW_TREE_IDS_SQL,
-                recover_stuck_workflows,
+                recover_stuck_workflow_tree,
             )
 
             tree_result = await recovery_session.execute(
@@ -1189,8 +1189,10 @@ async def resume_workflow(
                 {'wf_id': workflow_id},
             )
             tree_ids = [r.id for r in tree_result.fetchall()]
-            await recover_stuck_workflows(
-                recovery_session, broker, scope_workflow_ids=tree_ids,
+            await recover_stuck_workflow_tree(
+                recovery_session,
+                broker,
+                tree_ids,
             )
             await recovery_session.commit()
 

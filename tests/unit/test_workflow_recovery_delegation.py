@@ -27,15 +27,15 @@ class TestWorkflowRecoveryDelegation:
         session.info = {}
 
         async def _execute(stmt: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
-            if stmt is recovery.GET_PENDING_WITH_TERMINAL_DEPS_SQL:
+            if stmt is recovery.GLOBAL_GET_PENDING_WITH_TERMINAL_DEPS_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_READY_NOT_ENQUEUED_SQL:
+            if stmt is recovery.GLOBAL_GET_READY_NOT_ENQUEUED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL:
+            if stmt is recovery.GLOBAL_GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
+            if stmt is recovery.GLOBAL_GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
+            if stmt is recovery.GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
                 return _rows_result([SimpleNamespace(id='wf-1')])
             return _rows_result([])
 
@@ -69,13 +69,13 @@ class TestWorkflowRecoveryDelegation:
         session.info = {}
 
         async def _execute(stmt: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
-            if stmt is recovery.GET_PENDING_WITH_TERMINAL_DEPS_SQL:
+            if stmt is recovery.GLOBAL_GET_PENDING_WITH_TERMINAL_DEPS_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_READY_NOT_ENQUEUED_SQL:
+            if stmt is recovery.GLOBAL_GET_READY_NOT_ENQUEUED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL:
+            if stmt is recovery.GLOBAL_GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL:
                 return _rows_result([])
-            if stmt is recovery.GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
+            if stmt is recovery.GLOBAL_GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL:
                 return _rows_result([
                     SimpleNamespace(
                         id='child-poison',
@@ -90,7 +90,7 @@ class TestWorkflowRecoveryDelegation:
                         status='FAILED',
                     ),
                 ])
-            if stmt is recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
+            if stmt is recovery.GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL:
                 return _rows_result([])
             return _rows_result([])
 
@@ -141,7 +141,7 @@ class TestRecoveryScanRowCap:
         recovered = await recovery.recover_stuck_workflows(session, MagicMock())
 
         assert recovered == 0
-        assert len(captured) == 5
+        assert len(captured) == 6
         assert all(value == recovery.GLOBAL_SCAN_ROW_CAP for value in captured)
 
     @pytest.mark.asyncio
@@ -154,5 +154,68 @@ class TestRecoveryScanRowCap:
         )
 
         assert recovered == 0
-        assert len(captured) == 5
+        assert len(captured) == 6
         assert all(value is None for value in captured)
+
+
+@pytest.mark.unit
+class TestRecoveryQueryScopes:
+    '''Global and workflow-tree queries have different fixed SQL shapes.'''
+
+    @pytest.mark.parametrize(
+        ('global_query', 'tree_query'),
+        [
+            (
+                recovery.GLOBAL_GET_PENDING_WITH_TERMINAL_DEPS_SQL,
+                recovery.GET_PENDING_WITH_TERMINAL_DEPS_SQL,
+            ),
+            (
+                recovery.GLOBAL_GET_READY_NOT_ENQUEUED_SQL,
+                recovery.GET_READY_NOT_ENQUEUED_SQL,
+            ),
+            (
+                recovery.GLOBAL_GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL,
+                recovery.GET_READY_SUBWORKFLOWS_NOT_STARTED_SQL,
+            ),
+            (
+                recovery.GLOBAL_GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL,
+                recovery.GET_COMPLETED_CHILDREN_NOT_UPDATED_SQL,
+            ),
+            (
+                recovery.GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
+                recovery.GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
+            ),
+            (
+                recovery.GLOBAL_GET_ORPHANED_WORKFLOW_CANDIDATES_SQL,
+                recovery.GET_ORPHANED_WORKFLOW_CANDIDATES_SQL,
+            ),
+        ],
+    )
+    def test_global_query_has_no_nullable_scope_arm(
+        self,
+        global_query: Any,
+        tree_query: Any,
+    ) -> None:
+        assert ':scope_ids' not in global_query.text
+        assert ' IS NULL OR ' not in global_query.text
+        assert '= ANY(CAST(:scope_ids AS uuid[]))' in tree_query.text
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_global_discovery_failure_keeps_partial_metrics() -> None:
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(side_effect=RuntimeError('query failed'))
+    session_factory = MagicMock(return_value=session)
+
+    with pytest.raises(recovery.RecoveryPassFailure) as raised:
+        await recovery.recover_stuck_workflows_global(session_factory)
+
+    health = raised.value.health()
+    assert health['state'] == 'error'
+    assert health['errors'] == 1
+    cases = health['cases']
+    assert isinstance(cases, dict)
+    assert cases['case_0']['errors'] == 1

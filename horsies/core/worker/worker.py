@@ -163,6 +163,8 @@ class Worker(
         # refusals that skipped a leaf.
         self._partition_pruning_health: dict[str, Any] | None = None
         self._phase2_recovery_health: dict[str, Any] | None = None
+        self._workflow_recovery_health: dict[str, Any] | None = None
+        self._orphan_task_recovery_health: dict[str, Any] | None = None
         # Delay creation of the process pool until after preloading modules so that
         # any import/validation errors surface in the main process at startup.
         self._executor: Optional[ProcessPoolExecutor] = None

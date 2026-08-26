@@ -1,6 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
-import asyncio, hashlib, contextlib, os, random, threading, uuid
+import asyncio, hashlib, contextlib, os, random, threading, time, uuid
+from collections.abc import AsyncGenerator
 from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
@@ -21,6 +22,7 @@ from horsies.core.brokers.result_types import (
     RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.task_pg import TaskModel, Base
 from horsies.core.models.workflow_pg import (
@@ -232,10 +234,17 @@ from horsies.core.schemas.migrations import (
     WIDEN_HEARTBEATS_ID_TO_BIGINT_SQL,
     WIDEN_WORKER_STATES_ID_TO_BIGINT_SQL,
 )
+from horsies.core.schemas.recovery import (
+    CREATE_RECOVERY_SCAN_CURSORS_SQL,
+    SEED_RECOVERY_SCAN_CURSORS_SQL,
+    VALIDATE_RECOVERY_INDEXES_SQL,
+    install_recovery_indexes,
+)
 
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
 _SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
 _SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
+_PRE_CONCURRENT_SCHEMA_VERSION = 35
 
 # ---- Monitoring queries ----
 
@@ -406,9 +415,12 @@ _EXPIRE_BATCH_SIZE = 500
 # Backstop against an unbounded pass; the remainder expires next interval.
 _EXPIRE_MAX_BATCHES_PER_PASS = 200
 _ORPHAN_BATCH_SIZE = 500
-# Match expiry's bounded drain: each transaction is small and one reaper pass
-# cannot run forever if orphan production remains above its drain rate.
-_ORPHAN_MAX_BATCHES_PER_PASS = 200
+
+READ_ORPHAN_TASK_SCAN_STATS_SQL = text("""
+SELECT last_scan_rows, last_candidate_rows
+FROM horsies_recovery_scan_cursors
+WHERE scan_name = 'orphan_workflow_tasks'
+""")
 
 SELECT_TASK_ATTEMPTS_BY_TASK_ID_SQL = text("""
     SELECT task_id, attempt, outcome, will_retry,
@@ -824,7 +836,7 @@ class PostgresBroker:
     async def _run_schema_migrations_with_retry(self, engine: AsyncEngine) -> None:
         for attempt in range(1, _SCHEMA_INIT_MAX_ATTEMPTS + 1):
             try:
-                await self._run_schema_migrations(engine)
+                await self._run_schema_upgrade(engine)
                 return
             except Exception as exc:
                 if (
@@ -840,7 +852,93 @@ class PostgresBroker:
                 )
                 await asyncio.sleep(backoff)
 
-    async def _run_schema_migrations(self, engine: AsyncEngine) -> None:
+    @contextlib.asynccontextmanager
+    async def _schema_session_lock(self) -> AsyncGenerator[None]:
+        """Hold every schema lock on one direct physical connection."""
+        connection = await psycopg.AsyncConnection.connect(
+            to_psycopg_url(self.config.effective_session_database_url),
+            autocommit=True,
+        )
+        keys = (*self._legacy_schema_advisory_keys(), self._schema_advisory_key())
+        held: list[int] = []
+        body_error: BaseException | None = None
+        try:
+            for key in keys:
+                await connection.execute(
+                    'SELECT pg_advisory_lock(%s)',
+                    (key,),
+                )
+                held.append(key)
+            yield
+        except BaseException as exc:
+            body_error = exc
+            raise
+        finally:
+            unlock_failed = False
+            for key in reversed(held):
+                try:
+                    cursor = await connection.execute(
+                        'SELECT pg_advisory_unlock(%s)',
+                        (key,),
+                    )
+                    row = await cursor.fetchone()
+                    unlock_failed = unlock_failed or row is None or not bool(row[0])
+                except psycopg.Error:
+                    unlock_failed = True
+            await connection.close()
+            if unlock_failed:
+                message = 'schema advisory lock ownership was lost'
+                if body_error is None:
+                    raise RuntimeError(message)
+                body_error.add_note(message)
+
+    async def _run_schema_upgrade(self, engine: AsyncEngine) -> None:
+        if not self.run_schema_migrations:
+            self.logger.info(
+                'Schema migrations are disabled on this broker; skipping DDL'
+            )
+            return
+        async with self._schema_session_lock():
+            await self._run_schema_migrations(
+                engine,
+                target_version=_PRE_CONCURRENT_SCHEMA_VERSION,
+                acquire_transaction_locks=False,
+                reapply_at_target=True,
+            )
+            if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
+                return
+            await install_recovery_indexes(engine)
+            await self._activate_bounded_recovery(engine)
+
+    async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
+        from horsies.core.history.terminalization.move import (
+            bounded_cancel_orphan_sweep_ddl,
+        )
+
+        async with engine.begin() as conn:
+            await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
+            uuid_identity = bool(
+                (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()
+            )
+            if uuid_identity:
+                await conn.execute(text(
+                    'DROP FUNCTION IF EXISTS '
+                    'horsies_cancel_orphaned_tasks(integer)'
+                ))
+                await conn.execute(text(bounded_cancel_orphan_sweep_ddl()))
+            await conn.execute(
+                INSERT_SCHEMA_VERSION_SQL,
+                {'version': SCHEMA_VERSION},
+            )
+
+    async def _run_schema_migrations(
+        self,
+        engine: AsyncEngine,
+        *,
+        target_version: int = _PRE_CONCURRENT_SCHEMA_VERSION,
+        acquire_transaction_locks: bool = True,
+        reapply_at_target: bool = False,
+    ) -> None:
         if not self.run_schema_migrations:
             self.logger.info(
                 'Schema migrations are disabled on this broker; skipping DDL'
@@ -852,18 +950,24 @@ class PostgresBroker:
             # while also protecting rolling deploys that change database_url
             # from a direct URL to a pooled URL and move direct access to
             # session_database_url.
-            for key in self._legacy_schema_advisory_keys():
+            if acquire_transaction_locks:
+                for key in self._legacy_schema_advisory_keys():
+                    await conn.execute(
+                        SCHEMA_ADVISORY_LOCK_SQL,
+                        {'key': key},
+                    )
                 await conn.execute(
                     SCHEMA_ADVISORY_LOCK_SQL,
-                    {'key': key},
+                    {'key': self._schema_advisory_key()},
                 )
-            await conn.execute(
-                SCHEMA_ADVISORY_LOCK_SQL,
-                {'key': self._schema_advisory_key()},
-            )
 
             await conn.execute(CREATE_SCHEMA_VERSION_TABLE_SQL)
-            if await self._read_schema_version(conn) >= SCHEMA_VERSION:
+            await conn.execute(CREATE_RECOVERY_SCAN_CURSORS_SQL)
+            await conn.execute(SEED_RECOVERY_SCAN_CURSORS_SQL)
+            stored_version = await self._read_schema_version(conn)
+            if stored_version > target_version or (
+                stored_version == target_version and not reapply_at_target
+            ):
                 return
 
             await conn.run_sync(Base.metadata.create_all)
@@ -1151,7 +1255,9 @@ class PostgresBroker:
                     await conn.execute(text(LIVE_STATUS_DOMAIN_DDL))
                 for statement in teardown_statements():
                     await conn.execute(text(statement))
-                for statement in installation_fragments():
+                for statement in installation_fragments(
+                    bounded_orphan=False
+                ):
                     await conn.execute(text(statement))
                 heartbeats_flat = (await conn.execute(text(
                     """SELECT relkind <> 'p' FROM pg_class
@@ -1236,7 +1342,7 @@ class PostgresBroker:
 
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
-                {'version': SCHEMA_VERSION},
+                {'version': target_version},
             )
 
     async def _initialize_schema(self, engine: AsyncEngine) -> None:
@@ -2958,55 +3064,69 @@ class PostgresBroker:
                 exc,
             )
 
-    async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
-        """Cancel orphaned workflow tasks (no live workflow_task linkage).
-
-        These can never reach RUNNING, so requeuing them only churns. Marking
-        them CANCELLED releases the claim and lets retention sweep them.
-        """
+    async def audit_orphaned_workflow_tasks(
+        self,
+    ) -> BrokerResult[OrphanTaskAuditReport]:
+        """Scan and cancel one bounded page of orphan workflow tasks."""
+        started = time.monotonic()
         try:
-            total_terminated = 0
-            for _ in range(_ORPHAN_MAX_BATCHES_PER_PASS):
-                async with self.session_factory() as session:
-                    outcomes = await apply_batch_async(
-                        await session.connection(),
-                        CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
+            async with self.session_factory() as session:
+                outcomes = await apply_batch_async(
+                    await session.connection(),
+                    CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
+                )
+                for outcome in outcomes:
+                    match outcome:
+                        case Applied():
+                            continue
+                        case (
+                            AlreadyApplied()
+                            | LostClaim()
+                            | SourceStateConflict()
+                            | TaskAbsent()
+                        ):
+                            raise RuntimeError(
+                                'orphan sweep returned '
+                                f'{type(outcome).__name__}; discovery '
+                                'batches report transitioned rows only'
+                            )
+                        case _ as unreachable:
+                            assert_never(unreachable)
+                stats = (
+                    await session.execute(READ_ORPHAN_TASK_SCAN_STATS_SQL)
+                ).one()
+                rows_selected = int(stats.last_scan_rows)
+                candidates_returned = int(stats.last_candidate_rows)
+                if rows_selected < 0 or candidates_returned < 0:
+                    raise RuntimeError(
+                        'orphan sweep returned negative cursor metrics'
                     )
-                    for outcome in outcomes:
-                        match outcome:
-                            case Applied():
-                                continue
-                            case (
-                                AlreadyApplied()
-                                | LostClaim()
-                                | SourceStateConflict()
-                                | TaskAbsent()
-                            ):
-                                raise RuntimeError(
-                                    'orphan sweep returned '
-                                    f'{type(outcome).__name__}; discovery '
-                                    'batches report transitioned rows only'
-                                )
-                            case _ as unreachable:
-                                assert_never(unreachable)
-                    await session.commit()
-                batch_terminated = len(outcomes)
-                total_terminated += batch_terminated
-                if batch_terminated < _ORPHAN_BATCH_SIZE:
-                    return Ok(total_terminated)
-            self.logger.warning(
-                'terminate_orphaned_workflow_tasks reached the per-pass '
-                'batch cap after terminating %s task(s); the remainder '
-                'will be handled next interval',
-                total_terminated,
-            )
-            return Ok(total_terminated)
+                if candidates_returned != len(outcomes):
+                    raise RuntimeError(
+                        'orphan sweep cursor candidate count differs from '
+                        'the applied outcome count'
+                    )
+                await session.commit()
+            return Ok(OrphanTaskAuditReport(
+                rows_selected=rows_selected,
+                candidates_returned=candidates_returned,
+                cancelled=len(outcomes),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            ))
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLEANUP_FAILED,
-                f'terminate_orphaned_workflow_tasks failed: {exc}',
+                f'audit_orphaned_workflow_tasks failed: {exc}',
                 exc,
             )
+
+    async def terminate_orphaned_workflow_tasks(self) -> BrokerResult[int]:
+        """Cancel one bounded page and return its applied outcome count."""
+        match await self.audit_orphaned_workflow_tasks():
+            case Ok(report):
+                return Ok(report.cancelled)
+            case Err(error):
+                return Err(error)
 
     # ----------------- Sync API Facades -----------------
 

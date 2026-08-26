@@ -51,9 +51,9 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # or enumerates per-leaf indexes as an assertion (the discovery-shape
 # lesson was checked, not assumed). The qualified shape is unchanged
 # and the base advances.
-# v35 adds the durable cutover-completion marker and RANGE-subpartitions the
-# production forever class. Neither change touches the cloned task shape.
-_EXPECTED_BASE_SCHEMA_VERSION = 35
+# v36 adds durable recovery state and exact recovery indexes. These changes do
+# not change the cloned task shape.
+_EXPECTED_BASE_SCHEMA_VERSION = 36
 
 
 @dataclass(frozen=True, slots=True)
