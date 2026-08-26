@@ -1,12 +1,16 @@
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Timelike, Utc};
 use serial_test::serial;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
 use sqlx::{Connection, PgConnection, PgPool};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
@@ -14,11 +18,12 @@ use crate::core::history::commands::{
     CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
+use crate::core::history::cutover::relocation::{relocate_terminal_batch, RelocationOutcome};
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, register_finite_retention_class, ClassRegistration,
 };
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name,
+    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
 };
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, ensure_heartbeat_coverage, heartbeat_horizon, hourly_leaf_name,
@@ -27,7 +32,8 @@ use crate::core::history::heartbeats::partitioning::{
 };
 use crate::core::history::maintenance::coverage::{
     ensure_partition_coverage, ensure_partition_coverage_in_pool, ensure_startup_coverage,
-    CoverageOutcome, StartupCoverageOutcome,
+    ensure_startup_coverage_in_pool, CoverageOutcome, DeclaredRetentionClass,
+    StartupCoverageOutcome,
 };
 use crate::core::history::maintenance::gate::{
     active_maintenance_session, begin_archive_maintenance, finish_archive_maintenance,
@@ -35,14 +41,18 @@ use crate::core::history::maintenance::gate::{
 };
 use crate::core::history::maintenance::pruning::prune_expired_partitions;
 use crate::core::history::names::{
-    LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
-    TASK_HISTORY_PARENT,
+    HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
+    TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT, TASK_LOOKUP_MANIFEST,
 };
-use crate::core::history::outcomes::{HealthFault, LeafCreation, LeafDrop, LeafInspection};
+use crate::core::history::outcomes::{
+    CatalogConflictKind, HealthFault, LeafCreation, LeafDrop, LeafInspection,
+};
+use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 use super::catalog::{
     capture_partition_bound_utc, database_now, read_attached_birth_floor, read_leaf_catalog_row,
-    read_leaf_physical_state, read_manifest_leaf_rows,
+    read_leaf_physical_state, read_manifest_leaf_rows, LeafIndexKind,
+    LeafPartitionBoundExpectation,
 };
 use super::forever::{ensure_forever_range_partitioning, FOREVER_LEGACY_LEAF};
 use super::health::collect_partition_health;
@@ -114,6 +124,11 @@ struct FailFirstRepublish {
     reference_calls: AtomicUsize,
 }
 
+#[derive(Debug, Default)]
+struct FailFirstStagedPublisher {
+    calls: AtomicUsize,
+}
+
 #[derive(Debug)]
 struct BlockingPublisher {
     entered: Arc<Notify>,
@@ -162,6 +177,37 @@ impl LoaderPublication for FailFirstRepublish {
         _leaf_name: &str,
     ) -> Result<bool, crate::core::history::errors::HistoryError> {
         Ok(self.reference_calls.fetch_add(1, Ordering::SeqCst) == 0)
+    }
+}
+
+impl LoaderPublication for FailFirstStagedPublisher {
+    async fn republish(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            return Err(crate::core::history::errors::HistoryError::contract(
+                "injected post-commit publication failure",
+            ));
+        }
+        StagedLoaderPublisher.republish(connection).await
+    }
+
+    async fn references_leaf(
+        &self,
+        connection: &mut PgConnection,
+        leaf_name: &str,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher
+            .references_leaf(connection, leaf_name)
+            .await
+    }
+
+    async fn needs_republication(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher.needs_republication(connection).await
     }
 }
 
@@ -264,6 +310,359 @@ fn database_url() -> String {
         .find_map(|(key, value)| (key.trim() == "DB_PASSWORD").then(|| value.trim()))
         .expect("DB_PASSWORD in workspace .env");
     format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+}
+
+#[derive(Clone)]
+struct StatementPause {
+    pattern: Arc<str>,
+    consumed: Arc<AtomicBool>,
+    pending: Arc<AtomicBool>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl StatementPause {
+    fn new(pattern: impl Into<Arc<str>>) -> Self {
+        Self {
+            pattern: pattern.into(),
+            consumed: Arc::new(AtomicBool::new(false)),
+            pending: Arc::new(AtomicBool::new(false)),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    fn inspect(&self, query: &str) {
+        if query.contains(self.pattern.as_ref()) && !self.consumed.swap(true, Ordering::SeqCst) {
+            self.pending.store(true, Ordering::SeqCst);
+        }
+    }
+
+    async fn pause_after_ready(&self) {
+        if self.pending.swap(false, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    async fn wait_until_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.entered.notified())
+            .await
+            .expect("matching SQL statement did not reach its response barrier");
+    }
+
+    fn resume(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[derive(Default)]
+struct FrontendStatementParser {
+    startup: bool,
+    buffered: Vec<u8>,
+}
+
+impl FrontendStatementParser {
+    fn new() -> Self {
+        Self {
+            startup: true,
+            buffered: Vec::new(),
+        }
+    }
+
+    fn push(
+        &mut self,
+        bytes: &[u8],
+        statements: &AtomicUsize,
+        pending_responses: &AtomicUsize,
+        sql: &Mutex<Vec<String>>,
+        pause: Option<&StatementPause>,
+    ) {
+        self.buffered.extend_from_slice(bytes);
+        loop {
+            if self.startup {
+                if self.buffered.len() < 4 {
+                    return;
+                }
+                let length = u32::from_be_bytes(self.buffered[..4].try_into().unwrap()) as usize;
+                if length < 8 || self.buffered.len() < length {
+                    return;
+                }
+                let code = u32::from_be_bytes(self.buffered[4..8].try_into().unwrap());
+                self.buffered.drain(..length);
+                if code != 80_877_103 && code != 80_877_104 {
+                    self.startup = false;
+                }
+                continue;
+            }
+
+            if self.buffered.len() < 5 {
+                return;
+            }
+            let tag = self.buffered[0];
+            let length = u32::from_be_bytes(self.buffered[1..5].try_into().unwrap()) as usize;
+            let message_length = length + 1;
+            if length < 4 || self.buffered.len() < message_length {
+                return;
+            }
+            let body = &self.buffered[5..message_length];
+            match tag {
+                b'Q' => {
+                    statements.fetch_add(1, Ordering::SeqCst);
+                    pending_responses.fetch_add(1, Ordering::SeqCst);
+                    if let Some(query) = body.strip_suffix(&[0]) {
+                        let query = String::from_utf8_lossy(query);
+                        if let Some(pause) = pause {
+                            pause.inspect(&query);
+                        }
+                        sql.lock()
+                            .expect("statement SQL lock")
+                            .push(query.into_owned());
+                    }
+                }
+                b'E' => {
+                    statements.fetch_add(1, Ordering::SeqCst);
+                    pending_responses.fetch_add(1, Ordering::SeqCst);
+                }
+                b'P' => {
+                    if let Some(name_end) = body.iter().position(|byte| *byte == 0) {
+                        let query = &body[name_end + 1..];
+                        if let Some(query_end) = query.iter().position(|byte| *byte == 0) {
+                            let query = String::from_utf8_lossy(&query[..query_end]);
+                            if let Some(pause) = pause {
+                                pause.inspect(&query);
+                            }
+                            sql.lock()
+                                .expect("statement SQL lock")
+                                .push(query.into_owned());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.buffered.drain(..message_length);
+        }
+    }
+}
+
+#[derive(Default)]
+struct BackendReadyParser {
+    buffered: Vec<u8>,
+}
+
+impl BackendReadyParser {
+    fn push(&mut self, bytes: &[u8]) -> bool {
+        self.buffered.extend_from_slice(bytes);
+        let mut ready = false;
+        loop {
+            if self.buffered.len() < 5 {
+                return ready;
+            }
+            let tag = self.buffered[0];
+            let length = u32::from_be_bytes(self.buffered[1..5].try_into().unwrap()) as usize;
+            let message_length = length + 1;
+            if length < 4 || self.buffered.len() < message_length {
+                return ready;
+            }
+            ready |= tag == b'Z';
+            self.buffered.drain(..message_length);
+        }
+    }
+}
+
+struct SqlStatementProxy {
+    port: u16,
+    statements: Arc<AtomicUsize>,
+    pending_responses: Arc<AtomicUsize>,
+    sql: Arc<Mutex<Vec<String>>>,
+    cancel: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl SqlStatementProxy {
+    async fn start(backend: &PgConnectOptions, delay_ms: usize) -> Self {
+        Self::start_with_pause(backend, delay_ms, None).await
+    }
+
+    async fn start_with_pause(
+        backend: &PgConnectOptions,
+        delay_ms: usize,
+        pause: Option<StatementPause>,
+    ) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind SQL statement proxy");
+        let port = listener.local_addr().expect("proxy address").port();
+        let backend_host = backend.get_host().to_owned();
+        let backend_port = backend.get_port();
+        let statements = Arc::new(AtomicUsize::new(0));
+        let pending_responses = Arc::new(AtomicUsize::new(0));
+        let sql = Arc::new(Mutex::new(Vec::new()));
+        let cancel = CancellationToken::new();
+        let accept_cancel = cancel.clone();
+        let accept_statements = Arc::clone(&statements);
+        let accept_pending = Arc::clone(&pending_responses);
+        let accept_sql = Arc::clone(&sql);
+        let task = tokio::spawn(async move {
+            loop {
+                let accepted = tokio::select! {
+                    _ = accept_cancel.cancelled() => return,
+                    accepted = listener.accept() => accepted,
+                };
+                let (client, _) = accepted.expect("accept proxied PostgreSQL connection");
+                let connection_statements = Arc::clone(&accept_statements);
+                let connection_pending = Arc::clone(&accept_pending);
+                let connection_sql = Arc::clone(&accept_sql);
+                let connection_pause = pause.clone();
+                let host = backend_host.clone();
+                tokio::spawn(async move {
+                    let server = TcpStream::connect((host.as_str(), backend_port))
+                        .await
+                        .expect("connect SQL statement proxy to PostgreSQL");
+                    let (mut client_read, mut client_write) = client.into_split();
+                    let (mut server_read, mut server_write) = server.into_split();
+                    let client_to_server = async {
+                        let mut parser = FrontendStatementParser::new();
+                        let mut buffer = vec![0_u8; 16 * 1024];
+                        loop {
+                            let read = client_read
+                                .read(&mut buffer)
+                                .await
+                                .expect("read proxied PostgreSQL client");
+                            if read == 0 {
+                                return;
+                            }
+                            parser.push(
+                                &buffer[..read],
+                                &connection_statements,
+                                &connection_pending,
+                                &connection_sql,
+                                connection_pause.as_ref(),
+                            );
+                            server_write
+                                .write_all(&buffer[..read])
+                                .await
+                                .expect("write proxied PostgreSQL server");
+                        }
+                    };
+                    let server_to_client = async {
+                        let mut ready_parser = BackendReadyParser::default();
+                        let mut buffer = vec![0_u8; 16 * 1024];
+                        loop {
+                            let read = server_read
+                                .read(&mut buffer)
+                                .await
+                                .expect("read proxied PostgreSQL server");
+                            if read == 0 {
+                                return;
+                            }
+                            let delayed = connection_pending.swap(0, Ordering::SeqCst);
+                            if delayed > 0 && delay_ms > 0 {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    (delay_ms * delayed) as u64,
+                                ))
+                                .await;
+                            }
+                            if ready_parser.push(&buffer[..read]) {
+                                if let Some(pause) = connection_pause.as_ref() {
+                                    pause.pause_after_ready().await;
+                                }
+                            }
+                            client_write
+                                .write_all(&buffer[..read])
+                                .await
+                                .expect("write proxied PostgreSQL client");
+                        }
+                    };
+                    tokio::select! {
+                        _ = client_to_server => {}
+                        _ = server_to_client => {}
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            statements,
+            pending_responses,
+            sql,
+            cancel,
+            task,
+        }
+    }
+
+    fn reset(&self) {
+        self.statements.store(0, Ordering::SeqCst);
+        self.pending_responses.store(0, Ordering::SeqCst);
+        self.sql.lock().expect("statement SQL lock").clear();
+    }
+
+    fn statement_count(&self) -> usize {
+        self.statements.load(Ordering::SeqCst)
+    }
+
+    fn sql(&self) -> Vec<String> {
+        self.sql.lock().expect("statement SQL lock").clone()
+    }
+
+    async fn stop(self) {
+        self.cancel.cancel();
+        self.task.await.expect("stop SQL statement proxy");
+    }
+}
+
+async fn proxied_pool(
+    database: &TestDatabase,
+    delay_ms: usize,
+    max_connections: u32,
+) -> (SqlStatementProxy, PgPool) {
+    let backend = PgConnectOptions::from_str(&database_url())
+        .expect("invalid test database URL")
+        .database(&database.database_name)
+        .ssl_mode(PgSslMode::Disable);
+    let proxy = SqlStatementProxy::start(&backend, delay_ms).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(max_connections)
+        .test_before_acquire(true)
+        .connect_with(
+            backend
+                .clone()
+                .host("127.0.0.1")
+                .port(proxy.port)
+                .ssl_mode(PgSslMode::Disable),
+        )
+        .await
+        .expect("connect through SQL statement proxy");
+    sqlx::query("SELECT 1")
+        .execute(&pool)
+        .await
+        .expect("warm proxied PostgreSQL connection");
+    proxy.reset();
+    (proxy, pool)
+}
+
+async fn pausing_proxied_pool(
+    database: &TestDatabase,
+    pattern: &str,
+) -> (SqlStatementProxy, PgPool, StatementPause) {
+    let backend = PgConnectOptions::from_str(&database_url())
+        .expect("invalid test database URL")
+        .database(&database.database_name)
+        .ssl_mode(PgSslMode::Disable);
+    let pause = StatementPause::new(Arc::<str>::from(pattern));
+    let proxy = SqlStatementProxy::start_with_pause(&backend, 0, Some(pause.clone())).await;
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            backend
+                .clone()
+                .host("127.0.0.1")
+                .port(proxy.port)
+                .ssl_mode(PgSslMode::Disable),
+        )
+        .await
+        .expect("connect through pausing SQL statement proxy");
+    (proxy, pool, pause)
 }
 
 async fn register_class(pool: &PgPool, class_key: &str, days: i64) -> String {
@@ -788,6 +1187,641 @@ async fn pool_coverage_releases_each_leaf_transaction_before_returning() {
     .await
     .expect("count advisory locks");
     assert_eq!(advisory_locks, 0);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let declared: Vec<DeclaredRetentionClass> = (0..50)
+        .map(|index| DeclaredRetentionClass {
+            class_key: format!("rtt_class_{index:02}"),
+            duration: Duration::days(7 + i64::from(index)),
+        })
+        .collect();
+
+    let first = ensure_partition_coverage_in_pool(
+        &database.pool,
+        8,
+        8,
+        &declared[..1],
+        &StagedLoaderPublisher,
+    )
+    .await
+    .expect("create initial coverage");
+    assert!(matches!(first, CoverageOutcome::Ensured(_)));
+
+    for (history_horizon, heartbeat_horizon) in [(2, 2), (8, 8)] {
+        let setup = ensure_partition_coverage_in_pool(
+            &database.pool,
+            history_horizon,
+            heartbeat_horizon,
+            &declared[..1],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .expect("set healthy horizon coverage");
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+        let (proxy, pool) = proxied_pool(&database, 0, 1).await;
+        sqlx::query("SELECT set_config('timezone', 'America/Los_Angeles', false)")
+            .execute(&pool)
+            .await
+            .expect("set proxied session timezone");
+        proxy.reset();
+        let outcome = ensure_partition_coverage_in_pool(
+            &pool,
+            history_horizon,
+            heartbeat_horizon,
+            &declared[..1],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .expect("healthy horizon coverage");
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert_eq!(proxy.statement_count(), 3);
+        assert!(!proxy.sql().iter().any(|statement| {
+            statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
+        }));
+        let timezone: String = sqlx::query_scalar("SHOW timezone")
+            .fetch_one(&pool)
+            .await
+            .expect("read proxied session timezone");
+        assert_eq!(timezone, "America/Los_Angeles");
+        pool.close().await;
+        proxy.stop().await;
+    }
+
+    for class_count in [10, 50] {
+        let setup = ensure_partition_coverage_in_pool(
+            &database.pool,
+            2,
+            2,
+            &declared[..class_count],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .expect("extend class coverage");
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+
+        let (proxy, pool) = proxied_pool(&database, 0, 1).await;
+        let outcome = ensure_partition_coverage_in_pool(
+            &pool,
+            2,
+            2,
+            &declared[..class_count],
+            &StagedLoaderPublisher,
+        )
+        .await
+        .expect("healthy class coverage");
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert_eq!(proxy.statement_count(), 3);
+        pool.close().await;
+        proxy.stop().await;
+    }
+
+    let delay_ms = 20_usize;
+    let (proxy, pool) = proxied_pool(&database, delay_ms, 1).await;
+    let started = tokio::time::Instant::now();
+    let outcome = ensure_partition_coverage_in_pool(&pool, 2, 2, &declared, &StagedLoaderPublisher)
+        .await
+        .expect("healthy high-RTT coverage");
+    let elapsed = started.elapsed();
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    assert_eq!(proxy.statement_count(), 3);
+    assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
+    assert!(elapsed < std::time::Duration::from_millis((delay_ms * 3 + 500) as u64));
+    pool.close().await;
+    proxy.stop().await;
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn failed_post_commit_publication_is_retried_by_the_next_healthy_pass() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup =
+        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
+            .await
+            .expect("create and publish initial coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+
+    let publisher = FailFirstStagedPublisher::default();
+    let error = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+        .await
+        .expect_err("inject final publication failure");
+    assert!(error
+        .to_string()
+        .contains("injected post-commit publication failure"));
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+
+    let unpublished: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*)
+         FROM {LEAF_CATALOG} AS catalog
+         WHERE catalog.detached_at IS NULL
+           AND catalog.dropped_at IS NULL
+           AND catalog.class_key <> $1
+           AND to_regclass(catalog.leaf_name) IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
+               WHERE manifest.leaf_name = catalog.leaf_name
+           )"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("count committed unpublished leaves");
+    assert!(unpublished > 0);
+
+    let retry = ensure_partition_coverage_in_pool(&database.pool, 3, 3, &[], &publisher)
+        .await
+        .expect("retry publication on a healthy coverage pass");
+    let CoverageOutcome::Ensured(retry) = retry else {
+        panic!("the next healthy pass must publish the committed leaves");
+    };
+    assert!(retry.republished);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 2);
+    let unpublished: i64 = sqlx::query_scalar(&format!(
+        "SELECT count(*)
+         FROM {LEAF_CATALOG} AS catalog
+         WHERE catalog.detached_at IS NULL
+           AND catalog.dropped_at IS NULL
+           AND catalog.class_key <> $1
+           AND to_regclass(catalog.leaf_name) IS NOT NULL
+           AND NOT EXISTS (
+               SELECT 1 FROM {TASK_LOOKUP_MANIFEST} AS manifest
+               WHERE manifest.leaf_name = catalog.leaf_name
+           )"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("verify all attached leaves are published");
+    assert_eq!(unpublished, 0);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn current_heartbeat_with_a_wrong_physical_range_refuses_startup() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create heartbeat coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+
+    let (leaf_name, index_name, lower_anchor, upper_anchor): (
+        String,
+        String,
+        chrono::DateTime<Utc>,
+        chrono::DateTime<Utc>,
+    ) = sqlx::query_as(&format!(
+        "SELECT leaf_name, id_index_name, lower_anchor, upper_anchor
+         FROM {LEAF_CATALOG}
+         WHERE class_key = $1
+           AND lower_anchor <= statement_timestamp()
+           AND upper_anchor > statement_timestamp()
+           AND detached_at IS NULL
+           AND dropped_at IS NULL"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read current heartbeat leaf");
+    sqlx::query(&format!(
+        "ALTER TABLE {HEARTBEATS_TABLE} DETACH PARTITION {leaf_name}"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("detach current heartbeat leaf");
+    sqlx::query(&format!("DROP TABLE {leaf_name}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop current heartbeat leaf");
+    let wrong_bounds = LeafBounds::new(
+        lower_anchor - Duration::days(100),
+        upper_anchor - Duration::days(100),
+    )
+    .expect("valid wrong heartbeat bounds");
+    let wrong_leaf = LeafRef::new(&leaf_name, HEARTBEAT_CLASS_KEY, wrong_bounds)
+        .expect("wrong-range heartbeat leaf");
+    sqlx::query(
+        &render_daily_leaf_ddl(HEARTBEATS_TABLE, &wrong_leaf)
+            .expect("render wrong-range heartbeat leaf"),
+    )
+    .execute(&database.pool)
+    .await
+    .expect("create wrong-range heartbeat leaf");
+    sqlx::query(&format!(
+        "CREATE INDEX {index_name} ON {leaf_name} (task_id, role, sent_at DESC)"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("create conformant heartbeat index on wrong range");
+    let mut connection = database.pool.acquire().await.expect("acquire bound reader");
+    let wrong_bound = capture_partition_bound_utc(&mut connection, &leaf_name)
+        .await
+        .expect("capture wrong physical bound")
+        .expect("wrong physical bound exists");
+    drop(connection);
+    sqlx::query(&format!(
+        "UPDATE {LEAF_CATALOG} SET partition_bound = $1 WHERE leaf_name = $2"
+    ))
+    .bind(wrong_bound)
+    .bind(&leaf_name)
+    .execute(&database.pool)
+    .await
+    .expect("make stored bound match the wrong physical bound");
+
+    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("validate startup with a wrong current heartbeat range");
+    let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
+        panic!("a wrong current-heartbeat range must refuse startup");
+    };
+    assert!(!failure.heartbeat_covered_now);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create index-repair coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+
+    let heartbeat = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
+        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
+                index_schema_version, id_index_name, partition_bound, min_birth_at,
+                min_birth_verified, created_at, detached_at, dropped_at
+         FROM {LEAF_CATALOG}
+         WHERE class_key = $1
+           AND lower_anchor <= statement_timestamp()
+           AND upper_anchor > statement_timestamp()"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read current heartbeat catalog row");
+    sqlx::query(&format!("DROP INDEX {}", heartbeat.id_index_name))
+        .execute(&database.pool)
+        .await
+        .expect("drop heartbeat index");
+    sqlx::query(&format!(
+        "CREATE INDEX {} ON {} (task_id, role, sent_at ASC)",
+        heartbeat.id_index_name, heartbeat.leaf_name
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("create same-name heartbeat index with wrong sort direction");
+
+    let history = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
+        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
+                index_schema_version, id_index_name, partition_bound, min_birth_at,
+                min_birth_verified, created_at, detached_at, dropped_at
+         FROM {LEAF_CATALOG}
+         WHERE class_key <> $1
+           AND detached_at IS NULL
+           AND dropped_at IS NULL
+         ORDER BY lower_anchor, leaf_name
+         LIMIT 1"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read history catalog row");
+    sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
+        .bind(&history.id_index_name)
+        .execute(&database.pool)
+        .await
+        .expect("mark history index invalid");
+
+    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("repair malformed indexes");
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    let heartbeat_bounds =
+        LeafBounds::new(heartbeat.lower_anchor, heartbeat.upper_anchor).expect("heartbeat bounds");
+    let history_bounds =
+        LeafBounds::new(history.lower_anchor, history.upper_anchor).expect("history bounds");
+    let mut connection = database.pool.acquire().await.expect("acquire index reader");
+    assert!(
+        read_leaf_physical_state(
+            &mut connection,
+            &heartbeat.leaf_name,
+            &heartbeat.parent_name,
+            &heartbeat.id_index_name,
+            LeafPartitionBoundExpectation::Requested(&heartbeat_bounds),
+            LeafIndexKind::Heartbeat,
+        )
+        .await
+        .expect("read repaired heartbeat index")
+        .id_index_conformant
+    );
+    assert!(
+        read_leaf_physical_state(
+            &mut connection,
+            &history.leaf_name,
+            &history.parent_name,
+            &history.id_index_name,
+            LeafPartitionBoundExpectation::Requested(&history_bounds),
+            LeafIndexKind::History,
+        )
+        .await
+        .expect("read repaired history index")
+        .id_index_conformant
+    );
+    drop(connection);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn coverage_repairs_a_nondefault_heartbeat_operator_class() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create operator-class repair coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+    let heartbeat = sqlx::query_as::<_, super::catalog::LeafCatalogRow>(&format!(
+        "SELECT leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
+                index_schema_version, id_index_name, partition_bound, min_birth_at,
+                min_birth_verified, created_at, detached_at, dropped_at
+         FROM {LEAF_CATALOG}
+         WHERE class_key = $1
+           AND lower_anchor <= statement_timestamp()
+           AND upper_anchor > statement_timestamp()"
+    ))
+    .bind(HEARTBEAT_CLASS_KEY)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read current heartbeat catalog row");
+    sqlx::query(&format!("DROP INDEX {}", heartbeat.id_index_name))
+        .execute(&database.pool)
+        .await
+        .expect("drop canonical heartbeat index");
+    sqlx::query(&format!(
+        "CREATE INDEX {} ON {} (
+             task_id, role varchar_pattern_ops, sent_at DESC
+         )",
+        heartbeat.id_index_name, heartbeat.leaf_name
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("create heartbeat index with a nondefault operator class");
+    let index_definition: String = sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
+        .bind(&heartbeat.id_index_name)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read nondefault heartbeat index definition");
+    assert!(index_definition.contains("varchar_pattern_ops"));
+
+    let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("repair nondefault heartbeat operator class");
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    let index_definition: String = sqlx::query_scalar("SELECT pg_get_indexdef(to_regclass($1))")
+        .bind(&heartbeat.id_index_name)
+        .fetch_one(&database.pool)
+        .await
+        .expect("read repaired heartbeat index definition");
+    assert!(index_definition.ends_with("USING btree (task_id, role, sent_at DESC)"));
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn id_index_repair_refuses_a_name_reused_after_inspection() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let class_key = "p3_index_reuse_30d";
+    let parent = register_class(&database.pool, class_key, 30).await;
+    let now = database_now(
+        database
+            .pool
+            .acquire()
+            .await
+            .expect("acquire database clock")
+            .as_mut(),
+    )
+    .await
+    .expect("read database clock");
+    let today = now
+        .with_hour(0)
+        .and_then(|value| value.with_minute(0))
+        .and_then(|value| value.with_second(0))
+        .and_then(|value| value.with_nanosecond(0))
+        .expect("truncate current day");
+    let leaf = leaf_ref(&parent, class_key, today);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let id_index_name = leaf_id_index_name(leaf.leaf_name());
+    sqlx::query(&format!("DROP INDEX {id_index_name}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop canonical task-ID index");
+    sqlx::query(&format!(
+        "CREATE INDEX {id_index_name} ON {} (task_id DESC)",
+        leaf.leaf_name()
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("create malformed task-ID index");
+    let foreign_table = "p3_index_reuse_foreign";
+    sqlx::query(&format!("CREATE TABLE {foreign_table} (value integer)"))
+        .execute(&database.pool)
+        .await
+        .expect("create foreign index owner");
+
+    let (proxy, repair_pool, pause) = pausing_proxied_pool(
+        &database,
+        "SELECT CASE\n             WHEN to_regclass($2) IS NULL",
+    )
+    .await;
+    let repair_leaf = leaf.clone();
+    let repair = tokio::spawn(async move {
+        let mut transaction = repair_pool.begin().await.expect("begin index repair");
+        let outcome = create_daily_leaf(
+            transaction.as_mut(),
+            &CreateDailyHistoryLeaf::new(repair_leaf).expect("index repair command"),
+            &UnpublishedLoader,
+        )
+        .await
+        .expect("classify reused index name");
+        transaction
+            .commit()
+            .await
+            .expect("commit the refused index repair");
+        outcome
+    });
+    pause.wait_until_entered().await;
+    let moved_index_name = "p3_index_reuse_moved";
+    sqlx::query(&format!(
+        "ALTER INDEX {id_index_name} RENAME TO {moved_index_name}"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("rename the inspected malformed index");
+    sqlx::query(&format!(
+        "CREATE INDEX {id_index_name} ON {foreign_table} (value)"
+    ))
+    .execute(&database.pool)
+    .await
+    .expect("reuse the schema index name on a foreign table");
+    pause.resume();
+
+    let outcome = repair.await.expect("join index repair");
+    assert!(matches!(
+        outcome,
+        LeafCreation::CatalogConflict {
+            kind: CatalogConflictKind::PhysicalNonconformant,
+            ..
+        }
+    ));
+    let owner: String = sqlx::query_scalar(
+        "SELECT index_state.indrelid::regclass::text
+         FROM pg_index AS index_state
+         WHERE index_state.indexrelid = to_regclass($1)",
+    )
+    .bind(&id_index_name)
+    .fetch_one(&database.pool)
+    .await
+    .expect("read reused index owner");
+    assert_eq!(owner, foreign_table);
+    proxy.stop().await;
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn pool_coverage_repairs_only_the_damaged_leaf_in_one_mutation_transaction() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create repair coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+    let damaged_index: String = sqlx::query_scalar(&format!(
+        "SELECT id_index_name FROM {LEAF_CATALOG}
+         WHERE class_key = 'standard_30d' AND dropped_at IS NULL
+         ORDER BY lower_anchor LIMIT 1"
+    ))
+    .fetch_one(&database.pool)
+    .await
+    .expect("read damaged index name");
+    sqlx::query(&format!("DROP INDEX {damaged_index}"))
+        .execute(&database.pool)
+        .await
+        .expect("drop one required index");
+
+    let (proxy, pool) = proxied_pool(&database, 0, 4).await;
+    let outcome = ensure_partition_coverage_in_pool(&pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("repair one damaged leaf");
+    let CoverageOutcome::Ensured(ensured) = outcome else {
+        panic!("damaged index must be repairable");
+    };
+    assert_eq!(ensured.created_history_leaves, 0);
+    assert_eq!(ensured.created_heartbeat_leaves, 0);
+    let sql = proxy.sql();
+    assert_eq!(
+        sql.iter()
+            .filter(|statement| statement.starts_with("BEGIN"))
+            .count(),
+        2,
+        "one gate transaction and one leaf mutation transaction are required"
+    );
+    assert_eq!(
+        sql.iter()
+            .filter(|statement| {
+                statement.contains("pg_try_advisory_xact_lock(horsies_task_history_leaf_lock_key")
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        sql.iter()
+            .filter(|statement| statement.contains(&format!("CREATE INDEX {damaged_index}")))
+            .count(),
+        1
+    );
+    pool.close().await;
+    proxy.stop().await;
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn busy_coverage_gate_keeps_startup_ready_when_current_heartbeat_exists() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let setup = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("create current heartbeat coverage");
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+
+    let mut holder = database
+        .pool
+        .begin()
+        .await
+        .expect("begin coverage gate holder");
+    let held: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(
+             hashtextextended('horsies:partition-coverage:v1', 1601)
+         )",
+    )
+    .fetch_one(holder.as_mut())
+    .await
+    .expect("hold coverage maintenance gate");
+    assert!(held);
+
+    let startup = ensure_startup_coverage_in_pool(&database.pool, 3, 3, &[], &UnpublishedLoader)
+        .await
+        .expect("check startup under a busy coverage gate");
+    let StartupCoverageOutcome::Ready(CoverageOutcome::Failed(failure)) = startup else {
+        panic!("current heartbeat coverage must keep non-owner startup ready");
+    };
+    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert!(failure.heartbeat_covered_now);
+    holder
+        .rollback()
+        .await
+        .expect("release coverage gate holder");
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn busy_coverage_gate_refuses_startup_when_current_heartbeat_is_absent() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let mut holder = database
+        .pool
+        .begin()
+        .await
+        .expect("begin coverage gate holder");
+    let held: bool = sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(
+             hashtextextended('horsies:partition-coverage:v1', 1601)
+         )",
+    )
+    .fetch_one(holder.as_mut())
+    .await
+    .expect("hold coverage maintenance gate");
+    assert!(held);
+
+    let startup = ensure_startup_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
+        .await
+        .expect("check cold startup under a busy coverage gate");
+    let StartupCoverageOutcome::Refused(CoverageOutcome::Failed(failure)) = startup else {
+        panic!("missing current heartbeat coverage must refuse startup");
+    };
+    assert_eq!(failure.stage, "coverage_gate_busy");
+    assert!(!failure.heartbeat_covered_now);
+    holder
+        .rollback()
+        .await
+        .expect("release coverage gate holder");
     database.drop().await;
 }
 
@@ -1588,10 +2622,12 @@ async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
             FOREVER_LEGACY_LEAF,
             TASK_HISTORY_FOREVER,
             &legacy.id_index_name,
+            LeafPartitionBoundExpectation::CatalogOnly,
+            LeafIndexKind::History,
         )
         .await
         .expect("read legacy physical state")
-        .id_index_exists
+        .id_index_conformant
     );
     assert_eq!(
         capture_partition_bound_utc(&mut transaction, FOREVER_LEGACY_LEAF)
@@ -1611,6 +2647,50 @@ async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
             .expect("rerun forever conversion"),
         0
     );
+    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
+        .execute(&mut *transaction)
+        .await
+        .expect("restore pre-cutover terminal live-row posture");
+    let relocation_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+             id, task_name, queue_name, priority, args, kwargs, status,
+             sent_at, enqueued_at, completed_at, result, terminal_at,
+             terminalization_kind, retry_count, max_retries, enqueue_sha,
+             is_workflow_task, command_fingerprint_version,
+             command_fingerprint, retention_class_key, retain_rerun_input,
+             prepared_rerun_input_disposition, created_at, updated_at
+         ) VALUES (
+             $1, 'p3 legacy forever relocation', 'default', 100, '[]', '{}',
+             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
+             $1::text, FALSE, 1, $3, 'forever', FALSE, 'NEVER_ELIGIBLE',
+             $2, $2
+         )",
+    )
+    .bind(relocation_id)
+    .bind(old_anchor)
+    .bind(vec![7_u8; 32])
+    .execute(&mut *transaction)
+    .await
+    .expect("seed pre-today forever relocation task");
+    assert!(matches!(
+        relocate_terminal_batch(&mut transaction, 1)
+            .await
+            .expect("relocate into the MINVALUE legacy forever leaf"),
+        RelocationOutcome::Batch {
+            rows_relocated: 1,
+            ..
+        }
+    ));
+    let relocation_relation: String = sqlx::query_scalar(&format!(
+        "SELECT tableoid::regclass::text
+         FROM {TASK_HISTORY_PARENT} WHERE task_id = $1"
+    ))
+    .bind(relocation_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("read relocated legacy forever row");
+    assert_eq!(relocation_relation, FOREVER_LEGACY_LEAF);
     let row_count: i64 = sqlx::query_scalar(&format!(
         "SELECT count(*) FROM {TASK_HISTORY_PARENT} WHERE task_id = ANY($1)"
     ))

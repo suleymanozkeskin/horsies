@@ -254,9 +254,12 @@ async fn attached_legacy_forever_upper(
         &catalog.leaf_name,
         &catalog.parent_name,
         &catalog.id_index_name,
+        crate::core::history::partitions::catalog::LeafPartitionBoundExpectation::CatalogOnly,
+        crate::core::history::partitions::catalog::LeafIndexKind::History,
     )
     .await?;
     let conformant = physical.detach_pending == Some(false)
-        && physical.partition_bound.as_deref() == Some(catalog.partition_bound.as_str());
+        && physical.partition_bound.as_deref() == Some(catalog.partition_bound.as_str())
+        && physical.partition_bound_matches_expected;
     Ok(conformant.then_some(catalog.upper_anchor))
 }

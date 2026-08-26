@@ -3,7 +3,7 @@
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
-use crate::core::history::commands::is_safe_identifier;
+use crate::core::history::commands::{is_safe_identifier, LeafBounds};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
 
@@ -62,8 +62,21 @@ pub struct LeafPhysicalState {
     pub relation_exists: bool,
     pub parent_exists: bool,
     pub partition_bound: Option<String>,
-    pub id_index_exists: bool,
+    pub partition_bound_matches_expected: bool,
+    pub id_index_conformant: bool,
     pub detach_pending: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafIndexKind {
+    History,
+    Heartbeat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafPartitionBoundExpectation<'a> {
+    Requested(&'a LeafBounds),
+    CatalogOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,8 +332,9 @@ pub async fn capture_partition_bound_utc(
 struct PhysicalRaw {
     leaf_exists: bool,
     parent_exists: bool,
-    id_index_exists: bool,
     partition_bound: Option<String>,
+    partition_bound_matches_expected: bool,
+    id_index_conformant: bool,
     detach_pending: Option<bool>,
 }
 
@@ -329,6 +343,8 @@ pub async fn read_leaf_physical_state(
     leaf_name: &str,
     parent_name: &str,
     id_index_name: &str,
+    bound_expectation: LeafPartitionBoundExpectation<'_>,
+    index_kind: LeafIndexKind,
 ) -> Result<LeafPhysicalState, HistoryError> {
     if [leaf_name, parent_name, id_index_name]
         .iter()
@@ -336,13 +352,134 @@ pub async fn read_leaf_physical_state(
     {
         return Err(HistoryError::contract("unsafe physical-state identifier"));
     }
+    let heartbeat_index = matches!(index_kind, LeafIndexKind::Heartbeat);
+    let (expected_lower, expected_upper) = match bound_expectation {
+        LeafPartitionBoundExpectation::Requested(bounds) => {
+            (Some(bounds.lower()), Some(bounds.upper()))
+        }
+        LeafPartitionBoundExpectation::CatalogOnly => (None, None),
+    };
     let prior = pin_utc_timezone(connection).await?;
     let result = sqlx::query_as::<_, PhysicalRaw>(
-        "SELECT to_regclass($1) IS NOT NULL AS leaf_exists,
+        "WITH selected_index AS MATERIALIZED (
+             SELECT index_state.*, access_method.amname
+             FROM pg_index AS index_state
+             JOIN pg_class AS index_relation
+               ON index_relation.oid = index_state.indexrelid
+             JOIN pg_am AS access_method
+               ON access_method.oid = index_relation.relam
+             WHERE index_state.indexrelid = to_regclass($3)
+         )
+         SELECT to_regclass($1) IS NOT NULL AS leaf_exists,
                 to_regclass($2) IS NOT NULL AS parent_exists,
-                to_regclass($3) IS NOT NULL AS id_index_exists,
-                (SELECT pg_get_expr(c.relpartbound, c.oid) FROM pg_class AS c
-                 WHERE c.oid = to_regclass($1)) AS partition_bound,
+                (SELECT pg_get_expr(relation.relpartbound, relation.oid)
+                 FROM pg_class AS relation
+                 WHERE relation.oid = to_regclass($1)) AS partition_bound,
+                COALESCE((
+                    SELECT $4::timestamptz IS NULL
+                        OR pg_get_expr(relation.relpartbound, relation.oid) =
+                            format(
+                                'FOR VALUES FROM (%L) TO (%L)',
+                                $4::timestamptz,
+                                $5::timestamptz
+                            )
+                    FROM pg_class AS relation
+                    WHERE relation.oid = to_regclass($1)
+                ), false) AS partition_bound_matches_expected,
+                EXISTS (
+                    SELECT 1 FROM selected_index
+                    WHERE selected_index.indrelid = to_regclass($1)
+                      AND selected_index.amname = 'btree'
+                      AND selected_index.indisvalid
+                      AND selected_index.indisready
+                      AND selected_index.indislive
+                      AND NOT selected_index.indisunique
+                      AND NOT selected_index.indisprimary
+                      AND NOT selected_index.indisexclusion
+                      AND selected_index.indpred IS NULL
+                      AND selected_index.indexprs IS NULL
+                      AND (
+                          (
+                              NOT $6::boolean
+                              AND selected_index.indnkeyatts = 1
+                              AND selected_index.indnatts = 1
+                              AND selected_index.indkey[0] = (
+                                  SELECT attribute.attnum
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'task_id'
+                              )
+                              AND selected_index.indcollation[0] = (
+                                  SELECT attribute.attcollation
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'task_id'
+                              )
+                              AND pg_get_indexdef(
+                                  selected_index.indexrelid, 1, false
+                              ) = 'task_id'
+                              AND pg_get_indexdef(selected_index.indexrelid)
+                                  LIKE '% USING btree (task_id)'
+                              AND selected_index.indoption[0] = 0
+                          )
+                          OR
+                          (
+                              $6::boolean
+                              AND selected_index.indnkeyatts = 3
+                              AND selected_index.indnatts = 3
+                              AND selected_index.indkey[0] = (
+                                  SELECT attribute.attnum
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'task_id'
+                              )
+                              AND selected_index.indkey[1] = (
+                                  SELECT attribute.attnum
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'role'
+                              )
+                              AND selected_index.indkey[2] = (
+                                  SELECT attribute.attnum
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'sent_at'
+                              )
+                              AND selected_index.indcollation[0] = (
+                                  SELECT attribute.attcollation
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'task_id'
+                              )
+                              AND selected_index.indcollation[1] = (
+                                  SELECT attribute.attcollation
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'role'
+                              )
+                              AND selected_index.indcollation[2] = (
+                                  SELECT attribute.attcollation
+                                  FROM pg_attribute AS attribute
+                                  WHERE attribute.attrelid = to_regclass($1)
+                                    AND attribute.attname = 'sent_at'
+                              )
+                              AND pg_get_indexdef(
+                                  selected_index.indexrelid, 1, false
+                              ) = 'task_id'
+                              AND pg_get_indexdef(
+                                  selected_index.indexrelid, 2, false
+                              ) = 'role'
+                              AND pg_get_indexdef(
+                                  selected_index.indexrelid, 3, false
+                              ) = 'sent_at'
+                              AND pg_get_indexdef(selected_index.indexrelid)
+                                  LIKE '% USING btree (task_id, role, sent_at DESC)'
+                              AND selected_index.indoption[0] = 0
+                              AND selected_index.indoption[1] = 0
+                              AND selected_index.indoption[2] = 3
+                          )
+                      )
+                ) AS id_index_conformant,
                 (SELECT i.inhdetachpending FROM pg_inherits AS i
                  WHERE i.inhparent = to_regclass($2)
                    AND i.inhrelid = to_regclass($1)) AS detach_pending",
@@ -350,6 +487,9 @@ pub async fn read_leaf_physical_state(
     .bind(leaf_name)
     .bind(parent_name)
     .bind(id_index_name)
+    .bind(expected_lower)
+    .bind(expected_upper)
+    .bind(heartbeat_index)
     .fetch_one(&mut *connection)
     .await;
     let restored = restore_timezone(connection, &prior).await;
@@ -359,7 +499,8 @@ pub async fn read_leaf_physical_state(
         relation_exists: row.leaf_exists,
         parent_exists: row.parent_exists,
         partition_bound: row.partition_bound,
-        id_index_exists: row.id_index_exists,
+        partition_bound_matches_expected: row.partition_bound_matches_expected,
+        id_index_conformant: row.id_index_conformant,
         detach_pending: row.detach_pending,
     })
 }
@@ -377,12 +518,29 @@ pub async fn read_leaf_ordering_index_exists(
              JOIN pg_class AS ic ON ic.oid = i.indexrelid
              JOIN pg_am AS am ON am.oid = ic.relam
              WHERE i.indrelid = to_regclass($1)
-               AND am.amname = 'btree' AND i.indpred IS NULL
+               AND am.amname = 'btree'
+               AND i.indisvalid
+               AND i.indisready
+               AND i.indislive
+               AND NOT i.indisunique
+               AND NOT i.indisprimary
+               AND NOT i.indisexclusion
+               AND i.indpred IS NULL
+               AND i.indexprs IS NULL
                AND i.indnkeyatts = 1
+               AND i.indnatts = 1
                AND i.indkey[0] = (
                    SELECT a.attnum FROM pg_attribute AS a
                    WHERE a.attrelid = to_regclass($1) AND a.attname = $2
                )
+               AND i.indcollation[0] = (
+                   SELECT a.attcollation FROM pg_attribute AS a
+                   WHERE a.attrelid = to_regclass($1) AND a.attname = $2
+               )
+               AND pg_get_indexdef(i.indexrelid, 1, false) = $2
+               AND pg_get_indexdef(i.indexrelid)
+                   LIKE '% USING btree (enqueued_at)'
+               AND i.indoption[0] = 0
          )",
     )
     .bind(leaf_name)

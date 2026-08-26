@@ -68,7 +68,7 @@ tempfile = "3"
 workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util", "net", "io-util"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "migrate"] }
 serial_test = "3"
 futures = "0.3"
