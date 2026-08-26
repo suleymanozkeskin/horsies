@@ -285,6 +285,14 @@ SET status = 'FAILED', result = $2, error = COALESCE($3, error), completed_at = 
 WHERE id = $1 AND status = 'RUNNING' AND completed_at IS NULL
 RETURNING id";
 
+const LOCK_WORKFLOW_RECOVERY_CLAIM_SQL: &str = "\
+SELECT TRUE
+FROM horsies_recovery_scan_cursors
+WHERE scan_name = 'running_workflows'
+  AND claim_token = $1
+  AND claim_expires_at > statement_timestamp()
+FOR SHARE";
+
 const GET_PARENT_WORKFLOW_SQL: &str = "\
 SELECT parent_workflow_id, parent_task_index
 FROM horsies_workflows
@@ -2626,7 +2634,37 @@ pub(crate) fn check_workflow_completion<'a>(
     payload: &'a PayloadPolicy,
     retention: &'a RetentionConfig,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
-    check_workflow_completion_inner(pool, workflow_id, registry, payload, retention)
+    Box::pin(async move {
+        check_workflow_completion_inner(pool, workflow_id, registry, payload, retention, None)
+            .await
+            .map(|_| ())
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecoveryClaimOutcome {
+    Held,
+    Lost,
+}
+
+pub(crate) fn check_workflow_completion_with_recovery_claim<'a>(
+    pool: &'a PgPool,
+    workflow_id: Uuid,
+    registry: &'a WorkflowSpecRegistry,
+    payload: &'a PayloadPolicy,
+    retention: &'a RetentionConfig,
+    claim_token: Uuid,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<RecoveryClaimOutcome, WorkflowError>> + Send + 'a>,
+> {
+    check_workflow_completion_inner(
+        pool,
+        workflow_id,
+        registry,
+        payload,
+        retention,
+        Some(claim_token),
+    )
 }
 
 #[allow(clippy::explicit_auto_deref)]
@@ -2636,30 +2674,51 @@ fn check_workflow_completion_inner<'a>(
     registry: &'a WorkflowSpecRegistry,
     payload: &'a PayloadPolicy,
     retention: &'a RetentionConfig,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), WorkflowError>> + Send + 'a>> {
+    recovery_claim_token: Option<Uuid>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<RecoveryClaimOutcome, WorkflowError>> + Send + 'a>,
+> {
     Box::pin(async move {
-        // Cheap unlocked pre-check: if any workflow task is still non-terminal,
-        // the workflow cannot complete yet, so skip the lock entirely. This runs
-        // after every task completion, so holding the workflow row lock across
-        // the count round trip here serialized all same-workflow completions
-        // (~2 RTT of lock-hold each) — a large fan-in spent seconds in pure
-        // serialized lock-hold (P3). A stale non-zero count is safe: it merely
-        // defers finalize to a later completion's check; the completion that
-        // terminalizes the last task reads 0 below and proceeds. The final
-        // completion always observes 0.
-        let pre_count: NonTerminalCount = sqlx::query_as(COUNT_NON_TERMINAL_SQL)
-            .bind(workflow_id)
-            .fetch_one(pool)
-            .await?;
-        if pre_count.cnt > 0 {
-            return Ok(());
-        }
+        // Normal completion uses an unlocked pre-check. Recovery first locks
+        // its claim row and keeps that lock through the finalization transaction.
+        // A stale non-zero normal pre-check is safe. It defers finalization to a
+        // later completion check. The last task completion observes zero.
+        let mut tx = match recovery_claim_token {
+            Some(claim_token) => {
+                let mut tx = pool.begin().await?;
+                let claim_owned: bool = sqlx::query_scalar(LOCK_WORKFLOW_RECOVERY_CLAIM_SQL)
+                    .bind(claim_token)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .unwrap_or(false);
+                if !claim_owned {
+                    tx.rollback().await?;
+                    return Ok(RecoveryClaimOutcome::Lost);
+                }
+                let pre_count: NonTerminalCount = sqlx::query_as(COUNT_NON_TERMINAL_SQL)
+                    .bind(workflow_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                if pre_count.cnt > 0 {
+                    tx.commit().await?;
+                    return Ok(RecoveryClaimOutcome::Held);
+                }
+                tx
+            }
+            None => {
+                let pre_count: NonTerminalCount = sqlx::query_as(COUNT_NON_TERMINAL_SQL)
+                    .bind(workflow_id)
+                    .fetch_one(pool)
+                    .await?;
+                if pre_count.cnt > 0 {
+                    return Ok(RecoveryClaimOutcome::Held);
+                }
+                pool.begin().await?
+            }
+        };
 
-        // Looks complete — now take the lock and re-count authoritatively to
-        // serialize concurrent finalizers and guard against a task transitioning
-        // between the unlocked read above and here. Matches Python's
-        // LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL pattern.
-        let mut tx = pool.begin().await?;
+        // Looks complete. Lock and re-count to serialize concurrent finalizers
+        // and guard against a task transition after the pre-check.
 
         // Lock workflow row — serializes concurrent completion checks.
         sqlx::query(LOCK_WORKFLOW_FOR_COMPLETION_SQL)
@@ -2674,7 +2733,7 @@ fn check_workflow_completion_inner<'a>(
 
         if count.cnt > 0 {
             tx.commit().await?;
-            return Ok(()); // Still has non-terminal tasks.
+            return Ok(RecoveryClaimOutcome::Held); // Still has non-terminal tasks.
         }
 
         // Only a RUNNING workflow may be finalized. PAUSED waits for manual
@@ -2691,7 +2750,7 @@ fn check_workflow_completion_inner<'a>(
             Some(ref row) if row.status == "RUNNING" => {}
             _ => {
                 tx.commit().await?;
-                return Ok(());
+                return Ok(RecoveryClaimOutcome::Held);
             }
         }
 
@@ -2763,7 +2822,7 @@ fn check_workflow_completion_inner<'a>(
         if !finalized {
             // Another worker already finalized this workflow — skip sub-workflow callback.
             tracing::debug!(workflow_id = %workflow_id, "workflow already finalized by another worker");
-            return Ok(());
+            return Ok(RecoveryClaimOutcome::Held);
         }
 
         if let (Some(ref parent_wf_id), Some(parent_idx)) =
@@ -2784,7 +2843,7 @@ fn check_workflow_completion_inner<'a>(
             .await?;
         }
 
-        Ok(())
+        Ok(RecoveryClaimOutcome::Held)
     })
 }
 

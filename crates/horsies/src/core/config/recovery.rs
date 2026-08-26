@@ -28,6 +28,13 @@ pub struct RecoveryConfig {
     #[serde(default = "default_true")]
     pub auto_terminate_orphaned_workflow_tasks: bool,
 
+    /// Minimum time between bounded orphan workflow-task audits.
+    /// One audit examines at most 500 live workflow tasks.
+    /// A full cycle takes about `ceil(live_workflow_tasks / 500) * interval`.
+    /// The reaper check interval remains the lower scheduling unit (1s–24hr).
+    #[serde(default = "default_orphan_task_audit_interval")]
+    pub orphan_task_audit_interval_ms: u64,
+
     /// Milliseconds without runner heartbeat before RUNNING task is stale (1s–2hr).
     #[serde(default = "default_running_stale_threshold")]
     pub running_stale_threshold_ms: u64,
@@ -93,6 +100,8 @@ struct RecoveryConfigWire {
     auto_fail_stale_running: bool,
     #[serde(default = "default_true")]
     auto_terminate_orphaned_workflow_tasks: bool,
+    #[serde(default = "default_orphan_task_audit_interval")]
+    orphan_task_audit_interval_ms: u64,
     #[serde(default = "default_running_stale_threshold")]
     running_stale_threshold_ms: u64,
     #[serde(default = "default_finalizing_stale_threshold")]
@@ -144,6 +153,7 @@ impl<'de> Deserialize<'de> for RecoveryConfig {
             claimed_stale_threshold_ms: wire.claimed_stale_threshold_ms,
             auto_fail_stale_running: wire.auto_fail_stale_running,
             auto_terminate_orphaned_workflow_tasks: wire.auto_terminate_orphaned_workflow_tasks,
+            orphan_task_audit_interval_ms: wire.orphan_task_audit_interval_ms,
             running_stale_threshold_ms: wire.running_stale_threshold_ms,
             finalizing_stale_threshold_ms: wire.finalizing_stale_threshold_ms,
             crashed_worker_recovery_grace_ms: wire.crashed_worker_recovery_grace_ms,
@@ -174,6 +184,9 @@ fn default_crashed_worker_recovery_grace() -> u64 {
 fn default_phase2_quarantine_after_attempts() -> u32 {
     25
 }
+fn default_orphan_task_audit_interval() -> u64 {
+    60_000
+}
 fn default_check_interval() -> u64 {
     30_000
 }
@@ -190,6 +203,7 @@ impl Default for RecoveryConfig {
             claimed_stale_threshold_ms: 120_000,
             auto_fail_stale_running: true,
             auto_terminate_orphaned_workflow_tasks: true,
+            orphan_task_audit_interval_ms: 60_000,
             running_stale_threshold_ms: 300_000,
             finalizing_stale_threshold_ms: 300_000,
             crashed_worker_recovery_grace_ms: 10_000,
@@ -275,6 +289,10 @@ impl RecoveryConfig {
                 "finalizing_stale_threshold_ms",
                 self.finalizing_stale_threshold_ms,
             ),
+            (
+                "orphan_task_audit_interval_ms",
+                self.orphan_task_audit_interval_ms,
+            ),
             ("check_interval_ms", self.check_interval_ms),
             (
                 "runner_heartbeat_interval_ms",
@@ -329,6 +347,13 @@ impl RecoveryConfig {
                 field: "check_interval_ms",
                 value: self.check_interval_ms,
                 max: 600_000,
+            });
+        }
+        if self.orphan_task_audit_interval_ms > 86_400_000 {
+            errors.push(RecoveryConfigError::AboveMaximum {
+                field: "orphan_task_audit_interval_ms",
+                value: self.orphan_task_audit_interval_ms,
+                max: 86_400_000,
             });
         }
         if self.runner_heartbeat_interval_ms > 120_000 {
@@ -672,6 +697,27 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn orphan_task_audit_interval_default_and_bounds_are_exact() {
+        let from_empty: RecoveryConfig = serde_json::from_str("{}").expect("defaults deserialize");
+        assert_eq!(from_empty.orphan_task_audit_interval_ms, 60_000);
+
+        for value in [1_000, 86_400_000] {
+            let config = RecoveryConfig {
+                orphan_task_audit_interval_ms: value,
+                ..Default::default()
+            };
+            assert!(config.validate().is_empty());
+        }
+        for value in [999, 86_400_001] {
+            let config = RecoveryConfig {
+                orphan_task_audit_interval_ms: value,
+                ..Default::default()
+            };
+            assert_eq!(config.validate().len(), 1);
+        }
     }
 
     #[test]

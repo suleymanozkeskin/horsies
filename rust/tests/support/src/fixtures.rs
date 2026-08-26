@@ -45,6 +45,7 @@ pub fn fast_recovery_app_config() -> AppConfig {
         claimed_stale_threshold_ms: 2_000,
         auto_fail_stale_running: true,
         auto_terminate_orphaned_workflow_tasks: true,
+        orphan_task_audit_interval_ms: 60_000,
         running_stale_threshold_ms: 2_000,
         finalizing_stale_threshold_ms: 2_000,
         crashed_worker_recovery_grace_ms: 2_000,

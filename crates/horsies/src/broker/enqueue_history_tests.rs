@@ -763,7 +763,7 @@ fn every_workspace_task_insert_is_cutover_conformant_or_the_v26_fixture() {
         }
     }
 
-    assert_eq!(insert_count, 29, "classify every workspace task insert");
+    assert_eq!(insert_count, 30, "classify every workspace task insert");
     assert_eq!(
         transitional_v26_count, 1,
         "only the populated-v26 migration fixture may omit post-v26 columns",

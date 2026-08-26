@@ -244,6 +244,10 @@ impl AppConfig {
             self.recovery.check_interval_ms,
         ));
         lines.push(format!(
+            "    orphan_task_audit_interval: {}ms",
+            self.recovery.orphan_task_audit_interval_ms,
+        ));
+        lines.push(format!(
             "    heartbeat_intervals: runner={}ms, claimer={}ms",
             self.recovery.runner_heartbeat_interval_ms, self.recovery.claimer_heartbeat_interval_ms,
         ));

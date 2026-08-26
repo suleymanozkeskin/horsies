@@ -60,6 +60,48 @@ const ADVISORY_LOCK_KEY: i64 = 0x484F_5253_4945_5300;
 const MIGRATION_MAX_ATTEMPTS: usize = 5;
 const DEADLOCK_SQLSTATE: &str = "40P01";
 
+#[derive(Clone, Copy)]
+struct ConcurrentRecoveryIndex {
+    version: i64,
+    name: &'static str,
+    table: &'static str,
+}
+
+const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 2] = [
+    ConcurrentRecoveryIndex {
+        version: 46,
+        name: "idx_horsies_workflows_running_recovery_scan",
+        table: "horsies_workflows",
+    },
+    ConcurrentRecoveryIndex {
+        version: 47,
+        name: "idx_horsies_tasks_orphan_recovery_scan",
+        table: "horsies_tasks",
+    },
+];
+
+enum RecoveryIndexRelationState {
+    Absent,
+    ExpectedTable,
+    Conflict,
+}
+
+struct RecoveryIndexClaim {
+    name: String,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct RecoveryIndexClaimPause {
+    entered: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+static RECOVERY_INDEX_CLAIM_PAUSE: std::sync::OnceLock<
+    std::sync::Mutex<Option<RecoveryIndexClaimPause>>,
+> = std::sync::OnceLock::new();
+
 /// Run all embedded horsies migrations against `pool`.
 ///
 /// Bookkeeps in [`MIGRATIONS_TABLE`] rather than `_sqlx_migrations`.
@@ -365,7 +407,21 @@ async fn apply_migration(
     let start = Instant::now();
 
     if migration.no_tx {
+        let concurrent_index = CONCURRENT_RECOVERY_INDEXES
+            .iter()
+            .find(|index| index.version == migration.version)
+            .copied();
+        let claim = match concurrent_index {
+            Some(index) => prepare_concurrent_recovery_index(conn, migration, index).await?,
+            None => None,
+        };
         execute_sql(&mut *conn, migration).await?;
+        if let Some(claim) = claim {
+            remove_concurrent_recovery_index_claim(conn, migration, &claim).await?;
+        }
+        if let Some(index) = concurrent_index {
+            remove_abandoned_recovery_index_claims(conn, migration, index).await?;
+        }
         record_applied(&mut *conn, migration).await?;
     } else {
         let mut tx = conn.begin().await?;
@@ -387,6 +443,146 @@ async fn apply_migration(
 
     Ok(())
 }
+
+async fn prepare_concurrent_recovery_index(
+    conn: &mut PgConnection,
+    migration: &Migration,
+    index: ConcurrentRecoveryIndex,
+) -> Result<Option<RecoveryIndexClaim>, BrokerError> {
+    let state = recovery_index_relation_state(conn, index.name, index.table).await?;
+    pause_after_recovery_index_inspection().await;
+    match state {
+        RecoveryIndexRelationState::Absent => return Ok(None),
+        RecoveryIndexRelationState::Conflict => {
+            return Err(recovery_index_conflict(migration, index));
+        }
+        RecoveryIndexRelationState::ExpectedTable => {}
+    }
+
+    let claim_name = format!(
+        "horsies_recovery_index_claim_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    // The first ownership read can become stale. Rename the current canonical
+    // name and recheck its owner in one transaction. Rollback restores a
+    // foreign relation that reused the canonical name.
+    let mut transaction = conn.begin().await?;
+    sqlx::query(&format!(
+        "ALTER INDEX IF EXISTS {} RENAME TO {claim_name}",
+        index.name
+    ))
+    .execute(transaction.as_mut())
+    .await
+    .map_err(|error| {
+        BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
+    })?;
+    let claim_state =
+        recovery_index_relation_state(transaction.as_mut(), &claim_name, index.table).await?;
+    match claim_state {
+        RecoveryIndexRelationState::ExpectedTable => {
+            transaction.commit().await?;
+            Ok(Some(RecoveryIndexClaim { name: claim_name }))
+        }
+        RecoveryIndexRelationState::Absent | RecoveryIndexRelationState::Conflict => {
+            transaction.rollback().await?;
+            Err(recovery_index_conflict(migration, index))
+        }
+    }
+}
+
+async fn recovery_index_relation_state(
+    conn: &mut PgConnection,
+    index_name: &str,
+    table_name: &str,
+) -> Result<RecoveryIndexRelationState, BrokerError> {
+    let relation_owner: Option<(Option<bool>,)> = sqlx::query_as(
+        "SELECT i.indrelid = to_regclass($2)
+         FROM pg_class AS c
+         LEFT JOIN pg_index AS i ON i.indexrelid = c.oid
+         WHERE c.oid = to_regclass($1)",
+    )
+    .bind(index_name)
+    .bind(table_name)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(match relation_owner {
+        None => RecoveryIndexRelationState::Absent,
+        Some((Some(true),)) => RecoveryIndexRelationState::ExpectedTable,
+        Some((Some(false) | None,)) => RecoveryIndexRelationState::Conflict,
+    })
+}
+
+async fn remove_concurrent_recovery_index_claim(
+    conn: &mut PgConnection,
+    migration: &Migration,
+    claim: &RecoveryIndexClaim,
+) -> Result<(), BrokerError> {
+    // DROP INDEX CONCURRENTLY cannot run in the claim transaction. The UUID
+    // name prevents canonical-name reuse from changing the drop target.
+    sqlx::query(&format!("DROP INDEX CONCURRENTLY {}", claim.name))
+        .execute(&mut *conn)
+        .await
+        .map_err(|error| {
+            BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
+        })?;
+    Ok(())
+}
+
+async fn remove_abandoned_recovery_index_claims(
+    conn: &mut PgConnection,
+    migration: &Migration,
+    index: ConcurrentRecoveryIndex,
+) -> Result<(), BrokerError> {
+    let claim_names: Vec<String> = sqlx::query_scalar(
+        "SELECT relation.relname
+         FROM pg_class AS relation
+         JOIN pg_index AS index_state ON index_state.indexrelid = relation.oid
+         WHERE index_state.indrelid = to_regclass($1)
+           AND relation.relname LIKE 'horsies_recovery_index_claim\\_%' ESCAPE '\\'",
+    )
+    .bind(index.table)
+    .fetch_all(&mut *conn)
+    .await?;
+    for claim_name in claim_names {
+        if !claim_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err(recovery_index_conflict(migration, index));
+        }
+        remove_concurrent_recovery_index_claim(
+            conn,
+            migration,
+            &RecoveryIndexClaim { name: claim_name },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn recovery_index_conflict(migration: &Migration, index: ConcurrentRecoveryIndex) -> BrokerError {
+    let error = sqlx::Error::Protocol(format!(
+        "migration {} requires index {} on {}, but that name belongs to another relation",
+        migration.version, index.name, index.table,
+    ));
+    BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version))
+}
+
+#[cfg(test)]
+async fn pause_after_recovery_index_inspection() {
+    let pause = RECOVERY_INDEX_CLAIM_PAUSE
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("recovery index claim pause lock")
+        .clone();
+    if let Some(pause) = pause {
+        pause.entered.notify_one();
+        pause.release.notified().await;
+    }
+}
+
+#[cfg(not(test))]
+async fn pause_after_recovery_index_inspection() {}
 
 async fn execute_sql<'c, E>(executor: E, migration: &Migration) -> Result<(), BrokerError>
 where
@@ -416,4 +612,272 @@ where
     .execute(executor)
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod recovery_index_migration_tests {
+    use std::str::FromStr;
+
+    use serial_test::serial;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::{Connection, PgConnection};
+    use uuid::Uuid;
+
+    use super::*;
+
+    const WORKFLOW_INDEX: &str =
+        include_str!("../../migrations/0046_running_workflow_recovery_index.sql");
+    const TASK_INDEX: &str = include_str!("../../migrations/0047_orphan_task_recovery_index.sql");
+    const VALIDATION_AND_FUNCTION: &str =
+        include_str!("../../migrations/0048_bounded_recovery_function.sql");
+
+    #[test]
+    fn recovery_indexes_are_concurrent_and_validated_before_function_install() {
+        for migration in [WORKFLOW_INDEX, TASK_INDEX] {
+            assert!(migration.starts_with("-- no-transaction\n"));
+            assert!(migration.contains("CREATE INDEX CONCURRENTLY"));
+            assert!(!migration.contains("IF NOT EXISTS"));
+        }
+        let validation = VALIDATION_AND_FUNCTION
+            .find("DO $migration$")
+            .expect("index validation block");
+        let function = VALIDATION_AND_FUNCTION
+            .find("CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks")
+            .expect("bounded orphan function");
+        assert!(validation < function);
+        for required_shape_check in [
+            "'valid', i.indisvalid",
+            "'ready', i.indisready",
+            "'live', i.indislive",
+            "'operator_classes', to_jsonb(i.indclass::oid[])",
+            "'collations', to_jsonb(i.indcollation::oid[])",
+            "'predicate', pg_get_expr(i.indpred, i.indrelid)",
+        ] {
+            assert!(VALIDATION_AND_FUNCTION.contains(required_shape_check));
+        }
+    }
+
+    fn test_db_url() -> String {
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            return url;
+        }
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let root = std::path::Path::new(manifest_dir)
+            .ancestors()
+            .find(|path| path.join(".env").exists());
+        let password = root
+            .and_then(|path| std::fs::read_to_string(path.join(".env")).ok())
+            .and_then(|contents| {
+                contents
+                    .lines()
+                    .filter_map(|line| line.trim().split_once('='))
+                    .find(|(key, _)| key.trim() == "DB_PASSWORD")
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+            .unwrap_or_else(|| "W0rklane".to_owned());
+        format!("postgresql://postgres:{password}@localhost:5432/horsies-rust-port")
+    }
+
+    struct MigrationTestDatabase {
+        admin: PgConnection,
+        pool: PgPool,
+        name: String,
+    }
+
+    impl MigrationTestDatabase {
+        async fn create() -> Self {
+            let base_options = PgConnectOptions::from_str(&test_db_url()).unwrap();
+            let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
+                .await
+                .unwrap();
+            let name = format!("horsies_migration_retry_{}", Uuid::new_v4().simple());
+            sqlx::query(&format!("CREATE DATABASE \"{name}\""))
+                .execute(&mut admin)
+                .await
+                .unwrap();
+            let pool = PgPoolOptions::new()
+                .max_connections(4)
+                .connect_with(base_options.database(&name))
+                .await
+                .unwrap();
+            Self { admin, pool, name }
+        }
+
+        async fn drop(mut self) {
+            self.pool.close().await;
+            sqlx::query(&format!("DROP DATABASE \"{}\"", self.name))
+                .execute(&mut self.admin)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn invalid_concurrent_recovery_index_is_rebuilt_on_migration_retry() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+
+        run_horsies_migrations_through(pool, 45).await.unwrap();
+        let first_id = Uuid::new_v4();
+        let second_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_workflows (
+                 id, name, status, on_error, definition_key, depth,
+                 root_workflow_id, sent_at, created_at, started_at, updated_at
+             ) VALUES
+                 ($1, 'migration_retry_a', 'RUNNING', 'fail', $3, 0,
+                  $1, NOW(), NOW(), NOW(), NOW()),
+                 ($2, 'migration_retry_b', 'RUNNING', 'fail', $4, 0,
+                  $2, NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(first_id)
+        .bind(second_id)
+        .bind(format!("test.migration-retry.{first_id}"))
+        .bind(format!("test.migration-retry.{second_id}"))
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let build_error = sqlx::query(
+            "CREATE UNIQUE INDEX CONCURRENTLY
+                 idx_horsies_workflows_running_recovery_scan
+             ON horsies_workflows (status)",
+        )
+        .execute(pool)
+        .await
+        .unwrap_err();
+        assert_eq!(
+            build_error
+                .as_database_error()
+                .and_then(|error| error.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("23505"),
+        );
+        let invalid: bool = sqlx::query_scalar(
+            "SELECT NOT i.indisvalid
+             FROM pg_index AS i
+             WHERE i.indexrelid =
+                   'idx_horsies_workflows_running_recovery_scan'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(
+            invalid,
+            "failed concurrent build must leave an invalid index"
+        );
+
+        run_horsies_migrations_through(pool, 48).await.unwrap();
+        let valid: bool = sqlx::query_scalar(
+            "SELECT i.indisvalid AND i.indisready AND i.indislive
+             FROM pg_index AS i
+             WHERE i.indexrelid =
+                   'idx_horsies_workflows_running_recovery_scan'::regclass
+               AND i.indrelid = 'horsies_workflows'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(valid, "migration retry must install a valid recovery index");
+        let applied: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM horsies_migrations
+                 WHERE version = 46 AND success
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(applied, "repaired index migration must be recorded");
+
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn recovery_index_claim_refuses_a_canonical_name_reused_after_inspection() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 45).await.unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_horsies_workflows_running_recovery_scan
+             ON horsies_workflows (status)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE migration_recovery_index_foreign (value integer)")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let pause = RecoveryIndexClaimPause {
+            entered: std::sync::Arc::new(tokio::sync::Notify::new()),
+            release: std::sync::Arc::new(tokio::sync::Notify::new()),
+        };
+        *RECOVERY_INDEX_CLAIM_PAUSE
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap() = Some(pause.clone());
+        let migration_pool = pool.clone();
+        let migration =
+            tokio::spawn(async move { run_horsies_migrations_through(&migration_pool, 48).await });
+        pause.entered.notified().await;
+
+        sqlx::query(
+            "ALTER INDEX idx_horsies_workflows_running_recovery_scan
+             RENAME TO migration_recovery_index_moved",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_horsies_workflows_running_recovery_scan
+             ON migration_recovery_index_foreign (value)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        pause.release.notify_one();
+
+        let error = migration.await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("belongs to another relation"),
+            "migration must refuse the reused canonical name: {error}",
+        );
+        *RECOVERY_INDEX_CLAIM_PAUSE.get().unwrap().lock().unwrap() = None;
+        let owner: String = sqlx::query_scalar(
+            "SELECT index_state.indrelid::regclass::text
+             FROM pg_index AS index_state
+             WHERE index_state.indexrelid =
+                   'idx_horsies_workflows_running_recovery_scan'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(owner, "migration_recovery_index_foreign");
+        let moved_owner: String = sqlx::query_scalar(
+            "SELECT index_state.indrelid::regclass::text
+             FROM pg_index AS index_state
+             WHERE index_state.indexrelid =
+                   'migration_recovery_index_moved'::regclass",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(moved_owner, "horsies_workflows");
+        let recorded: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM horsies_migrations
+                 WHERE version = 46
+             )",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(!recorded, "refused claim must not record migration 46");
+
+        database.drop().await;
+    }
 }

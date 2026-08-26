@@ -164,6 +164,11 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     );
     write_kv(
         &mut buf,
+        "orphan_task_audit_interval",
+        &format_ms(recovery.orphan_task_audit_interval_ms),
+    );
+    write_kv(
+        &mut buf,
         "heartbeat_interval",
         &format_ms(recovery.runner_heartbeat_interval_ms),
     );

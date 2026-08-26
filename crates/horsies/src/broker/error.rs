@@ -82,6 +82,16 @@ pub enum BrokerError {
 }
 
 impl BrokerError {
+    /// Whether this error is PostgreSQL's nonblocking lock refusal.
+    pub fn is_lock_not_available(&self) -> bool {
+        match self {
+            Self::Database(sqlx::Error::Database(error)) => {
+                error.code().is_some_and(|code| code.as_ref() == "55P03")
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this error is transient and the operation can be retried.
     ///
     /// Retryable: `Database` (when the underlying sqlx error is retryable),
@@ -116,7 +126,8 @@ impl BrokerError {
 /// - Pool timeout / pool closed
 /// - Worker crashed
 /// - Protocol / TLS errors
-/// - PostgreSQL error codes: 08xxx (connection exceptions), 57P01–57P03
+/// - PostgreSQL error codes: 08xxx (connection exceptions), 40P01
+///   (deadlock), 55P03 (nonblocking lock refusal), and 57P01–57P03
 ///   (admin shutdown, crash shutdown, cannot connect now)
 pub fn is_retryable_sqlx_error(err: &sqlx::Error) -> bool {
     match err {
@@ -131,11 +142,13 @@ pub fn is_retryable_sqlx_error(err: &sqlx::Error) -> bool {
                 let code = code.as_ref();
                 // 08xxx = connection exception class
                 // 40P01 = deadlock_detected (one txn is rolled back; safe to retry)
+                // 55P03 = lock_not_available (NOWAIT refusal; safe to retry)
                 // 57P01 = admin_shutdown
                 // 57P02 = crash_shutdown
                 // 57P03 = cannot_connect_now
                 code.starts_with("08")
                     || code == "40P01"
+                    || code == "55P03"
                     || code == "57P01"
                     || code == "57P02"
                     || code == "57P03"
