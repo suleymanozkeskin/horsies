@@ -360,6 +360,8 @@ class TestBatchBuilder:
         assert 'pg_advisory_xact_lock' not in batch
         assert 'FOR UPDATE SKIP LOCKED' in batch or (
             'FOR UPDATE OF t2 SKIP LOCKED' in batch
+        ) or (
+            'FOR UPDATE OF t SKIP LOCKED' in batch
         )
 
     def test_deferred_batch_has_fence_and_pending(self) -> None:
@@ -377,11 +379,14 @@ class TestBatchBuilder:
         assert 'ORDER BY wt.id' in sweep
         assert 'task links to multiple workflows' in sweep
 
-    def test_sweep_discovery_is_deliberately_unordered(self) -> None:
+    def test_sweep_physical_scan_is_cursor_ordered(self) -> None:
         sweep = cancellation_family_fragments()[2]
-        discovery_start = sweep.index('SELECT t2.id FROM')
-        discovery_end = sweep.index('FOR UPDATE OF t2 SKIP LOCKED')
-        assert 'ORDER BY' not in sweep[discovery_start:discovery_end]
+        first_page = sweep.index('IF v_cursor_id IS NULL THEN')
+        classification = sweep.index('FROM unnest(COALESCE(v_scan_ids')
+        bounded_scan = sweep[first_page:classification]
+        assert 'ORDER BY t.created_at, t.id' in bounded_scan
+        assert 'LIMIT p_batch_size' in bounded_scan
+        assert 'FOR UPDATE OF t SKIP LOCKED' in sweep[classification:]
 
 
 class TestCancellationFamily:

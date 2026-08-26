@@ -367,6 +367,10 @@ class AppConfig(BaseModel):
         )
         lines.append(f'    check_interval: {self.recovery.check_interval_ms}ms')
         lines.append(
+            '    orphan_task_audit_interval: '
+            f'{self.recovery.orphan_task_audit_interval_ms}ms'
+        )
+        lines.append(
             f'    heartbeat_intervals: runner={self.recovery.runner_heartbeat_interval_ms}ms, claimer={self.recovery.claimer_heartbeat_interval_ms}ms'
         )
 

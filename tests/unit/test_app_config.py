@@ -1335,6 +1335,27 @@ class TestWorkerStateSnapshotInterval:
 
 
 @pytest.mark.unit
+class TestOrphanTaskAuditInterval:
+    '''RecoveryConfig orphan audit interval bounds and default.'''
+
+    def test_default_is_60_seconds(self) -> None:
+        assert RecoveryConfig().orphan_task_audit_interval_ms == 60_000
+
+    def test_bounds_accept_valid_edges(self) -> None:
+        assert RecoveryConfig(
+            orphan_task_audit_interval_ms=1_000,
+        ).orphan_task_audit_interval_ms == 1_000
+        assert RecoveryConfig(
+            orphan_task_audit_interval_ms=86_400_000,
+        ).orphan_task_audit_interval_ms == 86_400_000
+
+    @pytest.mark.parametrize('value', [999, 86_400_001])
+    def test_out_of_range_value_is_rejected(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            RecoveryConfig(orphan_task_audit_interval_ms=value)
+
+
+@pytest.mark.unit
 class TestRetentionSweepInterval:
     """RetentionConfig.retention_sweep_interval_s bounds and default."""
 

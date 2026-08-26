@@ -62,7 +62,10 @@ from ...schemas.terminalization import (
 from .relocation import RELOCATION_LEDGER, RELOCATION_LEDGER_DDL
 
 
-def installation_fragments() -> tuple[str, ...]:
+def installation_fragments(
+    *,
+    bounded_orphan: bool = True,
+) -> tuple[str, ...]:
     """The stage-2 statements, in dependency order, by import."""
     # The completion family carries the attempt encoder itself.
     return (
@@ -70,7 +73,7 @@ def installation_fragments() -> tuple[str, ...]:
         *completion_family_fragments(),
         *failure_family_fragments(),
         *expiry_family_fragments(),
-        *cancellation_family_fragments(),
+        *cancellation_family_fragments(bounded_orphan=bounded_orphan),
         *workflow_node_family_fragments(),
         *consumption_fragments(),
         *quarantine_fragments(),

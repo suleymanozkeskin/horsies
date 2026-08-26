@@ -20,7 +20,6 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
 from horsies.core.worker.finalize import _PersistedTaskOutcome
-
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.worker import (
     Worker,
@@ -52,8 +51,21 @@ from horsies.core.worker.worker import (
     _EXECUTOR_WARMUP_ATTEMPTS,
     ServiceLoopDiedError,
 )
-from horsies.core.models.recovery import RecoveryConfig
+from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
+
+
+def _empty_workflow_recovery_report() -> SimpleNamespace:
+    return SimpleNamespace(recovered=0, health=lambda: {})
+
+
+def _orphan_task_audit_report(cancelled: int = 0) -> OrphanTaskAuditReport:
+    return OrphanTaskAuditReport(
+        rows_selected=cancelled,
+        candidates_returned=cancelled,
+        cancelled=cancelled,
+        duration_ms=1,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -735,12 +747,12 @@ class TestReaperRetentionPass:
                 self.close_async = AsyncMock(return_value=Ok(None))
                 created_brokers.append(self)
 
-        recover_mock = AsyncMock(return_value=0)
+        recover_mock = AsyncMock(return_value=_empty_workflow_recovery_report())
         monkeypatch.setattr(
             'horsies.core.brokers.postgres.PostgresBroker', _FakeBroker
         )
         monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows',
+            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
             recover_mock,
         )
 
@@ -3386,7 +3398,9 @@ def _make_reaper_worker(
             worker._stop.set()
         return result
 
-    _terminate_results = list(terminate_results or [Ok(0)])
+    _terminate_results = list(
+        terminate_results or [Ok(_orphan_task_audit_report())]
+    )
     _terminate_idx = 0
 
     async def _terminate_side_effect(**kwargs: Any) -> Any:
@@ -3410,7 +3424,7 @@ def _make_reaper_worker(
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
             self.mark_stale_tasks_as_failed = _mark_failed_side_effect
-            self.terminate_orphaned_workflow_tasks = _terminate_side_effect
+            self.audit_orphaned_workflow_tasks = _terminate_side_effect
             self.expire_pending_tasks = AsyncMock(return_value=Ok(0))
             self.app: Any = None
 
@@ -3419,8 +3433,8 @@ def _make_reaper_worker(
         _FakeBroker,
     )
     monkeypatch.setattr(
-        'horsies.core.workflows.recovery.recover_stuck_workflows',
-        AsyncMock(return_value=0),
+        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+        AsyncMock(return_value=_empty_workflow_recovery_report()),
     )
 
     worker._test_created_brokers = created_brokers  # type: ignore[attr-defined]
@@ -3580,7 +3594,7 @@ class TestReaperMatchArms:
         worker = _make_reaper_worker(
             monkeypatch,
             auto_terminate=True,
-            terminate_results=[Ok(4)],
+            terminate_results=[Ok(_orphan_task_audit_report(4))],
         )
 
         with caplog.at_level(logging.WARNING, logger=self._LOGGER_NAME):
@@ -3707,8 +3721,8 @@ class TestReaperMatchArms:
             _BoomBroker,
         )
         monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows',
-            AsyncMock(return_value=0),
+            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+            AsyncMock(return_value=_empty_workflow_recovery_report()),
         )
 
         with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
@@ -3756,8 +3770,8 @@ class TestReaperMatchArms:
             _CancelBroker,
         )
         monkeypatch.setattr(
-            'horsies.core.workflows.recovery.recover_stuck_workflows',
-            AsyncMock(return_value=0),
+            'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+            AsyncMock(return_value=_empty_workflow_recovery_report()),
         )
 
         with caplog.at_level(logging.INFO, logger=self._LOGGER_NAME):
@@ -5107,7 +5121,9 @@ def _make_reaper_broker(
     broker.mark_stale_tasks_as_failed = AsyncMock(
         return_value=mark_result if mark_result is not None else Ok(0),
     )
-    broker.terminate_orphaned_workflow_tasks = AsyncMock(return_value=Ok(0))
+    broker.audit_orphaned_workflow_tasks = AsyncMock(
+        return_value=Ok(_orphan_task_audit_report())
+    )
     broker.expire_pending_tasks = AsyncMock(return_value=Ok(0))
     session = MagicMock()
     session.commit = AsyncMock()
@@ -5128,12 +5144,132 @@ async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) 
     from unittest.mock import patch as _patch
 
     with _patch(
-        'horsies.core.workflows.recovery.recover_stuck_workflows',
-        AsyncMock(return_value=0),
+        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+        AsyncMock(return_value=_empty_workflow_recovery_report()),
     ):
         await worker._run_reaper_pass(
             broker, RecoveryConfig(), RetentionConfig(), state
         )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_orphan_audit_has_its_own_cadence() -> None:
+    worker = _make_worker()
+    broker = _make_reaper_broker(Ok(0))
+    state = _ReaperPassState(
+        next_retention_cleanup_at=float('inf'),
+        next_partition_maintenance_at=float('inf'),
+    )
+    config = RecoveryConfig(orphan_task_audit_interval_ms=60_000)
+    report = _empty_workflow_recovery_report()
+    with patch(
+        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+        AsyncMock(return_value=report),
+    ):
+        await worker._run_reaper_pass(
+            broker,
+            config,
+            RetentionConfig(),
+            state,
+        )
+        await worker._run_reaper_pass(
+            broker,
+            config,
+            RetentionConfig(),
+            state,
+        )
+
+    broker.audit_orphaned_workflow_tasks.assert_awaited_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_orphan_audit_transient_failure_is_an_error() -> None:
+    worker = _make_worker()
+    broker = _make_reaper_broker(Ok(0))
+    broker.audit_orphaned_workflow_tasks.return_value = _reaper_err(
+        retryable=True,
+        exc=SATimeoutError('pool timeout'),
+    )
+    state = _ReaperPassState(
+        next_retention_cleanup_at=float('inf'),
+        next_partition_maintenance_at=float('inf'),
+    )
+
+    await _run_pass(worker, broker, state)
+
+    assert worker._orphan_task_recovery_health is not None
+    assert worker._orphan_task_recovery_health['state'] == 'error'
+    assert worker._orphan_task_recovery_health['errors'] == 1
+    assert worker._orphan_task_recovery_health['refusals'] == 0
+    assert state.terminate_orphans_permanent_failures == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_orphan_audit_lock_failure_is_a_refusal() -> None:
+    class LockNotAvailable(Exception):
+        sqlstate = '55P03'
+
+    worker = _make_worker()
+    broker = _make_reaper_broker(Ok(0))
+    broker.audit_orphaned_workflow_tasks.return_value = _reaper_err(
+        retryable=False,
+        exc=LockNotAvailable('busy'),
+    )
+    state = _ReaperPassState(
+        next_retention_cleanup_at=float('inf'),
+        next_partition_maintenance_at=float('inf'),
+    )
+
+    await _run_pass(worker, broker, state)
+
+    assert worker._orphan_task_recovery_health is not None
+    assert worker._orphan_task_recovery_health['state'] == 'refused'
+    assert worker._orphan_task_recovery_health['errors'] == 0
+    assert worker._orphan_task_recovery_health['refusals'] == 1
+    assert state.terminate_orphans_permanent_failures == 0
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_workflow_recovery_failure_publishes_partial_health() -> None:
+    from horsies.core.workflows.recovery import (
+        RecoveryPassFailure,
+        RecoveryReport,
+    )
+
+    worker = _make_worker()
+    broker = _make_reaper_broker(Ok(0))
+    state = _ReaperPassState(
+        next_retention_cleanup_at=float('inf'),
+        next_partition_maintenance_at=float('inf'),
+    )
+    report = RecoveryReport(errors=1)
+    report.metrics['case_0'].errors = 1
+    failure = RecoveryPassFailure(report, RuntimeError('discovery failed'))
+    config = RecoveryConfig(
+        auto_requeue_stale_claimed=False,
+        auto_fail_stale_running=False,
+        auto_terminate_orphaned_workflow_tasks=False,
+    )
+
+    with patch(
+        'horsies.core.workflows.recovery.recover_stuck_workflows_global',
+        AsyncMock(side_effect=failure),
+    ):
+        await worker._run_reaper_pass(
+            broker,
+            config,
+            RetentionConfig(),
+            state,
+        )
+
+    assert worker._workflow_recovery_health is not None
+    assert worker._workflow_recovery_health['state'] == 'error'
+    cases = worker._workflow_recovery_health['cases']
+    assert cases['case_0']['errors'] == 1
 
 
 @pytest.mark.unit

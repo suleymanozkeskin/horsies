@@ -1329,6 +1329,157 @@ def _cancel_orphan_sweep_ddl() -> str:
     )
 
 
+def bounded_cancel_orphan_sweep_ddl() -> str:
+    """Render the cursor-bounded live-to-history orphan sweep."""
+    kind = TerminalizationKind.CANCEL_ORPHAN_SWEEP
+    core = _move_stage_core(
+        kind=kind,
+        status='CANCELLED',
+        result_expression='NULL::text',
+        error_expression="'WORKFLOW_CHECK_FAILED'",
+        reason_expression=(
+            "'Workflow task orphaned: no live workflow_task linkage'"
+        ),
+        deferred=False,
+        ids_var='v_ids',
+        outcome_sql=_discovery_outcome_sql(kind, 'v_ids'),
+    )
+    return f"""
+CREATE FUNCTION {CANCEL_ORPHAN_SWEEP_FUNCTION}(
+    p_batch_size integer
+)
+RETURNS SETOF {OUTCOME_TYPE}
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    v_cursor_created_at timestamptz;
+    v_cursor_id uuid;
+    v_upper_created_at timestamptz;
+    v_upper_id uuid;
+    v_scan_created_at timestamptz[];
+    v_scan_ids uuid[];
+    v_ids uuid[];
+    v_scan_count integer;
+    v_cycle_complete boolean;
+    v_terminal_at timestamptz;
+    v_moved bigint;
+    v_deleted bigint;
+    v_result_payload bytea;
+BEGIN
+    IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
+        RAISE EXCEPTION
+            'p_batch_size must be a positive integer, got %', p_batch_size
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
+
+    SELECT c.last_created_at, c.last_id,
+           c.cycle_upper_created_at, c.cycle_upper_id
+    INTO v_cursor_created_at, v_cursor_id,
+         v_upper_created_at, v_upper_id
+    FROM horsies_recovery_scan_cursors c
+    WHERE c.scan_name = 'orphan_workflow_tasks'
+    FOR UPDATE NOWAIT;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'orphan workflow-task scan cursor is absent'
+            USING ERRCODE = 'data_corrupted';
+    END IF;
+
+    IF v_upper_id IS NULL THEN
+        SELECT t.created_at, t.id
+        INTO v_upper_created_at, v_upper_id
+        FROM {LIVE_TASKS} t
+        WHERE t.is_workflow_task = TRUE
+          AND t.status IN ('CLAIMED', 'PENDING')
+        ORDER BY t.created_at DESC, t.id DESC
+        LIMIT 1;
+    END IF;
+
+    IF v_cursor_id IS NULL THEN
+        SELECT array_agg(s.created_at ORDER BY s.created_at, s.id),
+               array_agg(s.id ORDER BY s.created_at, s.id)
+        INTO v_scan_created_at, v_scan_ids
+        FROM (
+            SELECT t.created_at, t.id
+            FROM {LIVE_TASKS} t
+            WHERE t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND v_upper_id IS NOT NULL
+              AND (t.created_at, t.id) <= (v_upper_created_at, v_upper_id)
+            ORDER BY t.created_at, t.id
+            LIMIT p_batch_size
+        ) s;
+    ELSE
+        SELECT array_agg(s.created_at ORDER BY s.created_at, s.id),
+               array_agg(s.id ORDER BY s.created_at, s.id)
+        INTO v_scan_created_at, v_scan_ids
+        FROM (
+            SELECT t.created_at, t.id
+            FROM {LIVE_TASKS} t
+            WHERE t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND v_upper_id IS NOT NULL
+              AND (t.created_at, t.id) > (v_cursor_created_at, v_cursor_id)
+              AND (t.created_at, t.id) <= (v_upper_created_at, v_upper_id)
+            ORDER BY t.created_at, t.id
+            LIMIT p_batch_size
+        ) s;
+    END IF;
+    v_scan_count := COALESCE(cardinality(v_scan_ids), 0);
+    v_cycle_complete := v_scan_count < p_batch_size
+        OR (
+            v_scan_count > 0
+            AND (v_scan_created_at[v_scan_count], v_scan_ids[v_scan_count])
+                = (v_upper_created_at, v_upper_id)
+        );
+
+    SELECT array_agg(s.id ORDER BY s.id) INTO v_ids
+    FROM (
+        SELECT candidate.id
+        FROM unnest(COALESCE(v_scan_ids, '{{}}'::uuid[])) AS scanned(id)
+        CROSS JOIN LATERAL (
+            SELECT t.id
+            FROM {LIVE_TASKS} t
+            LEFT JOIN LATERAL (
+                SELECT TRUE AS found
+                FROM horsies_workflow_tasks wt
+                WHERE wt.task_id = t.id
+                  AND wt.status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                LIMIT 1
+            ) runnable_link ON TRUE
+            WHERE t.id = scanned.id
+              AND t.is_workflow_task = TRUE
+              AND t.status IN ('CLAIMED', 'PENDING')
+              AND runnable_link.found IS NULL
+            LIMIT 1
+            FOR UPDATE OF t SKIP LOCKED
+        ) candidate
+    ) s;
+
+    UPDATE horsies_recovery_scan_cursors
+    SET last_created_at = CASE WHEN v_cycle_complete THEN NULL
+                               ELSE v_scan_created_at[v_scan_count] END,
+        last_id = CASE WHEN v_cycle_complete THEN NULL
+                       ELSE v_scan_ids[v_scan_count] END,
+        cycle_upper_created_at = CASE WHEN v_cycle_complete THEN NULL
+                                      ELSE v_upper_created_at END,
+        cycle_upper_id = CASE WHEN v_cycle_complete THEN NULL
+                              ELSE v_upper_id END,
+        completed_cycles = completed_cycles
+            + CASE WHEN v_cycle_complete THEN 1 ELSE 0 END,
+        last_scan_rows = v_scan_count,
+        last_candidate_rows = COALESCE(cardinality(v_ids), 0),
+        last_scan_at = statement_timestamp()
+    WHERE scan_name = 'orphan_workflow_tasks';
+
+    IF v_ids IS NULL THEN
+        RETURN;
+    END IF;
+{core}END
+$function$
+"""
+
+
 def _cancel_locked_ddl() -> str:
     kind = TerminalizationKind.CANCEL_ADMIN.value
     return f"""
@@ -1781,12 +1932,17 @@ def workflow_node_family_fragments() -> tuple[str, ...]:
     )
 
 
-def cancellation_family_fragments() -> tuple[str, ...]:
+def cancellation_family_fragments(
+    *,
+    bounded_orphan: bool = True,
+) -> tuple[str, ...]:
     """The cancellation-family wire functions, in install order."""
     return (
         _cancel_locked_ddl(),
         _cancel_orphan_ddl(),
-        _cancel_orphan_sweep_ddl(),
+        bounded_cancel_orphan_sweep_ddl()
+        if bounded_orphan
+        else _cancel_orphan_sweep_ddl(),
     )
 
 

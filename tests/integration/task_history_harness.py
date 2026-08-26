@@ -29,6 +29,10 @@ from horsies.core.history.ddl.classes import (
     register_finite_retention_class,
 )
 from horsies.core.history.ddl.fragments import frozen_fragments
+from horsies.core.schemas.recovery import (
+    CREATE_RECOVERY_SCAN_CURSORS_SQL,
+    SEED_RECOVERY_SCAN_CURSORS_SQL,
+)
 
 
 def _database_url() -> str:
@@ -379,6 +383,8 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
                 ATTEMPTS_STANDIN_DDL,
                 WORKFLOW_TASKS_STANDIN_DDL,
                 WORKFLOWS_STANDIN_DDL,
+                CREATE_RECOVERY_SCAN_CURSORS_SQL.text,
+                SEED_RECOVERY_SCAN_CURSORS_SQL.text,
                 (
                     HEARTBEATS_PARTITIONED_DDL
                     if partitioned_heartbeats

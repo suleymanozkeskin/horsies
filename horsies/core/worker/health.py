@@ -74,6 +74,8 @@ class HealthMixin:
         _partition_coverage_health: dict[str, Any] | None
         _partition_pruning_health: dict[str, Any] | None
         _phase2_recovery_health: dict[str, Any] | None
+        _workflow_recovery_health: dict[str, Any] | None
+        _orphan_task_recovery_health: dict[str, Any] | None
 
         # Cross-concern methods provided by sibling mixins / Worker.
         def _claim_lease_ms(self) -> int: ...
@@ -200,6 +202,7 @@ class HealthMixin:
                     'finalizing_stale_threshold_ms': self.cfg.recovery_config.finalizing_stale_threshold_ms,
                     'crashed_worker_recovery_grace_ms': self.cfg.recovery_config.crashed_worker_recovery_grace_ms,
                     'check_interval_ms': self.cfg.recovery_config.check_interval_ms,
+                    'orphan_task_audit_interval_ms': self.cfg.recovery_config.orphan_task_audit_interval_ms,
                     'runner_heartbeat_interval_ms': self.cfg.recovery_config.runner_heartbeat_interval_ms,
                     'claimer_heartbeat_interval_ms': self.cfg.recovery_config.claimer_heartbeat_interval_ms,
                     'worker_state_retention_hours': _effective_retention(self.cfg).worker_state_retention_hours,
@@ -242,6 +245,12 @@ class HealthMixin:
                                 'phase2_recovery': (
                                     self._phase2_recovery_health
                                 ),
+                                'workflow_recovery': (
+                                    self._workflow_recovery_health
+                                ),
+                                'orphan_task_recovery': (
+                                    self._orphan_task_recovery_health
+                                ),
                             }
                         )
                         if (
@@ -249,6 +258,8 @@ class HealthMixin:
                             or self._partition_coverage_health
                             or self._partition_pruning_health
                             or self._phase2_recovery_health
+                            or self._workflow_recovery_health
+                            or self._orphan_task_recovery_health
                         )
                         else None,
                         'running': running,

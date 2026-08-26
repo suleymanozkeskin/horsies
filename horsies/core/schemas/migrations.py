@@ -309,7 +309,10 @@ from sqlalchemy import text
 #      database records v35 but does not receive the completion row. Fresh and
 #      already-cut-over databases receive it only after structural validation.
 
-SCHEMA_VERSION = 35
+# v36: durable, upper-bounded recovery cursors. The two recovery indexes are
+#      built concurrently before the bounded database program is activated.
+
+SCHEMA_VERSION = 36
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
