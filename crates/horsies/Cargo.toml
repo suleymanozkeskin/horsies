@@ -1,6 +1,6 @@
 [package]
 name = "horsies"
-version = "0.1.0-alpha.30"
+version = "0.1.0-alpha.31"
 edition = "2021"
 description = "Unified public API for the horsies task queue and workflow engine"
 license = "MIT"
@@ -31,7 +31,7 @@ web = [
 ]
 
 [dependencies]
-horsies-macros = { version = "0.1.0-alpha.30", path = "../macros" }
+horsies-macros = { version = "0.1.0-alpha.31", path = "../macros" }
 async-stream = { version = "0.3", optional = true }
 async-trait = { version = "0.1", optional = true }
 axum = { version = "0.8", optional = true }

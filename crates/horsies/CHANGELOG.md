@@ -5,17 +5,41 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
-## [0.1.0-alpha.30] - 2026-08-25
+## [0.1.0-alpha.31] - 2026-08-26
 
 ### Fixed
 
 - Partition startup and periodic maintenance now use the session-capable
   database pool. PgBouncer transaction-pool connections no longer run session
   advisory locks or partition DDL.
-- Conformant partition leaves no longer take an advisory lock. Required leaf
-  mutations use `pg_try_advisory_*`, use `NOWAIT` for relation locks, return a
-  typed busy result, and commit one leaf per transaction. Concurrent detach
-  relation waits have a two-second `lock_timeout`.
+- Healthy partition coverage uses three catalog statements. It starts no
+  transaction and takes no advisory or relation lock. Required leaf repairs
+  use nonblocking advisory and relation locks and commit one leaf per
+  transaction.
+- Global recovery scans use bounded pages, fixed cycle upper watermarks, and
+  durable claims. New rows cannot prevent cursor wrap, and concurrent reapers
+  cannot process the same claimed page.
+- Recovery index migrations use retry-safe concurrent builds. Startup verifies
+  each index before the bounded recovery functions become active.
+
+### Changed
+
+- Partition mutation outcomes include explicit `Busy` variants.
+  `finalize_interrupted_detach` returns
+  `FinalizeInterruptedLeafOutcome`.
+- Recovery health data includes per-case row counts, candidate counts,
+  duration, refusals, and errors.
+- `RecoveryConfig.orphan_task_audit_interval_ms` controls the bounded orphan
+  workflow-task audit interval. Its default is 60 seconds.
+
+### Upgrade
+
+- Apply migrations 0045 through 0048 before processes use this release.
+
+## [0.1.0-alpha.30] - 2026-08-25
+
+### Fixed
+
 - Delayed-retry and stale-task retry wake-ups now send the task UUID to
   PostgreSQL `pg_notify` as text. PostgreSQL rejected the previous UUID bind.
   The retry state stayed durable and worker polling found it later, but the
@@ -23,9 +47,6 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Changed
 
-- Partition mutation outcomes now include explicit `Busy` variants.
-  `finalize_interrupted_detach` now returns
-  `FinalizeInterruptedLeafOutcome`.
 - The monitoring `/api/tasks/stats` route now caches each successful request
   scope for 10 seconds. Concurrent requests for the same scope share one
   aggregate query. Errors are not cached. The cache holds at most 256 scopes.
