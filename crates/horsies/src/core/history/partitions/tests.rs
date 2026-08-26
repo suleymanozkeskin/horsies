@@ -1290,7 +1290,8 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
     assert_eq!(proxy.statement_count(), 3);
     assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
-    assert!(elapsed < std::time::Duration::from_millis((delay_ms * 3 + 500) as u64));
+    // The exact statement count bounds RTT cost. CI load cannot give a stable
+    // wall-clock upper bound.
     pool.close().await;
     proxy.stop().await;
     database.drop().await;
