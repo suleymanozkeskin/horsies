@@ -248,7 +248,7 @@ WHERE workflow_id = $1
 ORDER BY task_index";
 
 const GET_WORKFLOW_META_SQL: &str = "\
-SELECT output_task_index, success_policy, on_error
+SELECT status, output_task_index, success_policy, on_error
 FROM horsies_workflows
 WHERE id = $1";
 
@@ -457,6 +457,7 @@ struct DepResult {
 #[derive(Debug, sqlx::FromRow)]
 #[allow(dead_code)]
 struct WorkflowMeta {
+    status: String,
     output_task_index: Option<i32>,
     success_policy: Option<serde_json::Value>,
     on_error: String,
@@ -983,20 +984,14 @@ async fn complete_phase2_workflow_in_tx(
     if count.cnt != 0 {
         return Ok(());
     }
-    let status: Option<WorkflowStatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
+    let meta: Option<WorkflowMeta> = sqlx::query_as(GET_WORKFLOW_META_SQL)
         .bind(workflow_id)
         .fetch_optional(transaction.as_mut())
         .await?;
-    if !matches!(
-        status.as_ref().map(|row| row.status.as_str()),
-        Some("RUNNING")
-    ) {
-        return Ok(());
-    }
-    let meta: WorkflowMeta = sqlx::query_as(GET_WORKFLOW_META_SQL)
-        .bind(workflow_id)
-        .fetch_one(transaction.as_mut())
-        .await?;
+    let meta = match meta {
+        Some(meta) if meta.status == "RUNNING" => meta,
+        _ => return Ok(()),
+    };
     let statuses: Vec<TaskStatusRow> = sqlx::query_as(ALL_TASK_STATUSES_SQL)
         .bind(workflow_id)
         .fetch_all(transaction.as_mut())
@@ -1006,9 +1001,13 @@ async fn complete_phase2_workflow_in_tx(
         statuses.iter().any(|status| status.status == "FAILED"),
         &statuses,
     )?;
-    let result =
-        get_workflow_final_result(transaction.as_mut(), workflow_id, meta.output_task_index)
-            .await?;
+    let result = match success {
+        true => Some(
+            get_workflow_final_result(transaction.as_mut(), workflow_id, meta.output_task_index)
+                .await?,
+        ),
+        false => None,
+    };
     let finalized = if success {
         sqlx::query_as::<_, IdRow>(UPDATE_WORKFLOW_COMPLETED_SQL)
             .bind(workflow_id)
@@ -1033,15 +1032,11 @@ async fn complete_phase2_workflow_in_tx(
     if finalized.is_none() {
         return Ok(());
     }
-    sqlx::query("SELECT pg_notify('workflow_done', $1)")
-        .bind(workflow_id.to_string())
-        .execute(transaction.as_mut())
-        .await?;
     propagate_terminal_child_in_tx(
         transaction,
         workflow_id,
         if success { "COMPLETED" } else { "FAILED" },
-        success.then_some(result.as_str()),
+        result.as_deref(),
         registry,
         payload,
         retention,
@@ -2742,23 +2737,17 @@ fn check_workflow_completion_inner<'a>(
         // so the completed_at guard on the mark SQL already blocks resurrection;
         // this short-circuit additionally avoids wasted finalize work on a
         // terminal workflow. Matches Python PR #101 ed61c3a2.)
-        let status_row: Option<WorkflowStatusRow> = sqlx::query_as(GET_WORKFLOW_STATUS_SQL)
+        let meta: Option<WorkflowMeta> = sqlx::query_as(GET_WORKFLOW_META_SQL)
             .bind(workflow_id)
             .fetch_optional(&mut *tx)
             .await?;
-        match status_row {
-            Some(ref row) if row.status == "RUNNING" => {}
+        let meta = match meta {
+            Some(meta) if meta.status == "RUNNING" => meta,
             _ => {
                 tx.commit().await?;
                 return Ok(RecoveryClaimOutcome::Held);
             }
-        }
-
-        // All tasks terminal — evaluate success.
-        let meta: WorkflowMeta = sqlx::query_as(GET_WORKFLOW_META_SQL)
-            .bind(workflow_id)
-            .fetch_one(&mut *tx)
-            .await?;
+        };
 
         // Count failures.
         let statuses: Vec<TaskStatusRow> = sqlx::query_as(ALL_TASK_STATUSES_SQL)
@@ -2770,9 +2759,12 @@ fn check_workflow_completion_inner<'a>(
 
         let is_success = evaluate_workflow_success(&meta.success_policy, has_failure, &statuses)?;
 
-        // Get the final result.
-        let result_json =
-            get_workflow_final_result(&mut tx, workflow_id, meta.output_task_index).await?;
+        let result_json = match is_success {
+            true => Some(
+                get_workflow_final_result(&mut tx, workflow_id, meta.output_task_index).await?,
+            ),
+            false => None,
+        };
 
         // Attempt to finalize the workflow. Use RETURNING to detect if another
         // worker already finalized (prevents duplicate on_subworkflow_complete).
@@ -2835,7 +2827,7 @@ fn check_workflow_completion_inner<'a>(
                 parent_idx,
                 workflow_id,
                 status_str,
-                if is_success { Some(&result_json) } else { None },
+                result_json.as_deref(),
                 registry,
                 payload,
                 retention,
@@ -4905,5 +4897,166 @@ mod promotion_batch_tests {
         );
 
         cleanup(&pool, &wf_id).await;
+    }
+}
+
+
+#[cfg(test)]
+mod finalization_contract_tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[tokio::test]
+    #[serial]
+    async fn finalization_preserves_explicit_and_default_outputs_on_both_paths() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut listener = sqlx::postgres::PgListener::connect_with(&pool)
+            .await
+            .unwrap();
+        listener.listen("workflow_done").await.unwrap();
+        let registry = WorkflowSpecRegistry::new();
+        let payload = PayloadPolicy::default();
+        let retention = RetentionConfig::default();
+        for deferred in [false, true] {
+            for success in [false, true] {
+                for output in [None, Some(0_i32)] {
+                    for bytes in [64_usize, 65536] {
+                        let id = Uuid::new_v4();
+                        sqlx::query(
+                            "INSERT INTO horsies_workflows (
+                                id, name, status, on_error, output_task_index,
+                                definition_key, root_workflow_id
+                             ) VALUES ($1, 'finalization_contract', 'RUNNING', 'fail',
+                                       $2, 'finalization_contract', $1)",
+                        )
+                        .bind(id)
+                        .bind(output)
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                        let result = serde_json::to_string(&TaskResult::Ok(
+                            serde_json::Value::String("x".repeat(bytes)),
+                        ))
+                        .unwrap();
+                        for index in 0..8_i32 {
+                            let status = match (success, index) {
+                                (false, 0) => "FAILED",
+                                _ => "COMPLETED",
+                            };
+                            sqlx::query(
+                                "INSERT INTO horsies_workflow_tasks (
+                                    id, workflow_id, task_index, node_id, task_name, status, result
+                                 ) VALUES ($1, $2, $3, $4, 'finalization_contract', $5, $6)",
+                            )
+                            .bind(Uuid::new_v4())
+                            .bind(id)
+                            .bind(index)
+                            .bind(format!("node_{index}"))
+                            .bind(status)
+                            .bind(&result)
+                            .execute(&pool)
+                            .await
+                            .unwrap();
+                        }
+                        match deferred {
+                            true => {
+                                let mut transaction = pool.begin().await.unwrap();
+                                complete_phase2_workflow_in_tx(
+                                    &mut transaction,
+                                    id,
+                                    &registry,
+                                    &payload,
+                                    &retention,
+                                )
+                                .await
+                                .unwrap();
+                                assert!(tokio::time::timeout(
+                                    std::time::Duration::from_millis(25),
+                                    listener.recv(),
+                                )
+                                .await
+                                .is_err());
+                                transaction.rollback().await.unwrap();
+                                let rolled_back: String = sqlx::query_scalar(
+                                    "SELECT status FROM horsies_workflows WHERE id = $1",
+                                )
+                                .bind(id)
+                                .fetch_one(&pool)
+                                .await
+                                .unwrap();
+                                assert_eq!(rolled_back, "RUNNING");
+                                assert!(tokio::time::timeout(
+                                    std::time::Duration::from_millis(25),
+                                    listener.recv(),
+                                )
+                                .await
+                                .is_err());
+                                let mut transaction = pool.begin().await.unwrap();
+                                complete_phase2_workflow_in_tx(
+                                    &mut transaction,
+                                    id,
+                                    &registry,
+                                    &payload,
+                                    &retention,
+                                )
+                                .await
+                                .unwrap();
+                                transaction.commit().await.unwrap();
+                            }
+                            false => check_workflow_completion(
+                                &pool, id, &registry, &payload, &retention,
+                            )
+                            .await
+                            .unwrap(),
+                        }
+                        let (status, stored): (String, Option<String>) = sqlx::query_as(
+                            "SELECT status, result FROM horsies_workflows WHERE id = $1",
+                        )
+                        .bind(id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                        let expected = match (success, output) {
+                            (false, _) => None,
+                            (true, Some(_)) => Some(result.clone()),
+                            (true, None) => {
+                                let value: serde_json::Value =
+                                    serde_json::from_str(&result).unwrap();
+                                let map = (0..8)
+                                    .map(|index| (format!("node_{index}"), value.clone()))
+                                    .collect::<serde_json::Map<_, _>>();
+                                Some(
+                                    serde_json::to_string(&TaskResult::Ok(
+                                        serde_json::Value::Object(map),
+                                    ))
+                                    .unwrap(),
+                                )
+                            }
+                        };
+                        assert_eq!(status, if success { "COMPLETED" } else { "FAILED" });
+                        assert_eq!(stored, expected);
+                        let notification = tokio::time::timeout(
+                            std::time::Duration::from_secs(5),
+                            listener.recv(),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                        assert_eq!(notification.payload(), id.to_string());
+                        assert!(tokio::time::timeout(
+                            std::time::Duration::from_millis(25),
+                            listener.recv(),
+                        )
+                        .await
+                        .is_err());
+                        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+        }
     }
 }
