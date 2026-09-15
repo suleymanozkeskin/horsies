@@ -112,6 +112,7 @@ pub fn spawn_scheduler(
             return;
         }
 
+        let lock_pool = scheduler_lock_pool(broker.pool());
         tracing::info!("scheduler started");
         let check_interval = Duration::from_secs(schedule_config.check_interval_seconds as u64);
         let mut existence_cadence =
@@ -129,6 +130,7 @@ pub fn spawn_scheduler(
             }
 
             if let Err(e) = check_and_enqueue(
+                &lock_pool,
                 &broker,
                 &schedule_config.schedules,
                 schedule_config.check_interval_seconds,
@@ -141,8 +143,18 @@ pub fn spawn_scheduler(
             }
         }
 
+        lock_pool.close().await;
         tracing::info!("scheduler stopped");
     })
+}
+
+fn scheduler_lock_pool(runtime_pool: &sqlx::PgPool) -> sqlx::PgPool {
+    runtime_pool
+        .options()
+        .clone()
+        .min_connections(0)
+        .max_connections(1)
+        .connect_lazy_with((*runtime_pool.connect_options()).clone())
 }
 
 /// Initialize schedule states in the database.
@@ -301,6 +313,7 @@ async fn ensure_states_exist(
 /// `try_acquire_schedule_lock`, and `process_schedule` re-reads state under
 /// that lock before enqueueing.
 async fn check_and_enqueue(
+    lock_pool: &sqlx::PgPool,
     broker: &Arc<PostgresBroker>,
     schedules: &[TaskSchedule],
     check_interval_seconds: u32,
@@ -341,7 +354,7 @@ async fn check_and_enqueue(
             continue;
         };
 
-        let lock_tx = match state::try_acquire_schedule_lock(broker.pool(), &schedule.name).await {
+        let lock_tx = match state::try_acquire_schedule_lock(lock_pool, &schedule.name).await {
             Ok(Some(tx)) => tx,
             Ok(None) => {
                 tracing::debug!(schedule = %schedule.name, "schedule lock busy, skipping");
@@ -1411,4 +1424,307 @@ mod tests {
         .unwrap();
         assert_eq!(tasks, 0);
     }
+    #[tokio::test]
+    #[serial]
+    async fn private_scheduler_pool_preserves_replay_cancellation_and_connection_hooks() {
+        let admin = test_pool().await;
+        let runtime = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_millis(200))
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET application_name='test_scheduler_private'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*admin.connect_options()).clone())
+            .await
+            .unwrap();
+        let broker = Arc::new(PostgresBroker::from_pool(runtime.clone()));
+        let make_lock_pool = || scheduler_lock_pool(&runtime);
+        let lock_pool = make_lock_pool();
+        let application: String = sqlx::query_scalar("SHOW application_name")
+            .fetch_one(&lock_pool)
+            .await
+            .unwrap();
+        assert_eq!(application, "test_scheduler_private");
+        let config = default_app_config();
+        for scenario in [
+            "state_failure",
+            "cancel_insert",
+            "saturation",
+            "competition",
+        ] {
+            let name = format!("test_private_{scenario}");
+            let mut schedule = interval_schedule_secs(&name, 60);
+            schedule.task_name = name.clone();
+            state::upsert_state(
+                &admin,
+                &name,
+                None,
+                Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
+                0,
+                None,
+            )
+            .await
+            .unwrap();
+            let schedules = vec![schedule];
+            match scenario {
+                "state_failure" => {
+                    sqlx::raw_sql("CREATE FUNCTION test_fail_schedule_state() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected state write failure'; END $$; CREATE TRIGGER test_fail_schedule_state BEFORE UPDATE ON horsies_schedule_state FOR EACH ROW EXECUTE FUNCTION test_fail_schedule_state();").execute(&admin).await.unwrap();
+                    let mut cadence = ExistenceCheckCadence::new(1);
+                    cadence.record(true);
+                    check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        state::get_state(&admin, &name)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .run_count,
+                        0
+                    );
+                    let tasks: i64 =
+                        sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name=$1")
+                            .bind(&name)
+                            .fetch_one(&admin)
+                            .await
+                            .unwrap();
+                    assert_eq!(tasks, 1);
+                    sqlx::raw_sql("DROP TRIGGER test_fail_schedule_state ON horsies_schedule_state; DROP FUNCTION test_fail_schedule_state();").execute(&admin).await.unwrap();
+                }
+                "cancel_insert" => {
+                    let mut blocker = admin.begin().await.unwrap();
+                    sqlx::query("LOCK TABLE horsies_tasks IN ACCESS EXCLUSIVE MODE")
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    let pool = lock_pool.clone();
+                    let broker = broker.clone();
+                    let schedules = schedules.clone();
+                    let config = config.clone();
+                    let task = tokio::spawn(async move {
+                        let mut cadence = ExistenceCheckCadence::new(1);
+                        cadence.record(true);
+                        check_and_enqueue(&pool, &broker, &schedules, 1, &config, &mut cadence)
+                            .await
+                            .unwrap();
+                    });
+                    tokio::time::timeout(Duration::from_secs(5),async {
+                        loop {
+                            let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name='test_scheduler_private' AND wait_event_type='Lock')").fetch_one(&admin).await.unwrap();
+                            if waiting { break; }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }).await.unwrap();
+                    task.abort();
+                    assert!(task.await.unwrap_err().is_cancelled());
+                    blocker.rollback().await.unwrap();
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        loop {
+                            match state::try_acquire_schedule_lock(&admin, &name)
+                                .await
+                                .unwrap()
+                            {
+                                Some(lock) => {
+                                    drop(lock);
+                                    break;
+                                }
+                                None => tokio::time::sleep(Duration::from_millis(10)).await,
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap();
+                }
+                "saturation" => {
+                    let held = runtime.acquire().await.unwrap();
+                    let mut cadence = ExistenceCheckCadence::new(1);
+                    cadence.record(true);
+                    assert!(
+                        check_and_enqueue(
+                            &lock_pool,
+                            &broker,
+                            &schedules,
+                            1,
+                            &config,
+                            &mut cadence
+                        )
+                        .await
+                        .is_err()
+                    );
+                    drop(held);
+                }
+                "competition" => {
+                    let mut calls = Vec::new();
+                    for _ in 0..4 {
+                        let pool = make_lock_pool();
+                        let broker = broker.clone();
+                        let schedules = schedules.clone();
+                        let config = config.clone();
+                        calls.push(tokio::spawn(async move {
+                            let mut cadence = ExistenceCheckCadence::new(1);
+                            cadence.record(true);
+                            check_and_enqueue(&pool, &broker, &schedules, 1, &config, &mut cadence)
+                                .await
+                                .unwrap();
+                            pool.close().await;
+                        }));
+                    }
+                    for call in calls {
+                        call.await.unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let mut cadence = ExistenceCheckCadence::new(1);
+            cadence.record(true);
+            check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
+                .await
+                .unwrap();
+            check_and_enqueue(&lock_pool, &broker, &schedules, 1, &config, &mut cadence)
+                .await
+                .unwrap();
+            assert_eq!(
+                state::get_state(&admin, &name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_count,
+                1
+            );
+            let tasks: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name=$1")
+                    .bind(&name)
+                    .fetch_one(&admin)
+                    .await
+                    .unwrap();
+            assert_eq!(tasks, 1);
+            sqlx::query("DELETE FROM horsies_tasks WHERE task_name=$1")
+                .bind(&name)
+                .execute(&admin)
+                .await
+                .unwrap();
+            state::delete_state(&admin, &name).await.unwrap();
+        }
+        lock_pool.close().await;
+        assert!(lock_pool.is_closed());
+        runtime.close().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn spawned_scheduler_uses_one_runtime_connection_and_closes_its_lock_pool() {
+        let admin = test_pool().await;
+        let application = format!("scheduler_lifecycle_{}", uuid::Uuid::new_v4().simple());
+        let hook_application = application.clone();
+        let runtime = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(1))
+            .after_connect(move |connection, _| {
+                let name = hook_application.clone();
+                Box::pin(async move {
+                    sqlx::query("SELECT set_config('application_name', $1, false)")
+                        .bind(name)
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*admin.connect_options()).clone())
+            .await
+            .unwrap();
+        let broker = Arc::new(PostgresBroker::from_pool(runtime.clone()));
+        let name = format!("scheduler_lifecycle_{}", uuid::Uuid::new_v4().simple());
+        let mut schedule = interval_schedule_secs(&name, 60);
+        schedule.task_name = name.clone();
+        let cancel = CancellationToken::new();
+        let service = spawn_scheduler(
+            broker,
+            ScheduleConfig {
+                enabled: true,
+                schedules: vec![schedule],
+                check_interval_seconds: 1,
+            },
+            default_app_config(),
+            cancel.clone(),
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state::get_state(&admin, &name).await.unwrap().is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        sqlx::query("UPDATE horsies_schedule_state SET next_run_at=NOW()-interval '1 second' WHERE schedule_name=$1")
+            .bind(&name).execute(&admin).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state::get_state(&admin, &name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .run_count
+                    == 1
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let tasks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name=$1")
+                .bind(&name)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(tasks, 1);
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE application_name=$1")
+                .bind(&application)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+        assert_eq!(sessions, 2);
+        cancel.cancel();
+        tokio::time::timeout(Duration::from_secs(5), service)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let sessions: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM pg_stat_activity WHERE application_name=$1",
+                )
+                .bind(&application)
+                .fetch_one(&admin)
+                .await
+                .unwrap();
+                if sessions == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!runtime.is_closed());
+        sqlx::query("DELETE FROM horsies_tasks WHERE task_name=$1")
+            .bind(&name)
+            .execute(&admin)
+            .await
+            .unwrap();
+        state::delete_state(&admin, &name).await.unwrap();
+        runtime.close().await;
+    }
+
 }
