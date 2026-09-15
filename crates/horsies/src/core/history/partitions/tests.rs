@@ -2706,3 +2706,104 @@ async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
         .expect("commit v34 conversion test");
     database.drop().await;
 }
+#[derive(Debug, Default)]
+struct CountingStagedPublisher {
+    calls: AtomicUsize,
+}
+
+impl LoaderPublication for CountingStagedPublisher {
+    async fn republish(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        StagedLoaderPublisher.republish(connection).await
+    }
+    async fn references_leaf(
+        &self,
+        connection: &mut PgConnection,
+        leaf_name: &str,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher
+            .references_leaf(connection, leaf_name)
+            .await
+    }
+    async fn needs_republication(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher.needs_republication(connection).await
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_coverage_publishes_once_per_changed_class_and_at_completion() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let publisher = CountingStagedPublisher::default();
+    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(report.created_history_leaves, 7);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    assert!(
+        !StagedLoaderPublisher
+            .needs_republication(tx.as_mut())
+            .await
+            .unwrap()
+    );
+    let again = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = again else {
+        panic!("{again:?}");
+    };
+    assert_eq!(report.created_history_leaves, 0);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    tx.commit().await.unwrap();
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_task_history_leaf_catalog WHERE class_key = 'forever'").fetch_one(tx.as_mut()).await.unwrap();
+    let publisher = FailFirstStagedPublisher::default();
+    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Failed(failed) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(failed.stage, "ensure_leaf_coverage");
+    assert_eq!(failed.class_key.as_deref(), Some("forever"));
+    assert!(failed.heartbeat_covered_now);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
+        .fetch_all(tx.as_mut()).await.unwrap();
+    assert!(
+        classes
+            .iter()
+            .any(|(class, count)| class == "standard_30d" && *count == 4)
+    );
+    assert!(
+        !StagedLoaderPublisher
+            .needs_republication(tx.as_mut())
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let mut repair = database.pool.begin().await.unwrap();
+    let result = ensure_partition_coverage(&mut repair, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(matches!(result, CoverageOutcome::Ensured(_)), "{result:?}");
+    repair.commit().await.unwrap();
+    database.drop().await;
+}
