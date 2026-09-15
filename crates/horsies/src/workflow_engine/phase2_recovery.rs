@@ -346,6 +346,11 @@ mod tests {
     }
 
     async fn cleanup_case(pool: &PgPool, workflow_id: Uuid, task_id: Uuid) {
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending WHERE task_id = $1")
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .expect("remove the pending recovery fixture");
         sqlx::query(
             "DELETE FROM horsies_tasks WHERE id IN (
                 SELECT task_id FROM horsies_workflow_tasks
@@ -503,6 +508,10 @@ mod tests {
     #[serial]
     async fn recovery_contains_retaining_row_advances_healthy_row_and_quarantines_at_bound() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
         let bad_workflow = Uuid::new_v4();
         let bad_task = Uuid::new_v4();
         let good_workflow = Uuid::new_v4();
@@ -595,6 +604,10 @@ mod tests {
     #[serial]
     async fn recovery_rolls_back_one_failed_row_and_advances_the_next_candidate() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        sqlx::query("DELETE FROM horsies_workflow_phase2_pending")
+            .execute(&pool)
+            .await
+            .expect("clear pending rows before global recovery");
         let bad_workflow = Uuid::new_v4();
         let bad_task = Uuid::new_v4();
         let good_workflow = Uuid::new_v4();
