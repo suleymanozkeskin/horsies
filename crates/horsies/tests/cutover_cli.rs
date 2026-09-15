@@ -309,13 +309,23 @@ async fn database_commands_print_facts_and_refuse_invalid_postures() {
     );
 
     anchor.close().await;
-    let active: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE datname = $1")
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let active: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = $1",
+            )
             .bind(&name)
             .fetch_one(&mut admin)
             .await
             .unwrap();
-    assert_eq!(active, 0);
+            if active == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all cutover database sessions must close before cleanup");
     admin
         .execute(format!("DROP DATABASE \"{name}\"").as_str())
         .await
