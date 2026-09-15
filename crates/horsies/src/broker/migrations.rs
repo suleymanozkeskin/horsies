@@ -140,10 +140,18 @@ async fn run_horsies_migrations_locked(
 ) -> Result<(), BrokerError> {
     let mut conn = pool.acquire().await?;
 
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(ADVISORY_LOCK_KEY)
-        .execute(&mut *conn)
-        .await?;
+    // A blocking lock query can keep a snapshot that a concurrent index
+    // build must wait for. End each lock attempt before waiting again.
+    loop {
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .fetch_one(&mut *conn)
+            .await?;
+        if acquired {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
 
     let outcome = run_inner(&mut conn, migrator).await;
 
@@ -710,6 +718,83 @@ mod recovery_index_migration_tests {
                 .await
                 .unwrap();
         }
+    }
+
+
+    #[tokio::test]
+    #[serial]
+    async fn waiting_migrator_does_not_block_a_concurrent_index_build() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations_through(&database.pool, 45)
+            .await
+            .unwrap();
+        let waiting_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET deadlock_timeout = '10s'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*database.pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let waiting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&waiting_pool)
+            .await
+            .unwrap();
+        let mut owner = database.pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        sqlx::raw_sql("SET deadlock_timeout = '10s'; SET statement_timeout = '2s';")
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        let waiter = tokio::spawn(async move {
+            let result = run_horsies_migrations(&waiting_pool).await;
+            waiting_pool.close().await;
+            result
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT query LIKE '%advisory_lock%' FROM pg_stat_activity WHERE pid=$1",
+                )
+                .bind(waiting_pid)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let built = sqlx::query(
+            "CREATE INDEX CONCURRENTLY test_workflow_name_active ON horsies_workflows(name) WHERE status='RUNNING'",
+        ).execute(&mut *owner).await;
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        drop(owner);
+        let migrated = tokio::time::timeout(Duration::from_secs(20), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        built.expect(
+            "the waiting migrator must leave no active transaction for the index build to wait on",
+        );
+        migrated.unwrap();
+        database.drop().await;
     }
 
     #[tokio::test]
