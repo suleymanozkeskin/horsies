@@ -395,7 +395,10 @@ async fn process_schedule(
         return Ok(());
     };
 
-    if !should_run_now(state_row.next_run_at, now) {
+    let Some(stored_next_run_at) = state_row.next_run_at else {
+        return Ok(());
+    };
+    if !should_run_now(Some(stored_next_run_at), now) {
         return Ok(());
     }
 
@@ -1354,5 +1357,58 @@ mod tests {
             checks, 3,
             "ticks 0/1/2 check (unhealthy, unhealthy, healthy); 3-5 skip",
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn process_schedule_preserves_null_after_due_discovery() {
+        let pool = test_pool().await;
+        let broker = Arc::new(PostgresBroker::from_pool(pool.clone()));
+        let mut schedule = interval_schedule_secs("stopped_after_due_discovery", 60);
+        schedule.task_name = "stopped_after_due_discovery".to_owned();
+        let now = Utc::now();
+        let config_hash = compute_config_hash(&schedule);
+        state::upsert_state(
+            &pool,
+            &schedule.name,
+            None,
+            Some(now - chrono::Duration::seconds(1)),
+            None,
+            0,
+            Some(&config_hash),
+        )
+        .await
+        .unwrap();
+        let due = state::get_due_schedules_filtered(&pool, &[schedule.name.clone()], now)
+            .await
+            .unwrap();
+        assert_eq!(due.len(), 1);
+
+        state::upsert_state(
+            &pool, &schedule.name, None, None, None, 0, Some(&config_hash),
+        )
+        .await
+        .unwrap();
+        let lock = state::try_acquire_schedule_lock(&pool, &schedule.name)
+            .await
+            .unwrap()
+            .unwrap();
+        process_schedule(&broker, &schedule, now, 1, &default_app_config())
+            .await
+            .unwrap();
+        state::release_schedule_lock(lock).await.unwrap();
+
+        let stored = state::get_state(&pool, &schedule.name).await.unwrap().unwrap();
+        assert!(stored.next_run_at.is_none());
+        assert_eq!(stored.run_count, 0);
+        assert!(stored.last_task_id.is_none());
+        let tasks: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_tasks WHERE task_name = $1",
+        )
+        .bind(&schedule.task_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tasks, 0);
     }
 }
