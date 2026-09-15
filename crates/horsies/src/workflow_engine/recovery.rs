@@ -2080,7 +2080,8 @@ mod cap_tests {
         );
         assert!(
             rendered.contains("idx_horsies_workflow_tasks_workflow")
-                || rendered.contains("uq_horsies_workflow_task_index"),
+                || rendered.contains("uq_horsies_workflow_task_index")
+                || rendered.contains("idx_horsies_workflow_tasks_wf_status_index"),
             "bounded workflow audit must use workflow-task index probes: {plan}",
         );
         assert!(
@@ -2122,7 +2123,8 @@ mod cap_tests {
             );
             assert!(
                 rendered.contains("idx_horsies_workflow_tasks_workflow")
-                    || rendered.contains("uq_horsies_workflow_task_index"),
+                    || rendered.contains("uq_horsies_workflow_task_index")
+                || rendered.contains("idx_horsies_workflow_tasks_wf_status_index"),
                 "workflow-tree recovery must use workflow-task index probes: {tree_plan}",
             );
             assert!(
