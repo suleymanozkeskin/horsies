@@ -6,7 +6,7 @@ BEGIN
         RETURN;
     END IF;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_move_task_to_history(p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text)
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_move_task_to_history(p_task_id uuid, p_terminal_status text, p_terminalization_kind text, p_terminal_at timestamp with time zone, p_result text, p_error_code text, p_failed_reason text)
  RETURNS void
  LANGUAGE plpgsql
 AS $function$
@@ -341,7 +341,7 @@ BEGIN
 END
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_abandon_nodes_of_paused_workflows(p_workflow_ids uuid[])
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_abandon_nodes_of_paused_workflows(p_workflow_ids uuid[])
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$
@@ -568,7 +568,7 @@ BEGIN
 END
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_abandon_owned_nodes(p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text)
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_abandon_owned_nodes(p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text)
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$
@@ -833,7 +833,7 @@ BEGIN
 END
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_cancel_nodes_of_cancelled_workflow(p_workflow_ids uuid[])
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_cancel_nodes_of_cancelled_workflow(p_workflow_ids uuid[])
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$
@@ -1060,7 +1060,7 @@ BEGIN
 END
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_cancel_orphaned_tasks(p_batch_size integer)
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_cancel_orphaned_tasks(p_batch_size integer)
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$
@@ -1382,7 +1382,7 @@ BEGIN
 END;
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_cancel_owned_nodes(p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text)
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_cancel_owned_nodes(p_ids uuid[], p_claimed_ats timestamp with time zone[], p_worker_id text)
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$
@@ -1647,7 +1647,7 @@ BEGIN
 END
 $function$$terminal_program$;
 
-    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION public.horsies_expire_pending_tasks(p_batch_size integer, p_result text, p_error_code text)
+    EXECUTE $terminal_program$CREATE OR REPLACE FUNCTION horsies_expire_pending_tasks(p_batch_size integer, p_result text, p_error_code text)
  RETURNS SETOF horsies_terminalization_outcome
  LANGUAGE plpgsql
 AS $function$

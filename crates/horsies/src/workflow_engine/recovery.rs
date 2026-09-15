@@ -1932,6 +1932,20 @@ mod cap_tests {
             .await
             .unwrap();
 
+        sqlx::query(
+            "UPDATE horsies_recovery_scan_cursors
+             SET last_created_at = NULL, last_id = NULL,
+                 cycle_upper_created_at = NULL, cycle_upper_id = NULL,
+                 claim_token = NULL, claim_expires_at = NULL,
+                 completed_cycles = 0,
+                 last_scan_rows = 0, last_candidate_rows = 0,
+                 last_scan_at = NULL
+             WHERE scan_name = 'running_workflows'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
         for id in &ids {
             insert_orphaned_workflow(&pool, *id).await;

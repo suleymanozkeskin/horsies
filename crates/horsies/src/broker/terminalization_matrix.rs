@@ -11,6 +11,8 @@
 //! process, global discovery batches (pending expiry, orphan sweep) are
 //! pre-drained before seeding so one serial test cannot affect another.
 
+mod schema;
+
 use chrono::{DateTime, Duration, Utc};
 use serial_test::serial;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -239,7 +241,7 @@ async fn drop_inactive_isolated_terminalization_databases(admin: &mut PgConnecti
 }
 
 impl IsolatedTerminalizationTestDatabase {
-    async fn create() -> Self {
+    async fn create_empty() -> Self {
         let base_options = PgConnectOptions::from_str(&test_db_url())
             .expect("invalid terminalization database URL");
         let mut admin = PgConnection::connect_with(&base_options.clone().database("postgres"))
@@ -261,7 +263,13 @@ impl IsolatedTerminalizationTestDatabase {
             .await
             .expect("connect isolated terminalization database");
         unlock_isolated_terminalization_database_setup(&mut admin).await;
-        run_horsies_migrations(&pool)
+        Self { admin, pool, name }
+    }
+
+    async fn create() -> Self {
+        let database = Self::create_empty().await;
+        let pool = &database.pool;
+        run_horsies_migrations(pool)
             .await
             .expect("migrate isolated terminalization database");
         let mut transaction = pool.begin().await.expect("coverage transaction");
@@ -274,7 +282,7 @@ impl IsolatedTerminalizationTestDatabase {
             "{coverage:?}"
         );
         transaction.commit().await.expect("commit coverage");
-        Self { admin, pool, name }
+        database
     }
 
     async fn drop(mut self) {
@@ -3229,158 +3237,162 @@ async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
             ));
             tx.commit().await.unwrap();
         }
-        let definition: String = sqlx::query_scalar(
-            "SELECT pg_get_functiondef('horsies_encode_task_attempts(uuid)'::regprocedure)",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap();
-        sqlx::raw_sql(&definition.replace(
-            "horsies_encode_task_attempts",
-            "test_encode_task_attempts_original",
-        ))
-        .execute(pool)
-        .await
-        .unwrap();
-        sqlx::raw_sql(
-            "CREATE TABLE test_attempt_encoding_calls (task_id uuid NOT NULL);
-         CREATE OR REPLACE FUNCTION horsies_encode_task_attempts(p_task_id uuid)
-         RETURNS bytea LANGUAGE plpgsql VOLATILE STRICT AS $$
-         BEGIN
-             INSERT INTO test_attempt_encoding_calls VALUES (p_task_id);
-             RETURN test_encode_task_attempts_original(p_task_id);
-         END $$;",
-        )
-        .execute(pool)
-        .await
-        .unwrap();
+        assert_batch_snapshot_encoding(pool).await;
+        database.drop().await;
+    }
+}
 
-        for operation in [
-            "abandon_owned",
-            "cancel_owned",
-            "paused",
-            "cancelled",
-            "orphan",
-            "expiry",
-        ] {
-            let workflow = Uuid::new_v4();
-            let workflow_status = match operation {
-                "paused" => "PAUSED",
-                "cancelled" => "CANCELLED",
-                _ => "RUNNING",
-            };
-            seed_workflow(pool, &workflow.to_string(), workflow_status).await;
-            let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
-            let claimed_at = Utc::now();
-            let mut snapshots = Vec::new();
-            for (index, id) in ids.iter().enumerate() {
-                seed_task(
-                    pool,
-                    &id.to_string(),
-                    Seed {
-                        status: match operation {
-                            "expiry" => "PENDING",
-                            _ => "CLAIMED",
-                        },
-                        claimed_at: Some(claimed_at),
-                        good_until: match operation {
-                            "expiry" => Some(Utc::now() - Duration::seconds(60)),
-                            _ => None,
-                        },
-                        is_workflow_task: true,
-                        ..Seed::default()
-                    },
-                )
-                .await;
-                if operation != "orphan" {
-                    seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "ENQUEUED").await;
-                }
-                for attempt in 1..=index * 3 {
-                    sqlx::query("INSERT INTO horsies_task_attempts(task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message, worker_id) VALUES ($1,$2,'FAILED',TRUE,NOW()-interval '2 minutes',NOW()-interval '1 minute','RETRY','retry once','w1')")
-                    .bind(id).bind(attempt as i32).execute(pool).await.unwrap();
-                }
-                let expected: Vec<u8> =
-                    sqlx::query_scalar("SELECT test_encode_task_attempts_original($1)")
-                        .bind(id)
-                        .fetch_one(pool)
-                        .await
-                        .unwrap();
-                snapshots.push(expected);
-            }
-            let count: i64 = match operation {
-                "abandon_owned" | "cancel_owned" => {
-                    let query = match operation {
-                        "abandon_owned" => {
-                            "SELECT count(*) FROM horsies_abandon_owned_nodes($1, $2, 'w1')"
-                        }
-                        _ => "SELECT count(*) FROM horsies_cancel_owned_nodes($1, $2, 'w1')",
-                    };
-                    sqlx::query_scalar(query)
-                        .bind(&ids)
-                        .bind(vec![claimed_at; 2])
-                        .fetch_one(pool)
-                        .await
-                        .unwrap()
-                }
-                "paused" | "cancelled" => {
-                    let query = match operation {
-                        "paused" => {
-                            "SELECT count(*) FROM horsies_abandon_nodes_of_paused_workflows($1)"
-                        }
-                        _ => "SELECT count(*) FROM horsies_cancel_nodes_of_cancelled_workflow($1)",
-                    };
-                    sqlx::query_scalar(query)
-                        .bind(vec![workflow])
-                        .fetch_one(pool)
-                        .await
-                        .unwrap()
-                }
-                "orphan" => {
-                    sqlx::query_scalar("SELECT count(*) FROM horsies_cancel_orphaned_tasks(10)")
-                        .fetch_one(pool)
-                        .await
-                        .unwrap()
-                }
-                "expiry" => sqlx::query_scalar(
-                    "SELECT count(*) FROM horsies_expire_pending_tasks(10, 'expired', 'EXPIRED')",
-                )
-                .fetch_one(pool)
-                .await
-                .unwrap(),
-                _ => unreachable!(),
-            };
-            assert_eq!(count, 2, "{operation}");
-            for (id, expected) in ids.iter().zip(snapshots) {
-                let calls: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM test_attempt_encoding_calls WHERE task_id=$1",
-                )
-                .bind(id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-                assert_eq!(calls, 1, "{operation}: {id}");
-                let (actual, valid_digest): (Vec<u8>, bool) = sqlx::query_as("SELECT attempt_snapshot, attempt_snapshot_digest = sha256(attempt_snapshot) FROM horsies_task_history WHERE task_id=$1")
-                .bind(id).fetch_one(pool).await.unwrap();
-                assert_eq!(actual, expected, "{operation}: {id}");
-                assert!(valid_digest);
-                let attempts: i64 = sqlx::query_scalar(
-                    "SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1",
-                )
-                .bind(id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-                assert_eq!(attempts, 0);
-            }
-            let strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
-            cleanup(
+async fn assert_batch_snapshot_encoding(pool: &PgPool) {
+    let definition: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef('horsies_encode_task_attempts(uuid)'::regprocedure)",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(&definition.replace(
+        "horsies_encode_task_attempts",
+        "test_encode_task_attempts_original",
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(
+        "CREATE TABLE test_attempt_encoding_calls (task_id uuid NOT NULL);
+     CREATE OR REPLACE FUNCTION horsies_encode_task_attempts(p_task_id uuid)
+     RETURNS bytea LANGUAGE plpgsql VOLATILE STRICT AS $$
+     BEGIN
+         INSERT INTO test_attempt_encoding_calls VALUES (p_task_id);
+         RETURN test_encode_task_attempts_original(p_task_id);
+     END $$;",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+
+    for operation in [
+        "abandon_owned",
+        "cancel_owned",
+        "paused",
+        "cancelled",
+        "orphan",
+        "expiry",
+    ] {
+        let workflow = Uuid::new_v4();
+        let workflow_status = match operation {
+            "paused" => "PAUSED",
+            "cancelled" => "CANCELLED",
+            _ => "RUNNING",
+        };
+        seed_workflow(pool, &workflow.to_string(), workflow_status).await;
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let claimed_at = Utc::now();
+        let mut snapshots = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            seed_task(
                 pool,
-                &strings.iter().map(String::as_str).collect::<Vec<_>>(),
+                &id.to_string(),
+                Seed {
+                    status: match operation {
+                        "expiry" => "PENDING",
+                        _ => "CLAIMED",
+                    },
+                    claimed_at: Some(claimed_at),
+                    good_until: match operation {
+                        "expiry" => Some(Utc::now() - Duration::seconds(60)),
+                        _ => None,
+                    },
+                    is_workflow_task: true,
+                    ..Seed::default()
+                },
             )
             .await;
-            cleanup_workflow(pool, &workflow.to_string()).await;
+            if operation != "orphan" {
+                seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "ENQUEUED").await;
+            }
+            for attempt in 1..=index * 3 {
+                sqlx::query("INSERT INTO horsies_task_attempts(task_id, attempt, outcome, will_retry, started_at, finished_at, error_code, error_message, worker_id) VALUES ($1,$2,'FAILED',TRUE,NOW()-interval '2 minutes',NOW()-interval '1 minute','RETRY','retry once','w1')")
+                .bind(id).bind(attempt as i32).execute(pool).await.unwrap();
+            }
+            let expected: Vec<u8> =
+                sqlx::query_scalar("SELECT test_encode_task_attempts_original($1)")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            snapshots.push(expected);
         }
-        database.drop().await;
+        let count: i64 = match operation {
+            "abandon_owned" | "cancel_owned" => {
+                let query = match operation {
+                    "abandon_owned" => {
+                        "SELECT count(*) FROM horsies_abandon_owned_nodes($1, $2, 'w1')"
+                    }
+                    _ => "SELECT count(*) FROM horsies_cancel_owned_nodes($1, $2, 'w1')",
+                };
+                sqlx::query_scalar(query)
+                    .bind(&ids)
+                    .bind(vec![claimed_at; 2])
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            "paused" | "cancelled" => {
+                let query = match operation {
+                    "paused" => {
+                        "SELECT count(*) FROM horsies_abandon_nodes_of_paused_workflows($1)"
+                    }
+                    _ => "SELECT count(*) FROM horsies_cancel_nodes_of_cancelled_workflow($1)",
+                };
+                sqlx::query_scalar(query)
+                    .bind(vec![workflow])
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            "orphan" => {
+                sqlx::query_scalar("SELECT count(*) FROM horsies_cancel_orphaned_tasks(10)")
+                    .fetch_one(pool)
+                    .await
+                    .unwrap()
+            }
+            "expiry" => sqlx::query_scalar(
+                "SELECT count(*) FROM horsies_expire_pending_tasks(10, 'expired', 'EXPIRED')",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(count, 2, "{operation}");
+        for (id, expected) in ids.iter().zip(snapshots) {
+            let calls: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM test_attempt_encoding_calls WHERE task_id=$1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(calls, 1, "{operation}: {id}");
+            let (actual, valid_digest): (Vec<u8>, bool) = sqlx::query_as("SELECT attempt_snapshot, attempt_snapshot_digest = sha256(attempt_snapshot) FROM horsies_task_history WHERE task_id=$1")
+            .bind(id).fetch_one(pool).await.unwrap();
+            assert_eq!(actual, expected, "{operation}: {id}");
+            assert!(valid_digest);
+            let attempts: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1",
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+            assert_eq!(attempts, 0);
+        }
+        let strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        cleanup(
+            pool,
+            &strings.iter().map(String::as_str).collect::<Vec<_>>(),
+        )
+        .await;
+        cleanup_workflow(pool, &workflow.to_string()).await;
     }
 }
 
@@ -3388,14 +3400,18 @@ async fn batch_terminalization_encodes_each_attempt_snapshot_once() {
 #[serial]
 async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
     let pool = migrated_pool().await;
+    assert_terminal_result_digests(&pool).await;
+}
+
+async fn assert_terminal_result_digests(pool: &PgPool) {
     for admin in [false, true] {
         for payload in [None, Some("stored result".repeat(10000))] {
             let deferred = !admin && payload.is_some();
             let id = Uuid::new_v4();
             let workflow = Uuid::new_v4();
-            seed_workflow(&pool, &workflow.to_string(), "RUNNING").await;
+            seed_workflow(pool, &workflow.to_string(), "RUNNING").await;
             seed_task(
-                &pool,
+                pool,
                 &id.to_string(),
                 Seed {
                     is_workflow_task: deferred,
@@ -3404,12 +3420,12 @@ async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
             )
             .await;
             if deferred {
-                seed_wf_task(&pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
+                seed_wf_task(pool, &workflow.to_string(), &id.to_string(), "RUNNING").await;
             }
             sqlx::query("UPDATE horsies_tasks SET result = $2 WHERE id = $1")
                 .bind(id)
                 .bind(&payload)
-                .execute(&pool)
+                .execute(pool)
                 .await
                 .unwrap();
             let mut tx = pool.begin().await.unwrap();
@@ -3457,9 +3473,9 @@ async fn terminal_result_digest_preserves_null_prior_and_deferred_payloads() {
                 assert_eq!(deferred, expected_digest);
             }
             tx.rollback().await.unwrap();
-            assert_eq!(post_image(&pool, &id.to_string()).await.status, "RUNNING");
-            cleanup(&pool, &[&id.to_string()]).await;
-            cleanup_workflow(&pool, &workflow.to_string()).await;
+            assert_eq!(post_image(pool, &id.to_string()).await.status, "RUNNING");
+            cleanup(pool, &[&id.to_string()]).await;
+            cleanup_workflow(pool, &workflow.to_string()).await;
         }
     }
 }
