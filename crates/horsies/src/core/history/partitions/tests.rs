@@ -2787,6 +2787,11 @@ async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_class
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
     let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
         .fetch_all(tx.as_mut()).await.unwrap();
+    assert_eq!(
+        classes.iter().find(|(class, _)| class == "forever").map(|(_, count)| *count),
+        Some(before),
+        "the failed class must retain only its pre-existing leaves",
+    );
     assert!(
         classes
             .iter()
