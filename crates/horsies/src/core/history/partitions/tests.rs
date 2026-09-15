@@ -1210,7 +1210,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     )
     .await
     .expect("create initial coverage");
-    assert!(matches!(first, CoverageOutcome::Ensured(_)));
+    assert!(matches!(first, CoverageOutcome::Ensured(_)), "{first:?}");
 
     for (history_horizon, heartbeat_horizon) in [(2, 2), (8, 8)] {
         let setup = ensure_partition_coverage_in_pool(
@@ -1222,7 +1222,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("set healthy horizon coverage");
-        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
         let (proxy, pool) = proxied_pool(&database, 0, 1).await;
         sqlx::query("SELECT set_config('timezone', 'America/Los_Angeles', false)")
             .execute(&pool)
@@ -1238,7 +1238,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy horizon coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
         assert_eq!(proxy.statement_count(), 3);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
@@ -1262,7 +1262,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("extend class coverage");
-        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
 
         let (proxy, pool) = proxied_pool(&database, 0, 1).await;
         let outcome = ensure_partition_coverage_in_pool(
@@ -1274,7 +1274,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy class coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
         assert_eq!(proxy.statement_count(), 3);
         pool.close().await;
         proxy.stop().await;
@@ -1287,7 +1287,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         .await
         .expect("healthy high-RTT coverage");
     let elapsed = started.elapsed();
-    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
     assert_eq!(proxy.statement_count(), 3);
     assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
