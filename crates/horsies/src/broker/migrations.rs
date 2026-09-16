@@ -67,7 +67,7 @@ struct ConcurrentRecoveryIndex {
     table: &'static str,
 }
 
-const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 2] = [
+const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 3] = [
     ConcurrentRecoveryIndex {
         version: 46,
         name: "idx_horsies_workflows_running_recovery_scan",
@@ -77,6 +77,11 @@ const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 2] = [
         version: 47,
         name: "idx_horsies_tasks_orphan_recovery_scan",
         table: "horsies_tasks",
+    },
+    ConcurrentRecoveryIndex {
+        version: 51,
+        name: "idx_horsies_history_catalog_active",
+        table: "horsies_task_history_leaf_catalog",
     },
 ];
 
@@ -140,10 +145,18 @@ async fn run_horsies_migrations_locked(
 ) -> Result<(), BrokerError> {
     let mut conn = pool.acquire().await?;
 
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(ADVISORY_LOCK_KEY)
-        .execute(&mut *conn)
-        .await?;
+    // A blocking lock query can keep a snapshot that a concurrent index
+    // build must wait for. End each lock attempt before waiting again.
+    loop {
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .fetch_one(&mut *conn)
+            .await?;
+        if acquired {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
 
     let outcome = run_inner(&mut conn, migrator).await;
 
@@ -710,6 +723,280 @@ mod recovery_index_migration_tests {
                 .await
                 .unwrap();
         }
+    }
+
+
+    #[tokio::test]
+    #[serial]
+    async fn active_catalog_upgrade_repairs_invalid_index_and_preserves_catalog_rows() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 50).await.unwrap();
+        sqlx::query("INSERT INTO horsies_retention_classes (class_key, duration, partition_interval, finite_parent_name, created_at) VALUES ('standard_30d', interval '30 days', interval '1 day', 'unused_parent', NOW())").execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_task_history_leaf_catalog (
+                leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
+                index_schema_version, id_index_name, partition_bound,
+                min_birth_verified, created_at, detached_at, dropped_at
+             ) SELECT 'catalog_index_' || g, 'unused_parent', 'standard_30d',
+                      timestamptz '2010-01-01' + g * interval '1 minute',
+                      timestamptz '2010-01-01' + (g + 1) * interval '1 minute',
+                      1, 'unused_index_' || g, 'unused_bound', FALSE, NOW(),
+                      CASE WHEN g <= 6010 THEN NOW() ELSE NULL END,
+                      CASE WHEN g <= 6000 THEN NOW() ELSE NULL END
+               FROM generate_series(1, 6020) AS g",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let snapshot = "SELECT jsonb_agg(to_jsonb(c) ORDER BY leaf_name) FROM horsies_task_history_leaf_catalog c";
+        let before: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(pool).await.unwrap();
+        let selected = "SELECT leaf_name FROM horsies_task_history_leaf_catalog WHERE class_key='standard_30d' AND dropped_at IS NULL AND upper_anchor <= timestamptz '2020-01-01' ORDER BY upper_anchor";
+        let expected: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
+        assert_eq!(expected.len(), 20);
+        let error = sqlx::query("CREATE UNIQUE INDEX CONCURRENTLY idx_horsies_history_catalog_active ON horsies_task_history_leaf_catalog (class_key)")
+            .execute(pool).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().and_then(|e| e.code()).as_deref(),
+            Some("23505")
+        );
+        run_horsies_migrations_through(pool, 52).await.unwrap();
+        run_horsies_migrations_through(pool, 52).await.unwrap();
+        let after: serde_json::Value = sqlx::query_scalar(snapshot).fetch_one(pool).await.unwrap();
+        assert_eq!(before, after);
+        let actual: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
+        assert_eq!(expected, actual);
+        sqlx::query("ANALYZE horsies_task_history_leaf_catalog")
+            .execute(pool)
+            .await
+            .unwrap();
+        let plan: serde_json::Value = sqlx::query_scalar(&format!(
+            "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {selected}"
+        ))
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.to_string()
+                .contains("idx_horsies_history_catalog_active"),
+            "{plan}"
+        );
+        sqlx::query(
+            "UPDATE horsies_task_history_leaf_catalog SET dropped_at=NOW() WHERE leaf_name=$1",
+        )
+        .bind(&expected[0])
+        .execute(pool)
+        .await
+        .unwrap();
+        let after_drop: Vec<String> = sqlx::query_scalar(selected).fetch_all(pool).await.unwrap();
+        assert_eq!(after_drop, expected[1..]);
+        let retained: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM horsies_task_history_leaf_catalog WHERE leaf_name=$1)",
+        )
+        .bind(&expected[0])
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(retained);
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ordered_claim_upgrade_preserves_existing_tasks_and_function_shape() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 48).await.unwrap();
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, status, sent_at, enqueued_at,
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+             ) VALUES (
+                $1, 'claim_upgrade', 'claim_upgrade', 10, 'PENDING', NOW(), NOW(),
+                $1::text, 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+             )",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let shape: String = sqlx::query_scalar(
+            "SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'horsies_claim'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+
+        run_horsies_migrations_through(pool, 49).await.unwrap();
+        run_horsies_migrations_through(pool, 49).await.unwrap();
+        let after: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let upgraded_shape: String = sqlx::query_scalar(
+            "SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'horsies_claim'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(shape, upgraded_shape);
+        let claimed: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM horsies_claim(
+                'upgrade_worker', '[\"claim_upgrade\"]'::jsonb, '{}'::jsonb,
+                '{}'::jsonb, TRUE, 1, 0, 1, 1, NULL, 60000, '[]'::jsonb
+             )",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(claimed, vec![task_id.to_string()]);
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn terminal_snapshot_upgrade_preserves_existing_tasks_and_function_shapes() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 49).await.unwrap();
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, status, sent_at, enqueued_at,
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+             ) VALUES (
+                $1, 'claim_upgrade', 'claim_upgrade', 10, 'PENDING', NOW(), NOW(),
+                $1::text, 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+             )",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let shape: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+
+        run_horsies_migrations_through(pool, 50).await.unwrap();
+        run_horsies_migrations_through(pool, 50).await.unwrap();
+        let after: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let upgraded_shape: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(shape, upgraded_shape);
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn waiting_migrator_does_not_block_a_concurrent_index_build() {
+        let database = MigrationTestDatabase::create().await;
+        run_horsies_migrations_through(&database.pool, 45)
+            .await
+            .unwrap();
+        let waiting_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|connection, _| {
+                Box::pin(async move {
+                    sqlx::query("SET deadlock_timeout = '10s'")
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with((*database.pool.connect_options()).clone())
+            .await
+            .unwrap();
+        let waiting_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&waiting_pool)
+            .await
+            .unwrap();
+        let mut owner = database.pool.acquire().await.unwrap();
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        sqlx::raw_sql("SET deadlock_timeout = '10s'; SET statement_timeout = '2s';")
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        let waiter = tokio::spawn(async move {
+            let result = run_horsies_migrations(&waiting_pool).await;
+            waiting_pool.close().await;
+            result
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT query LIKE '%advisory_lock%' FROM pg_stat_activity WHERE pid=$1",
+                )
+                .bind(waiting_pid)
+                .fetch_one(&database.pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let built = sqlx::query(
+            "CREATE INDEX CONCURRENTLY test_workflow_name_active ON horsies_workflows(name) WHERE status='RUNNING'",
+        ).execute(&mut *owner).await;
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(ADVISORY_LOCK_KEY)
+            .execute(&mut *owner)
+            .await
+            .unwrap();
+        drop(owner);
+        let migrated = tokio::time::timeout(Duration::from_secs(20), waiter)
+            .await
+            .unwrap()
+            .unwrap();
+        built.expect(
+            "the waiting migrator must leave no active transaction for the index build to wait on",
+        );
+        migrated.unwrap();
+        database.drop().await;
     }
 
     #[tokio::test]

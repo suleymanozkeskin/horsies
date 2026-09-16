@@ -1387,7 +1387,7 @@ async fn test_priority_ordering() {
     let broker = broker().await;
     db::clean_tables(&pool).await;
 
-    let enqueue_base = chrono::Utc::now();
+    let enqueue_base = chrono::Utc::now() - chrono::Duration::seconds(1);
 
     // Low priority (100) submitted first.
     let task_id_low = broker
@@ -1432,6 +1432,15 @@ async fn test_priority_ordering() {
         )
         .await
         .unwrap();
+
+    let eligible: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM horsies_tasks WHERE id = ANY($1) AND enqueued_at <= NOW()",
+    )
+    .bind(vec![task_id_low, task_id_high])
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(eligible, 2, "both tasks must be eligible before the worker starts");
 
     // Start worker with concurrency=1 to force serial execution.
     let _worker = start_worker(

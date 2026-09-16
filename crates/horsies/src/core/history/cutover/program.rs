@@ -12,6 +12,8 @@ use super::state::cutover_complete;
 
 const FRESH_CUTOVER_MIGRATION: &str =
     include_str!("../../../../migrations/0041_task_history_fresh_cutover.sql");
+const TERMINAL_SNAPSHOT_MIGRATION: &str =
+    include_str!("../../../../migrations/0050_reuse_terminal_snapshots.sql");
 const IN_PLACE_PROGRAM_MIGRATION: &str =
     include_str!("../../../../migrations/0032_terminalization_operations.sql");
 const IN_PLACE_PROGRAM_FIRST: &str =
@@ -131,8 +133,11 @@ pub async fn install_programs(
     for statement in teardown.iter().chain(installation.iter()) {
         sqlx::raw_sql(statement).execute(&mut *connection).await?;
     }
+    sqlx::raw_sql(TERMINAL_SNAPSHOT_MIGRATION)
+        .execute(&mut *connection)
+        .await?;
     Ok(ProgramInstallation::Installed {
-        statements_executed: teardown.len() + installation.len(),
+        statements_executed: teardown.len() + installation.len() + 1,
     })
 }
 
