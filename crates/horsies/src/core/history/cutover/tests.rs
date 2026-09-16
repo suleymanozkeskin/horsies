@@ -663,7 +663,14 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
         } => statements_executed,
         refused => panic!("unexpected program refusal: {refused:?}"),
     };
-    assert_eq!(installed_count, 43);
+    assert_eq!(installed_count, 44);
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT proconfig @> ARRAY['plan_cache_mode=force_generic_plan']::text[]
+         FROM pg_proc WHERE oid = 'horsies_phase2_consume(uuid,text)'::regprocedure",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap());
     let rollback = stage_rollback_programs(&pool).await.unwrap();
     assert!(matches!(
         rollback,
