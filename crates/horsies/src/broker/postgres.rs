@@ -4366,6 +4366,82 @@ mod horsies_claim_tests {
 
         cleanup(&pool, &queues).await;
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn claimed_rows_keep_dispatch_order_across_eligibility_arms() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool();
+        let queue = format!("claim_order_{}", Uuid::new_v4().simple());
+        let queues = vec![queue.clone()];
+        let middle = seed(pool, &queue, "PENDING", 50, None, None).await;
+        let last = seed(pool, &queue, "PENDING", 100, None, None).await;
+        let second = seed(pool, &queue, "PENDING", 1, None, None).await;
+        let first = seed(
+            pool, &queue, "CLAIMED", 0, Some("old_worker"),
+            Some(-60),
+        ).await;
+        let rows = broker.claim_batch(&base_params("claim_order_worker", &queues))
+            .await.unwrap();
+        let returned: Vec<Uuid> = rows.into_iter().map(|row| row.id).collect();
+        assert_eq!(returned, vec![first, second, middle, last]);
+        cleanup(pool, &queues).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn queue_and_batch_limits_leave_unused_candidates_unlocked() {
+        let broker = connect_migrated().await;
+        let pool = broker.pool();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let blocked = format!("claim_blocked_{suffix}");
+        let ready = format!("claim_ready_{suffix}");
+        let queues = vec![blocked.clone(), ready.clone()];
+        let mut unused = Vec::new();
+        for priority in 0..10 {
+            unused.push(seed(pool, &blocked, "PENDING", priority, None, None).await);
+        }
+        let mut expected = Vec::new();
+        for priority in 0..10 {
+            let id = seed(pool, &ready, "PENDING", priority, None, None).await;
+            match priority {
+                0 | 1 => expected.push(id),
+                _ => unused.push(id),
+            }
+        }
+        let mut claim = pool.begin().await.unwrap();
+        let returned: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM horsies_claim($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+        )
+        .bind("claim_lock_budget_worker")
+        .bind(serde_json::json!(queues))
+        .bind(serde_json::json!({}))
+        .bind(serde_json::json!({blocked: 0, ready: 2}))
+        .bind(true)
+        .bind(100_i32)
+        .bind(0_i32)
+        .bind(100_i32)
+        .bind(2_i32)
+        .bind(None::<i32>)
+        .bind(60_000_i64)
+        .bind(serde_json::json!([]))
+        .fetch_all(&mut *claim)
+        .await.unwrap();
+        assert_eq!(returned, expected.iter().map(Uuid::to_string).collect::<Vec<_>>());
+
+        let mut other = pool.begin().await.unwrap();
+        let unlocked: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM horsies_tasks WHERE id = ANY($1) FOR UPDATE NOWAIT",
+        )
+        .bind(&unused)
+        .fetch_all(&mut *other)
+        .await.expect("unused queue and batch candidates must remain available");
+        assert_eq!(unlocked.len(), unused.len());
+        other.rollback().await.unwrap();
+        claim.rollback().await.unwrap();
+        cleanup(pool, &queues).await;
+    }
+
 }
 
 #[cfg(test)]
