@@ -839,7 +839,9 @@ where
         Err(error) => return Err(error.into()),
     }
     record_detached(connection, leaf.leaf_name()).await?;
-    publisher.republish(connection).await?;
+    if publisher.needs_republication(connection).await? {
+        publisher.republish(connection).await?;
+    }
     Ok(DetachExpiredLeafOutcome::Inspection(
         inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
     ))
@@ -890,7 +892,9 @@ async fn finalize_locked<P: LoaderPublication>(
     match inspection {
         LeafInspection::Detached { .. } => {
             record_detached(connection, leaf.leaf_name()).await?;
-            publisher.republish(connection).await?;
+            if publisher.needs_republication(connection).await? {
+                publisher.republish(connection).await?;
+            }
         }
         LeafInspection::DetachInterrupted { .. } => {
             let retention = read_retention_class(connection, leaf.class_key())
@@ -915,7 +919,9 @@ async fn finalize_locked<P: LoaderPublication>(
                 Err(error) => return Err(error.into()),
             }
             record_detached(connection, leaf.leaf_name()).await?;
-            publisher.republish(connection).await?;
+            if publisher.needs_republication(connection).await? {
+                publisher.republish(connection).await?;
+            }
         }
         other => return Ok(FinalizeInterruptedLeafOutcome::Inspection(other)),
     }

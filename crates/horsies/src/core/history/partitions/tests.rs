@@ -136,6 +136,13 @@ struct BlockingPublisher {
 }
 
 impl LoaderPublication for BlockingPublisher {
+    async fn needs_republication(
+        &self,
+        _connection: &mut PgConnection,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        Ok(true)
+    }
+
     async fn republish(
         &self,
         _connection: &mut PgConnection,
@@ -157,6 +164,13 @@ impl LoaderPublication for BlockingPublisher {
 }
 
 impl LoaderPublication for FailFirstRepublish {
+    async fn needs_republication(
+        &self,
+        _connection: &mut PgConnection,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        Ok(true)
+    }
+
     async fn republish(
         &self,
         _connection: &mut PgConnection,
@@ -2810,5 +2824,177 @@ async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_class
         .unwrap();
     assert!(matches!(result, CoverageOutcome::Ensured(_)), "{result:?}");
     repair.commit().await.unwrap();
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn detach_publishes_changed_history_only_and_finalization_repairs_stale_readers() {
+    use super::manager::finalize_interrupted_detach;
+    use crate::core::history::commands::FinalizeInterruptedLeafDetach;
+
+    for heartbeat in [true, false] {
+        for interrupted in [false, true] {
+            let database = TestDatabase::create_with_connections(4).await;
+            let parent = register_class(&database.pool, "detach_guard_1d", 1).await;
+            let mut tx = database.pool.begin().await.unwrap();
+            register_heartbeat_class(&mut tx, Duration::hours(3))
+                .await
+                .unwrap();
+            let now = database_now(&mut tx).await.unwrap();
+            let lower = (now - Duration::days(6))
+                .with_hour(0)
+                .unwrap()
+                .with_minute(0)
+                .unwrap()
+                .with_second(0)
+                .unwrap()
+                .with_nanosecond(0)
+                .unwrap();
+            let leaf = match heartbeat {
+                true => {
+                    let leaf = hourly_leaf_ref(lower).unwrap();
+                    create_hourly_heartbeat_leaf(
+                        &mut tx,
+                        &CreateHourlyHeartbeatLeaf::new(leaf.clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    leaf
+                }
+                false => leaf_ref(&parent, "detach_guard_1d", lower),
+            };
+            tx.commit().await.unwrap();
+            if !heartbeat {
+                assert!(matches!(
+                    create_leaf(&database.pool, &leaf).await,
+                    LeafCreation::Created { .. }
+                ));
+            }
+            let publisher = CountingStagedPublisher::default();
+            let mut connection = database.pool.acquire().await.unwrap();
+            publisher.republish(&mut connection).await.unwrap();
+            publisher.calls.store(0, Ordering::SeqCst);
+            drop(connection);
+            let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(100)).unwrap();
+            match interrupted {
+                true => {
+                    let mut blocker = database.pool.acquire().await.unwrap();
+                    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    sqlx::query(&format!("SELECT count(*) FROM {}", leaf.leaf_name()))
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    let error =
+                        detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
+                            .await
+                            .unwrap_err();
+                    assert!(error.to_string().contains("statement timeout"));
+                    sqlx::query("ROLLBACK")
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    drop(blocker);
+                }
+                false => {
+                    let result =
+                        detach_expired_leaf(&database.pool, &command, &publisher, &NoQuarantine)
+                            .await
+                            .unwrap();
+                    assert!(matches!(
+                        result,
+                        DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+                    ));
+                }
+            }
+            let finalize = FinalizeInterruptedLeafDetach::new(leaf.clone(), Some(5_000)).unwrap();
+            finalize_interrupted_detach(&database.pool, &finalize, &publisher)
+                .await
+                .unwrap();
+            assert_eq!(
+                publisher.calls.load(Ordering::SeqCst),
+                usize::from(!heartbeat)
+            );
+            finalize_interrupted_detach(&database.pool, &finalize, &publisher)
+                .await
+                .unwrap();
+            assert_eq!(
+                publisher.calls.load(Ordering::SeqCst),
+                usize::from(!heartbeat)
+            );
+            let mut connection = database.pool.acquire().await.unwrap();
+            assert!(!publisher
+                .needs_republication(&mut connection)
+                .await
+                .unwrap());
+            assert!(!publisher
+                .references_leaf(&mut connection, leaf.leaf_name())
+                .await
+                .unwrap());
+            drop(connection);
+            database.drop().await;
+        }
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn finalization_retries_publication_after_detach_committed() {
+    use super::manager::finalize_interrupted_detach;
+    use crate::core::history::commands::FinalizeInterruptedLeafDetach;
+
+    let database = TestDatabase::create_with_connections(4).await;
+    let class = "detach_retry_1d";
+    let parent = register_class(&database.pool, class, 1).await;
+    let mut connection = database.pool.acquire().await.unwrap();
+    let now = database_now(&mut connection).await.unwrap();
+    drop(connection);
+    let lower = (now - Duration::days(6))
+        .with_hour(0)
+        .unwrap()
+        .with_minute(0)
+        .unwrap()
+        .with_second(0)
+        .unwrap()
+        .with_nanosecond(0)
+        .unwrap();
+    let leaf = leaf_ref(&parent, class, lower);
+    assert!(matches!(
+        create_leaf(&database.pool, &leaf).await,
+        LeafCreation::Created { .. }
+    ));
+    let mut connection = database.pool.acquire().await.unwrap();
+    StagedLoaderPublisher
+        .republish(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+    let failing = FailFirstStagedPublisher::default();
+    let command = DetachExpiredHistoryLeaf::new(leaf.clone(), None, Some(5_000)).unwrap();
+    let error = detach_expired_leaf(&database.pool, &command, &failing, &NoQuarantine)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected post-commit publication failure"));
+    let mut connection = database.pool.acquire().await.unwrap();
+    assert!(StagedLoaderPublisher
+        .references_leaf(&mut connection, leaf.leaf_name())
+        .await
+        .unwrap());
+    drop(connection);
+    let publisher = CountingStagedPublisher::default();
+    let finalize = FinalizeInterruptedLeafDetach::new(leaf.clone(), Some(5_000)).unwrap();
+    finalize_interrupted_detach(&database.pool, &finalize, &publisher)
+        .await
+        .unwrap();
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    finalize_interrupted_detach(&database.pool, &finalize, &publisher)
+        .await
+        .unwrap();
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
     database.drop().await;
 }
