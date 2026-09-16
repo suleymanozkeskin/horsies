@@ -57,7 +57,8 @@ pub fn build_app_with_handles_for_url(
     url: &str,
 ) -> Result<(Horsies, tasks::TaskHandles, workflows::RegisteredWorkflows), ShowcaseAppError> {
     let mut app = Horsies::new(config_for_url(url)).map_err(ShowcaseAppError::Horsies)?;
-    let handles = tasks::register_all(&mut app).map_err(ShowcaseAppError::Horsies)?;
+    let store = crate::store::TaskStore::new(url);
+    let handles = tasks::register_all(&mut app, &store).map_err(ShowcaseAppError::Horsies)?;
     let order_template =
         workflows::register_all(&mut app, handles.clone()).map_err(ShowcaseAppError::Horsies)?;
     Ok((app, handles, order_template))

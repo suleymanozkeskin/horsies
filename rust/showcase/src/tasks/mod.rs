@@ -98,24 +98,25 @@ pub(crate) fn fixed_options_with(
 
 pub(crate) fn register_json(
     app: &mut Horsies,
+    store: &crate::store::TaskStore,
     name: &str,
     queue: &str,
     options: TaskOptions,
 ) -> Result<JsonTask, HorsiesError> {
     let registered = match name {
-        "validate_order" => async_task_fn!(runtime::validate_order, Value),
-        "reserve_stock" => async_task_fn!(runtime::reserve_stock, Value),
-        "release_stock" => async_task_fn!(runtime::release_stock, Value),
-        "replenish_catalog" => async_task_fn!(runtime::replenish_catalog, Value),
-        "authorize_payment" => async_task_fn!(runtime::authorize_payment, Value),
-        "capture_payment" => async_task_fn!(runtime::capture_payment, Value),
-        "pick_pack" => async_task_fn!(runtime::pick_pack, Value),
-        "generate_invoice" => async_task_fn!(runtime::generate_invoice, Value),
-        "book_courier" => async_task_fn!(runtime::book_courier, Value),
-        "print_label" => async_task_fn!(runtime::print_label, Value),
-        "tracking_seed" => async_task_fn!(runtime::tracking_seed, Value),
+        "validate_order" => runtime::registered(store, runtime::validate_order),
+        "reserve_stock" => runtime::registered(store, runtime::reserve_stock),
+        "release_stock" => runtime::registered(store, runtime::release_stock),
+        "replenish_catalog" => runtime::registered(store, runtime::replenish_catalog),
+        "authorize_payment" => runtime::registered(store, runtime::authorize_payment),
+        "capture_payment" => runtime::registered(store, runtime::capture_payment),
+        "pick_pack" => runtime::registered(store, runtime::pick_pack),
+        "generate_invoice" => runtime::registered(store, runtime::generate_invoice),
+        "book_courier" => runtime::registered(store, runtime::book_courier),
+        "print_label" => runtime::registered(store, runtime::print_label),
+        "tracking_seed" => runtime::registered(store, runtime::tracking_seed),
         "send_order_email" => async_task_fn!(runtime::send_order_email, Value),
-        "apply_promotions" => async_task_fn!(runtime::apply_promotions, Value),
+        "apply_promotions" => runtime::registered_lazy(store, runtime::apply_promotions),
         "compute_loyalty_points" => async_task_fn!(runtime::compute_loyalty_points, Value),
         _ => async_task_fn!(generic_task, Value),
     };
@@ -155,17 +156,20 @@ pub(crate) fn supplier_options() -> TaskOptions {
     )
 }
 
-pub fn register_all(app: &mut Horsies) -> Result<TaskHandles, HorsiesError> {
+pub fn register_all(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<TaskHandles, HorsiesError> {
     let mut handles = TaskHandles::new();
-    for handle in analytics::register(app)?
+    for handle in analytics::register(app, store)?
         .into_iter()
-        .chain(inventory::register(app)?)
-        .chain(notify::register(app)?)
-        .chain(orders::register(app)?)
-        .chain(payments::register(app)?)
-        .chain(promotions::register(app)?)
-        .chain(returns::register(app)?)
-        .chain(shipping::register(app)?)
+        .chain(inventory::register(app, store)?)
+        .chain(notify::register(app, store)?)
+        .chain(orders::register(app, store)?)
+        .chain(payments::register(app, store)?)
+        .chain(promotions::register(app, store)?)
+        .chain(returns::register(app, store)?)
+        .chain(shipping::register(app, store)?)
     {
         handles.insert(handle.task_name().to_owned(), handle);
     }

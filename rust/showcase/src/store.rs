@@ -161,6 +161,30 @@ pub async fn ensure_database(settings: &DatabaseSettings) -> StoreResult<bool> {
     Ok(true)
 }
 
+/// One Store per application registry, initialized on its first task call.
+/// Registry construction does not need an active async runtime or a database.
+#[derive(Clone)]
+pub struct TaskStore {
+    url: std::sync::Arc<str>,
+    store: std::sync::Arc<tokio::sync::OnceCell<Store>>,
+}
+
+impl TaskStore {
+    pub fn new(url: &str) -> Self {
+        Self {
+            url: url.into(),
+            store: std::sync::Arc::new(tokio::sync::OnceCell::new()),
+        }
+    }
+
+    pub async fn get(&self) -> StoreResult<Store> {
+        self.store
+            .get_or_try_init(|| Store::connect_url(&self.url))
+            .await
+            .cloned()
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -168,9 +192,13 @@ pub struct Store {
 
 impl Store {
     pub async fn connect(settings: &DatabaseSettings) -> StoreResult<Self> {
+        Self::connect_url(settings.sqlx_url()).await
+    }
+
+    async fn connect_url(url: &str) -> StoreResult<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(8)
-            .connect(settings.sqlx_url())
+            .connect(url)
             .await
             .map_err(|error| store_error("connect", error))?;
         Ok(Self { pool })

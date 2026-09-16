@@ -162,17 +162,39 @@ pub fn register_story(app: &mut Horsies) -> Result<StoryTaskHandles, HorsiesErro
     Ok(StoryTaskHandles { apply, loyalty })
 }
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     Ok(vec![
-        register_json(app, "apply_promotions", QUEUE_FULFILLMENT, fixed_options())?,
         register_json(
             app,
+            store,
+            "apply_promotions",
+            QUEUE_FULFILLMENT,
+            fixed_options(),
+        )?,
+        register_json(
+            app,
+            store,
             "compute_loyalty_points",
             QUEUE_ANALYTICS,
             fixed_options(),
         )?,
-        register_json(app, "publish_cdn", QUEUE_FULFILLMENT, fixed_options())?,
-        register_json(app, "publish_origin", QUEUE_FULFILLMENT, fixed_options())?,
+        register_json(
+            app,
+            store,
+            "publish_cdn",
+            QUEUE_FULFILLMENT,
+            fixed_options(),
+        )?,
+        register_json(
+            app,
+            store,
+            "publish_origin",
+            QUEUE_FULFILLMENT,
+            fixed_options(),
+        )?,
     ])
 }
 

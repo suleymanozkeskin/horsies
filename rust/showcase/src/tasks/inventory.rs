@@ -10,16 +10,21 @@ pub const TASK_NAMES: &[&str] = &[
     "update_stock_levels",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     handles.push(register_json(
         app,
+        store,
         "reserve_stock",
         QUEUE_FULFILLMENT,
         fixed_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "release_stock",
         QUEUE_FULFILLMENT,
         fixed_options(),

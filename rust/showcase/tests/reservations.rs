@@ -74,10 +74,13 @@ async fn reserved(store: &Store, sku: &str) -> i32 {
         .expect("reserved count")
 }
 
-async fn run_nightly_cleanup() -> serde_json::Value {
-    runtime::replenish_catalog(json!({
-        "target_units": tuning::CATALOG_STOCK_PER_SKU,
-    }))
+async fn run_nightly_cleanup(store: &Store) -> serde_json::Value {
+    runtime::replenish_catalog(
+        store.clone(),
+        json!({
+            "target_units": tuning::CATALOG_STOCK_PER_SKU,
+        }),
+    )
     .await
     .expect("nightly reservation cleanup")
 }
@@ -95,7 +98,7 @@ async fn reserve_one(store: &Store, order: &Order, sku: &str) {
 #[tokio::test]
 #[serial]
 async fn every_failure_path_releases_or_cleans_its_reservations() {
-    let Some((_url, store)) = database().await else {
+    let Some((url, store)) = database().await else {
         return;
     };
 
@@ -107,10 +110,13 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .expect("card-decline identity");
     let (card_order, card_sku) = seed_order_with_id(&store, "card", card_id, ORDER_PLACED).await;
     reserve_one(&store, &card_order, &card_sku).await;
-    let card_error = runtime::authorize_payment(json!({
-        "order_id": card_order.order_id,
-        "amount_cents": card_order.total_cents,
-    }))
+    let card_error = runtime::authorize_payment(
+        store.clone(),
+        json!({
+            "order_id": card_order.order_id,
+            "amount_cents": card_order.total_cents,
+        }),
+    )
     .await
     .expect_err("card decline");
     assert_eq!(
@@ -183,12 +189,15 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .await
         .expect("partial order");
     reserve_one(&store, &partial_order, &partial_sku).await;
-    let insufficient = runtime::reserve_stock(json!({
-        "order_id": partial_order.order_id,
-        "line_no": 2,
-        "sku": missing_sku,
-        "quantity": 1,
-    }))
+    let insufficient = runtime::reserve_stock(
+        store.clone(),
+        json!({
+            "order_id": partial_order.order_id,
+            "line_no": 2,
+            "sku": missing_sku,
+            "quantity": 1,
+        }),
+    )
     .await
     .expect_err("insufficient stock");
     assert_eq!(
@@ -207,15 +216,18 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
     let (bundle_order, bundle_sku) =
         seed_order_with_id(&store, "bundle", bundle_id, ORDER_PLACED).await;
     reserve_one(&store, &bundle_order, &bundle_sku).await;
-    let panic_join = tokio::spawn(runtime::apply_promotions(json!({
-        "order_id": bundle_order.order_id,
-    })))
+    let panic_join = tokio::spawn(runtime::apply_promotions(
+        acme_showcase::store::TaskStore::new(&url),
+        json!({
+            "order_id": bundle_order.order_id,
+        }),
+    ))
     .await;
     assert!(
         panic_join.is_err(),
         "bundle pricing must remain a real panic"
     );
-    let cleanup = run_nightly_cleanup().await;
+    let cleanup = run_nightly_cleanup(&store).await;
     assert!(cleanup["reservations_cleared"].as_i64().unwrap_or_default() >= 1);
     assert_eq!(reserved(&store, &bundle_sku).await, 0);
 
@@ -225,7 +237,7 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .set_order_status(&cancelled_order.order_id, &"cancelled".into())
         .await
         .expect("cancel order");
-    run_nightly_cleanup().await;
+    run_nightly_cleanup(&store).await;
     assert_eq!(reserved(&store, &cancelled_sku).await, 0);
 
     let (abandoned_order, abandoned_sku) = seed_order(&store, "abandoned", ORDER_PLACED).await;
@@ -234,7 +246,7 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         .set_order_status(&abandoned_order.order_id, &"abandoned".into())
         .await
         .expect("abandon order");
-    run_nightly_cleanup().await;
+    run_nightly_cleanup(&store).await;
     assert_eq!(reserved(&store, &abandoned_sku).await, 0);
 
     let (return_order, return_sku) = seed_order(&store, "return", ORDER_PLACED).await;
@@ -251,6 +263,6 @@ async fn every_failure_path_releases_or_cleans_its_reservations() {
         })
         .await
         .expect("return");
-    run_nightly_cleanup().await;
+    run_nightly_cleanup(&store).await;
     assert_eq!(reserved(&store, &return_sku).await, 0);
 }

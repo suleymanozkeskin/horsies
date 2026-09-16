@@ -13,8 +13,7 @@ use crate::domain::{
     CARD_DECLINED, COURIER_UNAVAILABLE, INSUFFICIENT_STOCK, ORDER_CLOSED, ORDER_NOT_FOUND,
     SHIPMENT_NOT_FOUND, UNKNOWN_SKU,
 };
-use crate::settings::resolve_database_settings;
-use crate::store::Store;
+use crate::store::{Store, TaskStore};
 use crate::{simulate, tuning};
 
 use super::promotions::{self, LoyaltyArgs, PromotionArgs};
@@ -77,12 +76,12 @@ struct StocktakeArgs {
     target_units: i32,
 }
 
-pub async fn apply_promotions(input: Value) -> Result<Value, TaskError> {
+pub async fn apply_promotions(store: TaskStore, input: Value) -> Result<Value, TaskError> {
     let args: PromotionArgs = parse(input)?;
     let result = match promotions::apply_promotions(args.clone()).await {
         Ok(result) => result,
         Err(error) => {
-            if let Ok(store) = store().await {
+            if let Ok(store) = store.get().await {
                 compensate_failed_order(&store, &args.order_id).await;
             }
             return Err(error);
@@ -101,21 +100,13 @@ fn invalid_input(message: impl Into<String>) -> TaskError {
     TaskError::new("TASK_ERROR", message)
 }
 
-async fn store() -> Result<Store, TaskError> {
-    let settings = resolve_database_settings().map_err(|error| store_failure("settings", error))?;
-    Store::connect(&settings)
-        .await
-        .map_err(|error| store_failure("connect", error))
-}
-
 fn parse<T: for<'de> Deserialize<'de>>(input: Value) -> Result<T, TaskError> {
     serde_json::from_value(input)
         .map_err(|error| invalid_input(format!("invalid task input: {error}")))
 }
 
-pub async fn validate_order(input: Value) -> Result<Value, TaskError> {
+pub async fn validate_order(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: ValidateArgs = parse(input)?;
-    let store = store().await?;
     let order = store
         .get_order(&args.order_id)
         .await
@@ -135,9 +126,8 @@ pub async fn validate_order(input: Value) -> Result<Value, TaskError> {
     }))
 }
 
-pub async fn reserve_stock(input: Value) -> Result<Value, TaskError> {
+pub async fn reserve_stock(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: ReserveArgs = parse(input)?;
-    let store = store().await?;
     let outcome = store
         .reserve_line(&args.order_id, args.line_no, &args.sku, args.quantity)
         .await
@@ -180,9 +170,8 @@ async fn compensate_failed_order(store: &Store, order_id: &str) {
     }
 }
 
-pub async fn release_stock(input: Value) -> Result<Value, TaskError> {
+pub async fn release_stock(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: ReleaseArgs = parse(input)?;
-    let store = store().await?;
     let available = store
         .release_line(&args.sku, args.quantity)
         .await
@@ -197,9 +186,8 @@ pub async fn release_stock(input: Value) -> Result<Value, TaskError> {
     }))
 }
 
-pub async fn replenish_catalog(input: Value) -> Result<Value, TaskError> {
+pub async fn replenish_catalog(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: StocktakeArgs = parse(input)?;
-    let store = store().await?;
     let (topped_up, reservations_cleared) = store
         .nightly_stocktake(args.target_units, tuning::STOCKTAKE_CEILING_UNITS)
         .await
@@ -211,9 +199,8 @@ pub async fn replenish_catalog(input: Value) -> Result<Value, TaskError> {
     }))
 }
 
-pub async fn authorize_payment(input: Value) -> Result<Value, TaskError> {
+pub async fn authorize_payment(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: AuthorizeArgs = parse(input)?;
-    let store = store().await?;
     let attempt = store
         .count_authorization_attempt(&args.order_id)
         .await
@@ -266,9 +253,8 @@ pub async fn authorize_payment(input: Value) -> Result<Value, TaskError> {
     }))
 }
 
-pub async fn capture_payment(input: Value) -> Result<Value, TaskError> {
+pub async fn capture_payment(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: CaptureArgs = parse(input)?;
-    let store = store().await?;
     let authorization = store
         .find_payment(&args.order_id, &"authorization".to_owned())
         .await
@@ -297,9 +283,8 @@ pub async fn capture_payment(input: Value) -> Result<Value, TaskError> {
     }))
 }
 
-pub async fn pick_pack(input: Value) -> Result<Value, TaskError> {
+pub async fn pick_pack(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: OrderArgs = parse(input)?;
-    let store = store().await?;
     let order = store
         .get_order(&args.order_id)
         .await
@@ -320,9 +305,8 @@ pub async fn pick_pack(input: Value) -> Result<Value, TaskError> {
     )
 }
 
-pub async fn generate_invoice(input: Value) -> Result<Value, TaskError> {
+pub async fn generate_invoice(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: OrderArgs = parse(input)?;
-    let store = store().await?;
     let order = store
         .get_order(&args.order_id)
         .await
@@ -333,9 +317,8 @@ pub async fn generate_invoice(input: Value) -> Result<Value, TaskError> {
     )
 }
 
-pub async fn book_courier(input: Value) -> Result<Value, TaskError> {
+pub async fn book_courier(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: CourierArgs = parse(input)?;
-    let store = store().await?;
     let attempt = store
         .count_courier_attempt(&args.order_id, &args.courier, args.express)
         .await
@@ -374,9 +357,8 @@ pub async fn book_courier(input: Value) -> Result<Value, TaskError> {
     )
 }
 
-pub async fn print_label(input: Value) -> Result<Value, TaskError> {
+pub async fn print_label(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: LabelArgs = parse(input)?;
-    let store = store().await?;
     let shipment = store
         .get_shipment(&args.order_id)
         .await
@@ -395,9 +377,8 @@ pub async fn print_label(input: Value) -> Result<Value, TaskError> {
     )
 }
 
-pub async fn tracking_seed(input: Value) -> Result<Value, TaskError> {
+pub async fn tracking_seed(store: Store, input: Value) -> Result<Value, TaskError> {
     let args: LabelArgs = parse(input)?;
-    let store = store().await?;
     let shipment = store
         .get_shipment(&args.order_id)
         .await
@@ -425,4 +406,85 @@ pub async fn send_order_email(input: Value) -> Result<Value, TaskError> {
     Ok(
         json!({"order_id": args.order_id, "template": "order-confirmation", "recipient": "customer@example.invalid"}),
     )
+}
+
+pub(crate) fn registered_lazy<F, Fut>(
+    store: &TaskStore,
+    function: F,
+) -> horsies::core::task::fn_trait::RegisteredTask
+where
+    F: Fn(TaskStore, Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Value, TaskError>> + Send + 'static,
+{
+    use horsies::core::task::fn_trait::{RegisteredTask, TaskMeta};
+    RegisteredTask::Async {
+        task: std::sync::Arc::new(StoreTask {
+            store: store.clone(),
+            function,
+        }),
+        meta: TaskMeta::for_input::<Value>(),
+    }
+}
+
+struct StoreTask<F> {
+    store: TaskStore,
+    function: F,
+}
+
+impl<F, Fut> horsies::core::task::fn_trait::AsyncTaskFn for StoreTask<F>
+where
+    F: Fn(TaskStore, Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Value, TaskError>> + Send + 'static,
+{
+    fn execute(
+        &self,
+        args: &[u8],
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = horsies::core::task::fn_trait::RawTaskResult>
+                + Send
+                + '_,
+        >,
+    > {
+        use horsies::core::task::{
+            macros::{decode_task_input, encode_validated_task_output},
+            result::TaskResult,
+        };
+        let input = decode_task_input::<Value>(args);
+        Box::pin(async move {
+            let input = match input {
+                Ok(input) => input,
+                Err(error) => return TaskResult::Err(error),
+            };
+            match (self.function)(self.store.clone(), input).await {
+                Ok(value) => encode_validated_task_output(&value),
+                Err(error) => TaskResult::Err(error),
+            }
+        })
+    }
+
+    fn validate_input(&self, envelope: &[u8]) -> Result<(), TaskError> {
+        horsies::core::task::macros::decode_task_input::<Value>(envelope).map(|_| ())
+    }
+}
+
+pub(crate) fn registered<F, Fut>(
+    store: &TaskStore,
+    function: F,
+) -> horsies::core::task::fn_trait::RegisteredTask
+where
+    F: Fn(Store, Value) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<Value, TaskError>> + Send + 'static,
+{
+    let function = std::sync::Arc::new(function);
+    registered_lazy(store, move |store: TaskStore, input| {
+        let function = function.clone();
+        async move {
+            let store = store
+                .get()
+                .await
+                .map_err(|error| store_failure("connect", error))?;
+            function(store, input).await
+        }
+    })
 }

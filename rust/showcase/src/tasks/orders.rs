@@ -9,11 +9,15 @@ pub const TASK_NAMES: &[&str] = &[
     "generate_invoice",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     for name in ["validate_order", "pick_pack", "allocate_warehouse"] {
         handles.push(register_json(
             app,
+            store,
             name,
             QUEUE_FULFILLMENT,
             fixed_options(),
@@ -21,6 +25,7 @@ pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
     }
     handles.push(register_json(
         app,
+        store,
         "generate_invoice",
         QUEUE_FULFILLMENT,
         options_with_timeout(crate::tuning::INVOICE_TIMEOUT_MS),
