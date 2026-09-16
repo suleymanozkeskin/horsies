@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 use uuid::Uuid;
@@ -164,6 +164,45 @@ async fn handle_worker_ping(
     Ok(())
 }
 
+/// Release local capacity before waking the claim loop.
+struct ExecutionPermit {
+    permit: Option<OwnedSemaphorePermit>,
+    released: Arc<Notify>,
+}
+
+impl Drop for ExecutionPermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        self.released.notify_one();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimWake {
+    Cancelled,
+    CapacityReleased,
+    DatabaseNotification,
+    ListenerClosed,
+    PollElapsed,
+}
+
+async fn wait_for_claim_wake(
+    cancel: &CancellationToken,
+    capacity_released: &Notify,
+    notifications: &mut mpsc::Receiver<sqlx::postgres::PgNotification>,
+    poll_interval: Duration,
+) -> ClaimWake {
+    tokio::select! {
+        _ = cancel.cancelled() => ClaimWake::Cancelled,
+        _ = capacity_released.notified() => ClaimWake::CapacityReleased,
+        notification = notifications.recv() => match notification {
+            Some(_) => ClaimWake::DatabaseNotification,
+            None => ClaimWake::ListenerClosed,
+        },
+        _ = tokio::time::sleep(poll_interval) => ClaimWake::PollElapsed,
+    }
+}
+
 /// Task queue worker.
 ///
 /// Claims tasks from PostgreSQL, executes them according to their
@@ -176,6 +215,7 @@ pub struct Worker {
     worker_config: WorkerConfig,
     worker_id: String,
     semaphore: Arc<Semaphore>,
+    capacity_released: Arc<Notify>,
     tracker: TaskTracker,
     cancel: CancellationToken,
     hostname: String,
@@ -202,6 +242,7 @@ impl Worker {
 
         Ok(Self {
             semaphore: Arc::new(Semaphore::new(worker_config.concurrency as usize)),
+            capacity_released: Arc::new(Notify::new()),
             broker,
             registry,
             workflow_registry,
@@ -489,38 +530,34 @@ impl Worker {
                 }
             }
 
-            // Wait for a NOTIFY or timeout (configurable poll interval).
+            // A database notification can arrive before the local permit is released.
             let poll_interval =
                 Duration::from_millis(self.app_config.resilience.notify_poll_interval_ms);
-            tokio::select! {
-                _ = self.cancel.cancelled() => break,
-                result = tokio::time::timeout(
-                    poll_interval,
-                    notify_rx.recv(),
-                ) => {
-                    match result {
-                        Ok(Some(_)) => {
-                            // GAP 5: Drain burst notifications (coalesce_notifies).
-                            // After waking up on one notification, drain up to
-                            // `coalesce_notifies` buffered messages to prevent
-                            // thundering herd from burst inserts.
-                            let max_drain = self.worker_config.coalesce_notifies;
-                            let mut drained = 0u32;
-                            while drained < max_drain {
-                                match notify_rx.try_recv() {
-                                    Ok(_) => { drained += 1; }
-                                    Err(mpsc::error::TryRecvError::Empty) => break,
-                                    Err(mpsc::error::TryRecvError::Disconnected) => break,
-                                }
-                            }
+            match wait_for_claim_wake(
+                &self.cancel,
+                &self.capacity_released,
+                &mut notify_rx,
+                poll_interval,
+            )
+            .await
+            {
+                ClaimWake::Cancelled => break,
+                ClaimWake::ListenerClosed => {
+                    tracing::info!("listener channel closed, shutting down");
+                    break;
+                }
+                ClaimWake::DatabaseNotification => {
+                    for _ in 0..self.worker_config.coalesce_notifies {
+                        match notify_rx.try_recv() {
+                            Ok(_) => {}
+                            Err(
+                                mpsc::error::TryRecvError::Empty
+                                | mpsc::error::TryRecvError::Disconnected,
+                            ) => break,
                         }
-                        Ok(None) => {
-                            tracing::info!("listener channel closed, shutting down");
-                            break;
-                        }
-                        Err(_) => {} // timeout — re-loop to check for work
                     }
                 }
+                ClaimWake::CapacityReleased | ClaimWake::PollElapsed => {}
             }
         }
 
@@ -892,6 +929,11 @@ impl Worker {
             return;
         };
 
+        let permit = ExecutionPermit {
+            permit: Some(permit),
+            released: Arc::clone(&self.capacity_released),
+        };
+
         // Look up the registered task function.
         let task_fn = match self.registry.get(&row.task_name) {
             Ok(t) => t.clone(),
@@ -1035,6 +1077,81 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn released_capacity_wakes_claim_wait_before_poll_deadline() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let released = Arc::new(Notify::new());
+        let permit = ExecutionPermit {
+            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
+            released: released.clone(),
+        };
+        let cancel = CancellationToken::new();
+        let (_sender, mut receiver) = mpsc::channel(1);
+        let wait = wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60));
+        tokio::pin!(wait);
+        assert!(wait.as_mut().now_or_never().is_none());
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(permit);
+        let wake = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("local capacity must wake the claim loop before polling");
+        assert_eq!(wake, ClaimWake::CapacityReleased);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn released_capacity_is_retained_before_claim_wait_starts() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let released = Arc::new(Notify::new());
+        let permit = ExecutionPermit {
+            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
+            released: released.clone(),
+        };
+        drop(permit);
+        let cancel = CancellationToken::new();
+        let (_sender, mut receiver) = mpsc::channel(1);
+        let wake = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60)),
+        )
+        .await
+        .expect("release before waiting must not lose the wake");
+        assert_eq!(wake, ClaimWake::CapacityReleased);
+        assert_eq!(semaphore.available_permits(), 1);
+        assert!(
+            wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60),)
+                .now_or_never()
+                .is_none(),
+            "an idle worker must not keep waking"
+        );
+    }
+
+    #[tokio::test]
+    async fn released_capacity_wakes_claim_wait_after_execution_is_aborted() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let released = Arc::new(Notify::new());
+        let permit = ExecutionPermit {
+            permit: Some(semaphore.clone().try_acquire_owned().unwrap()),
+            released: released.clone(),
+        };
+        let execution = tokio::spawn(async move {
+            let _permit = permit;
+            std::future::pending::<()>().await;
+        });
+        execution.abort();
+        assert!(execution.await.unwrap_err().is_cancelled());
+        let cancel = CancellationToken::new();
+        let (_sender, mut receiver) = mpsc::channel(1);
+        let wake = tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_claim_wake(&cancel, &released, &mut receiver, Duration::from_secs(60)),
+        )
+        .await
+        .expect("cancelled execution must release capacity and wake claims");
+        assert_eq!(wake, ClaimWake::CapacityReleased);
+        assert_eq!(semaphore.available_permits(), 1);
+    }
 
     async fn test_pool() -> PgPool {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
@@ -2592,6 +2709,103 @@ mod tests {
             cancel.is_cancelled(),
             "run() must cancel the token on a fatal exit so background loops stop (C11)",
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn released_capacity_from_dispatch_wakes_claims_for_success_and_resolution_failure() {
+        use crate::core::config::{PostgresConfig, QueueMode, WorkerResilienceConfig};
+
+        let broker = test_broker().await;
+        let pool = broker.pool().clone();
+        clean(&pool).await;
+        let app_config = AppConfig {
+            payload: crate::core::config::payload::PayloadPolicy::default(),
+            queue_mode: QueueMode::Default,
+            custom_queues: None,
+            broker: PostgresConfig {
+                database_url: crate::broker::terminalization_matrix::migrated_database_url().await,
+                session_database_url: None,
+                pgbouncer_transaction_mode: false,
+                pool_pre_ping: true,
+                pool_size: 30,
+                max_overflow: 30,
+                retain_rerun_input_default: false,
+                pool_timeout: 30,
+                pool_recycle: 1800,
+                echo: false,
+            },
+            cluster_wide_cap: None,
+            prefetch_buffer: 0,
+            claim_lease_ms: Some(60_000),
+            max_claim_renew_age_ms: 180_000,
+            recovery: RecoveryConfig::default(),
+            retention: crate::core::RetentionConfig::default(),
+            resilience: WorkerResilienceConfig {
+                notify_poll_interval_ms: 60_000,
+                ..WorkerResilienceConfig::default()
+            },
+            schedule: None,
+            resend_on_transient_err: false,
+        };
+        for registered in [true, false] {
+            let mut registry = TaskRegistry::new();
+            if registered {
+                registry
+                    .register("finalize_test", async_task_fn!(succeed, ()))
+                    .unwrap();
+            }
+            let worker = Worker::new(
+                broker.clone(),
+                Arc::new(registry),
+                Arc::new(WorkflowSpecRegistry::new()),
+                app_config.clone(),
+                WorkerConfig {
+                    concurrency: 1,
+                    ..WorkerConfig::default()
+                },
+            )
+            .unwrap();
+            let id = Uuid::new_v4();
+            insert_claimed_task(&pool, &id, "default", 0, 0, None).await;
+            sqlx::query("UPDATE horsies_tasks SET claimed_by_worker_id = $2 WHERE id = $1")
+                .bind(id)
+                .bind(worker.worker_id())
+                .execute(&pool)
+                .await
+                .unwrap();
+            let (_sender, mut receiver) = mpsc::channel(1);
+            worker.dispatch_task(claimed_task_row(&id, "default", None));
+            assert_eq!(worker.semaphore.available_permits(), 0);
+            let wake = tokio::time::timeout(
+                Duration::from_secs(5),
+                wait_for_claim_wake(
+                    &worker.cancel,
+                    &worker.capacity_released,
+                    &mut receiver,
+                    Duration::from_secs(60),
+                ),
+            )
+            .await
+            .expect("dispatch must wake claims without a database notification or poll");
+            assert_eq!(wake, ClaimWake::CapacityReleased);
+            assert_eq!(worker.semaphore.available_permits(), 1);
+            worker.tracker.close();
+            worker.tracker.wait().await;
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id = $1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                status,
+                match registered {
+                    true => "COMPLETED",
+                    false => "FAILED",
+                }
+            );
+        }
     }
 
     /// C17: in soft-cap mode, buffered-dispatch must not start more of a capped
