@@ -1210,7 +1210,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
     )
     .await
     .expect("create initial coverage");
-    assert!(matches!(first, CoverageOutcome::Ensured(_)));
+    assert!(matches!(first, CoverageOutcome::Ensured(_)), "{first:?}");
 
     for (history_horizon, heartbeat_horizon) in [(2, 2), (8, 8)] {
         let setup = ensure_partition_coverage_in_pool(
@@ -1222,7 +1222,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("set healthy horizon coverage");
-        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
         let (proxy, pool) = proxied_pool(&database, 0, 1).await;
         sqlx::query("SELECT set_config('timezone', 'America/Los_Angeles', false)")
             .execute(&pool)
@@ -1238,7 +1238,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy horizon coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
         assert_eq!(proxy.statement_count(), 3);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
@@ -1262,7 +1262,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("extend class coverage");
-        assert!(matches!(setup, CoverageOutcome::Ensured(_)));
+        assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
 
         let (proxy, pool) = proxied_pool(&database, 0, 1).await;
         let outcome = ensure_partition_coverage_in_pool(
@@ -1274,7 +1274,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy class coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
         assert_eq!(proxy.statement_count(), 3);
         pool.close().await;
         proxy.stop().await;
@@ -1287,7 +1287,7 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         .await
         .expect("healthy high-RTT coverage");
     let elapsed = started.elapsed();
-    assert!(matches!(outcome, CoverageOutcome::Ensured(_)));
+    assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
     assert_eq!(proxy.statement_count(), 3);
     assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
@@ -2704,5 +2704,111 @@ async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
         .commit()
         .await
         .expect("commit v34 conversion test");
+    database.drop().await;
+}
+#[derive(Debug, Default)]
+struct CountingStagedPublisher {
+    calls: AtomicUsize,
+}
+
+impl LoaderPublication for CountingStagedPublisher {
+    async fn republish(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<LoaderRepublished, crate::core::history::errors::HistoryError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        StagedLoaderPublisher.republish(connection).await
+    }
+    async fn references_leaf(
+        &self,
+        connection: &mut PgConnection,
+        leaf_name: &str,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher
+            .references_leaf(connection, leaf_name)
+            .await
+    }
+    async fn needs_republication(
+        &self,
+        connection: &mut PgConnection,
+    ) -> Result<bool, crate::core::history::errors::HistoryError> {
+        StagedLoaderPublisher.needs_republication(connection).await
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_coverage_publishes_once_per_changed_class_and_at_completion() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let publisher = CountingStagedPublisher::default();
+    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(report.created_history_leaves, 7);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    assert!(
+        !StagedLoaderPublisher
+            .needs_republication(tx.as_mut())
+            .await
+            .unwrap()
+    );
+    let again = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = again else {
+        panic!("{again:?}");
+    };
+    assert_eq!(report.created_history_leaves, 0);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    tx.commit().await.unwrap();
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_task_history_leaf_catalog WHERE class_key = 'forever'").fetch_one(tx.as_mut()).await.unwrap();
+    let publisher = FailFirstStagedPublisher::default();
+    let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Failed(failed) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(failed.stage, "ensure_leaf_coverage");
+    assert_eq!(failed.class_key.as_deref(), Some("forever"));
+    assert!(failed.heartbeat_covered_now);
+    assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
+    let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
+        .fetch_all(tx.as_mut()).await.unwrap();
+    assert_eq!(
+        classes.iter().find(|(class, _)| class == "forever").map(|(_, count)| *count),
+        Some(before),
+        "the failed class must retain only its pre-existing leaves",
+    );
+    assert!(
+        classes
+            .iter()
+            .any(|(class, count)| class == "standard_30d" && *count == 4)
+    );
+    assert!(
+        !StagedLoaderPublisher
+            .needs_republication(tx.as_mut())
+            .await
+            .unwrap()
+    );
+    tx.commit().await.unwrap();
+    let mut repair = database.pool.begin().await.unwrap();
+    let result = ensure_partition_coverage(&mut repair, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(matches!(result, CoverageOutcome::Ensured(_)), "{result:?}");
+    repair.commit().await.unwrap();
     database.drop().await;
 }
