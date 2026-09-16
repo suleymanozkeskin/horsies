@@ -865,6 +865,62 @@ mod recovery_index_migration_tests {
 
     #[tokio::test]
     #[serial]
+    async fn terminal_snapshot_upgrade_preserves_existing_tasks_and_function_shapes() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 49).await.unwrap();
+        let task_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, status, sent_at, enqueued_at,
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+             ) VALUES (
+                $1, 'claim_upgrade', 'claim_upgrade', 10, 'PENDING', NOW(), NOW(),
+                $1::text, 1, decode(repeat('00', 32), 'hex'),
+                'standard_30d', FALSE, 'NEVER_ELIGIBLE'
+             )",
+        )
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let before: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let shape: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+
+        run_horsies_migrations_through(pool, 50).await.unwrap();
+        run_horsies_migrations_through(pool, 50).await.unwrap();
+        let after: serde_json::Value = sqlx::query_scalar(
+            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        )
+        .bind(task_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let upgraded_shape: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(shape, upgraded_shape);
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn invalid_concurrent_recovery_index_is_rebuilt_on_migration_retry() {
         let database = MigrationTestDatabase::create().await;
         let pool = &database.pool;
