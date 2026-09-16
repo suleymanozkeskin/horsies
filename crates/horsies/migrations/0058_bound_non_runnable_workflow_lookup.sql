@@ -27,7 +27,11 @@ JOIN LATERAL (
     WHERE workflow.id = n.workflow_id
     -- Keep each workflow lookup tied to its claimed node before filtering status.
     OFFSET 0
-) w ON w.status IN ('PAUSED', 'CANCELLED');
+) w ON w.status IN ('PAUSED', 'CANCELLED')
+WHERE EXISTS (
+    SELECT 1 FROM horsies_workflows guard_workflow
+    WHERE guard_workflow.status IN ('PAUSED', 'CANCELLED')
+);
 END
 $function$;
 $definition$;
