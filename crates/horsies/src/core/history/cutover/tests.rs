@@ -663,7 +663,7 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
         } => statements_executed,
         refused => panic!("unexpected program refusal: {refused:?}"),
     };
-    assert_eq!(installed_count, 42);
+    assert_eq!(installed_count, 43);
     let rollback = stage_rollback_programs(&pool).await.unwrap();
     assert!(matches!(
         rollback,
