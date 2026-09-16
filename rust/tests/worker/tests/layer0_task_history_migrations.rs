@@ -49,6 +49,7 @@ const REQUIRED_FUNCTION_SIGNATURES: &[&str] = &[
     "horsies_abandon_nodes_of_paused_workflows(uuid[])",
     "horsies_cancel_nodes_of_cancelled_workflow(uuid[])",
     "horsies_phase2_consume(uuid,text)",
+    "horsies_find_non_runnable_workflow_tasks(uuid[])",
     "horsies_phase2_quarantine_one(uuid,text)",
     "horsies_archive_replacement_note_mutation()",
 ];

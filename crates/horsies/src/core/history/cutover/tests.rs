@@ -663,7 +663,7 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
         } => statements_executed,
         refused => panic!("unexpected program refusal: {refused:?}"),
     };
-    assert_eq!(installed_count, 44);
+    assert_eq!(installed_count, 45);
     assert!(sqlx::query_scalar::<_, bool>(
         "SELECT proconfig @> ARRAY['plan_cache_mode=force_generic_plan']::text[]
          FROM pg_proc WHERE oid = 'horsies_phase2_consume(uuid,text)'::regprocedure",
@@ -671,11 +671,23 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
     .fetch_one(&pool)
     .await
     .unwrap());
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT to_regprocedure('horsies_find_non_runnable_workflow_tasks(uuid[])') IS NOT NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap());
     let rollback = stage_rollback_programs(&pool).await.unwrap();
+    assert!(sqlx::query_scalar::<_, bool>(
+        "SELECT to_regprocedure('horsies_find_non_runnable_workflow_tasks(uuid[])') IS NULL",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap());
     assert!(matches!(
         rollback,
         super::program::ProgramRollback::RolledBack {
-            teardown_statements_executed: 12,
+            teardown_statements_executed: 13,
             attempt_identity: AttemptIdentityRestoration::Restored,
         }
     ));
