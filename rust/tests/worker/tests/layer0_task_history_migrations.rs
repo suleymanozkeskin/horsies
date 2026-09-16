@@ -112,9 +112,12 @@ const LEGACY_MONITORING_FUNCTIONS: &[&str] = &[
     "notify_worker_state_insert()",
 ];
 
-const REMOVED_TASK_RETENTION_INDEXES: &[&str] = &[
+const REMOVED_INDEXES: &[&str] = &[
     "idx_horsies_tasks_retention",
     "idx_horsies_tasks_queue_retention",
+    "idx_horsies_workflow_tasks_node",
+    "idx_horsies_workflow_tasks_deps",
+    "idx_horsies_workflow_tasks_workflow",
 ];
 
 async fn relation_kind(pool: &PgPool, relation: &str) -> String {
@@ -276,13 +279,13 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
 
     assert_monitoring_trigger_parity(&pool).await;
 
-    for index in REMOVED_TASK_RETENTION_INDEXES {
+    for index in REMOVED_INDEXES {
         let present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
             .bind(index)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert!(!present, "obsolete task retention index remains: {index}");
+        assert!(!present, "removed index remains: {index}");
     }
 
     for &(relation, column) in UUID_COLUMNS {
