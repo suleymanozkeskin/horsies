@@ -18,6 +18,10 @@ const ORDERED_PENDING_EXPIRY_MIGRATION: &str =
     include_str!("../../../../migrations/0053_order_pending_expiry_results.sql");
 const PHASE2_PLAN_MIGRATION: &str =
     include_str!("../../../../migrations/0057_cache_phase2_history_plan.sql");
+const NON_RUNNABLE_LOOKUP_MIGRATION: &str =
+    include_str!("../../../../migrations/0058_bound_non_runnable_workflow_lookup.sql");
+const DROP_NON_RUNNABLE_LOOKUP: &str =
+    "DROP FUNCTION IF EXISTS horsies_find_non_runnable_workflow_tasks(uuid[])";
 const IN_PLACE_PROGRAM_MIGRATION: &str =
     include_str!("../../../../migrations/0032_terminalization_operations.sql");
 const IN_PLACE_PROGRAM_FIRST: &str =
@@ -146,8 +150,11 @@ pub async fn install_programs(
     sqlx::raw_sql(PHASE2_PLAN_MIGRATION)
         .execute(&mut *connection)
         .await?;
+    sqlx::raw_sql(NON_RUNNABLE_LOOKUP_MIGRATION)
+        .execute(&mut *connection)
+        .await?;
     Ok(ProgramInstallation::Installed {
-        statements_executed: teardown.len() + installation.len() + 3,
+        statements_executed: teardown.len() + installation.len() + 4,
     })
 }
 
@@ -199,11 +206,14 @@ pub async fn uninstall_programs(
     for statement in &teardown {
         sqlx::raw_sql(statement).execute(&mut *connection).await?;
     }
+    sqlx::raw_sql(DROP_NON_RUNNABLE_LOOKUP)
+        .execute(&mut *connection)
+        .await?;
     sqlx::raw_sql(in_place_program_sql()?)
         .execute(connection)
         .await?;
     Ok(ProgramRollback::RolledBack {
-        teardown_statements_executed: teardown.len(),
+        teardown_statements_executed: teardown.len() + 1,
         attempt_identity,
     })
 }

@@ -323,12 +323,8 @@ WHERE wt.task_id = $1";
 
 /// Find tasks from a batch that belong to PAUSED or CANCELLED workflows.
 /// Returns (task_id, workflow_status) to allow split handling.
-const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str = "\
-SELECT t.id, w.status \
-FROM horsies_tasks t \
-JOIN horsies_workflow_tasks wt ON wt.task_id = t.id \
-JOIN horsies_workflows w ON w.id = wt.workflow_id \
-WHERE t.id = ANY($1) AND w.status IN ('PAUSED', 'CANCELLED')";
+const FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL: &str =
+    "SELECT id, status FROM horsies_find_non_runnable_workflow_tasks($1)";
 
 /// Skip workflow_tasks for tasks belonging to CANCELLED workflows.
 const SKIP_CANCELLED_WORKFLOW_TASKS_SQL: &str = "\
@@ -5158,6 +5154,82 @@ mod filter_non_runnable_tests {
     use super::*;
     use serial_test::serial;
     use uuid::Uuid;
+
+    #[tokio::test]
+    #[serial]
+    async fn bounded_lookup_preserves_rows_for_duplicates_missing_links_and_status_changes() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL plan_cache_mode = force_custom_plan")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for status in ["PAUSED", "CANCELLED", "RUNNING"] {
+            let workflow_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO horsies_workflows(id,name,status) VALUES($1,'lookup_test',$2)")
+                .bind(workflow_id)
+                .bind(status)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            for index in 0..2 {
+                let task_id = Uuid::new_v4();
+                ids.push(task_id);
+                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,node_id,task_name,task_args,task_kwargs,dependencies,status,task_id) VALUES($1,$2,$3,$4,'lookup_test','[]','{}','{}','ENQUEUED',$5)")
+                    .bind(Uuid::new_v4()).bind(workflow_id).bind(index)
+                    .bind(format!("node_{index}")).bind(task_id)
+                    .execute(&mut *tx).await.unwrap();
+                if index == 0 {
+                    sqlx::query("INSERT INTO horsies_tasks(id,task_name,queue_name,enqueue_sha,command_fingerprint_version,command_fingerprint,retention_class_key,retain_rerun_input,prepared_rerun_input_disposition) VALUES($1,'lookup_test','default','fixture',1,decode(repeat('00',32),'hex'),'forever',false,'DECLINED_BY_POLICY')")
+                        .bind(task_id).execute(&mut *tx).await.unwrap();
+                }
+            }
+        }
+        let original = "SELECT t.id,w.status FROM horsies_tasks t JOIN horsies_workflow_tasks wt ON wt.task_id=t.id JOIN horsies_workflows w ON w.id=wt.workflow_id WHERE t.id=ANY($1) AND w.status IN ('PAUSED','CANCELLED')";
+        for input in [
+            Vec::<Option<Uuid>>::new(),
+            vec![None],
+            vec![Some(ids[0]), Some(ids[0]), None, Some(Uuid::new_v4())],
+            ids.iter().copied().map(Some).collect(),
+        ] {
+            let mut expected: Vec<(Uuid, String)> = sqlx::query_as(original)
+                .bind(&input)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+            let mut actual: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
+                .bind(&input)
+                .fetch_all(&mut *tx)
+                .await
+                .unwrap();
+            expected.sort();
+            actual.sort();
+            assert_eq!(actual, expected);
+        }
+        let absent: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
+            .bind(Option::<Vec<Uuid>>::None)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        assert!(absent.is_empty());
+        sqlx::query("UPDATE horsies_workflows SET status='RUNNING' WHERE name='lookup_test'")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let changed: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
+            .bind(&ids)
+            .fetch_all(&mut *tx)
+            .await
+            .unwrap();
+        assert!(changed.is_empty());
+        let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+        assert_eq!(mode, "force_custom_plan");
+        tx.rollback().await.unwrap();
+    }
 
     #[tokio::test]
     #[serial]
