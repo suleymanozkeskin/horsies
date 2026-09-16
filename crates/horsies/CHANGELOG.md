@@ -5,6 +5,44 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.32] - 2026-09-16
+
+### Fixed
+
+- Keep schedules stopped when their stored `next_run_at` becomes `NULL`.
+- Use a private connection pool for scheduler locks. A runtime pool with one
+  connection no longer blocks the scheduler while it holds its lock.
+- Poll for the migration lock without retaining an active transaction.
+  Waiting migrators no longer block a concurrent index build.
+- Wake the claim loop when local execution capacity is released. Available
+  capacity no longer waits for the polling interval after a consumed wake.
+
+### Work reductions
+
+- Skip unused UUID generation when enqueue receives a predetermined task ID.
+- Reuse the nonterminal-node existence result during workflow recovery.
+- Bound claim candidate locks by queue capacity and batch size. Use indexed
+  task lookup for the claim update while preserving dispatch order.
+- Combine workflow finalization metadata reads, skip discarded success
+  results on failure paths, and remove the redundant completion notification.
+- Skip workflow-node updates during handoff when the node is already running.
+- Reuse terminal result digests and encode each task's attempt snapshot once
+  in batch terminalization.
+- Write each history manifest with one DELETE and one bulk INSERT. Publish
+  readers once per changed retention class during coverage creation.
+- Index active history catalog records so retention scans can exclude
+  dropped-partition records.
+
+### Testing
+
+- Isolate recovery cursors and pending rows in tests. Wait for database
+  sessions to close before cleanup.
+
+### Upgrade
+
+- Apply migrations 0049 through 0052 before processes use this release.
+- The scheduler lock pool can use one additional database connection.
+
 ## [0.1.0-alpha.31] - 2026-08-26
 
 ### Fixed
