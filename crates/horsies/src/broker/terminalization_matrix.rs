@@ -1573,12 +1573,52 @@ async fn drain_pending_expiry(pool: &PgPool) {
 #[serial]
 async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     let pool = migrated_pool().await;
-    drain_pending_expiry(&pool).await;
+    assert_pending_expiry_order(&pool).await;
+}
 
-    let ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
-    for (index, id) in ids.iter().enumerate() {
+#[tokio::test]
+#[serial]
+async fn pending_expiry_order_survives_upgrade_and_program_installation() {
+    for explicit_install in [false, true] {
+        let database = IsolatedTerminalizationTestDatabase::create_empty().await;
+        let pool = &database.pool;
+        crate::broker::migrations::run_horsies_migrations_through(pool, 52)
+            .await
+            .unwrap();
+        match explicit_install {
+            false => run_horsies_migrations(pool).await.unwrap(),
+            true => {
+                let mut tx = pool.begin().await.unwrap();
+                let installed = crate::core::history::cutover::program::install_programs(tx.as_mut())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    installed,
+                    crate::core::history::cutover::program::ProgramInstallation::Installed { .. }
+                ));
+                tx.commit().await.unwrap();
+            }
+        }
+        let mut tx = pool.begin().await.unwrap();
+        let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
+            .await
+            .unwrap();
+        assert!(matches!(coverage, CoverageOutcome::Ensured(_)));
+        tx.commit().await.unwrap();
+        assert_pending_expiry_order(pool).await;
+        database.drop().await;
+    }
+}
+
+async fn assert_pending_expiry_order(pool: &PgPool) {
+    drain_pending_expiry(pool).await;
+
+    let mut ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+    ids.sort_unstable_by(|left, right| right.cmp(left));
+    // UUID and insertion order both oppose deadline order.
+    for (index, id) in ids.iter().enumerate().rev() {
         seed_task(
-            &pool,
+            pool,
             id,
             Seed {
                 status: "PENDING",
@@ -1592,7 +1632,7 @@ async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     }
 
     let first = terminalize(
-        &pool,
+        pool,
         &TerminalizationCommand::ExpirePendingTasks {
             batch_size: BatchSize::new(2).unwrap(),
             result_json: "{\"Err\":{}}".to_owned(),
@@ -1617,10 +1657,10 @@ async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
             ..
         }
     )));
-    assert_eq!(post_image(&pool, &ids[2]).await.status, "PENDING");
+    assert_eq!(post_image(pool, &ids[2]).await.status, "PENDING");
 
     let second = terminalize(
-        &pool,
+        pool,
         &TerminalizationCommand::ExpirePendingTasks {
             batch_size: BatchSize::new(500).unwrap(),
             result_json: "{}".to_owned(),
@@ -1633,7 +1673,7 @@ async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     assert_eq!(second[0].task_id(), Uuid::parse_str(&ids[2]).unwrap());
 
     let empty = terminalize(
-        &pool,
+        pool,
         &TerminalizationCommand::ExpirePendingTasks {
             batch_size: BatchSize::new(500).unwrap(),
             result_json: "{}".to_owned(),
@@ -1645,7 +1685,7 @@ async fn expire_pending_batch_is_bounded_and_deadline_ordered() {
     assert!(empty.is_empty(), "zero eligible rows is a valid answer");
 
     let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-    cleanup(&pool, &id_refs).await;
+    cleanup(pool, &id_refs).await;
 }
 
 #[tokio::test]
