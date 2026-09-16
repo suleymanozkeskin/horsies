@@ -9,10 +9,14 @@ pub const TASK_NAMES: &[&str] = &[
     "reconcile_payments",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     handles.push(register_json(
         app,
+        store,
         "authorize_payment",
         QUEUE_PAYMENTS,
         exponential_options(
@@ -25,7 +29,13 @@ pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
         ),
     )?);
     for name in ["capture_payment", "refund_payment", "reconcile_payments"] {
-        handles.push(register_json(app, name, QUEUE_PAYMENTS, fixed_options())?);
+        handles.push(register_json(
+            app,
+            store,
+            name,
+            QUEUE_PAYMENTS,
+            fixed_options(),
+        )?);
     }
     Ok(handles)
 }

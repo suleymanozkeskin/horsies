@@ -9,11 +9,15 @@ pub const TASK_NAMES: &[&str] = &[
     "winback_blast",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     for name in TASK_NAMES {
         handles.push(register_json(
             app,
+            store,
             name,
             QUEUE_NOTIFICATIONS,
             fixed_options(),

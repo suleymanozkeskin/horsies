@@ -21,7 +21,10 @@ pub const TASK_NAMES: &[&str] = &[
     "update_price",
 ];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     for name in [
         "sales_rollup",
@@ -40,34 +43,39 @@ pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
         } else {
             fixed_options()
         };
-        handles.push(register_json(app, name, QUEUE_ANALYTICS, options)?);
+        handles.push(register_json(app, store, name, QUEUE_ANALYTICS, options)?);
     }
     handles.push(register_json(
         app,
+        store,
         "sync_supplier_feed",
         QUEUE_ANALYTICS,
         supplier_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "update_stock_levels",
         QUEUE_ANALYTICS,
         fixed_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "prewarm_search",
         QUEUE_ANALYTICS,
         fixed_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "warm_cache_edge",
         super::QUEUE_FULFILLMENT,
         fixed_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "update_price",
         QUEUE_ANALYTICS,
         fixed_options(),

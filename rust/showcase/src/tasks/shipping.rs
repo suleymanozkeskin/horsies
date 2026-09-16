@@ -4,10 +4,14 @@ use super::{exponential_options, fixed_options, register_json, JsonTask, QUEUE_F
 
 pub const TASK_NAMES: &[&str] = &["book_courier", "print_label", "tracking_seed"];
 
-pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
+pub fn register(
+    app: &mut Horsies,
+    store: &crate::store::TaskStore,
+) -> Result<Vec<JsonTask>, HorsiesError> {
     let mut handles = Vec::new();
     handles.push(register_json(
         app,
+        store,
         "book_courier",
         QUEUE_FULFILLMENT,
         exponential_options(
@@ -21,12 +25,14 @@ pub fn register(app: &mut Horsies) -> Result<Vec<JsonTask>, HorsiesError> {
     )?);
     handles.push(register_json(
         app,
+        store,
         "print_label",
         QUEUE_FULFILLMENT,
         fixed_options(),
     )?);
     handles.push(register_json(
         app,
+        store,
         "tracking_seed",
         QUEUE_FULFILLMENT,
         fixed_options(),
