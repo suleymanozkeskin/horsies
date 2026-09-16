@@ -238,21 +238,21 @@ pub(crate) async fn confirm_ownership_and_set_running(
     // task proceeds. Gated on `is_workflow_task`: a plain task pays no round
     // trip here (P1).
     if is_workflow_task {
-        match sqlx::query(
-            "UPDATE horsies_workflow_tasks \
-             SET status = 'RUNNING', \
-                 started_at = CASE \
-                     WHEN status = 'RUNNING' THEN started_at \
-                     ELSE NOW() \
-                 END \
-             WHERE task_id = $1 \
-               AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')",
+        match sqlx::query_scalar::<_, bool>(
+            "WITH linked AS MATERIALIZED (
+                SELECT id, status FROM horsies_workflow_tasks
+                WHERE task_id = $1 AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                FOR UPDATE
+             ), changed AS (
+                UPDATE horsies_workflow_tasks n SET status = 'RUNNING', started_at = NOW()
+                FROM linked l WHERE n.id = l.id AND l.status <> 'RUNNING' RETURNING n.id
+             ) SELECT EXISTS(SELECT 1 FROM linked)",
         )
         .bind(task_id)
-        .execute(broker.pool())
+        .fetch_one(broker.pool())
         .await
         {
-            Ok(result) if result.rows_affected() == 0 && orphan_self_heal => {
+            Ok(false) if orphan_self_heal => {
                 match terminalize(
                     broker.pool(),
                     &TerminalizationCommand::CancelOwnedOrphan {
@@ -2252,6 +2252,9 @@ mod set_running_gate_tests {
         .unwrap();
         seed_claimed(&pool, &task_id.to_string(), true).await;
 
+        let before: String = sqlx::query_scalar(
+            "SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1",
+        ).bind(wf_id).fetch_one(&pool).await.unwrap();
         let outcome =
             confirm_ownership_and_set_running(&broker, task_id, "w1", 1, "h1", true, None, false)
                 .await;
@@ -2265,6 +2268,10 @@ mod set_running_gate_tests {
         .await
         .unwrap();
         assert_eq!(persisted, first_started_at);
+        let after: String = sqlx::query_scalar(
+            "SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1",
+        ).bind(wf_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(before, after, "RUNNING replay must not create a new node tuple");
 
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(wf_id)
@@ -2317,4 +2324,132 @@ mod set_running_gate_tests {
             .await
             .ok();
     }
+    #[tokio::test]
+    #[serial]
+    async fn handoff_preserves_link_states_and_observes_cancellation() {
+        let broker = test_broker().await;
+        let pool = broker.pool().clone();
+        for status in [
+            Some("ENQUEUED"),
+            Some("READY"),
+            Some("PENDING"),
+            Some("RUNNING"),
+            Some("COMPLETED"),
+            Some("FAILED"),
+            Some("SKIPPED"),
+            Some("CANCELLED"),
+            None,
+        ] {
+            let wf = Uuid::new_v4();
+            let task = Uuid::new_v4();
+            let node = Uuid::new_v4();
+            sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key) VALUES($1,'handoff_contract','RUNNING','handoff_contract')").bind(wf).execute(&pool).await.unwrap();
+            if let Some(status) = status {
+                sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id,started_at) VALUES($1,$2,0,'handoff_contract',$3,$4,timestamptz '2026-01-01')").bind(node).bind(wf).bind(status).bind(task).execute(&pool).await.unwrap();
+            }
+            seed_claimed(&pool, &task.to_string(), true).await;
+            let result =
+                confirm_ownership_and_set_running(&broker, task, "w1", 1, "h1", true, None, true)
+                    .await;
+            let outcome = match result {
+                OwnershipOutcome::Running(_) => "running",
+                OwnershipOutcome::Aborted => "aborted",
+                OwnershipOutcome::ExpiredBeforeStart => "expired",
+            };
+            let persisted: Option<String> =
+                sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id=$1")
+                    .bind(node)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            let task_state: Option<String> =
+                sqlx::query_scalar("SELECT status FROM horsies_tasks WHERE id=$1")
+                    .bind(task)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            let history: Option<String> =
+                sqlx::query_scalar("SELECT status FROM horsies_task_history WHERE task_id=$1")
+                    .bind(task)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+            match status {
+                Some("ENQUEUED" | "READY" | "PENDING" | "RUNNING") => {
+                    assert_eq!(outcome, "running");
+                    assert_eq!(persisted.as_deref(), Some("RUNNING"));
+                    assert_eq!(task_state.as_deref(), Some("RUNNING"));
+                    assert!(history.is_none());
+                }
+                _ => {
+                    assert_eq!(outcome, "aborted");
+                    assert_eq!(persisted.as_deref(), status);
+                    assert!(task_state.is_none());
+                    assert_eq!(history.as_deref(), Some("CANCELLED"));
+                }
+            }
+            clean_handoff_case(&pool, wf, task).await;
+        }
+        let wf = Uuid::new_v4();
+        let task = Uuid::new_v4();
+        let node = Uuid::new_v4();
+        sqlx::query("INSERT INTO horsies_workflows(id,name,status,definition_key) VALUES($1,'handoff_race','RUNNING','handoff_contract')").bind(wf).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id) VALUES($1,$2,0,'handoff_race','ENQUEUED',$3)").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
+        seed_claimed(&pool, &task.to_string(), true).await;
+        let mut held = pool.begin().await.unwrap();
+        sqlx::query("UPDATE horsies_workflow_tasks SET status='CANCELLED' WHERE id=$1")
+            .bind(node)
+            .execute(held.as_mut())
+            .await
+            .unwrap();
+        let race_broker = PostgresBroker::from_pool(pool.clone());
+        let handoff = tokio::spawn(async move {
+            confirm_ownership_and_set_running(&race_broker, task, "w1", 1, "h1", true, None, true)
+                .await
+        });
+        let mut waited = false;
+        for _ in 0..500 {
+            waited=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND pid<>pg_backend_pid())").fetch_one(&pool).await.unwrap();
+            if waited {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(waited, "handoff must wait for the node update");
+        held.commit().await.unwrap();
+        let result = handoff.await.unwrap();
+        assert!(matches!(result, OwnershipOutcome::Aborted));
+        let node_status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id=$1")
+                .bind(node)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(node_status, "CANCELLED");
+        clean_handoff_case(&pool, wf, task).await;
+    }
+
+    async fn clean_handoff_case(pool: &PgPool, workflow: Uuid, task: Uuid) {
+        sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
+            .bind(workflow)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_tasks WHERE id = $1")
+            .bind(task)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_task_history WHERE task_id = $1")
+            .bind(task)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM horsies_workflows WHERE id = $1")
+            .bind(workflow)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
 }
