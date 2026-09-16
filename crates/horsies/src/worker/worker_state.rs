@@ -171,6 +171,10 @@ pub fn spawn_worker_state_loop(
                     health.partition_pruning.unwrap_or(serde_json::Value::Null),
                 );
                 object.insert(
+                    "workflow_recovery".to_owned(),
+                    health.workflow_recovery.unwrap_or(serde_json::Value::Null),
+                );
+                object.insert(
                     "phase2_recovery".to_owned(),
                     health.phase2_recovery.unwrap_or(serde_json::Value::Null),
                 );
@@ -209,6 +213,82 @@ pub fn spawn_worker_state_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn worker_snapshots_persist_workflow_recovery_health() {
+        use crate::worker::recovery::new_reaper_health;
+        use serde_json::json;
+        use std::time::Duration;
+
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let worker_id = uuid::Uuid::new_v4().to_string();
+        let health = new_reaper_health();
+        let phase2 = json!({"applied": 2, "failed": 0});
+        health.write().await.phase2_recovery = Some(phase2.clone());
+        let mut app_config = AppConfig::for_database_url("postgresql://unused/test");
+        app_config.recovery.worker_state_snapshot_interval_ms = 10;
+        let worker_config = WorkerConfig {
+            concurrency: 1,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let task = spawn_worker_state_loop(
+            pool.clone(),
+            worker_id.clone(),
+            "snapshot-test".to_owned(),
+            std::process::id() as i32,
+            worker_config,
+            app_config,
+            health.clone(),
+            Arc::new(Semaphore::new(1)),
+            Utc::now(),
+            cancel.clone(),
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), async {
+            for workflow in [
+                serde_json::Value::Null,
+                json!({"metrics": {"case2_3": {"rows_selected": 200,
+                    "candidates_returned": 5, "duration_ms": 12}},
+                    "completion_candidate_yield": 0.025}),
+                json!({"state": "error", "error": "audit unavailable", "errors": 1,
+                    "completion_candidate_yield": null}),
+            ] {
+                health.write().await.workflow_recovery = match &workflow {
+                    serde_json::Value::Null => None,
+                    value => Some(value.clone()),
+                };
+                loop {
+                    let snapshot: Option<serde_json::Value> = sqlx::query_scalar(
+                        "SELECT recovery_config FROM horsies_worker_states
+                         WHERE worker_id = $1 ORDER BY snapshot_at DESC LIMIT 1",
+                    )
+                    .bind(&worker_id)
+                    .fetch_optional(&pool)
+                    .await
+                    .unwrap();
+                    if let Some(value) = snapshot {
+                        if value.get("workflow_recovery") == Some(&workflow) {
+                            assert_eq!(value["phase2_recovery"], phase2);
+                            assert!(value.get("partition_coverage").is_some());
+                            assert!(value.get("partition_pruning").is_some());
+                            break;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }
+        })
+        .await;
+        cancel.cancel();
+        task.await.unwrap();
+        sqlx::query("DELETE FROM horsies_worker_states WHERE worker_id = $1")
+            .bind(&worker_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        result.expect("worker snapshots must retain each recovery health state");
+    }
 
     #[test]
     fn insert_sql_has_expected_placeholders() {

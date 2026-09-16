@@ -35,6 +35,10 @@ pub struct RecoveryReport {
     pub errors: u32,
     /// Query and processing metrics for each recovery case.
     pub metrics: RecoveryMetrics,
+    /// Completion candidates divided by workflows scanned in the global audit.
+    /// Null when no workflows were scanned or no global audit result is available.
+    /// Candidates count before processing; this is not the successful completion rate.
+    pub completion_candidate_yield: Option<f64>,
 }
 
 #[derive(Debug, Default, serde::Serialize)]
@@ -1131,6 +1135,10 @@ async fn recover_global_workflow_end_states(
     report.metrics.case2_3.rows_selected = scanned_count;
     report.metrics.case2_3.candidates_returned =
         u32::try_from(completion_ids.len()).unwrap_or(u32::MAX);
+    report.completion_candidate_yield = match scanned_count {
+        0 => None,
+        count => Some(f64::from(report.metrics.case2_3.candidates_returned) / f64::from(count)),
+    };
     report.metrics.case4.rows_selected = scanned_count;
     report.metrics.case4.candidates_returned = u32::try_from(orphan_ids.len()).unwrap_or(u32::MAX);
 
@@ -1834,6 +1842,27 @@ mod cap_tests {
         assert_eq!(report.metrics.case4.errors, 1);
         assert_eq!(report.metrics.case2_3.rows_selected, 0);
         assert_eq!(report.metrics.case4.candidates_returned, 0);
+        assert_eq!(report.completion_candidate_yield, None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn zero_scan_limit_has_undefined_completion_yield() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut report = RecoveryReport::default();
+        recover_global_workflow_end_states(
+            &pool,
+            &WorkflowSpecRegistry::new(),
+            Some(0),
+            &mut report,
+            &PayloadPolicy::default(),
+            &RetentionConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.metrics.case2_3.rows_selected, 0);
+        assert_eq!(report.completion_candidate_yield, None);
+        assert!(serde_json::to_value(report).unwrap()["completion_candidate_yield"].is_null());
     }
 
     #[tokio::test]
@@ -2074,6 +2103,7 @@ mod cap_tests {
         .await
         .unwrap();
         assert_eq!(report.metrics.case2_3.rows_selected, 200);
+        assert_eq!(report.completion_candidate_yield, Some(0.0));
         assert_eq!(report.metrics.case2_3.candidates_returned, 0);
         assert_eq!(report.metrics.case4.rows_selected, 200);
         assert_eq!(report.metrics.case4.candidates_returned, 0);
@@ -2260,6 +2290,7 @@ mod cap_tests {
         .await
         .unwrap();
         assert_eq!(second.metrics.case2_3.candidates_returned, 1);
+        assert_eq!(second.completion_candidate_yield, Some(1.0));
         let completed_id = Uuid::parse_str("60000000-0000-7000-8000-0000000000c9").unwrap();
         let status: String =
             sqlx::query_scalar("SELECT status FROM horsies_workflows WHERE id = $1")
