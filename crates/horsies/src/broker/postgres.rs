@@ -952,11 +952,12 @@ impl PostgresBroker {
                 "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
             ));
         }
-        let task_id = predetermined_task_id.unwrap_or(
-            crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
+        let task_id = match predetermined_task_id {
+            Some(task_id) => task_id,
+            None => crate::core::history::identity::uuid7::mint_task_id().map_err(|error| {
                 BrokerError::EnqueueContract(format!("task identity mint failed: {error}"))
             })?,
-        );
+        };
         let max_retries = parse_max_retries(task_options);
         let effective_sent_at = sent_at.unwrap_or_else(Utc::now);
         let retain_rerun_input = retain_rerun_input.unwrap_or(self.retain_rerun_input_default);
