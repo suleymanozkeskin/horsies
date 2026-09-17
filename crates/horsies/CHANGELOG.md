@@ -5,6 +5,27 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.33] - 2026-09-17
+
+### Fixed
+
+- Return expired pending nodes in deadline order, with stable workflow and
+  task-index tie breakers.
+- Persist workflow recovery health in worker snapshots. Include completion
+  candidate yield as candidates divided by workflows scanned.
+
+### Work reductions
+
+- Remove three workflow-node indexes whose readers use the remaining indexes.
+- Reuse a generic plan for the phase-two history lookup.
+- Skip loader republication when partition detach does not change the manifest.
+- Bound non-runnable workflow checks by claimed task IDs and reuse a generic
+  plan. Skip node lookups when no workflow is paused or cancelled.
+
+### Upgrade
+
+- Apply migrations 0053 through 0058 before processes use this release.
+
 ## [0.1.0-alpha.32] - 2026-09-16
 
 ### Fixed
