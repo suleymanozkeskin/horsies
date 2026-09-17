@@ -604,8 +604,9 @@ where
     executor
         .execute(migration.sql.as_ref())
         .await
-        .map_err(|e| {
-            BrokerError::Migration(MigrateError::ExecuteMigration(e, migration.version))
+        .map_err(|error| match sqlx_error_sqlstate(&error).as_deref() {
+            Some("HN001") => BrokerError::InvalidWorkflowNodeStatus,
+            _ => BrokerError::Migration(MigrateError::ExecuteMigration(error, migration.version)),
         })?;
     Ok(())
 }
@@ -725,6 +726,110 @@ mod recovery_index_migration_tests {
         }
     }
 
+
+    #[tokio::test]
+    #[serial]
+    async fn node_status_upgrade_refuses_invalid_rows_and_preserves_valid_states() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 58).await.unwrap();
+        let workflow = Uuid::new_v4();
+        let node = Uuid::new_v4();
+        sqlx::query("INSERT INTO horsies_workflows (id, name, status) VALUES ($1, 'node_status_test', 'RUNNING')")
+            .bind(workflow).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name, status) VALUES ($1, $2, 0, 'node_status_test', 'CANCELLED')")
+            .bind(node).bind(workflow).execute(pool).await.unwrap();
+        let function_sql =
+            "SELECT pg_get_functiondef('horsies_phase2_consume(uuid,text)'::regprocedure)";
+        let before: String = sqlx::query_scalar(function_sql)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let error = run_horsies_migrations_through(pool, 59).await.unwrap_err();
+        assert!(matches!(error, BrokerError::InvalidWorkflowNodeStatus));
+        assert!(!error.is_retryable());
+        let version: i64 = sqlx::query_scalar("SELECT max(version) FROM horsies_migrations")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 58);
+        let after: String = sqlx::query_scalar(function_sql)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(before, after);
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM horsies_workflow_tasks WHERE id=$1")
+                .bind(node)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "CANCELLED");
+        sqlx::query("UPDATE horsies_workflow_tasks SET status='FAILED' WHERE id=$1")
+            .bind(node)
+            .execute(pool)
+            .await
+            .unwrap();
+        run_horsies_migrations_through(pool, 59).await.unwrap();
+        run_horsies_migrations_through(pool, 59).await.unwrap();
+        for status in [
+            "PENDING",
+            "READY",
+            "ENQUEUED",
+            "RUNNING",
+            "COMPLETED",
+            "FAILED",
+            "SKIPPED",
+        ] {
+            sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE id=$2")
+                .bind(status)
+                .bind(node)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        for status in ["CANCELLED", "EXPIRED", "UNKNOWN", ""] {
+            let error = sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE id=$2")
+                .bind(status)
+                .bind(node)
+                .execute(pool)
+                .await
+                .unwrap_err();
+            assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("23514"));
+        }
+        let validated: bool = sqlx::query_scalar("SELECT convalidated FROM pg_constraint WHERE conrelid='horsies_workflow_tasks'::regclass AND conname='horsies_workflow_tasks_status_check'")
+            .fetch_one(pool).await.unwrap();
+        assert!(validated);
+        for status in [Some("CANCELLED"), Some("SKIPPED"), Some("UNKNOWN"), None] {
+            let error = sqlx::query("SELECT horsies_phase2_consume($1, $2)")
+                .bind(Uuid::new_v4())
+                .bind(status)
+                .execute(pool)
+                .await
+                .unwrap_err();
+            assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("22023"));
+        }
+        for status in ["COMPLETED", "FAILED"] {
+            let disposition: String =
+                sqlx::query_scalar("SELECT (horsies_phase2_consume($1, $2)).disposition")
+                    .bind(Uuid::new_v4())
+                    .bind(status)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
+            assert_eq!(disposition, "PENDING_ABSENT");
+        }
+        let settings: Vec<String> = sqlx::query_scalar(
+            "SELECT proconfig FROM pg_proc WHERE oid='horsies_phase2_consume(uuid,text)'::regprocedure",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(settings
+            .iter()
+            .any(|s| s == "plan_cache_mode=force_generic_plan"));
+        database.drop().await;
+    }
 
     #[tokio::test]
     #[serial]
