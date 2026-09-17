@@ -326,7 +326,7 @@ class TestOrphanSingle:
             )
             await link_node(connection, task_id, status='COMPLETED')
             await link_node(
-                connection, task_id, status='CANCELLED', task_index=1
+                connection, task_id, status='FAILED', task_index=1
             )
             with pytest.raises(DBAPIError, match='multiple workflows'):
                 await cancel_orphan(connection, task_id)
