@@ -5,6 +5,32 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [0.1.0-alpha.34] - 2026-09-17
+
+### Fixed
+
+- Constrain persisted workflow-node statuses to the seven supported values.
+  Reject unsupported existing values before the migration changes the schema.
+  Stop accepting `CANCELLED` as a node terminal status in SQL functions.
+
+### Work reductions
+
+- Index nonterminal workflow nodes by workflow ID. Recovery probes use the
+  partial index without scanning terminal nodes in the same workflow.
+- Reuse a generic plan for claim candidate selection. Keep automatic planning
+  for in-flight accounting and preserve claim ordering, leases, and caps.
+
+### Observability
+
+- Add claim-call debug timings on the `horsies::claim` target. Record pool wait,
+  database-call duration, total duration, returned count, and success.
+
+### Upgrade
+
+- Apply migrations 0059 through 0062 before processes use this release.
+- The node-status migration refuses rows outside the supported status set.
+  Correct those rows before retrying the migration.
+
 ## [0.1.0-alpha.33] - 2026-09-17
 
 ### Fixed
