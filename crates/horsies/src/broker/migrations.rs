@@ -962,6 +962,130 @@ mod recovery_index_migration_tests {
         database.drop().await;
     }
 
+    async fn claim_planning_database() -> MigrationTestDatabase {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        sqlx::query("CREATE EXTENSION pg_stat_statements")
+            .execute(pool)
+            .await
+            .unwrap();
+        run_horsies_migrations_through(pool, 62).await.unwrap();
+        sqlx::query("ALTER TABLE horsies_tasks SET (autovacuum_enabled = false)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO horsies_tasks (
+                id, task_name, queue_name, priority, status, enqueued_at,
+                enqueue_sha, command_fingerprint_version, command_fingerprint,
+                retention_class_key, retain_rerun_input, prepared_rerun_input_disposition
+             ) SELECT md5(n::text)::uuid, 'plan_test', 'plan_test', n % 5,
+                'PENDING', NOW() - interval '1 hour', n::text, 1,
+                decode(repeat('00', 32), 'hex'), 'forever', FALSE, 'NEVER_ELIGIBLE'
+             FROM generate_series(1, 50000) n",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("VACUUM ANALYZE horsies_tasks")
+            .execute(pool)
+            .await
+            .unwrap();
+        database
+    }
+
+    async fn candidate_planning_counts(connection: &mut PgConnection) -> (i64, i64) {
+        sqlx::query_as(
+            "SELECT COALESCE(sum(plans), 0)::bigint, COALESCE(sum(calls), 0)::bigint
+             FROM pg_stat_statements
+             WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND NOT toplevel AND ltrim(query) LIKE 'WITH cand AS (%'",
+        )
+        .fetch_one(connection)
+        .await
+        .unwrap()
+    }
+
+    async fn rolled_back_claim(connection: &mut PgConnection) {
+        let mut transaction = sqlx::Acquire::begin(&mut *connection).await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM horsies_claim(
+                'plan_worker', '[\"plan_test\"]'::jsonb, '{}'::jsonb, '{}'::jsonb,
+                TRUE, 32, 0, 32, 8, NULL, 60000, '[]'::jsonb
+             )",
+        )
+        .fetch_one(transaction.as_mut())
+        .await
+        .unwrap();
+        assert_eq!(count, 8);
+        transaction.rollback().await.unwrap();
+        let mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
+            .fetch_one(connection)
+            .await
+            .unwrap();
+        assert_eq!(mode, "auto");
+    }
+
+    async fn configure_planning_counters(connection: &mut PgConnection) {
+        for statement in [
+            "SET plan_cache_mode = auto",
+            "SET pg_stat_statements.track = 'all'",
+            "SET pg_stat_statements.track_planning = on",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut *connection)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
+    async fn claim_candidate_plan_is_reused_across_calls() {
+        let database = claim_planning_database().await;
+        let mut connection = database.pool.acquire().await.unwrap();
+        configure_planning_counters(&mut connection).await;
+        rolled_back_claim(&mut connection).await;
+        let first = candidate_planning_counts(&mut connection).await;
+        assert_eq!(first, (1, 1));
+        for _ in 0..30 {
+            rolled_back_claim(&mut connection).await;
+        }
+        let repeated = candidate_planning_counts(&mut connection).await;
+        assert_eq!(repeated, (1, 31));
+        drop(connection);
+        database.drop().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[ignore = "requires preloaded pg_stat_statements; release CI runs this test"]
+    async fn claim_candidate_plan_rebuilds_once_after_analyze() {
+        let database = claim_planning_database().await;
+        let mut connection = database.pool.acquire().await.unwrap();
+        configure_planning_counters(&mut connection).await;
+        for _ in 0..8 {
+            rolled_back_claim(&mut connection).await;
+        }
+        let before = candidate_planning_counts(&mut connection).await;
+        assert_eq!(before, (1, 8));
+        sqlx::query("ANALYZE horsies_tasks")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        rolled_back_claim(&mut connection).await;
+        let rebuilt = candidate_planning_counts(&mut connection).await;
+        assert_eq!(rebuilt, (before.0 + 1, before.1 + 1));
+        for _ in 0..30 {
+            rolled_back_claim(&mut connection).await;
+        }
+        let repeated = candidate_planning_counts(&mut connection).await;
+        assert_eq!(repeated, (rebuilt.0, rebuilt.1 + 30));
+        drop(connection);
+        database.drop().await;
+    }
+
     #[tokio::test]
     #[serial]
     async fn ordered_claim_upgrade_preserves_existing_tasks_and_function_shape() {
@@ -984,10 +1108,15 @@ mod recovery_index_migration_tests {
         .execute(pool)
         .await
         .unwrap();
-        let before: serde_json::Value = sqlx::query_scalar(
-            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
+        let before: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let signature: String = sqlx::query_scalar(
+            "SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'horsies_claim'",
         )
-        .bind(task_id)
         .fetch_one(pool)
         .await
         .unwrap();
@@ -998,15 +1127,14 @@ mod recovery_index_migration_tests {
         .await
         .unwrap();
 
-        run_horsies_migrations_through(pool, 49).await.unwrap();
-        run_horsies_migrations_through(pool, 49).await.unwrap();
-        let after: serde_json::Value = sqlx::query_scalar(
-            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        run_horsies_migrations_through(pool, 62).await.unwrap();
+        run_horsies_migrations_through(pool, 62).await.unwrap();
+        let after: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         assert_eq!(before, after);
         let upgraded_shape: String = sqlx::query_scalar(
             "SELECT pg_get_function_result(oid) FROM pg_proc WHERE proname = 'horsies_claim'",
@@ -1015,6 +1143,26 @@ mod recovery_index_migration_tests {
         .await
         .unwrap();
         assert_eq!(shape, upgraded_shape);
+        let upgraded_signature: String = sqlx::query_scalar(
+            "SELECT oid::regprocedure::text FROM pg_proc WHERE proname = 'horsies_claim'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(signature, upgraded_signature);
+        let settings: Vec<(String, Option<Vec<String>>)> = sqlx::query_as(
+            "SELECT proname::text, proconfig FROM pg_proc WHERE proname IN ('horsies_claim', 'horsies_claim_candidates') ORDER BY proname",
+        ).fetch_all(pool).await.unwrap();
+        assert_eq!(
+            settings,
+            vec![
+                ("horsies_claim".to_owned(), None),
+                (
+                    "horsies_claim_candidates".to_owned(),
+                    Some(vec!["plan_cache_mode=force_generic_plan".to_owned()])
+                ),
+            ]
+        );
         let claimed: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM horsies_claim(
                 'upgrade_worker', '[\"claim_upgrade\"]'::jsonb, '{}'::jsonb,
