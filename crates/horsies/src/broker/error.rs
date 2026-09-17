@@ -14,6 +14,10 @@ pub enum BrokerError {
     #[error("migration error: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
 
+    /// Existing workflow nodes contain a status outside the typed node enum.
+    #[error("migration refused: workflow nodes contain an unsupported status; repair these rows before retrying")]
+    InvalidWorkflowNodeStatus,
+
     /// The migration chain is current, but the separately operated history
     /// cutover has not produced its validated completion attestation.
     #[error(
@@ -104,6 +108,7 @@ impl BrokerError {
             Self::Database(e) => is_retryable_sqlx_error(e),
             Self::ConnectionFailed(_) | Self::ListenerClosed => true,
             Self::Migration(_)
+            | Self::InvalidWorkflowNodeStatus
             | Self::IncompleteTaskHistoryCutover
             | Self::SchemaVersionMismatch { .. }
             | Self::Serialization(_)
