@@ -108,7 +108,7 @@ WHERE wt.status = 'PENDING'
     SELECT 1 FROM horsies_workflow_tasks dep
     WHERE dep.workflow_id = wt.workflow_id
       AND wt.dependencies @> ARRAY[dep.task_index]
-      AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND dep.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($1 AS bigint)";
 
@@ -123,7 +123,7 @@ WHERE wt.status = 'PENDING'
     SELECT 1 FROM horsies_workflow_tasks dep
     WHERE dep.workflow_id = wt.workflow_id
       AND wt.dependencies @> ARRAY[dep.task_index]
-      AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND dep.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($2 AS bigint)";
 
@@ -188,7 +188,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
 LIMIT CAST($1 AS bigint)";
@@ -201,7 +201,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
   AND cw.id = ANY($1::uuid[])
@@ -224,7 +224,7 @@ WHERE w.status = 'RUNNING'
   AND NOT EXISTS (
     SELECT 1 FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = w.id
-      AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($2 AS bigint)";
 
@@ -308,7 +308,7 @@ classified AS MATERIALIZED (
         SELECT TRUE AS found
         FROM horsies_workflow_tasks wt
         WHERE wt.workflow_id = s.id
-          AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+          AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
         LIMIT 1
     ) nonterminal_task ON TRUE
     LEFT JOIN LATERAL (
