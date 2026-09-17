@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -47,9 +47,6 @@ _CLASS_KEY = 'finite_30d_v1'
 _OLD_LEAF = 'history_aggregate_finite_2026_06_01'
 _OLD_LOWER = datetime(2026, 6, 1, tzinfo=timezone.utc)
 _OLD_UPPER = datetime(2026, 6, 2, tzinfo=timezone.utc)
-_CURRENT_LEAF = 'history_aggregate_finite_2026_08_05'
-_CURRENT_LOWER = datetime(2026, 8, 5, tzinfo=timezone.utc)
-_CURRENT_UPPER = datetime(2026, 8, 6, tzinfo=timezone.utc)
 
 
 @pytest_asyncio.fixture
@@ -199,16 +196,28 @@ async def test_expired_leaf_is_ready_without_pending_locator(
     assert inspection.attached is True
 
 
+async def _future_leaf_bounds(connection: AsyncConnection) -> tuple[str, datetime, datetime]:
+    lower = (await connection.execute(text(
+        "SELECT date_trunc('day', statement_timestamp(), 'UTC') + interval '1 day'"
+    ))).scalar_one().astimezone(timezone.utc)
+    return f'history_aggregate_finite_{lower:%Y_%m_%d}', lower, lower + timedelta(days=1)
+
+
 async def test_unexpired_leaf_is_not_detachable(
     partition_schema: AsyncConnection,
 ) -> None:
+    leaf_name, lower, upper = await _future_leaf_bounds(partition_schema)
+    await create_daily_history_leaf(
+        partition_schema, _schema(partition_schema), leaf_name=leaf_name,
+        class_key=_CLASS_KEY, lower=lower, upper=upper,
+    )
     inspection = await inspect_history_leaf(
         partition_schema,
         _schema(partition_schema),
-        leaf_name=_CURRENT_LEAF,
+        leaf_name=leaf_name,
         class_key=_CLASS_KEY,
-        lower=_CURRENT_LOWER,
-        upper=_CURRENT_UPPER,
+        lower=lower,
+        upper=upper,
     )
     assert inspection.state is LeafState.NOT_EXPIRED
 
@@ -307,9 +316,7 @@ async def test_future_leaf_creation_is_idempotent_and_indexed(
     partition_schema: AsyncConnection,
 ) -> None:
     schema = _schema(partition_schema)
-    leaf_name = 'history_aggregate_finite_2026_08_06'
-    lower = datetime(2026, 8, 6, tzinfo=timezone.utc)
-    upper = datetime(2026, 8, 7, tzinfo=timezone.utc)
+    leaf_name, lower, upper = await _future_leaf_bounds(partition_schema)
     await create_daily_history_leaf(
         partition_schema,
         schema,
