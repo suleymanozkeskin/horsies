@@ -53,7 +53,9 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # and the base advances.
 # v36 adds durable recovery state and exact recovery indexes. These changes do
 # not change the cloned task shape.
-_EXPECTED_BASE_SCHEMA_VERSION = 36
+# Schema 37 constrains workflow nodes and replaces their phase-two function.
+# These prototypes clone the task table, whose columns and indexes are unchanged.
+_EXPECTED_BASE_SCHEMA_VERSION = 37
 
 
 @dataclass(frozen=True, slots=True)

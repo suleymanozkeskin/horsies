@@ -984,22 +984,83 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
-    async def test_a_version_bump_restores_a_replaced_function_body(
+    async def test_node_status_upgrade_from_36_refuses_then_retries(
+        self, scratch_database: str,
+    ) -> None:
+        """Schema activation preserves invalid rows until explicit repair."""
+        from horsies.core.schemas.node_status import WorkflowNodeStatusMigrationError
+        from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'ALTER TABLE horsies_workflow_tasks '
+                    'DROP CONSTRAINT horsies_workflow_tasks_status_check'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 37'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (36) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                await conn.execute(text("""
+                    CREATE OR REPLACE FUNCTION horsies_phase2_consume(
+                        p_task_id uuid, p_terminal_node_status text
+                    )
+                    RETURNS horsies_phase2_disposition LANGUAGE plpgsql
+                    AS $$ BEGIN RETURN NULL; END $$
+                """))
+                workflow = str(uuid.uuid4())
+                node = str(uuid.uuid4())
+                await conn.execute(WorkflowModel.__table__.insert().values(
+                    id=workflow, name='node_status_upgrade', status='RUNNING',
+                ))
+                await conn.execute(WorkflowTaskModel.__table__.insert().values(
+                    id=node, workflow_id=workflow, task_index=0,
+                    task_name='node_status_upgrade', status='CANCELLED',
+                ))
+            refused = await broker.ensure_schema_initialized()
+            assert refused.is_err()
+            assert isinstance(refused.unwrap_err().exception, WorkflowNodeStatusMigrationError)
+            async with engine.begin() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == 36
+                assert (await conn.execute(text(
+                    'SELECT (horsies_phase2_consume(CAST(:id AS uuid), :status)).disposition'
+                ), {'id': str(uuid.uuid4()), 'status': 'FAILED'})).scalar_one() is None
+                assert (await conn.execute(text(
+                    'SELECT status FROM horsies_workflow_tasks WHERE id=CAST(:id AS uuid)'
+                ), {'id': node})).scalar_one() == 'CANCELLED'
+                await conn.execute(text(
+                    "UPDATE horsies_workflow_tasks SET status='FAILED' WHERE id=CAST(:id AS uuid)"
+                ), {'id': node})
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == 37
+                assert (await conn.execute(text(
+                    'SELECT (horsies_phase2_consume(CAST(:id AS uuid), :status)).disposition'
+                ), {'id': str(uuid.uuid4()), 'status': 'FAILED'})).scalar_one() == 'PENDING_ABSENT'
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
+    async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,
     ) -> None:
-        """The mechanism the versioning rule rests on, exercised directly.
+        """Upgrade from schema 35 reinstalls the pre-cutover program.
 
-        Function bodies are reinstalled on every apply, but an apply only
-        happens when the stored version is behind. This replaces an installed
-        body with one that answers differently, lowers the watermark, and
-        migrates: the canonical behaviour must come back. If it does not, then
-        a merged change to a function body would reach fresh databases only,
-        which is the failure the one-version-per-change rule exists to
-        prevent. Characterized in the varchar world, where the in-place
-        program is self-contained; the fresh world's body restoration
-        rides the same chain arm and its program is exercised by the
-        first-terminalization characterization below.
+        A sentinel function returns TASK_ABSENT before the upgrade. The
+        canonical function must return APPLIED afterward. The outcome type
+        retains its identity through function replacement.
         """
         await _migrate(scratch_database)
         engine = _engine(scratch_database)
@@ -1040,14 +1101,14 @@ class TestUpgradePaths:
             async with engine.connect() as connection:
                 await connection.execute(
                     text('DELETE FROM horsies_schema_version WHERE version >= :v'),
-                    {'v': SCHEMA_VERSION},
+                    {'v': 36},
                 )
                 await connection.execute(
                     text(
                         'INSERT INTO horsies_schema_version (version) '
                         'VALUES (:v) ON CONFLICT DO NOTHING'
                     ),
-                    {'v': SCHEMA_VERSION - 1},
+                    {'v': 35},
                 )
                 await connection.commit()
 
