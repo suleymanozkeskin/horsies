@@ -9,8 +9,7 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Fixed
 
-- Return expired pending nodes in deadline order, with stable workflow and
-  task-index tie breakers.
+- Return expired pending tasks in deadline order.
 - Persist workflow recovery health in worker snapshots. Include completion
   candidate yield as candidates divided by workflows scanned.
 
