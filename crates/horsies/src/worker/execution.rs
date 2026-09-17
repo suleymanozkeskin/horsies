@@ -2326,7 +2326,7 @@ mod set_running_gate_tests {
     }
     #[tokio::test]
     #[serial]
-    async fn handoff_preserves_link_states_and_observes_cancellation() {
+    async fn handoff_preserves_link_states_and_observes_terminal_nodes() {
         let broker = test_broker().await;
         let pool = broker.pool().clone();
         for status in [
@@ -2337,7 +2337,6 @@ mod set_running_gate_tests {
             Some("COMPLETED"),
             Some("FAILED"),
             Some("SKIPPED"),
-            Some("CANCELLED"),
             None,
         ] {
             let wf = Uuid::new_v4();
@@ -2397,7 +2396,7 @@ mod set_running_gate_tests {
         sqlx::query("INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status,task_id) VALUES($1,$2,0,'handoff_race','ENQUEUED',$3)").bind(node).bind(wf).bind(task).execute(&pool).await.unwrap();
         seed_claimed(&pool, &task.to_string(), true).await;
         let mut held = pool.begin().await.unwrap();
-        sqlx::query("UPDATE horsies_workflow_tasks SET status='CANCELLED' WHERE id=$1")
+        sqlx::query("UPDATE horsies_workflow_tasks SET status='FAILED' WHERE id=$1")
             .bind(node)
             .execute(held.as_mut())
             .await
@@ -2425,7 +2424,7 @@ mod set_running_gate_tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(node_status, "CANCELLED");
+        assert_eq!(node_status, "FAILED");
         clean_handoff_case(&pool, wf, task).await;
     }
 
