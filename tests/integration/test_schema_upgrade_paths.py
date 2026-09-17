@@ -1044,7 +1044,7 @@ class TestUpgradePaths:
             async with engine.connect() as conn:
                 assert (await conn.execute(text(
                     'SELECT max(version) FROM horsies_schema_version'
-                ))).scalar_one() == 37
+                ))).scalar_one() == SCHEMA_VERSION
                 assert (await conn.execute(text(
                     'SELECT (horsies_phase2_consume(CAST(:id AS uuid), :status)).disposition'
                 ), {'id': str(uuid.uuid4()), 'status': 'FAILED'})).scalar_one() == 'PENDING_ABSENT'

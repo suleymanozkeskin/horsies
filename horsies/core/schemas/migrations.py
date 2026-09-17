@@ -314,7 +314,7 @@ from sqlalchemy import text
 
 # v37: close the workflow-node status set and reject unsupported phase-two inputs.
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
