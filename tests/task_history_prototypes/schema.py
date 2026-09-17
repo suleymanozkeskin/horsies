@@ -55,7 +55,7 @@ _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
 # not change the cloned task shape.
 # Schema 37 constrains workflow nodes and replaces their phase-two function.
 # These prototypes clone the task table, whose columns and indexes are unchanged.
-_EXPECTED_BASE_SCHEMA_VERSION = 37
+_EXPECTED_BASE_SCHEMA_VERSION = 38
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,7 +27,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession as _RuntimeAsyncSession
 
 from horsies.core.logging import get_logger
-from horsies.core.models.workflow import WF_TASK_TERMINAL_VALUES
 
 if TYPE_CHECKING:
     from sqlalchemy import TextClause
@@ -103,7 +102,7 @@ GET_PENDING_WITH_TERMINAL_DEPS_SQL = text("""
           SELECT 1 FROM horsies_workflow_tasks dep
           WHERE dep.workflow_id = wt.workflow_id
             AND wt.dependencies @> ARRAY[dep.task_index]
-            AND NOT (dep.status = ANY(:wf_task_terminal_states))
+            AND dep.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
       )
     LIMIT CAST(:max_rows AS bigint)
 """)
@@ -183,7 +182,7 @@ GET_TERMINAL_WORKFLOW_CANDIDATES_SQL = text("""
       AND NOT EXISTS (
           SELECT 1 FROM horsies_workflow_tasks wt2
           WHERE wt2.workflow_id = w.id
-            AND NOT (wt2.status = ANY(:wf_task_terminal_states))
+            AND wt2.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
       )
     GROUP BY w.id, w.error, w.success_policy
     LIMIT CAST(:max_rows AS bigint)
@@ -298,7 +297,7 @@ classified AS MATERIALIZED (
         SELECT TRUE AS found
         FROM horsies_workflow_tasks wt
         WHERE wt.workflow_id = s.id
-          AND NOT (wt.status = ANY(:wf_task_terminal_states))
+          AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
         LIMIT 1
     ) nonterminal_task ON TRUE
 ),
@@ -537,7 +536,7 @@ async def recover_stuck_workflows(
         GLOBAL_GET_PENDING_WITH_TERMINAL_DEPS_SQL
         if global_scope
         else GET_PENDING_WITH_TERMINAL_DEPS_SQL,
-        {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
+        {'scope_ids': scope_ids, 'max_rows': max_rows},
         _metrics['case_0'] if _metrics is not None else None,
         started=started,
     )
@@ -780,7 +779,7 @@ async def recover_stuck_workflows(
             GLOBAL_GET_TERMINAL_WORKFLOW_CANDIDATES_SQL
             if global_scope
             else GET_TERMINAL_WORKFLOW_CANDIDATES_SQL,
-            {'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES, 'scope_ids': scope_ids, 'max_rows': max_rows},
+            {'scope_ids': scope_ids, 'max_rows': max_rows},
         )
 
         for row in terminal_candidates.fetchall():
@@ -1026,7 +1025,6 @@ async def _recover_stuck_workflows_global(
                     'max_rows': GLOBAL_SCAN_ROW_CAP,
                     'claim_token': requested_token,
                     'claim_ttl_ms': GLOBAL_WORKFLOW_AUDIT_CLAIM_TTL_MS,
-                    'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,
                 },
             )
             audit = result.one_or_none()
