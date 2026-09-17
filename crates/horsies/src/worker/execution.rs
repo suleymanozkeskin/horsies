@@ -1582,6 +1582,28 @@ pub(crate) async fn finalize_pre_execution_failure(
 // Orchestrator: execute_and_finalize (mirrors Python's _finalize_after)
 // ---------------------------------------------------------------------------
 
+/// Stamp the finalization handoff only for the current owner and claim.
+/// A missing generation retains the worker-only OwnedClaim check.
+async fn mark_task_finalizing(
+    pool: &sqlx::PgPool,
+    task_id: Uuid,
+    worker_id: &str,
+    claimed_at: Option<chrono::DateTime<Utc>>,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE horsies_tasks SET finalizing_at = NOW(), finalizing_by_worker_id = $2 \
+         WHERE id = $1 AND status = 'RUNNING' \
+           AND claimed_by_worker_id = $2 \
+           AND ($3::timestamptz IS NULL OR claimed_at = $3)",
+    )
+    .bind(task_id)
+    .bind(worker_id)
+    .bind(claimed_at)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Execute a task through Phase 1 finalize, returning Phase 2 work if needed.
 ///
 /// Orchestrates:
@@ -1665,14 +1687,8 @@ pub(crate) async fn execute_and_finalize(
     // while finalize runs (the runner heartbeat has now stopped). Best-effort:
     // a failed stamp does not abort finalize — phase-1 CAS still protects
     // correctness. Mirrors Python's finalizing_at / finalizing_by_worker_id.
-    if let Err(e) = sqlx::query(
-        "UPDATE horsies_tasks SET finalizing_at = NOW(), finalizing_by_worker_id = $2 \
-         WHERE id = $1 AND status = 'RUNNING'",
-    )
-    .bind(&task_id)
-    .bind(&worker_id)
-    .execute(broker.pool())
-    .await
+    if let Err(e) =
+        mark_task_finalizing(broker.pool(), task_id, &worker_id, row.claimed_at).await
     {
         tracing::warn!(task_id = %task_id, error = %e, "failed to stamp finalizing handoff");
     }
@@ -1704,6 +1720,10 @@ pub(crate) async fn execute_and_finalize(
         Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
 }
+
+#[cfg(test)]
+#[path = "finalizing_tests.rs"]
+mod finalizing_tests;
 
 /// Run Phase 2 finalize: workflow advancement + capacity notifications.
 ///
