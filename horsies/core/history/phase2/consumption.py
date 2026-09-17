@@ -68,9 +68,9 @@ DECLARE
     v_source_task uuid;
     v_cas_won boolean;
 BEGIN
-    IF p_terminal_node_status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED') THEN
+    IF p_terminal_node_status IS NULL OR p_terminal_node_status NOT IN ('COMPLETED', 'FAILED') THEN
         RAISE EXCEPTION
-            'terminal node status must be COMPLETED, FAILED, or CANCELLED'
+            'terminal node status must be COMPLETED or FAILED'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
@@ -97,7 +97,7 @@ BEGIN
         INTO v_wf
         FROM horsies_workflows w
         WHERE w.id = v_node.workflow_id;
-        IF v_node.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED')
+        IF v_node.status IN ('COMPLETED', 'FAILED', 'SKIPPED')
         THEN
             RETURN ROW('ALREADY_APPLIED', v_node.workflow_id, v_node.id,
                        v_node.task_index, v_wf.status, v_wf.depth,
@@ -231,7 +231,7 @@ BEGIN
         result = convert_from(v_payload, 'UTF8'),
         completed_at = NOW()
     WHERE wt.id = v_node.id
-      AND wt.status NOT IN ('COMPLETED', 'FAILED', 'CANCELLED', 'SKIPPED');
+      AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED');
     v_cas_won := FOUND;
 
     DELETE FROM {WORKFLOW_PHASE2_PENDING} WHERE task_id = p_task_id;

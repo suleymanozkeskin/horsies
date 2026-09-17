@@ -916,7 +916,10 @@ class PostgresBroker:
             bounded_cancel_orphan_sweep_ddl,
         )
 
+        from horsies.core.schemas.node_status import close_workflow_node_status_set
+
         async with engine.begin() as conn:
+            await close_workflow_node_status_set(conn)
             await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
             uuid_identity = bool(
                 (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()

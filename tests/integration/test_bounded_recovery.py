@@ -681,7 +681,7 @@ async def test_recovery_index_upgrade_rebuilds_a_malformed_canonical_index(
         '''))
     async with engine.begin() as connection:
         await connection.execute(text(
-            'DELETE FROM horsies_schema_version WHERE version = 36'
+            'DELETE FROM horsies_schema_version WHERE version >= 36'
         ))
 
     url = engine.url.render_as_string(hide_password=False)
@@ -719,7 +719,7 @@ async def test_recovery_index_claim_refuses_foreign_name_reuse(
     recovery_schema._index_inspection_pause = pause  # pyright: ignore[reportPrivateUsage]
     async with engine.begin() as connection:
         await connection.execute(text(
-            'DELETE FROM horsies_schema_version WHERE version = 36'
+            'DELETE FROM horsies_schema_version WHERE version >= 36'
         ))
 
     url = engine.url.render_as_string(hide_password=False)

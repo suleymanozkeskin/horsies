@@ -87,7 +87,9 @@ BASELINE_SCHEMA_VERSION: Final = 26
 # `substrate_identity()` raises when the database's version is not this pin.
 # `qual_boundary33` is therefore unusable until rebuilt at 34, which is a
 # deliberate consequence and not an accident of the bump.
-CANDIDATE_SCHEMA_VERSION: Final = 36
+# Schema 37 changes workflow nodes, outside the task-table copy. Rebuild the
+# candidate database at this version before new measurements.
+CANDIDATE_SCHEMA_VERSION: Final = 37
 
 SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 
