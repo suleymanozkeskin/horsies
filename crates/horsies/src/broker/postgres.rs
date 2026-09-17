@@ -1489,7 +1489,10 @@ impl PostgresBroker {
         &self,
         params: &ClaimPassParams,
     ) -> Result<Vec<ClaimedTaskRow>, BrokerError> {
-        let rows: Vec<ClaimedTaskRow> = sqlx::query_as(HORSIES_CLAIM_SQL)
+        let started = std::time::Instant::now();
+        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
+        let acquired = std::time::Instant::now();
+        let result = sqlx::query_as::<_, ClaimedTaskRow>(HORSIES_CLAIM_SQL)
             .bind(&params.worker_id)
             .bind(sqlx::types::Json(&params.queues))
             .bind(sqlx::types::Json(&params.queue_priority))
@@ -1506,9 +1509,21 @@ impl PostgresBroker {
             )
             .bind(params.claim_lease_ms.map(i64::from))
             .bind(sqlx::types::Json(&params.lock_keys))
-            .fetch_all(&self.pool)
-            .await
-            .map_err(BrokerError::Database)?;
+            .fetch_all(&mut *connection)
+            .await;
+        let finished = std::time::Instant::now();
+        drop(connection);
+        tracing::debug!(
+            target: "horsies::claim",
+            worker_id = %params.worker_id,
+            pool_wait_ms = acquired.duration_since(started).as_secs_f64() * 1000.0,
+            query_ms = finished.duration_since(acquired).as_secs_f64() * 1000.0,
+            elapsed_ms = finished.duration_since(started).as_secs_f64() * 1000.0,
+            count = result.as_ref().map_or(0, Vec::len),
+            success = result.is_ok(),
+            "claim call completed"
+        );
+        let rows = result.map_err(BrokerError::Database)?;
 
         tracing::debug!(count = rows.len(), "claim pass claimed tasks");
         Ok(rows)

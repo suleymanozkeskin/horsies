@@ -65,6 +65,23 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Enable statement planning counters
+        run: |
+          docker exec ${{ job.services.postgres.id }} psql -U postgres -d horsies-rust-port -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'"
+          docker restart ${{ job.services.postgres.id }}
+          for attempt in {1..30}; do
+            if docker exec ${{ job.services.postgres.id }} pg_isready -U postgres; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec ${{ job.services.postgres.id }} pg_isready -U postgres
+
+      - name: Verify claim candidate plan reuse
+        env:
+          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
+        run: cargo test -p horsies claim_candidate_plan_ -- --ignored --test-threads=1
+
       - name: Run default workspace tests
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
