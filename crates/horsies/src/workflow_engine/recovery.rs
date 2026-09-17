@@ -108,7 +108,7 @@ WHERE wt.status = 'PENDING'
     SELECT 1 FROM horsies_workflow_tasks dep
     WHERE dep.workflow_id = wt.workflow_id
       AND wt.dependencies @> ARRAY[dep.task_index]
-      AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND dep.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($1 AS bigint)";
 
@@ -123,7 +123,7 @@ WHERE wt.status = 'PENDING'
     SELECT 1 FROM horsies_workflow_tasks dep
     WHERE dep.workflow_id = wt.workflow_id
       AND wt.dependencies @> ARRAY[dep.task_index]
-      AND dep.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND dep.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($2 AS bigint)";
 
@@ -188,7 +188,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
 LIMIT CAST($1 AS bigint)";
@@ -201,7 +201,7 @@ JOIN horsies_workflows w ON w.id = wt.workflow_id
 JOIN horsies_workflows cw ON cw.id = wt.sub_workflow_id
 WHERE wt.is_subworkflow = TRUE
   AND wt.sub_workflow_id IS NOT NULL
-  AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+  AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   AND cw.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
   AND w.status = 'RUNNING'
   AND cw.id = ANY($1::uuid[])
@@ -224,7 +224,7 @@ WHERE w.status = 'RUNNING'
   AND NOT EXISTS (
     SELECT 1 FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = w.id
-      AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+      AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
   )
 LIMIT CAST($2 AS bigint)";
 
@@ -308,7 +308,7 @@ classified AS MATERIALIZED (
         SELECT TRUE AS found
         FROM horsies_workflow_tasks wt
         WHERE wt.workflow_id = s.id
-          AND wt.status NOT IN ('COMPLETED', 'FAILED', 'SKIPPED')
+          AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
         LIMIT 1
     ) nonterminal_task ON TRUE
     LEFT JOIN LATERAL (
@@ -2014,6 +2014,82 @@ mod cap_tests {
 
     #[tokio::test]
     #[serial]
+    async fn generic_audit_uses_partial_index_for_wide_and_narrow_workflows() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::raw_sql("DELETE FROM horsies_workflow_tasks; DELETE FROM horsies_workflows;
+            UPDATE horsies_recovery_scan_cursors SET last_created_at=NULL,last_id=NULL,
+                cycle_upper_created_at=NULL,cycle_upper_id=NULL,claim_token=NULL,claim_expires_at=NULL;
+            INSERT INTO horsies_workflows(id,name,status)
+                SELECT md5('partial-'||n)::uuid,'partial_index','RUNNING' FROM generate_series(1,200) n;
+            INSERT INTO horsies_workflow_tasks(id,workflow_id,task_index,task_name,status)
+                SELECT gen_random_uuid(),md5('partial-'||n)::uuid,i,'partial_index','COMPLETED'
+                FROM generate_series(1,200) n CROSS JOIN LATERAL generate_series(0,CASE WHEN n=200 THEN 1000 ELSE 0 END) i;
+            ANALYZE horsies_workflows, horsies_workflow_tasks;
+            SET LOCAL plan_cache_mode=force_generic_plan;")
+            .execute(tx.as_mut()).await.unwrap();
+        sqlx::raw_sql(&format!(
+            "PREPARE partial_audit(bigint,uuid,bigint) AS {GLOBAL_WORKFLOW_AUDIT_SQL}"
+        ))
+        .execute(tx.as_mut())
+        .await
+        .unwrap();
+        for status in ["COMPLETED", "RUNNING"] {
+            sqlx::query("UPDATE horsies_workflow_tasks SET status=$1 WHERE task_index IN (0,1000)")
+                .bind(status)
+                .execute(tx.as_mut())
+                .await
+                .unwrap();
+            sqlx::query("ANALYZE horsies_workflow_tasks")
+                .execute(tx.as_mut())
+                .await
+                .unwrap();
+            sqlx::query("SAVEPOINT partial_audit_probe")
+                .execute(tx.as_mut())
+                .await
+                .unwrap();
+            let plan: serde_json::Value = sqlx::query_scalar("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE partial_audit(200,'00000000-0000-4000-8000-000000000001',30000)")
+                .fetch_one(tx.as_mut()).await.unwrap();
+            assert!(
+                plan.to_string()
+                    .contains("idx_horsies_workflow_tasks_nonterminal"),
+                "{plan}"
+            );
+            assert!(
+                relation_rows_examined(&plan, "horsies_workflow_tasks") <= 400.0,
+                "{plan}"
+            );
+            sqlx::query("ROLLBACK TO SAVEPOINT partial_audit_probe")
+                .execute(tx.as_mut())
+                .await
+                .unwrap();
+            let result = sqlx::query(
+                "EXECUTE partial_audit(200,'00000000-0000-4000-8000-000000000001',30000)",
+            )
+            .fetch_one(tx.as_mut())
+            .await
+            .unwrap();
+            let ids: Vec<Uuid> = sqlx::Row::get(&result, "completion_ids");
+            let expected = match status {
+                "COMPLETED" => 200,
+                "RUNNING" => 0,
+                _ => unreachable!(),
+            };
+            assert_eq!(ids.len(), expected);
+            sqlx::query("ROLLBACK TO SAVEPOINT partial_audit_probe")
+                .execute(tx.as_mut())
+                .await
+                .unwrap();
+        }
+        sqlx::query("DEALLOCATE partial_audit")
+            .execute(tx.as_mut())
+            .await
+            .unwrap();
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[serial]
     async fn empty_global_workflow_audit_is_bounded_at_fifty_thousand_rows() {
         let pool = crate::broker::terminalization_matrix::migrated_pool().await;
         sqlx::query("DELETE FROM horsies_workflow_tasks")
@@ -2126,7 +2202,8 @@ mod cap_tests {
         assert!(
             rendered.contains("idx_horsies_workflow_tasks_workflow")
                 || rendered.contains("uq_horsies_workflow_task_index")
-                || rendered.contains("idx_horsies_workflow_tasks_wf_status_index"),
+                || rendered.contains("idx_horsies_workflow_tasks_wf_status_index")
+                || rendered.contains("idx_horsies_workflow_tasks_nonterminal"),
             "bounded workflow audit must use workflow-task index probes: {plan}",
         );
         assert!(
@@ -2169,7 +2246,8 @@ mod cap_tests {
             assert!(
                 rendered.contains("idx_horsies_workflow_tasks_workflow")
                     || rendered.contains("uq_horsies_workflow_task_index")
-                || rendered.contains("idx_horsies_workflow_tasks_wf_status_index"),
+                    || rendered.contains("idx_horsies_workflow_tasks_wf_status_index")
+                    || rendered.contains("idx_horsies_workflow_tasks_nonterminal"),
                 "workflow-tree recovery must use workflow-task index probes: {tree_plan}",
             );
             assert!(

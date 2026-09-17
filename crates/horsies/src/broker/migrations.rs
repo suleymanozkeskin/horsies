@@ -67,7 +67,7 @@ struct ConcurrentRecoveryIndex {
     table: &'static str,
 }
 
-const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 3] = [
+const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 4] = [
     ConcurrentRecoveryIndex {
         version: 46,
         name: "idx_horsies_workflows_running_recovery_scan",
@@ -82,6 +82,11 @@ const CONCURRENT_RECOVERY_INDEXES: [ConcurrentRecoveryIndex; 3] = [
         version: 51,
         name: "idx_horsies_history_catalog_active",
         table: "horsies_task_history_leaf_catalog",
+    },
+    ConcurrentRecoveryIndex {
+        version: 60,
+        name: "idx_horsies_workflow_tasks_nonterminal",
+        table: "horsies_workflow_tasks",
     },
 ];
 
@@ -726,6 +731,57 @@ mod recovery_index_migration_tests {
         }
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn nonterminal_node_index_upgrade_repairs_wrong_shape_and_preserves_rows() {
+        let database = MigrationTestDatabase::create().await;
+        let pool = &database.pool;
+        run_horsies_migrations_through(pool, 59).await.unwrap();
+        let workflow = Uuid::new_v4();
+        sqlx::query("INSERT INTO horsies_workflows (id, name, status) VALUES ($1, 'partial_index', 'RUNNING')")
+            .bind(workflow).execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO horsies_workflow_tasks (id, workflow_id, task_index, task_name, status) SELECT gen_random_uuid(), $1, n, 'partial_index', status FROM unnest(ARRAY['PENDING','READY','ENQUEUED','RUNNING','COMPLETED','FAILED','SKIPPED']) WITH ORDINALITY AS states(status,n)")
+            .bind(workflow).execute(pool).await.unwrap();
+        let row_sql =
+            "SELECT jsonb_agg(to_jsonb(n) ORDER BY task_index) FROM horsies_workflow_tasks n";
+        let before: serde_json::Value = sqlx::query_scalar(row_sql).fetch_one(pool).await.unwrap();
+        sqlx::query(
+            "CREATE INDEX idx_horsies_workflow_tasks_nonterminal ON horsies_workflow_tasks(status)",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        run_horsies_migrations_through(pool, 61).await.unwrap();
+        run_horsies_migrations_through(pool, 61).await.unwrap();
+        let after: serde_json::Value = sqlx::query_scalar(row_sql).fetch_one(pool).await.unwrap();
+        assert_eq!(before, after);
+        let definition: String = sqlx::query_scalar(
+            "SELECT pg_get_indexdef('idx_horsies_workflow_tasks_nonterminal'::regclass)",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert!(definition.contains("(workflow_id)"), "{definition}");
+        for status in ["PENDING", "READY", "ENQUEUED", "RUNNING"] {
+            assert!(definition.contains(status), "{definition}");
+        }
+        let mut transaction = pool.begin().await.unwrap();
+        sqlx::query("DROP INDEX idx_horsies_workflow_tasks_nonterminal")
+            .execute(transaction.as_mut())
+            .await
+            .unwrap();
+        sqlx::query("CREATE INDEX idx_horsies_workflow_tasks_nonterminal ON horsies_workflow_tasks(workflow_id) WHERE status='RUNNING'")
+            .execute(transaction.as_mut()).await.unwrap();
+        let error = sqlx::raw_sql(include_str!(
+            "../../migrations/0061_validate_nonterminal_node_recovery_index.sql"
+        ))
+        .execute(transaction.as_mut())
+        .await
+        .unwrap_err();
+        assert_eq!(sqlx_error_sqlstate(&error).as_deref(), Some("55000"));
+        transaction.rollback().await.unwrap();
+        database.drop().await;
+    }
 
     #[tokio::test]
     #[serial]
