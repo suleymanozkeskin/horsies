@@ -18,6 +18,7 @@ pub const TASK_LOOKUP_MANIFEST: &str = "horsies_task_lookup_manifest";
 pub const TASK_PROVENANCE_FUNCTION: &str = "horsies_task_provenance_staged";
 pub const TASK_PROVENANCE_TYPE: &str = "horsies_task_provenance";
 pub const TASK_DETAIL_FUNCTION: &str = "horsies_task_detail_staged";
+pub const TASK_RESULT_FUNCTION: &str = "horsies_task_result_staged";
 
 /// PostgreSQL `NAMEDATALEN - 1`. Longer names are silently truncated.
 pub const POSTGRES_IDENTIFIER_LIMIT: usize = 63;

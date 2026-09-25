@@ -5,6 +5,25 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [Unreleased]
+
+### Changed
+
+- The staged reader publisher also installs `horsies_task_result_staged(uuid)`.
+  It returns only the result columns of one task, as flat output columns, from
+  the live table or from a history leaf, under one snapshot.
+- `get_result` and `TaskHandle::get` read a task result in one statement.
+  Before, a history read sent three statements: a live-table read, a
+  `to_regprocedure` check, and a full `horsies_task_detail_staged` row with its
+  attempt snapshot.
+- Healthy partition coverage republishes the staged readers when the detail
+  or the result function is absent. It still uses three catalog statements.
+
+### Upgrade
+
+- No migration. The next partition coverage pass installs the result
+  function. Until then, result reads use the previous three-statement path.
+
 ## [0.1.0-alpha.34] - 2026-09-17
 
 ### Fixed

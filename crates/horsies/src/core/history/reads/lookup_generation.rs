@@ -9,6 +9,7 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
     HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT,
     TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE, TASK_PROVENANCE_FUNCTION, TASK_PROVENANCE_TYPE,
+    TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::LeafCatalogRow;
 
@@ -194,6 +195,31 @@ pub fn render_staged_detail_function(manifest: &LookupManifest) -> String {
         |relation| {
             format!(
                 "\n        SELECT h.* INTO v_row FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN QUERY SELECT 'HISTORY'::text, v_row;\n            RETURN;\n        END IF;\n"
+            )
+        },
+        manifest,
+        Absence::Statement("RETURN;"),
+    )
+}
+
+/// Terminal-result reader: the result columns only, as flat output columns.
+/// Every column reference is qualified: the output column names are
+/// PL/pgSQL variables inside the body.
+pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
+    let live_probe = format!(
+        "\n        RETURN QUERY SELECT\n            'LIVE'::text, t.status::text, t.result::text, t.failed_reason::text,\n            NULL::smallint, NULL::text, NULL::text, NULL::bytea, NULL::bytea\n        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
+    );
+    staged_function(
+        TASK_RESULT_FUNCTION,
+        "TABLE (location text, status text, live_result text, failed_reason text, \
+         result_envelope_version smallint, result_codec text, result_content_type text, \
+         result_payload bytea, result_digest bytea)",
+        "",
+        &[],
+        &live_probe,
+        |relation| {
+            format!(
+                "\n        RETURN QUERY SELECT\n            'HISTORY'::text, h.status::text, NULL::text, h.final_failed_reason::text,\n            h.result_envelope_version, h.result_codec::text, h.result_content_type::text,\n            h.result_payload, h.result_digest\n        FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN;\n        END IF;\n"
             )
         },
         manifest,

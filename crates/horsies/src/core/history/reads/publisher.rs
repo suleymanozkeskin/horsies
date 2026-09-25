@@ -1,4 +1,4 @@
-//! Atomic publication of the staged reader triple and its probe manifest.
+//! Atomic publication of the staged readers and their probe manifest.
 
 use std::collections::HashSet;
 
@@ -6,15 +6,15 @@ use sqlx::PgConnection;
 
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION,
+    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_DETAIL_FUNCTION, TASK_LOOKUP_MANIFEST,
+    TASK_PROVENANCE_FUNCTION, TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::read_manifest_leaf_rows;
 use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
 
-use super::detail::staged_detail_published;
 use super::lookup_generation::{
     manifest_from_catalog, render_staged_detail_function, render_staged_lookup_function,
-    render_staged_provenance_function, LookupManifest,
+    render_staged_provenance_function, render_staged_result_function, LookupManifest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -40,6 +40,9 @@ impl LoaderPublication for StagedLoaderPublisher {
             .execute(&mut *connection)
             .await?;
         sqlx::query(&render_staged_detail_function(&manifest))
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query(&render_staged_result_function(&manifest))
             .execute(&mut *connection)
             .await?;
         rewrite_manifest_table(connection, &manifest).await?;
@@ -69,11 +72,23 @@ impl LoaderPublication for StagedLoaderPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<bool, HistoryError> {
-        if !staged_detail_published(connection).await? {
+        if !staged_readers_published(connection).await? {
             return Ok(true);
         }
         Ok(!published_manifest_matches_catalog(connection).await?)
     }
+}
+
+/// Detail and result readers are both installed. One statement: healthy
+/// coverage has a fixed statement budget.
+async fn staged_readers_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_regprocedure($1) IS NOT NULL AND to_regprocedure($2) IS NOT NULL",
+    )
+    .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
+    .bind(format!("{TASK_RESULT_FUNCTION}(uuid)"))
+    .fetch_one(connection)
+    .await?)
 }
 
 async fn published_manifest_matches_catalog(
