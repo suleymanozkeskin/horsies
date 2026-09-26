@@ -1260,7 +1260,10 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy horizon coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
+        assert!(
+            matches!(outcome, CoverageOutcome::Ensured(_)),
+            "{outcome:?}"
+        );
         assert_eq!(proxy.statement_count(), 3);
         assert!(!proxy.sql().iter().any(|statement| {
             statement.starts_with("BEGIN") || statement.contains("pg_try_advisory_xact_lock")
@@ -1296,7 +1299,10 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         )
         .await
         .expect("healthy class coverage");
-        assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
+        assert!(
+            matches!(outcome, CoverageOutcome::Ensured(_)),
+            "{outcome:?}"
+        );
         assert_eq!(proxy.statement_count(), 3);
         pool.close().await;
         proxy.stop().await;
@@ -1309,7 +1315,10 @@ async fn healthy_pool_coverage_has_a_fixed_statement_budget() {
         .await
         .expect("healthy high-RTT coverage");
     let elapsed = started.elapsed();
-    assert!(matches!(outcome, CoverageOutcome::Ensured(_)), "{outcome:?}");
+    assert!(
+        matches!(outcome, CoverageOutcome::Ensured(_)),
+        "{outcome:?}"
+    );
     assert_eq!(proxy.statement_count(), 3);
     assert!(elapsed >= std::time::Duration::from_millis((delay_ms * 3) as u64));
     // The exact statement count bounds RTT cost. CI load cannot give a stable
@@ -2801,12 +2810,10 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
     // migrations already created today's daily forever leaf.
     assert_eq!(report.created_history_leaves, 5);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
-    assert!(
-        !StagedLoaderPublisher
-            .needs_republication(tx.as_mut())
-            .await
-            .unwrap()
-    );
+    assert!(!StagedLoaderPublisher
+        .needs_republication(tx.as_mut())
+        .await
+        .unwrap());
     let again = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
         .await
         .unwrap();
@@ -2824,7 +2831,12 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
 async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_classes() {
     let database = TestDatabase::create().await;
     let mut tx = database.pool.begin().await.unwrap();
-    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_task_history_leaf_catalog WHERE class_key = 'forever'").fetch_one(tx.as_mut()).await.unwrap();
+    let before: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM horsies_task_history_leaf_catalog WHERE class_key = 'forever'",
+    )
+    .fetch_one(tx.as_mut())
+    .await
+    .unwrap();
     let publisher = FailFirstStagedPublisher::default();
     let result = ensure_partition_coverage(&mut tx, 3, 2, &[], &publisher)
         .await
@@ -2839,21 +2851,20 @@ async fn connection_coverage_rolls_back_a_failed_class_and_preserves_other_class
     let classes: Vec<(String, i64)> = sqlx::query_as("SELECT class_key, count(*) FROM horsies_task_history_leaf_catalog WHERE dropped_at IS NULL AND class_key <> 'heartbeats' GROUP BY class_key ORDER BY class_key")
         .fetch_all(tx.as_mut()).await.unwrap();
     assert_eq!(
-        classes.iter().find(|(class, _)| class == "forever").map(|(_, count)| *count),
+        classes
+            .iter()
+            .find(|(class, _)| class == "forever")
+            .map(|(_, count)| *count),
         Some(before),
         "the failed class must retain only its pre-existing leaves",
     );
-    assert!(
-        classes
-            .iter()
-            .any(|(class, count)| class == "standard_30d" && *count == 4)
-    );
-    assert!(
-        !StagedLoaderPublisher
-            .needs_republication(tx.as_mut())
-            .await
-            .unwrap()
-    );
+    assert!(classes
+        .iter()
+        .any(|(class, count)| class == "standard_30d" && *count == 4));
+    assert!(!StagedLoaderPublisher
+        .needs_republication(tx.as_mut())
+        .await
+        .unwrap());
     tx.commit().await.unwrap();
     let mut repair = database.pool.begin().await.unwrap();
     let result = ensure_partition_coverage(&mut repair, 3, 2, &[], &StagedLoaderPublisher)

@@ -288,13 +288,12 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
         .execute(&mut *connection)
         .await
         .unwrap();
-    let disposition: String = sqlx::query_scalar(
-        "SELECT disposition FROM horsies_phase2_consume($1, 'COMPLETED')",
-    )
-    .bind(uuid::Uuid::new_v4())
-    .fetch_one(&mut *connection)
-    .await
-    .unwrap();
+    let disposition: String =
+        sqlx::query_scalar("SELECT disposition FROM horsies_phase2_consume($1, 'COMPLETED')")
+            .bind(uuid::Uuid::new_v4())
+            .fetch_one(&mut *connection)
+            .await
+            .unwrap();
     assert_eq!(disposition, "PENDING_ABSENT");
     let caller_mode: String = sqlx::query_scalar("SHOW plan_cache_mode")
         .fetch_one(&mut *connection)
@@ -306,7 +305,6 @@ async fn fresh_database_is_born_at_validated_v35_posture() {
         .await
         .unwrap();
     drop(connection);
-
 
     for index in REMOVED_INDEXES {
         let present: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")

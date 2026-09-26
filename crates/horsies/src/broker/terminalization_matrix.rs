@@ -1589,9 +1589,10 @@ async fn pending_expiry_order_survives_upgrade_and_program_installation() {
             false => run_horsies_migrations(pool).await.unwrap(),
             true => {
                 let mut tx = pool.begin().await.unwrap();
-                let installed = crate::core::history::cutover::program::install_programs(tx.as_mut())
-                    .await
-                    .unwrap();
+                let installed =
+                    crate::core::history::cutover::program::install_programs(tx.as_mut())
+                        .await
+                        .unwrap();
                 assert!(matches!(
                     installed,
                     crate::core::history::cutover::program::ProgramInstallation::Installed { .. }
@@ -3491,13 +3492,12 @@ async fn assert_batch_snapshot_encoding(pool: &PgPool) {
             .bind(id).fetch_one(pool).await.unwrap();
             assert_eq!(actual, expected, "{operation}: {id}");
             assert!(valid_digest);
-            let attempts: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1",
-            )
-            .bind(id)
-            .fetch_one(pool)
-            .await
-            .unwrap();
+            let attempts: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM horsies_task_attempts WHERE task_id=$1")
+                    .bind(id)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap();
             assert_eq!(attempts, 0);
         }
         let strings: Vec<String> = ids.iter().map(ToString::to_string).collect();
