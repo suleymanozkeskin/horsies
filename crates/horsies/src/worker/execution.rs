@@ -1687,10 +1687,14 @@ pub(crate) async fn execute_and_finalize(
     // while finalize runs (the runner heartbeat has now stopped). Best-effort:
     // a failed stamp does not abort finalize — phase-1 CAS still protects
     // correctness. Mirrors Python's finalizing_at / finalizing_by_worker_id.
-    if let Err(e) =
-        mark_task_finalizing(broker.pool(), task_id, &worker_id, row.claimed_at).await
-    {
-        tracing::warn!(task_id = %task_id, error = %e, "failed to stamp finalizing handoff");
+    match mark_task_finalizing(broker.pool(), task_id, &worker_id, row.claimed_at).await {
+        Ok(0) => {
+            tracing::debug!(task_id = %task_id, "finalizing handoff skipped: claim changed");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "failed to stamp finalizing handoff");
+        }
     }
 
     // Finalize Phase 1: Persist terminal state (with phase-aware retry).
@@ -1720,10 +1724,6 @@ pub(crate) async fn execute_and_finalize(
         Some(FinalizeOutcome::Retried) | Some(FinalizeOutcome::Finalized) | None => None,
     }
 }
-
-#[cfg(test)]
-#[path = "finalizing_tests.rs"]
-mod finalizing_tests;
 
 /// Run Phase 2 finalize: workflow advancement + capacity notifications.
 ///
@@ -2472,3 +2472,7 @@ mod set_running_gate_tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "finalizing_tests.rs"]
+mod finalizing_tests;
