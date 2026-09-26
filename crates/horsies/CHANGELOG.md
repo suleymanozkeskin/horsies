@@ -20,8 +20,23 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   history INSERT. The cross-column CHECK constraints stay. The Horsies
   writers produce values inside the dropped rules.
 
+- The `forever` class uses one open-ended history leaf instead of one daily
+  leaf per day. Partition coverage creates it after the last daily `forever`
+  leaf and no longer creates daily `forever` leaves. The pruning pass
+  detaches and drops closed daily `forever` leaves that hold no rows (at most
+  32 per pass). Before, each day added a `forever` leaf that was never
+  removed, and every staged-reader miss and duplicate-identity guard probed
+  it. With PR #52's pruned guard, the guard for a UUIDv7 id probes today's and
+  the horizon's standard leaves plus one `forever` leaf.
+
 ### Changed
 
+- `LeafCreation::CoveredByOpenEndedLeaf`: `create_daily_leaf` refuses a daily
+  `forever` leaf that the open-ended leaf covers, and creates nothing.
+- `LeafInspection` renames `expires_at` to `eligible_at` and adds
+  `KeptNonEmpty`. The inspection, finalize and drop commands carry a
+  `LeafLifecycle`; existing constructors use `Retention`.
+- `PrunePass` adds `forever_swept`.
 - The move family's duplicate-identity guard calls
   `horsies_task_history_duplicate_staged(uuid)`. The staged reader publisher
   renders it from the leaf manifest: a UUIDv7 id probes only the history
