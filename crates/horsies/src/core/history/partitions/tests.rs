@@ -15,14 +15,14 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
-    CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
+    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
 use crate::core::history::cutover::relocation::{
     relocate_terminal_batch, RelocationError, RelocationOutcome, RELOCATION_LEDGER,
 };
 use crate::core::history::ddl::classes::{
-    finite_class_parent_name, register_finite_retention_class, ClassRegistration,
+    finite_class_parent_name, register_finite_retention_class, ClassRegistration, FOREVER_CLASS_KEY,
 };
 use crate::core::history::ddl::runtime_names::{
     daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
@@ -2764,7 +2764,9 @@ async fn connection_coverage_publishes_once_per_changed_class_and_at_completion(
     let CoverageOutcome::Ensured(report) = result else {
         panic!("{result:?}");
     };
-    assert_eq!(report.created_history_leaves, 7);
+    // Four standard daily leaves and the one open-ended forever leaf. The
+    // migrations already created today's daily forever leaf.
+    assert_eq!(report.created_history_leaves, 5);
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 3);
     assert!(
         !StagedLoaderPublisher
@@ -3081,5 +3083,112 @@ async fn relocation_refuses_a_row_outside_the_history_column_rules_without_writi
         .rollback()
         .await
         .expect("roll back rule violation test");
+    database.drop().await;
+}
+
+async fn forever_leaves(
+    connection: &mut PgConnection,
+) -> Vec<(String, chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
+    sqlx::query_as(&format!(
+        "SELECT leaf_name, lower_anchor, upper_anchor FROM {LEAF_CATALOG}
+         WHERE class_key = 'forever' AND detached_at IS NULL AND dropped_at IS NULL
+         ORDER BY lower_anchor"
+    ))
+    .fetch_all(connection)
+    .await
+    .expect("read forever leaves")
+}
+
+#[tokio::test]
+#[serial]
+async fn connection_coverage_creates_one_open_ended_forever_leaf_after_the_daily_ones() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let daily_before = forever_leaves(tx.as_mut()).await;
+    let daily_upper = daily_before
+        .iter()
+        .map(|(_, _, upper)| *upper)
+        .max()
+        .expect("the migrations create a daily forever leaf");
+    let first = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(matches!(first, CoverageOutcome::Ensured(_)), "{first:?}");
+    let after = forever_leaves(tx.as_mut()).await;
+    let open: Vec<_> = after
+        .iter()
+        .filter(|(_, _, upper)| *upper == open_end_anchor())
+        .collect();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].1, daily_upper);
+    assert_eq!(
+        open[0].0,
+        format!(
+            "horsies_task_history_forever_open_{}",
+            daily_upper.format("%Y_%m_%d")
+        )
+    );
+    // No new daily forever leaf.
+    assert_eq!(after.len(), daily_before.len() + 1);
+
+    let second = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = second else {
+        panic!("{second:?}");
+    };
+    assert_eq!(report.created_history_leaves, 0);
+    assert_eq!(forever_leaves(tx.as_mut()).await, after);
+    tx.rollback().await.unwrap();
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn daily_forever_leaf_inside_the_open_ended_leaf_is_refused_without_change() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let before = forever_leaves(tx.as_mut()).await;
+    let open = before
+        .iter()
+        .find(|(_, _, upper)| *upper == open_end_anchor())
+        .expect("open-ended leaf")
+        .clone();
+    let lower = open.1 + Duration::days(10);
+    let leaf = LeafRef::new(
+        daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
+        FOREVER_CLASS_KEY,
+        LeafBounds::new(lower, lower + Duration::days(1)).unwrap(),
+    )
+    .unwrap();
+    let outcome = create_daily_leaf(
+        tx.as_mut(),
+        &CreateDailyHistoryLeaf::new(leaf.clone()).unwrap(),
+        &StagedLoaderPublisher,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome,
+        LeafCreation::CoveredByOpenEndedLeaf {
+            leaf_name: leaf.leaf_name().to_owned(),
+            open_leaf_name: open.0.clone(),
+        }
+    );
+    assert_eq!(forever_leaves(tx.as_mut()).await, before);
+    let relation: Option<String> = sqlx::query_scalar("SELECT to_regclass($1)::text")
+        .bind(leaf.leaf_name())
+        .fetch_one(tx.as_mut())
+        .await
+        .unwrap();
+    assert_eq!(relation, None);
+    tx.rollback().await.unwrap();
     database.drop().await;
 }

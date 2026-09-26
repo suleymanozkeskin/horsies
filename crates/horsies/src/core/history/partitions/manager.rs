@@ -3,19 +3,20 @@
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 
-use chrono::{Duration, Timelike};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::pool::PoolConnection;
 use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
-    is_safe_identifier, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf,
-    EnsureLeafCoverage, FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
+    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf,
+    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage,
+    FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
-    render_leaf_enqueued_index_ddl, render_leaf_id_index_ddl,
+    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, open_ended_leaf_name,
+    render_daily_leaf_ddl, render_leaf_enqueued_index_ddl, render_leaf_id_index_ddl,
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
@@ -26,9 +27,10 @@ use crate::core::history::outcomes::{
 };
 
 use super::catalog::{
-    capture_partition_bound_utc, database_now, read_leaf_catalog_row,
-    read_leaf_ordering_index_exists, read_leaf_physical_state, read_retention_class, LeafIndexKind,
-    LeafPartitionBoundExpectation, RetentionClassRow, INDEX_SCHEMA_VERSION,
+    capture_partition_bound_utc, database_now, open_ended_forever_start_sql, read_leaf_catalog_row,
+    read_leaf_ordering_index_exists, read_leaf_physical_state, read_open_ended_forever_leaf,
+    read_retention_class, LeafIndexKind, LeafPartitionBoundExpectation, RetentionClassRow,
+    INDEX_SCHEMA_VERSION,
 };
 use super::locks::{
     is_lock_not_available, try_lock_leaf_for_session, try_lock_leaf_for_transaction,
@@ -39,8 +41,14 @@ use super::publication::LoaderPublication;
 const DAILY: Duration = Duration::days(1);
 const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 
-pub(crate) enum DailyCoveragePlan {
-    Leaves(Vec<CreateDailyHistoryLeaf>),
+/// One leaf that coverage plans to ensure.
+pub(crate) enum PlannedLeaf {
+    Daily(CreateDailyHistoryLeaf),
+    OpenEnded(CreateOpenEndedHistoryLeaf),
+}
+
+pub(crate) enum CoveragePlan {
+    Leaves(Vec<PlannedLeaf>),
     Refused(LeafCreation),
 }
 
@@ -416,12 +424,44 @@ pub(crate) async fn remove_attached_index_for_repair(
     }
 }
 
+/// Creates or repairs one daily leaf. A daily `forever` leaf that the attached
+/// open-ended `forever` leaf covers is refused with `CoveredByOpenEndedLeaf`,
+/// and nothing is created.
 pub async fn create_daily_leaf<P: LoaderPublication>(
     connection: &mut PgConnection,
     command: &CreateDailyHistoryLeaf,
     publisher: &P,
 ) -> Result<LeafCreation, HistoryError> {
     let leaf = command.leaf();
+    let covering = match leaf.class_key() == FOREVER_CLASS_KEY {
+        true => read_open_ended_forever_leaf(connection)
+            .await?
+            .filter(|open| open.lower_anchor < leaf.bounds().upper()),
+        false => None,
+    };
+    match covering {
+        Some(open) => Ok(LeafCreation::CoveredByOpenEndedLeaf {
+            leaf_name: leaf.leaf_name().to_owned(),
+            open_leaf_name: open.leaf_name,
+        }),
+        None => create_leaf(connection, leaf, publisher).await,
+    }
+}
+
+/// Creates or repairs the open-ended `forever` leaf.
+pub async fn create_open_ended_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    command: &CreateOpenEndedHistoryLeaf,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
+    create_leaf(connection, command.leaf(), publisher).await
+}
+
+async fn create_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
     let Some(retention_class) = read_retention_class(connection, leaf.class_key()).await? else {
         return Ok(LeafCreation::RetentionClassAbsent {
             class_key: leaf.class_key().to_owned(),
@@ -670,13 +710,18 @@ pub async fn ensure_leaf_coverage<P: LoaderPublication>(
     command: &EnsureLeafCoverage,
     publisher: &P,
 ) -> Result<Vec<LeafCreation>, HistoryError> {
-    let commands = match plan_daily_leaf_coverage(connection, command).await? {
-        DailyCoveragePlan::Leaves(commands) => commands,
-        DailyCoveragePlan::Refused(refusal) => return Ok(vec![refusal]),
+    let commands = match plan_leaf_coverage(connection, command).await? {
+        CoveragePlan::Leaves(commands) => commands,
+        CoveragePlan::Refused(refusal) => return Ok(vec![refusal]),
     };
     let mut outcomes = Vec::with_capacity(commands.len());
-    for create in commands {
-        let outcome = create_daily_leaf(connection, &create, publisher).await?;
+    for planned in commands {
+        let outcome = match planned {
+            PlannedLeaf::Daily(create) => create_daily_leaf(connection, &create, publisher).await?,
+            PlannedLeaf::OpenEnded(create) => {
+                create_open_ended_leaf(connection, &create, publisher).await?
+            }
+        };
         let keep_going = matches!(
             outcome,
             LeafCreation::Created { .. }
@@ -691,33 +736,34 @@ pub async fn ensure_leaf_coverage<P: LoaderPublication>(
     Ok(outcomes)
 }
 
-pub(crate) async fn plan_daily_leaf_coverage(
+/// Plans the leaves a class needs: one daily leaf per horizon day for a finite
+/// class; the one open-ended leaf for `forever`.
+pub(crate) async fn plan_leaf_coverage(
     connection: &mut PgConnection,
     command: &EnsureLeafCoverage,
-) -> Result<DailyCoveragePlan, HistoryError> {
+) -> Result<CoveragePlan, HistoryError> {
     let Some(retention_class) = read_retention_class(connection, command.class_key()).await? else {
-        return Ok(DailyCoveragePlan::Refused(
-            LeafCreation::RetentionClassAbsent {
-                class_key: command.class_key().to_owned(),
-            },
-        ));
+        return Ok(CoveragePlan::Refused(LeafCreation::RetentionClassAbsent {
+            class_key: command.class_key().to_owned(),
+        }));
     };
     let is_forever = command.class_key() == FOREVER_CLASS_KEY
         && retention_class.duration.is_none()
         && retention_class.partition_interval.is_none();
     if !is_forever && retention_class.partition_interval != Some(DAILY) {
-        return Ok(DailyCoveragePlan::Refused(
-            LeafCreation::ClassIntervalMismatch {
-                class_key: command.class_key().to_owned(),
-                partition_interval_days: interval_days(retention_class.partition_interval),
-            },
-        ));
+        return Ok(CoveragePlan::Refused(LeafCreation::ClassIntervalMismatch {
+            class_key: command.class_key().to_owned(),
+            partition_interval_days: interval_days(retention_class.partition_interval),
+        }));
     }
     let Some(parent_name) = history_class_parent(command.class_key(), &retention_class) else {
-        return Ok(DailyCoveragePlan::Refused(LeafCreation::ForeverClassLeaf {
+        return Ok(CoveragePlan::Refused(LeafCreation::ForeverClassLeaf {
             class_key: command.class_key().to_owned(),
         }));
     };
+    if is_forever {
+        return plan_open_ended_forever_leaf(connection, &parent_name).await;
+    }
     let now = database_now(connection).await?;
     let today = now
         .with_hour(0)
@@ -734,12 +780,42 @@ pub(crate) async fn plan_daily_leaf_coverage(
             .map_err(|error| HistoryError::contract(error.to_string()))?;
         let leaf = LeafRef::new(leaf_name, command.class_key(), bounds)
             .map_err(|error| HistoryError::contract(error.to_string()))?;
-        commands.push(
+        commands.push(PlannedLeaf::Daily(
             CreateDailyHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
-        );
+        ));
     }
-    Ok(DailyCoveragePlan::Leaves(commands))
+    Ok(CoveragePlan::Leaves(commands))
+}
+
+/// The attached open-ended leaf with its stored bounds, so conformance and
+/// index repair apply to it; otherwise a new one from
+/// `open_ended_forever_start_sql`.
+async fn plan_open_ended_forever_leaf(
+    connection: &mut PgConnection,
+    parent_name: &str,
+) -> Result<CoveragePlan, HistoryError> {
+    let (leaf_name, lower) = match read_open_ended_forever_leaf(connection).await? {
+        Some(open) => (open.leaf_name, open.lower_anchor),
+        None => {
+            let lower: DateTime<Utc> = sqlx::query_scalar(&format!(
+                "SELECT {}",
+                open_ended_forever_start_sql("date_trunc('day', statement_timestamp(), 'UTC')")
+            ))
+            .fetch_one(&mut *connection)
+            .await?;
+            let name = open_ended_leaf_name(parent_name, lower)
+                .map_err(|error| HistoryError::contract(error.to_string()))?;
+            (name, lower)
+        }
+    };
+    let bounds = LeafBounds::new(lower, open_end_anchor())
+        .map_err(|error| HistoryError::contract(error.to_string()))?;
+    let leaf = LeafRef::new(leaf_name, FOREVER_CLASS_KEY, bounds)
+        .map_err(|error| HistoryError::contract(error.to_string()))?;
+    let command = CreateOpenEndedHistoryLeaf::new(leaf)
+        .map_err(|error| HistoryError::contract(error.to_string()))?;
+    Ok(CoveragePlan::Leaves(vec![PlannedLeaf::OpenEnded(command)]))
 }
 
 /// Detach one expired leaf without waiting for its advisory lock.

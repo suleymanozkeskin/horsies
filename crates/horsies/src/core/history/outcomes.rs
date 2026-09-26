@@ -83,6 +83,12 @@ pub enum LeafCreation {
     ForeverClassLeaf {
         class_key: String,
     },
+    /// A daily `forever` leaf was requested for a range that the attached
+    /// open-ended `forever` leaf covers. Nothing was created.
+    CoveredByOpenEndedLeaf {
+        leaf_name: String,
+        open_leaf_name: String,
+    },
     ClassIntervalMismatch {
         class_key: String,
         partition_interval_days: Option<i64>,
@@ -239,6 +245,10 @@ mod tests {
             LeafCreation::ForeverClassLeaf {
                 class_key: "forever".into(),
             },
+            LeafCreation::CoveredByOpenEndedLeaf {
+                leaf_name: "leaf".into(),
+                open_leaf_name: "open_leaf".into(),
+            },
             LeafCreation::ClassIntervalMismatch {
                 class_key: "finite".into(),
                 partition_interval_days: Some(2),
@@ -249,7 +259,7 @@ mod tests {
                 detail: "bound mismatch".into(),
             },
         ];
-        assert_eq!(creations.len(), 8);
+        assert_eq!(creations.len(), 9);
 
         let drops = [
             LeafDrop::Busy {
