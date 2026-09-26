@@ -3321,3 +3321,70 @@ async fn existing_daily_forever_leaves_keep_the_probe_healthy_before_the_open_le
     proxy.stop().await;
     database.drop().await;
 }
+
+#[tokio::test]
+#[serial]
+async fn relocation_places_a_forever_row_in_the_open_ended_leaf_without_a_new_leaf() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database.pool.begin().await.unwrap();
+    let coverage = ensure_partition_coverage(&mut transaction, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let before = forever_leaves(transaction.as_mut()).await;
+    let open = before
+        .iter()
+        .find(|(_, _, upper)| *upper == open_end_anchor())
+        .expect("open-ended leaf")
+        .clone();
+    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
+        .execute(&mut *transaction)
+        .await
+        .unwrap();
+    let task_id = Uuid::new_v4();
+    let terminal_at = open.1 + Duration::days(2) + Duration::hours(3);
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+             id, task_name, queue_name, priority, args, kwargs, status,
+             sent_at, enqueued_at, completed_at, result, terminal_at,
+             terminalization_kind, retry_count, max_retries, enqueue_sha,
+             is_workflow_task, command_fingerprint_version,
+             command_fingerprint, retention_class_key, retain_rerun_input,
+             prepared_rerun_input_disposition, created_at, updated_at
+         ) VALUES (
+             $1, 'open-ended relocation', 'default', 100, '[]', '{}',
+             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
+             $1::text, FALSE, 1, $3, 'forever', FALSE, 'NEVER_ELIGIBLE',
+             $2, $2
+         )",
+    )
+    .bind(task_id)
+    .bind(terminal_at)
+    .bind(vec![7_u8; 32])
+    .execute(&mut *transaction)
+    .await
+    .unwrap();
+
+    let outcome = relocate_terminal_batch(&mut transaction, 10).await.unwrap();
+    assert!(matches!(
+        outcome,
+        RelocationOutcome::Batch {
+            rows_relocated: 1,
+            ..
+        }
+    ));
+    assert_eq!(forever_leaves(transaction.as_mut()).await, before);
+    let relation: String = sqlx::query_scalar(&format!(
+        "SELECT tableoid::regclass::text FROM {TASK_HISTORY_PARENT} WHERE task_id = $1"
+    ))
+    .bind(task_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .unwrap();
+    assert_eq!(relation, open.0);
+    transaction.rollback().await.unwrap();
+    database.drop().await;
+}
