@@ -243,10 +243,32 @@ impl DetachExpiredHistoryLeaf {
     }
 }
 
+/// What makes a leaf eligible to leave its parent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafLifecycle {
+    /// A finite retention class: eligible at the upper bound plus the class
+    /// duration. A `forever` leaf is refused.
+    Retention,
+    /// A closed daily `forever` leaf: eligible at its upper bound, and only
+    /// while it holds no rows.
+    ClosedEmptyForever,
+}
+
+/// A daily `forever` leaf, the only leaf the `ClosedEmptyForever` lifecycle accepts.
+fn closed_forever_leaf(leaf: &LeafRef) -> Result<(), HistoryCommandError> {
+    if leaf.class_key != FOREVER_CLASS_KEY || !leaf.bounds.spans_one_day() {
+        return Err(HistoryCommandError::Invalid(
+            "the closed-empty-forever lifecycle accepts only daily forever leaves",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalizeInterruptedLeafDetach {
     leaf: LeafRef,
     statement_timeout_ms: Option<u64>,
+    lifecycle: LeafLifecycle,
 }
 
 impl FinalizeInterruptedLeafDetach {
@@ -254,6 +276,131 @@ impl FinalizeInterruptedLeafDetach {
         leaf: LeafRef,
         statement_timeout_ms: Option<u64>,
     ) -> Result<Self, HistoryCommandError> {
+        if statement_timeout_ms == Some(0) {
+            return Err(HistoryCommandError::Invalid(
+                "statement timeout must be positive",
+            ));
+        }
+        Ok(Self {
+            leaf,
+            statement_timeout_ms,
+            lifecycle: LeafLifecycle::Retention,
+        })
+    }
+
+    /// Finalizes an interrupted detach of a closed daily `forever` leaf.
+    pub fn closed_empty_forever(
+        leaf: LeafRef,
+        statement_timeout_ms: Option<u64>,
+    ) -> Result<Self, HistoryCommandError> {
+        closed_forever_leaf(&leaf)?;
+        let command = Self::new(leaf, statement_timeout_ms)?;
+        Ok(Self {
+            lifecycle: LeafLifecycle::ClosedEmptyForever,
+            ..command
+        })
+    }
+
+    pub fn leaf(&self) -> &LeafRef {
+        &self.leaf
+    }
+
+    pub fn statement_timeout_ms(&self) -> Option<u64> {
+        self.statement_timeout_ms
+    }
+
+    pub fn lifecycle(&self) -> LeafLifecycle {
+        self.lifecycle
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectHistoryLeaf {
+    leaf: LeafRef,
+    lifecycle: LeafLifecycle,
+}
+
+impl InspectHistoryLeaf {
+    pub fn new(leaf: LeafRef) -> Self {
+        Self {
+            leaf,
+            lifecycle: LeafLifecycle::Retention,
+        }
+    }
+
+    /// Inspects a closed daily `forever` leaf.
+    pub fn closed_empty_forever(leaf: LeafRef) -> Result<Self, HistoryCommandError> {
+        closed_forever_leaf(&leaf)?;
+        Ok(Self {
+            leaf,
+            lifecycle: LeafLifecycle::ClosedEmptyForever,
+        })
+    }
+
+    pub fn with_lifecycle(
+        leaf: LeafRef,
+        lifecycle: LeafLifecycle,
+    ) -> Result<Self, HistoryCommandError> {
+        match lifecycle {
+            LeafLifecycle::Retention => Ok(Self::new(leaf)),
+            LeafLifecycle::ClosedEmptyForever => Self::closed_empty_forever(leaf),
+        }
+    }
+
+    pub fn leaf(&self) -> &LeafRef {
+        &self.leaf
+    }
+
+    pub fn lifecycle(&self) -> LeafLifecycle {
+        self.lifecycle
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropDetachedHistoryLeaf {
+    leaf: LeafRef,
+    lifecycle: LeafLifecycle,
+}
+
+impl DropDetachedHistoryLeaf {
+    pub fn new(leaf: LeafRef) -> Self {
+        Self {
+            leaf,
+            lifecycle: LeafLifecycle::Retention,
+        }
+    }
+
+    /// Drops a detached closed daily `forever` leaf, only while it holds no rows.
+    pub fn closed_empty_forever(leaf: LeafRef) -> Result<Self, HistoryCommandError> {
+        closed_forever_leaf(&leaf)?;
+        Ok(Self {
+            leaf,
+            lifecycle: LeafLifecycle::ClosedEmptyForever,
+        })
+    }
+
+    pub fn leaf(&self) -> &LeafRef {
+        &self.leaf
+    }
+
+    pub fn lifecycle(&self) -> LeafLifecycle {
+        self.lifecycle
+    }
+}
+
+/// Detaches a closed daily `forever` leaf that holds no rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachEmptyForeverLeaf {
+    leaf: LeafRef,
+    statement_timeout_ms: Option<u64>,
+}
+
+impl DetachEmptyForeverLeaf {
+    pub fn new(
+        leaf: LeafRef,
+        statement_timeout_ms: Option<u64>,
+    ) -> Result<Self, HistoryCommandError> {
+        closed_forever_leaf(&leaf)?;
         if statement_timeout_ms == Some(0) {
             return Err(HistoryCommandError::Invalid(
                 "statement timeout must be positive",
@@ -271,36 +418,6 @@ impl FinalizeInterruptedLeafDetach {
 
     pub fn statement_timeout_ms(&self) -> Option<u64> {
         self.statement_timeout_ms
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InspectHistoryLeaf {
-    leaf: LeafRef,
-}
-
-impl InspectHistoryLeaf {
-    pub fn new(leaf: LeafRef) -> Self {
-        Self { leaf }
-    }
-
-    pub fn leaf(&self) -> &LeafRef {
-        &self.leaf
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DropDetachedHistoryLeaf {
-    leaf: LeafRef,
-}
-
-impl DropDetachedHistoryLeaf {
-    pub fn new(leaf: LeafRef) -> Self {
-        Self { leaf }
-    }
-
-    pub fn leaf(&self) -> &LeafRef {
-        &self.leaf
     }
 }
 

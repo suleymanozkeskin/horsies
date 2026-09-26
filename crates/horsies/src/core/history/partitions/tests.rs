@@ -15,8 +15,9 @@ use uuid::Uuid;
 
 use crate::broker::migrations::run_horsies_migrations;
 use crate::core::history::commands::{
-    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
-    DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
+    open_end_anchor, CollectPartitionHealth, CreateDailyHistoryLeaf, DetachEmptyForeverLeaf,
+    DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf,
+    LeafBounds, LeafRef,
 };
 use crate::core::history::cutover::relocation::{
     relocate_terminal_batch, RelocationError, RelocationOutcome, RELOCATION_LEDGER,
@@ -41,7 +42,10 @@ use crate::core::history::maintenance::gate::{
     active_maintenance_session, begin_archive_maintenance, finish_archive_maintenance,
     MaintenanceSessionError, ARCHIVE_AVAILABILITY_FUNCTION,
 };
-use crate::core::history::maintenance::pruning::prune_expired_partitions;
+use crate::core::history::maintenance::pruning::{
+    prune_expired_partitions, sweep_empty_forever_leaves, ForeverLeafSweepOutcome,
+    ForeverLeafSwept, ForeverSweepSkipped, MAX_FOREVER_DETACHES_PER_PASS,
+};
 use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, LEAF_LOCK_KEY_FUNCTION, RETENTION_CLASSES,
     TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT, TASK_LOOKUP_MANIFEST,
@@ -59,9 +63,10 @@ use super::catalog::{
 use super::forever::{ensure_forever_range_partitioning, FOREVER_LEGACY_LEAF};
 use super::health::collect_partition_health;
 use super::manager::{
-    create_daily_leaf, detach_expired_leaf, drop_detached_leaf, ensure_leaf_coverage, inspect_leaf,
-    DetachExpiredLeafOutcome, LeafBlockerQuarantine, NoQuarantine, QuarantineRefusalVerdict,
-    QuarantineRefused, QuarantineResult, TaskQuarantineRefusal,
+    create_daily_leaf, detach_empty_forever_leaf, detach_expired_leaf, drop_detached_leaf,
+    ensure_leaf_coverage, inspect_leaf, DetachExpiredLeafOutcome, LeafBlockerQuarantine,
+    NoQuarantine, QuarantineRefusalVerdict, QuarantineRefused, QuarantineResult,
+    TaskQuarantineRefusal,
 };
 use super::publication::{LoaderPublication, LoaderRepublished, UnpublishedLoader};
 
@@ -3419,5 +3424,326 @@ async fn forever_health_meets_the_floor_with_the_open_ended_leaf_only() {
     );
     assert_eq!(forever_floor_faults(tx.as_mut()).await, Vec::new());
     tx.rollback().await.unwrap();
+    database.drop().await;
+}
+
+fn utc_day_start(value: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+    value.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
+}
+
+async fn create_forever_daily_leaf(pool: &PgPool, lower: chrono::DateTime<Utc>) -> LeafRef {
+    let leaf = LeafRef::new(
+        daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
+        FOREVER_CLASS_KEY,
+        LeafBounds::new(lower, lower + Duration::days(1)).unwrap(),
+    )
+    .unwrap();
+    let mut transaction = pool.begin().await.unwrap();
+    let outcome = create_daily_leaf(
+        transaction.as_mut(),
+        &CreateDailyHistoryLeaf::new(leaf.clone()).unwrap(),
+        &UnpublishedLoader,
+    )
+    .await
+    .unwrap();
+    transaction.commit().await.unwrap();
+    assert!(
+        matches!(
+            outcome,
+            LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
+        ),
+        "{outcome:?}"
+    );
+    leaf
+}
+
+async fn seed_forever_row(pool: &PgPool, anchor: chrono::DateTime<Utc>) {
+    seed_forever_row_into(pool, TASK_HISTORY_PARENT, anchor).await;
+}
+
+async fn seed_forever_row_into(pool: &PgPool, relation: &str, anchor: chrono::DateTime<Utc>) {
+    sqlx::query(&format!(
+        "INSERT INTO {relation} (
+             task_id, task_name, queue_name, priority,
+             command_fingerprint_version, command_fingerprint,
+             status, terminalization_kind, terminal_at,
+             retention_anchor_at, retention_class_key,
+             enqueued_at, created_at, retry_count, max_retries,
+             result_envelope_version, result_codec, result_content_type,
+             is_workflow_task, history_schema_version,
+             attempt_archive_version, attempt_snapshot_codec,
+             attempt_snapshot_content_type, attempt_snapshot,
+             attempt_snapshot_digest, rerun_input_disposition
+         ) VALUES (
+             $1, 'forever sweep', 'default', 100,
+             1, $2, 'COMPLETED', 'COMPLETE_FUSED', $3,
+             $3, 'forever', $3, $3, 0, 0,
+             1, 'json-utf8', 'application/json', FALSE, 1,
+             1, 'json-utf8', 'application/json', $4, $5,
+             'NEVER_ELIGIBLE'
+         )"
+    ))
+    .bind(Uuid::new_v4())
+    .bind(vec![3_u8; 32])
+    .bind(anchor)
+    .bind(b"[]".as_slice())
+    .bind(vec![5_u8; 32])
+    .execute(pool)
+    .await
+    .expect("seed forever history row");
+}
+
+async fn leaf_dropped(pool: &PgPool, leaf_name: &str) -> bool {
+    let (detached, dropped, relation): (bool, bool, Option<String>) = sqlx::query_as(&format!(
+        "SELECT detached_at IS NOT NULL, dropped_at IS NOT NULL, to_regclass(leaf_name)::text
+         FROM {LEAF_CATALOG} WHERE leaf_name = $1"
+    ))
+    .bind(leaf_name)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    detached && dropped && relation.is_none()
+}
+
+async fn database_today(pool: &PgPool) -> chrono::DateTime<Utc> {
+    let mut connection = pool.acquire().await.unwrap();
+    utc_day_start(database_now(&mut connection).await.unwrap())
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_sweep_drops_closed_empty_leaves_and_keeps_the_rest() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let empty = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
+    let full = create_forever_daily_leaf(&database.pool, today - Duration::days(3)).await;
+    let future = create_forever_daily_leaf(&database.pool, today + Duration::days(1)).await;
+    seed_forever_row(
+        &database.pool,
+        today - Duration::days(3) + Duration::hours(1),
+    )
+    .await;
+    let coverage =
+        ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &StagedLoaderPublisher)
+            .await
+            .unwrap();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    let mut reader = database.pool.acquire().await.unwrap();
+    let open = super::catalog::read_open_ended_forever_leaf(&mut reader)
+        .await
+        .unwrap()
+        .expect("open-ended leaf");
+    drop(reader);
+    // A catalog row under the legacy leaf name with closed one-day bounds.
+    sqlx::query(&format!(
+        "INSERT INTO {LEAF_CATALOG} (
+             leaf_name, parent_name, class_key, lower_anchor, upper_anchor,
+             index_schema_version, id_index_name, partition_bound,
+             min_birth_at, min_birth_verified, created_at
+         ) VALUES ($1, $2, 'forever', $3, $4, 1, $5, 'legacy', NULL, TRUE, now())"
+    ))
+    .bind(super::forever::FOREVER_LEGACY_LEAF)
+    .bind(TASK_HISTORY_FOREVER)
+    .bind(today - Duration::days(9))
+    .bind(today - Duration::days(8))
+    .bind(format!("{}_task_idx", super::forever::FOREVER_LEGACY_LEAF))
+    .execute(&database.pool)
+    .await
+    .unwrap();
+
+    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(pass.errors, Vec::<String>::new());
+    assert_eq!(pass.skipped, None);
+    assert_eq!(
+        pass.swept,
+        vec![ForeverLeafSwept {
+            leaf_name: empty.leaf_name().to_owned(),
+            outcome: ForeverLeafSweepOutcome::Dropped,
+        }]
+    );
+    assert_eq!(pass.kept_non_empty, vec![full.leaf_name().to_owned()]);
+    assert!(leaf_dropped(&database.pool, empty.leaf_name()).await);
+    let mut connection = database.pool.acquire().await.unwrap();
+    assert!(!StagedLoaderPublisher
+        .references_leaf(&mut connection, empty.leaf_name())
+        .await
+        .unwrap());
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .unwrap());
+    drop(connection);
+    for kept in [
+        full.leaf_name(),
+        future.leaf_name(),
+        open.leaf_name.as_str(),
+    ] {
+        assert!(!leaf_dropped(&database.pool, kept).await, "{kept}");
+    }
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_sweep_finalizes_an_interrupted_detach_on_the_next_pass() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let leaf = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
+    let mut blocker = database.pool.acquire().await.unwrap();
+    sqlx::query("BEGIN ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query(&format!("SELECT count(*) FROM {}", leaf.leaf_name()))
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let command = DetachEmptyForeverLeaf::new(leaf.clone(), Some(100)).unwrap();
+    let timed_out = detach_empty_forever_leaf(&database.pool, &command, &UnpublishedLoader)
+        .await
+        .expect_err("the old snapshot interrupts the concurrent detach");
+    assert!(timed_out.to_string().contains("statement timeout"));
+    let mut inspector = database.pool.acquire().await.unwrap();
+    assert!(matches!(
+        inspect_leaf(
+            &mut inspector,
+            &InspectHistoryLeaf::closed_empty_forever(leaf.clone()).unwrap()
+        )
+        .await
+        .unwrap(),
+        LeafInspection::DetachInterrupted { .. }
+    ));
+    drop(inspector);
+    sqlx::query("ROLLBACK")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    drop(blocker);
+
+    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(pass.errors, Vec::<String>::new());
+    assert!(pass.swept.contains(&ForeverLeafSwept {
+        leaf_name: leaf.leaf_name().to_owned(),
+        outcome: ForeverLeafSweepOutcome::Dropped,
+    }));
+    assert!(leaf_dropped(&database.pool, leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_sweep_reaches_an_empty_leaf_behind_non_empty_ones() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let mut full = Vec::new();
+    for offset in (3..=34).rev() {
+        let lower = today - Duration::days(offset);
+        full.push(create_forever_daily_leaf(&database.pool, lower).await);
+        seed_forever_row(&database.pool, lower + Duration::hours(1)).await;
+    }
+    let empty = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
+    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(pass.errors, Vec::<String>::new());
+    assert_eq!(pass.kept_non_empty.len(), 32);
+    assert!(pass.swept.contains(&ForeverLeafSwept {
+        leaf_name: empty.leaf_name().to_owned(),
+        outcome: ForeverLeafSweepOutcome::Dropped,
+    }));
+    assert!(leaf_dropped(&database.pool, empty.leaf_name()).await);
+    for leaf in &full {
+        assert!(!leaf_dropped(&database.pool, leaf.leaf_name()).await);
+    }
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_sweep_stops_at_its_detach_bound() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let total = MAX_FOREVER_DETACHES_PER_PASS + 1;
+    let mut leaves = Vec::new();
+    for offset in 2..(2 + total as i64) {
+        leaves
+            .push(create_forever_daily_leaf(&database.pool, today - Duration::days(offset)).await);
+    }
+    let first = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(first.errors, Vec::<String>::new());
+    let dropped = first
+        .swept
+        .iter()
+        .filter(|entry| entry.outcome == ForeverLeafSweepOutcome::Dropped)
+        .count();
+    assert_eq!(dropped, MAX_FOREVER_DETACHES_PER_PASS);
+    let second = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(second.swept.len(), 1);
+    for leaf in &leaves {
+        assert!(leaf_dropped(&database.pool, leaf.leaf_name()).await);
+    }
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_sweep_is_skipped_while_archive_maintenance_is_active() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let leaf = create_forever_daily_leaf(&database.pool, today - Duration::days(2)).await;
+    let mut transaction = database.pool.begin().await.unwrap();
+    begin_archive_maintenance(&mut transaction, Uuid::new_v4())
+        .await
+        .unwrap();
+    transaction.commit().await.unwrap();
+    let pass = sweep_empty_forever_leaves(&database.pool, &StagedLoaderPublisher).await;
+    assert_eq!(
+        pass.skipped,
+        Some(ForeverSweepSkipped::ArchiveMaintenanceActive)
+    );
+    assert!(pass.swept.is_empty() && pass.kept_non_empty.is_empty());
+    assert!(!leaf_dropped(&database.pool, leaf.leaf_name()).await);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_drop_keeps_a_detached_leaf_that_gained_rows() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let today = database_today(&database.pool).await;
+    let lower = today - Duration::days(2);
+    let leaf = create_forever_daily_leaf(&database.pool, lower).await;
+    let detach = detach_empty_forever_leaf(
+        &database.pool,
+        &DetachEmptyForeverLeaf::new(leaf.clone(), None).unwrap(),
+        &UnpublishedLoader,
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            detach,
+            DetachExpiredLeafOutcome::Inspection(LeafInspection::Detached { .. })
+        ),
+        "{detach:?}"
+    );
+    // A row written straight into the detached leaf after its detach.
+    seed_forever_row_into(&database.pool, leaf.leaf_name(), lower + Duration::hours(1)).await;
+    let mut transaction = database.pool.begin().await.unwrap();
+    let drop = drop_detached_leaf(
+        &mut transaction,
+        &DropDetachedHistoryLeaf::closed_empty_forever(leaf.clone()).unwrap(),
+        &UnpublishedLoader,
+    )
+    .await
+    .unwrap();
+    transaction.rollback().await.unwrap();
+    assert_eq!(
+        drop,
+        LeafDrop::Inspection(LeafInspection::KeptNonEmpty {
+            leaf_name: leaf.leaf_name().to_owned(),
+        })
+    );
     database.drop().await;
 }
