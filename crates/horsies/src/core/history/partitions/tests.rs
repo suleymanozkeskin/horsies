@@ -3388,3 +3388,36 @@ async fn relocation_places_a_forever_row_in_the_open_ended_leaf_without_a_new_le
     transaction.rollback().await.unwrap();
     database.drop().await;
 }
+
+async fn forever_floor_faults(connection: &mut PgConnection) -> Vec<HealthFault> {
+    collect_partition_health(
+        connection,
+        &CollectPartitionHealth::new(FOREVER_CLASS_KEY, false).unwrap(),
+    )
+    .await
+    .unwrap()
+    .faults
+    .into_iter()
+    .filter(|fault| matches!(fault, HealthFault::CoverageBelowFloor { .. }))
+    .collect()
+}
+
+#[tokio::test]
+#[serial]
+async fn forever_health_meets_the_floor_with_the_open_ended_leaf_only() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    // Only the migrations' daily forever leaf: coverage ends tomorrow.
+    let absent = forever_floor_faults(tx.as_mut()).await;
+    assert_eq!(absent.len(), 1, "{absent:?}");
+    let coverage = ensure_partition_coverage(&mut tx, 2, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    assert_eq!(forever_floor_faults(tx.as_mut()).await, Vec::new());
+    tx.rollback().await.unwrap();
+    database.drop().await;
+}
