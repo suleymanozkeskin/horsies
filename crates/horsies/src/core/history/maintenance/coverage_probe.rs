@@ -155,19 +155,15 @@ fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, Hist
     }
 }
 
-pub(crate) async fn probe_partition_coverage(
-    connection: &mut PgConnection,
-    history_horizon_days: u32,
-    heartbeat_horizon_hours: u32,
-    declared_classes: &[DeclaredRetentionClass],
-) -> Result<CoverageProbe, HistoryError> {
-    let expected = expected_finite_classes(declared_classes)?;
-    let history_horizon = i64::from(history_horizon_days);
-    let heartbeat_horizon = i64::from(heartbeat_horizon_hours);
+/// The coverage probe statement. `series_bound` is the larger horizon, a
+/// literal: with a column bound the planner guesses 1,000 series rows per
+/// class, and the cost estimate passes `jit_above_cost`, so PostgreSQL spends
+/// far longer compiling the probe than running it.
+fn coverage_probe_sql(series_bound: i64) -> String {
     let open_start =
         open_ended_forever_start_sql("date_trunc('day', db_clock.database_now, 'UTC')");
     let open_predicate = open_ended_forever_leaf_predicate("catalog");
-    let sql = format!(
+    format!(
         r#"
 WITH utc_timezone AS MATERIALIZED (
     SELECT set_config('timezone', 'UTC', true) AS value
@@ -329,11 +325,7 @@ desired AS (
         END AS lower_anchor
     FROM classes
     CROSS JOIN db_clock
-    CROSS JOIN LATERAL generate_series(
-        0,
-        CASE WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN 0
-             ELSE classes.horizon END
-    ) AS series(value)
+    CROSS JOIN generate_series(0, {series_bound}) AS series(value)
     LEFT JOIN LATERAL (
         SELECT catalog.leaf_name, catalog.lower_anchor
         FROM {LEAF_CATALOG} AS catalog
@@ -341,6 +333,10 @@ desired AS (
         ORDER BY catalog.lower_anchor
         LIMIT 1
     ) AS open_leaf ON classes.leaf_kind = 'history' AND classes.class_key = $5
+    WHERE series.value <= CASE
+        WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN 0
+        ELSE classes.horizon
+    END
 ),
 named_desired AS (
     SELECT
@@ -598,9 +594,17 @@ FROM summary
 CROSS JOIN faults
 ORDER BY fault_kind NULLS FIRST, class_key NULLS FIRST, lower_anchor NULLS FIRST
 "#
-    );
+    )
+}
 
-    let rows = sqlx::query_as::<_, CoverageProbeRaw>(&sql)
+/// Binds the probe parameters $1..$10 to `query`.
+fn bind_probe_arguments<'q, O>(
+    query: sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>,
+    expected: ExpectedFiniteClasses,
+    history_horizon: i64,
+    heartbeat_horizon: i64,
+) -> sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments> {
+    query
         .bind(expected.class_keys)
         .bind(expected.durations_us)
         .bind(expected.parent_names)
@@ -611,8 +615,27 @@ ORDER BY fault_kind NULLS FIRST, class_key NULLS FIRST, lower_anchor NULLS FIRST
         .bind(TASK_HISTORY_PARENT)
         .bind(HEARTBEATS_TABLE)
         .bind(heartbeat_horizon)
-        .fetch_all(&mut *connection)
-        .await?;
+}
+
+pub(crate) async fn probe_partition_coverage(
+    connection: &mut PgConnection,
+    history_horizon_days: u32,
+    heartbeat_horizon_hours: u32,
+    declared_classes: &[DeclaredRetentionClass],
+) -> Result<CoverageProbe, HistoryError> {
+    let expected = expected_finite_classes(declared_classes)?;
+    let history_horizon = i64::from(history_horizon_days);
+    let heartbeat_horizon = i64::from(heartbeat_horizon_hours);
+    let sql = coverage_probe_sql(history_horizon.max(heartbeat_horizon));
+
+    let rows = bind_probe_arguments(
+        sqlx::query_as::<_, CoverageProbeRaw>(&sql),
+        expected,
+        history_horizon,
+        heartbeat_horizon,
+    )
+    .fetch_all(&mut *connection)
+    .await?;
     let summary = rows
         .first()
         .ok_or_else(|| HistoryError::contract("coverage probe returned no summary row"))?;
@@ -666,5 +689,38 @@ mod tests {
             duration: Duration::days(7),
         };
         assert!(expected_finite_classes(&[conflicting]).is_err());
+    }
+}
+
+#[cfg(test)]
+mod plan_cost_tests {
+    use super::*;
+    use serial_test::serial;
+
+    /// PostgreSQL's default `jit_above_cost`.
+    const DEFAULT_JIT_ABOVE_COST: f64 = 100_000.0;
+
+    #[tokio::test]
+    #[serial]
+    async fn probe_plan_cost_stays_below_the_default_jit_threshold() {
+        let pool = crate::broker::terminalization_matrix::migrated_pool().await;
+        let (history_horizon, heartbeat_horizon) = (3_i64, 6_i64);
+        let sql = format!(
+            "EXPLAIN (FORMAT JSON) {}",
+            coverage_probe_sql(history_horizon.max(heartbeat_horizon))
+        );
+        let (plan,): (serde_json::Value,) = bind_probe_arguments(
+            sqlx::query_as(&sql),
+            expected_finite_classes(&[]).unwrap(),
+            history_horizon,
+            heartbeat_horizon,
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let cost = plan[0]["Plan"]["Total Cost"]
+            .as_f64()
+            .expect("plan total cost");
+        assert!(cost < DEFAULT_JIT_ABOVE_COST, "probe plan cost {cost}");
     }
 }
