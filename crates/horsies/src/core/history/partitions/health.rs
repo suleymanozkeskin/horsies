@@ -1,6 +1,6 @@
 //! Read-only partition health survey.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
 use crate::core::history::commands::CollectPartitionHealth;
@@ -122,7 +122,14 @@ pub async fn collect_partition_health(
             detachable += 1;
         }
     }
-    if complete_future < COVERAGE_FLOOR_INTERVALS {
+    // Finite classes need whole future daily leaves. The forever class has one
+    // open-ended leaf, so it needs coverage that reaches past the floor.
+    let below_floor = match duration {
+        Some(_) => complete_future < COVERAGE_FLOOR_INTERVALS,
+        None => coverage_until
+            .is_none_or(|until| until < now + Duration::days(COVERAGE_FLOOR_INTERVALS)),
+    };
+    if below_floor {
         faults.push(HealthFault::CoverageBelowFloor {
             class_key: command.class_key().to_owned(),
             complete_future_intervals: complete_future,

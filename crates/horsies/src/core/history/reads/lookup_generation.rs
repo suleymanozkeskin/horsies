@@ -4,12 +4,12 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Timelike, Utc};
 
-use crate::core::history::commands::is_safe_identifier;
+use crate::core::history::commands::{is_safe_identifier, open_end_anchor};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_HISTORY_PARENT,
-    TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE, TASK_PROVENANCE_FUNCTION, TASK_PROVENANCE_TYPE,
-    TASK_RESULT_FUNCTION,
+    HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION,
+    TASK_HISTORY_PARENT, TASK_LOOKUP_FUNCTION, TASK_LOOKUP_TYPE, TASK_PROVENANCE_FUNCTION,
+    TASK_PROVENANCE_TYPE, TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::LeafCatalogRow;
 
@@ -156,6 +156,7 @@ pub fn render_staged_lookup_function(manifest: &LookupManifest) -> String {
         &identity_probe(LIVE_TASKS, "LIVE", "id"),
         |relation| identity_probe(relation, "HISTORY", "task_id"),
         manifest,
+        FallbackProbes::Included,
         Absence::Composite("NULL, NULL, NULL, NULL"),
     )
 }
@@ -178,6 +179,7 @@ pub fn render_staged_provenance_function(manifest: &LookupManifest) -> String {
         &live_probe,
         provenance_history_probe,
         manifest,
+        FallbackProbes::Included,
         Absence::Composite("NULL, NULL, NULL, NULL, NULL"),
     )
 }
@@ -198,6 +200,7 @@ pub fn render_staged_detail_function(manifest: &LookupManifest) -> String {
             )
         },
         manifest,
+        FallbackProbes::Included,
         Absence::Statement("RETURN;"),
     )
 }
@@ -223,8 +226,40 @@ pub fn render_staged_result_function(manifest: &LookupManifest) -> String {
             )
         },
         manifest,
+        FallbackProbes::Included,
         Absence::Statement("RETURN;"),
     )
+}
+
+/// Duplicate-identity guard of the move family: TRUE when the id is in a
+/// history leaf that can hold it. UUIDv7 ids probe only the leaves whose upper
+/// anchor is after the id's birth (minus the clock bound); the fallback probes
+/// of the readers are omitted, so a row placed in an older leaf by a wrong
+/// client clock is not found. Other ids probe every leaf. The live table is
+/// not probed.
+pub fn render_staged_duplicate_guard_function(manifest: &LookupManifest) -> String {
+    staged_function(
+        TASK_DUPLICATE_GUARD_FUNCTION,
+        "boolean",
+        "",
+        &[],
+        "",
+        |relation| {
+            format!(
+                "\n        PERFORM 1 FROM {relation} h WHERE h.task_id = p_task_id;\n        IF FOUND THEN\n            RETURN TRUE;\n        END IF;\n"
+            )
+        },
+        manifest,
+        FallbackProbes::Omitted,
+        Absence::Statement("RETURN FALSE;"),
+    )
+}
+
+/// Whether a staged function probes the leaves that its birth-time pruning skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackProbes {
+    Included,
+    Omitted,
 }
 
 enum Absence<'a> {
@@ -241,6 +276,7 @@ fn staged_function(
     live_probe: &str,
     history_probe: impl Fn(&str) -> String,
     manifest: &LookupManifest,
+    fallback_probes: FallbackProbes,
     absence_form: Absence<'_>,
 ) -> String {
     let absence = match absence_form {
@@ -265,13 +301,22 @@ fn staged_function(
             .map(|leaf| pruned_probe(leaf, &history_probe(leaf.relation_name())))
             .collect::<Vec<_>>()
             .join("\n");
-        let fallback = manifest
-            .leaves
-            .iter()
-            .rev()
-            .map(|leaf| fallback_probe(leaf, &history_probe(leaf.relation_name())))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let fallback = match fallback_probes {
+            FallbackProbes::Included => format!(
+                "            -- Birth time is an optimization hint, not an integrity\n            -- constraint. Probe every leaf skipped above before declaring\n            -- absence so a caller-clock violation cannot hide a retained row.\n{}",
+                manifest
+                    .leaves
+                    .iter()
+                    .rev()
+                    // The open-ended leaf ends at the open-end anchor, so its
+                    // fallback condition can never hold.
+                    .filter(|leaf| leaf.upper_anchor != open_end_anchor())
+                    .map(|leaf| fallback_probe(leaf, &history_probe(leaf.relation_name())))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+            FallbackProbes::Omitted => String::new(),
+        };
         let legacy = manifest
             .leaves
             .iter()
@@ -280,7 +325,7 @@ fn staged_function(
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "\n        v_uuid_bytes := uuid_send(p_task_id);\n        IF (get_byte(v_uuid_bytes, 6) >> 4) = 7\n           AND (get_byte(v_uuid_bytes, 8) & 192) = 128\n        THEN\n            v_birth_milliseconds :=\n                (get_byte(v_uuid_bytes, 0)::bigint << 40)\n                | (get_byte(v_uuid_bytes, 1)::bigint << 32)\n                | (get_byte(v_uuid_bytes, 2)::bigint << 24)\n                | (get_byte(v_uuid_bytes, 3)::bigint << 16)\n                | (get_byte(v_uuid_bytes, 4)::bigint << 8)\n                | get_byte(v_uuid_bytes, 5)::bigint;\n            v_birth_at := to_timestamp(\n                v_birth_milliseconds::double precision / 1000.0\n            );\n{floor_check}\n            v_effective_birth :=\n                v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';\n{pruned}\n            -- Birth time is an optimization hint, not an integrity\n            -- constraint. Probe every leaf skipped above before declaring\n            -- absence so a caller-clock violation cannot hide a retained row.\n{fallback}\n        ELSE\n{legacy}\n        END IF;\n"
+            "\n        v_uuid_bytes := uuid_send(p_task_id);\n        IF (get_byte(v_uuid_bytes, 6) >> 4) = 7\n           AND (get_byte(v_uuid_bytes, 8) & 192) = 128\n        THEN\n            v_birth_milliseconds :=\n                (get_byte(v_uuid_bytes, 0)::bigint << 40)\n                | (get_byte(v_uuid_bytes, 1)::bigint << 32)\n                | (get_byte(v_uuid_bytes, 2)::bigint << 24)\n                | (get_byte(v_uuid_bytes, 3)::bigint << 16)\n                | (get_byte(v_uuid_bytes, 4)::bigint << 8)\n                | get_byte(v_uuid_bytes, 5)::bigint;\n            v_birth_at := to_timestamp(\n                v_birth_milliseconds::double precision / 1000.0\n            );\n{floor_check}\n            v_effective_birth :=\n                v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';\n{pruned}\n{fallback}\n        ELSE\n{legacy}\n        END IF;\n"
         )
     };
     let declare_block = declares

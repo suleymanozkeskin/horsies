@@ -61,11 +61,6 @@ const MONITORING_TRIGGER_BINDINGS: &[(&str, &str, &str)] = &[
         "horsies_notify_task_changes",
     ),
     (
-        "horsies_task_notify_update_trigger",
-        "horsies_tasks",
-        "horsies_notify_task_changes",
-    ),
-    (
         "horsies_task_status_notify_insert_trigger",
         "horsies_tasks",
         "horsies_notify_task_status_change",
@@ -105,6 +100,7 @@ const LEGACY_MONITORING_TRIGGERS: &[&str] = &[
     "workflow_status_change_insert_notify",
     "workflow_status_change_update_notify",
     "worker_state_insert_notify",
+    "horsies_task_notify_update_trigger",
 ];
 
 const LEGACY_MONITORING_FUNCTIONS: &[&str] = &[

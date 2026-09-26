@@ -30,6 +30,7 @@ use super::outcomes::{
     SWAP_RETRY_BACKOFF_SECONDS,
 };
 use super::signature::relation_schema_signature;
+use super::target::DecodableTarget;
 use super::transforms::{
     backup_relation_name, column_list, component_columns, encoded_source_select, quoted_identifier,
     replacement_bound_name, replacement_index_name, replacement_ordering_index_name,
@@ -53,16 +54,18 @@ struct InventoryRow {
     distinct_task_ids: i64,
 }
 
+/// Plans a transcode of `target.component()` from `source_version` and
+/// `source_codec` to a target that a decoder reads (see `DecodableTarget`).
 pub async fn plan_transcode(
     connection: &mut PgConnection,
     job_id: Uuid,
-    component: ArchiveComponent,
     source_version: i16,
-    target_version: i16,
     source_codec: &str,
-    target_codec: &str,
+    decodable_target: &DecodableTarget,
 ) -> Result<TranscodePlanOutcome, TranscodeError> {
-    if (i32::from(target_version) - i32::from(source_version)).abs() != 1 {
+    let component = decodable_target.component();
+    let target = decodable_target.target();
+    if (i32::from(target.version()) - i32::from(source_version)).abs() != 1 {
         return Ok(TranscodePlanOutcome::Rejected(TranscodePlanRejected {
             component,
             reason: "unsupported transcode direction".to_owned(),
@@ -169,7 +172,7 @@ pub async fn plan_transcode(
     let payload_rows = checked_sum(inventory.iter().map(|row| row.payload_rows))?;
     let payload_bytes = checked_sum(inventory.iter().map(|row| row.payload_bytes))?;
     let affected_relation_bytes = checked_sum(inventory.iter().map(|row| row.relation_bytes))?;
-    let projected = if target_version > source_version {
+    let projected = if target.version() > source_version {
         i128::from(payload_bytes) + i128::from(payload_rows) * 2
     } else {
         i128::from(payload_bytes) - i128::from(payload_rows) * 2
@@ -196,9 +199,9 @@ pub async fn plan_transcode(
     .bind(session_id)
     .bind(component.as_str())
     .bind(source_version)
-    .bind(target_version)
+    .bind(target.version())
     .bind(source_codec)
-    .bind(target_codec)
+    .bind(target.codec())
     .bind(transformed_rows)
     .bind(copied_rows)
     .bind(payload_rows)
@@ -247,7 +250,7 @@ pub async fn plan_transcode(
         job_id,
         component,
         source_version,
-        target_version,
+        target_version: target.version(),
         transformed_rows,
         copied_rows,
         payload_bytes,
@@ -363,7 +366,7 @@ pub async fn run_copy_batch(
             "source",
             job.source_version,
             &job.source_codec,
-            job.target_version > job.source_version,
+            job.target.version() > job.source_version,
         )?,
         column_list = column_list(&columns)?,
         transformed = transformed_select(
@@ -371,8 +374,8 @@ pub async fn run_copy_batch(
             job.component,
             job.source_version,
             &job.source_codec,
-            job.target_version,
-            &job.target_codec,
+            job.target.version(),
+            job.target.codec(),
             "source",
         )?,
     );
@@ -533,8 +536,8 @@ pub async fn verify_transcode(
             job.component,
             job.source_version,
             &job.source_codec,
-            job.target_version,
-            &job.target_codec,
+            job.target.version(),
+            job.target.codec(),
         )
         .await?;
         mismatches += mismatch;
@@ -545,8 +548,8 @@ pub async fn verify_transcode(
                 &mut *connection,
                 &quoted_identifier(&relation.replacement_relation_name)?,
                 job.component,
-                job.target_version,
-                &job.target_codec,
+                job.target.version(),
+                job.target.codec(),
             )
             .await?
         };

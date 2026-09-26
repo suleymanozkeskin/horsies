@@ -663,7 +663,7 @@ async fn populated_v32_pipeline_reaches_attested_v35_and_completes_the_survivor(
         } => statements_executed,
         refused => panic!("unexpected program refusal: {refused:?}"),
     };
-    assert_eq!(installed_count, 46);
+    assert_eq!(installed_count, 47);
     assert!(sqlx::query_scalar::<_, bool>(
         "SELECT convalidated FROM pg_constraint WHERE conrelid = 'horsies_workflow_tasks'::regclass AND conname = 'horsies_workflow_tasks_status_check'",
     )
