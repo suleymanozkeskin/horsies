@@ -1440,7 +1440,10 @@ async fn test_priority_ordering() {
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(eligible, 2, "both tasks must be eligible before the worker starts");
+    assert_eq!(
+        eligible, 2,
+        "both tasks must be eligible before the worker starts"
+    );
 
     // Start worker with concurrency=1 to force serial execution.
     let _worker = start_worker(

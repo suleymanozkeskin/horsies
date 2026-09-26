@@ -189,11 +189,15 @@ pub async fn ensure_partition_coverage<P: LoaderPublication>(
             .map_err(|error| HistoryError::contract(error.to_string()))?;
         let class_result: Result<Vec<LeafCreation>, HistoryError> = async {
             let creations = ensure_leaf_coverage(connection, &command, &UnpublishedLoader).await?;
-            if creations.iter().any(|creation| matches!(creation, LeafCreation::Created { .. })) {
+            if creations
+                .iter()
+                .any(|creation| matches!(creation, LeafCreation::Created { .. }))
+            {
                 publisher.republish(connection).await?;
             }
             Ok(creations)
-        }.await;
+        }
+        .await;
         let creations = match class_result {
             Ok(creations) => {
                 sqlx::query(&format!("RELEASE SAVEPOINT {savepoint}"))

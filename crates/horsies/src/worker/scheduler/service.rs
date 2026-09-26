@@ -1398,7 +1398,13 @@ mod tests {
         assert_eq!(due.len(), 1);
 
         state::upsert_state(
-            &pool, &schedule.name, None, None, None, 0, Some(&config_hash),
+            &pool,
+            &schedule.name,
+            None,
+            None,
+            None,
+            0,
+            Some(&config_hash),
         )
         .await
         .unwrap();
@@ -1411,17 +1417,19 @@ mod tests {
             .unwrap();
         state::release_schedule_lock(lock).await.unwrap();
 
-        let stored = state::get_state(&pool, &schedule.name).await.unwrap().unwrap();
+        let stored = state::get_state(&pool, &schedule.name)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(stored.next_run_at.is_none());
         assert_eq!(stored.run_count, 0);
         assert!(stored.last_task_id.is_none());
-        let tasks: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM horsies_tasks WHERE task_name = $1",
-        )
-        .bind(&schedule.task_name)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let tasks: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE task_name = $1")
+                .bind(&schedule.task_name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(tasks, 0);
     }
     #[tokio::test]
@@ -1545,18 +1553,16 @@ mod tests {
                     let held = runtime.acquire().await.unwrap();
                     let mut cadence = ExistenceCheckCadence::new(1);
                     cadence.record(true);
-                    assert!(
-                        check_and_enqueue(
-                            &lock_pool,
-                            &broker,
-                            &schedules,
-                            1,
-                            &config,
-                            &mut cadence
-                        )
-                        .await
-                        .is_err()
-                    );
+                    assert!(check_and_enqueue(
+                        &lock_pool,
+                        &broker,
+                        &schedules,
+                        1,
+                        &config,
+                        &mut cadence
+                    )
+                    .await
+                    .is_err());
                     drop(held);
                 }
                 "competition" => {
@@ -1726,5 +1732,4 @@ mod tests {
         state::delete_state(&admin, &name).await.unwrap();
         runtime.close().await;
     }
-
 }

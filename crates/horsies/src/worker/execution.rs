@@ -2274,7 +2274,11 @@ mod set_running_gate_tests {
 
         let before: String = sqlx::query_scalar(
             "SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1",
-        ).bind(wf_id).fetch_one(&pool).await.unwrap();
+        )
+        .bind(wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         let outcome =
             confirm_ownership_and_set_running(&broker, task_id, "w1", 1, "h1", true, None, false)
                 .await;
@@ -2290,8 +2294,15 @@ mod set_running_gate_tests {
         assert_eq!(persisted, first_started_at);
         let after: String = sqlx::query_scalar(
             "SELECT ctid::text FROM horsies_workflow_tasks WHERE workflow_id = $1",
-        ).bind(wf_id).fetch_one(&pool).await.unwrap();
-        assert_eq!(before, after, "RUNNING replay must not create a new node tuple");
+        )
+        .bind(wf_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            before, after,
+            "RUNNING replay must not create a new node tuple"
+        );
 
         sqlx::query("DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1")
             .bind(wf_id)
@@ -2470,7 +2481,6 @@ mod set_running_gate_tests {
             .await
             .unwrap();
     }
-
 }
 
 #[cfg(test)]

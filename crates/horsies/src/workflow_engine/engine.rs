@@ -2760,9 +2760,9 @@ fn check_workflow_completion_inner<'a>(
         let is_success = evaluate_workflow_success(&meta.success_policy, has_failure, &statuses)?;
 
         let result_json = match is_success {
-            true => Some(
-                get_workflow_final_result(&mut tx, workflow_id, meta.output_task_index).await?,
-            ),
+            true => {
+                Some(get_workflow_final_result(&mut tx, workflow_id, meta.output_task_index).await?)
+            }
             false => None,
         };
 
@@ -4899,7 +4899,6 @@ mod promotion_batch_tests {
         cleanup(&pool, &wf_id).await;
     }
 }
-
 
 #[cfg(test)]
 mod finalization_contract_tests {

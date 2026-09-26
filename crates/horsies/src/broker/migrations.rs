@@ -1198,13 +1198,12 @@ mod recovery_index_migration_tests {
         .execute(pool)
         .await
         .unwrap();
-        let before: serde_json::Value = sqlx::query_scalar(
-            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let before: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         let shape: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",
         )
@@ -1214,13 +1213,12 @@ mod recovery_index_migration_tests {
 
         run_horsies_migrations_through(pool, 50).await.unwrap();
         run_horsies_migrations_through(pool, 50).await.unwrap();
-        let after: serde_json::Value = sqlx::query_scalar(
-            "SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1",
-        )
-        .bind(task_id)
-        .fetch_one(pool)
-        .await
-        .unwrap();
+        let after: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(task) FROM horsies_tasks task WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
         assert_eq!(before, after);
         let upgraded_shape: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT proname::text, pg_get_function_identity_arguments(oid), pg_get_function_result(oid) FROM pg_proc WHERE proname LIKE 'horsies_%' ORDER BY 1, 2",

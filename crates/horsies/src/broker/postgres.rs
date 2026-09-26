@@ -4487,12 +4487,11 @@ mod horsies_claim_tests {
         let middle = seed(pool, &queue, "PENDING", 50, None, None).await;
         let last = seed(pool, &queue, "PENDING", 100, None, None).await;
         let second = seed(pool, &queue, "PENDING", 1, None, None).await;
-        let first = seed(
-            pool, &queue, "CLAIMED", 0, Some("old_worker"),
-            Some(-60),
-        ).await;
-        let rows = broker.claim_batch(&base_params("claim_order_worker", &queues))
-            .await.unwrap();
+        let first = seed(pool, &queue, "CLAIMED", 0, Some("old_worker"), Some(-60)).await;
+        let rows = broker
+            .claim_batch(&base_params("claim_order_worker", &queues))
+            .await
+            .unwrap();
         let returned: Vec<Uuid> = rows.into_iter().map(|row| row.id).collect();
         assert_eq!(returned, vec![first, second, middle, last]);
         cleanup(pool, &queues).await;
@@ -4536,22 +4535,25 @@ mod horsies_claim_tests {
         .bind(60_000_i64)
         .bind(serde_json::json!([]))
         .fetch_all(&mut *claim)
-        .await.unwrap();
-        assert_eq!(returned, expected.iter().map(Uuid::to_string).collect::<Vec<_>>());
+        .await
+        .unwrap();
+        assert_eq!(
+            returned,
+            expected.iter().map(Uuid::to_string).collect::<Vec<_>>()
+        );
 
         let mut other = pool.begin().await.unwrap();
-        let unlocked: Vec<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM horsies_tasks WHERE id = ANY($1) FOR UPDATE NOWAIT",
-        )
-        .bind(&unused)
-        .fetch_all(&mut *other)
-        .await.expect("unused queue and batch candidates must remain available");
+        let unlocked: Vec<Uuid> =
+            sqlx::query_scalar("SELECT id FROM horsies_tasks WHERE id = ANY($1) FOR UPDATE NOWAIT")
+                .bind(&unused)
+                .fetch_all(&mut *other)
+                .await
+                .expect("unused queue and batch candidates must remain available");
         assert_eq!(unlocked.len(), unused.len());
         other.rollback().await.unwrap();
         claim.rollback().await.unwrap();
         cleanup(pool, &queues).await;
     }
-
 }
 
 #[cfg(test)]
@@ -5281,12 +5283,14 @@ mod filter_non_runnable_tests {
         let mut ids = Vec::new();
         for status in ["PAUSED", "CANCELLED", "RUNNING"] {
             let workflow_id = Uuid::new_v4();
-            sqlx::query("INSERT INTO horsies_workflows(id,name,status) VALUES($1,'lookup_test',$2)")
-                .bind(workflow_id)
-                .bind(status)
-                .execute(&mut *tx)
-                .await
-                .unwrap();
+            sqlx::query(
+                "INSERT INTO horsies_workflows(id,name,status) VALUES($1,'lookup_test',$2)",
+            )
+            .bind(workflow_id)
+            .bind(status)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
             for index in 0..2 {
                 let task_id = Uuid::new_v4();
                 ids.push(task_id);
@@ -5312,11 +5316,12 @@ mod filter_non_runnable_tests {
                 .fetch_all(&mut *tx)
                 .await
                 .unwrap();
-            let mut actual: Vec<(Uuid, String)> = sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
-                .bind(&input)
-                .fetch_all(&mut *tx)
-                .await
-                .unwrap();
+            let mut actual: Vec<(Uuid, String)> =
+                sqlx::query_as(FIND_NON_RUNNABLE_WORKFLOW_TASKS_SQL)
+                    .bind(&input)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .unwrap();
             expected.sort();
             actual.sort();
             assert_eq!(actual, expected);
