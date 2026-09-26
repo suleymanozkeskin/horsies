@@ -23,6 +23,9 @@ use crate::core::history::identity::reservations::{claim_key_reservation, Reserv
 use crate::core::history::reads::detail::{
     read_task_detail, staged_detail_published, HistoryTaskDetail, TaskDetailResult,
 };
+use crate::core::history::reads::result::{
+    read_task_result, HistoryResultPayload, HistoryTaskResult, TaskResultRead,
+};
 use crate::core::history::rerun::operations::{
     rerun_task_in_tx, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
 };
@@ -2744,7 +2747,34 @@ impl PostgresBroker {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    /// One statement through the staged result function. While that function
+    /// is not published (an upgraded schema before its next coverage pass),
+    /// falls back to the live read plus the staged detail read.
     async fn fetch_result_row(&self, task_id: Uuid) -> Result<ResultRowProbe, BrokerError> {
+        let mut connection = self.pool.acquire().await.map_err(BrokerError::Database)?;
+        let read = read_task_result(&mut connection, task_id)
+            .await
+            .map_err(map_history_read_error)?;
+        drop(connection);
+        match read {
+            TaskResultRead::Live(live) => Ok(ResultRowProbe::Row(TaskResultRow {
+                id: task_id,
+                status: live.status,
+                result: live.result,
+                failed_reason: live.failed_reason,
+            })),
+            TaskResultRead::History(history) => Ok(ResultRowProbe::Row(history_task_result_row(
+                task_id, history,
+            )?)),
+            TaskResultRead::Absent => Ok(ResultRowProbe::Absent),
+            TaskResultRead::NotPublished => self.fetch_result_row_unstaged(task_id).await,
+        }
+    }
+
+    async fn fetch_result_row_unstaged(
+        &self,
+        task_id: Uuid,
+    ) -> Result<ResultRowProbe, BrokerError> {
         let live: Option<TaskResultRow> = sqlx::query_as(GET_RESULT_SQL)
             .bind(task_id)
             .fetch_optional(&self.pool)
@@ -3074,6 +3104,32 @@ fn history_result_row(detail: HistoryTaskDetail) -> Result<TaskResultRow, Broker
         status: detail.status,
         result,
         failed_reason: detail.final_failed_reason,
+    })
+}
+
+fn history_task_result_row(
+    task_id: Uuid,
+    history: HistoryTaskResult,
+) -> Result<TaskResultRow, BrokerError> {
+    let result = match &history.payload {
+        HistoryResultPayload::Absent => None,
+        HistoryResultPayload::Stored { payload, digest } => {
+            let value = decode_result_envelope(
+                history.envelope_version,
+                &history.codec,
+                &history.content_type,
+                payload,
+                digest,
+            )
+            .map_err(|error| BrokerError::HistoryReadContract(error.to_string()))?;
+            Some(serde_json::to_string(&value)?)
+        }
+    };
+    Ok(TaskResultRow {
+        id: task_id,
+        status: history.status,
+        result,
+        failed_reason: history.failed_reason,
     })
 }
 

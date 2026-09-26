@@ -50,6 +50,10 @@ use super::pages::{
     HistoryWindow, HISTORY_SUMMARY_COLUMNS,
 };
 use super::publisher::{published_manifest_absent_leaves, StagedLoaderPublisher};
+use super::result::{
+    decode_result_row, read_task_result, staged_result_published, HistoryResultPayload,
+    LiveTaskResult, ResultWireRow, TaskResultRead,
+};
 use super::{detail::read_task_detail, detail::TaskDetailResult};
 
 const PYTHON_STAGED_FIXTURE: &str =
@@ -611,8 +615,28 @@ async fn seed_history_row(
     status: &str,
     kind: &str,
 ) -> StoredAttemptSnapshot {
+    seed_history_row_with_payload(
+        connection,
+        task_id,
+        class_key,
+        anchor,
+        status,
+        kind,
+        br#"{"ok":true}"#,
+    )
+    .await
+}
+
+async fn seed_history_row_with_payload(
+    connection: &mut PgConnection,
+    task_id: Uuid,
+    class_key: &str,
+    anchor: DateTime<Utc>,
+    status: &str,
+    kind: &str,
+    result_payload: &[u8],
+) -> StoredAttemptSnapshot {
     let attempts = attempt_snapshot(anchor);
-    let result_payload = br#"{"ok":true}"#.as_slice();
     let sql = format!(
         "INSERT INTO {TASK_HISTORY_PARENT} (
              task_id, task_name, queue_name, priority,
@@ -1469,4 +1493,225 @@ fn open_ended_leaf_is_probed_in_the_pruned_and_legacy_passes_only() {
     assert!(!provenance.contains("IF v_effective_birth >= TIMESTAMPTZ '9999-01-01T00:00:00Z' THEN"));
     assert_eq!(probes(&guard, daily), 2);
     assert_eq!(probes(&guard, open), 2);
+}
+
+fn result_wire_row(location: &str) -> ResultWireRow {
+    ResultWireRow {
+        location: location.to_owned(),
+        status: Some("COMPLETED".to_owned()),
+        live_result: None,
+        failed_reason: None,
+        result_envelope_version: Some(1),
+        result_codec: Some("json-utf8".to_owned()),
+        result_content_type: Some("application/json".to_owned()),
+        result_payload: Some(b"1".to_vec()),
+        result_digest: Some(vec![3; 32]),
+    }
+}
+
+#[test]
+fn result_wire_decode_is_typed_and_fail_closed() {
+    let task_id = Uuid::parse_str("0198c0de-0000-7000-8000-000000000002").unwrap();
+    assert_eq!(
+        decode_result_row(
+            task_id,
+            ResultWireRow {
+                status: Some("RUNNING".to_owned()),
+                live_result: Some("{}".to_owned()),
+                ..result_wire_row("LIVE")
+            }
+        )
+        .unwrap(),
+        TaskResultRead::Live(LiveTaskResult {
+            status: "RUNNING".to_owned(),
+            result: Some("{}".to_owned()),
+            failed_reason: None,
+        })
+    );
+    let TaskResultRead::History(stored) =
+        decode_result_row(task_id, result_wire_row("HISTORY")).unwrap()
+    else {
+        panic!("history row did not decode as history");
+    };
+    assert_eq!(
+        stored.payload,
+        HistoryResultPayload::Stored {
+            payload: b"1".to_vec(),
+            digest: vec![3; 32],
+        }
+    );
+    let TaskResultRead::History(prior_only) = decode_result_row(
+        task_id,
+        ResultWireRow {
+            result_payload: None,
+            ..result_wire_row("HISTORY")
+        },
+    )
+    .unwrap() else {
+        panic!("history row without payload did not decode as history");
+    };
+    assert_eq!(prior_only.payload, HistoryResultPayload::Absent);
+    for broken in [
+        result_wire_row("QUARANTINE"),
+        ResultWireRow {
+            status: None,
+            ..result_wire_row("LIVE")
+        },
+        ResultWireRow {
+            result_codec: None,
+            ..result_wire_row("HISTORY")
+        },
+        ResultWireRow {
+            result_digest: None,
+            ..result_wire_row("HISTORY")
+        },
+    ] {
+        assert!(matches!(
+            decode_result_row(task_id, broken),
+            Err(HistoryError::Contract(_))
+        ));
+    }
+}
+
+#[tokio::test]
+#[serial]
+async fn result_reader_resolves_each_location_and_falls_back_while_unpublished() {
+    use crate::broker::postgres::PostgresBroker;
+    use crate::core::TaskResult;
+
+    let database = TestDatabase::create().await;
+    let class_key = "p4_result";
+    let mut transaction = database.pool.begin().await.expect("begin result setup");
+    let now = database_now(&mut transaction).await.expect("database now");
+    let today = utc_day(now);
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let failed_id = v7_with_birth(today + Duration::hours(2));
+    let completed_id = Uuid::from_u128(v7_with_birth(today + Duration::hours(2)).as_u128() + 1);
+    let live_id = v7_with_birth(today + Duration::hours(4));
+    let completed_json =
+        serde_json::to_string(&TaskResult::<i32>::Ok(7)).expect("encode completed result");
+    seed_history_row(
+        &mut transaction,
+        failed_id,
+        class_key,
+        today + Duration::hours(3),
+        "FAILED",
+        "FAIL_RUNNING",
+    )
+    .await;
+    seed_history_row_with_payload(
+        &mut transaction,
+        completed_id,
+        class_key,
+        today + Duration::hours(3),
+        "COMPLETED",
+        "COMPLETE_FUSED",
+        completed_json.as_bytes(),
+    )
+    .await;
+    seed_live_row(&mut transaction, live_id, class_key, now).await;
+    stamp_leaf_birth(
+        &mut transaction,
+        leaf.leaf_name(),
+        today + Duration::hours(1),
+    )
+    .await;
+    StagedLoaderPublisher
+        .republish(&mut transaction)
+        .await
+        .expect("publish staged readers");
+    transaction.commit().await.expect("commit result setup");
+
+    let mut connection = database.pool.acquire().await.expect("acquire result reads");
+    assert_eq!(
+        read_task_result(&mut connection, live_id)
+            .await
+            .expect("read live result"),
+        TaskResultRead::Live(LiveTaskResult {
+            status: "PENDING".to_owned(),
+            result: None,
+            failed_reason: None,
+        })
+    );
+    let TaskResultRead::History(failed) = read_task_result(&mut connection, failed_id)
+        .await
+        .expect("read history result")
+    else {
+        panic!("retained task did not read as history");
+    };
+    assert_eq!(failed.status, "FAILED");
+    assert_eq!(failed.failed_reason.as_deref(), Some("failed"));
+    assert_eq!(failed.envelope_version, 1);
+    assert_eq!(failed.codec, "json-utf8");
+    assert_eq!(failed.content_type, "application/json");
+    assert_eq!(
+        failed.payload,
+        HistoryResultPayload::Stored {
+            payload: br#"{"ok":true}"#.to_vec(),
+            digest: archive_digest(br#"{"ok":true}"#).to_vec(),
+        }
+    );
+    for absent_id in [v7_with_birth(today + Duration::hours(5)), Uuid::new_v4()] {
+        assert_eq!(
+            read_task_result(&mut connection, absent_id)
+                .await
+                .expect("read absent result"),
+            TaskResultRead::Absent
+        );
+    }
+
+    let broker = PostgresBroker::from_pool(database.pool.clone());
+    let staged = broker
+        .get_result::<i32>(completed_id, None)
+        .await
+        .expect("staged history get_result");
+    assert!(matches!(staged, TaskResult::Ok(7)));
+
+    sqlx::query("DROP FUNCTION horsies_task_result_staged(uuid)")
+        .execute(&mut *connection)
+        .await
+        .expect("drop only staged result function");
+    assert_eq!(
+        read_task_result(&mut connection, failed_id)
+            .await
+            .expect("read with unpublished result function"),
+        TaskResultRead::NotPublished
+    );
+    let fallback = broker
+        .get_result::<i32>(completed_id, None)
+        .await
+        .expect("fallback history get_result");
+    assert!(matches!(fallback, TaskResult::Ok(7)));
+
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .expect("republication probe"));
+    StagedLoaderPublisher
+        .republish(&mut connection)
+        .await
+        .expect("republish staged readers");
+    assert!(staged_result_published(&mut connection)
+        .await
+        .expect("result publication probe"));
+
+    sqlx::query(
+        "CREATE OR REPLACE FUNCTION horsies_task_result_staged(p_task_id uuid)
+         RETURNS TABLE (location text, status text, live_result text, failed_reason text,
+                        result_envelope_version smallint, result_codec text,
+                        result_content_type text, result_payload bytea, result_digest bytea)
+         LANGUAGE plpgsql STABLE AS
+         $$ BEGIN PERFORM horsies_p4_function_that_does_not_exist(); END $$",
+    )
+    .execute(&mut *connection)
+    .await
+    .expect("plant result function with an undefined inner call");
+    assert!(matches!(
+        read_task_result(&mut connection, failed_id).await,
+        Err(HistoryError::Database(sqlx::Error::Database(ref error)))
+            if error.code().as_deref() == Some("42883")
+    ));
+    drop(connection);
+    database.drop().await;
 }

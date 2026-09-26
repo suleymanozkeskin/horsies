@@ -35,6 +35,16 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Changed
 
+- The staged reader publisher also installs `horsies_task_result_staged(uuid)`.
+  It returns only the result columns of one task, as flat output columns, from
+  the live table or from a history leaf, under one snapshot.
+- `get_result` and `TaskHandle::get` read a task result in one statement.
+  Before, a history read sent three statements: a live-table read, a
+  `to_regprocedure` check, and a full `horsies_task_detail_staged` row with its
+  attempt snapshot.
+- Healthy partition coverage republishes the staged readers when the detail
+  reader, the result reader, or the rendered duplicate guard is absent. It
+  still uses three catalog statements.
 - `LeafCreation::CoveredByOpenEndedLeaf`: `create_daily_leaf` refuses a daily
   `forever` leaf that the open-ended leaf covers, and creates nothing.
 - `LeafInspection` renames `expires_at` to `eligible_at` and adds
@@ -71,6 +81,8 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 - Migration 0064 refuses a database whose single-column CHECK set on
   `horsies_task_history` differs from the 24 expected names. It takes a short
   exclusive lock on the history parent and its leaves, and scans no rows.
+- The next partition coverage pass installs `horsies_task_result_staged`.
+  Until then, result reads use the previous three-statement path.
 
 ## [0.1.0-alpha.34] - 2026-09-17
 

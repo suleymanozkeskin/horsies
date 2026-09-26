@@ -8,13 +8,15 @@ use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
     HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RENDERED_GUARD_MARKER, TASK_DETAIL_FUNCTION,
     TASK_DUPLICATE_GUARD_FUNCTION, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION,
+    TASK_RESULT_FUNCTION,
 };
 use crate::core::history::partitions::catalog::read_manifest_leaf_rows;
 use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
 
 use super::lookup_generation::{
     manifest_from_catalog, render_staged_detail_function, render_staged_duplicate_guard_function,
-    render_staged_lookup_function, render_staged_provenance_function, LookupManifest,
+    render_staged_lookup_function, render_staged_provenance_function,
+    render_staged_result_function, LookupManifest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -40,6 +42,9 @@ impl LoaderPublication for StagedLoaderPublisher {
             .execute(&mut *connection)
             .await?;
         sqlx::query(&render_staged_detail_function(&manifest))
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query(&render_staged_result_function(&manifest))
             .execute(&mut *connection)
             .await?;
         sqlx::query(&render_staged_duplicate_guard_function(&manifest))
@@ -84,15 +89,17 @@ impl LoaderPublication for StagedLoaderPublisher {
     }
 }
 
-/// The detail reader is installed and the duplicate guard is the rendered
-/// version (it carries the marker; the migration's first version does not).
-/// One statement: healthy coverage has a fixed statement budget.
+/// The detail and result readers are installed and the duplicate guard is
+/// the rendered version (it carries the marker; the migration's first version
+/// does not). One statement: healthy coverage has a fixed statement budget.
 async fn staged_readers_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
     Ok(sqlx::query_scalar(
         "SELECT to_regprocedure($1) IS NOT NULL
-            AND obj_description(to_regprocedure($2), 'pg_proc') IS NOT DISTINCT FROM $3",
+            AND to_regprocedure($2) IS NOT NULL
+            AND obj_description(to_regprocedure($3), 'pg_proc') IS NOT DISTINCT FROM $4",
     )
     .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
+    .bind(format!("{TASK_RESULT_FUNCTION}(uuid)"))
     .bind(format!("{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)"))
     .bind(RENDERED_GUARD_MARKER)
     .fetch_one(connection)
