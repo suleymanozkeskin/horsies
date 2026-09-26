@@ -15,8 +15,8 @@ use crate::core::history::partitions::publication::{LoaderPublication, LoaderRep
 
 use super::lookup_generation::{
     manifest_from_catalog, render_staged_detail_function, render_staged_duplicate_guard_function,
-    render_staged_lookup_function, render_staged_provenance_function, render_staged_result_function,
-    LookupManifest,
+    render_staged_lookup_function, render_staged_provenance_function,
+    render_staged_result_function, LookupManifest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
