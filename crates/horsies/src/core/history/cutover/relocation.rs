@@ -14,7 +14,8 @@ use crate::core::history::names::{
 };
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::history::partitions::catalog::{
-    read_leaf_catalog_row, read_leaf_physical_state, read_retention_class,
+    read_leaf_catalog_row, read_leaf_physical_state, read_open_ended_forever_leaf,
+    read_retention_class,
 };
 use crate::core::history::partitions::forever::FOREVER_LEGACY_LEAF;
 use crate::core::history::partitions::manager::create_daily_leaf;
@@ -228,6 +229,9 @@ async fn ensure_batch_leaf_coverage(
     .await?;
     let mut created = false;
     let legacy_forever_upper = attached_legacy_forever_upper(connection).await?;
+    let open_forever_lower = read_open_ended_forever_leaf(connection)
+        .await?
+        .map(|open| open.lower_anchor);
     for destination in destinations {
         let retention_class = read_retention_class(connection, &destination.class_key)
             .await?
@@ -248,8 +252,11 @@ async fn ensure_batch_leaf_coverage(
                     ))
                 })?
             };
+        // The legacy leaf covers every day before its upper bound; the
+        // open-ended leaf covers every day from its lower bound.
         if destination.class_key == FOREVER_CLASS_KEY
-            && legacy_forever_upper.is_some_and(|upper| destination.lower_anchor < upper)
+            && (legacy_forever_upper.is_some_and(|upper| destination.lower_anchor < upper)
+                || open_forever_lower.is_some_and(|lower| destination.lower_anchor >= lower))
         {
             continue;
         }

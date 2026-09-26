@@ -3,7 +3,7 @@
 use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
 
-use crate::core::history::commands::{CreateDailyHistoryLeaf, EnsureLeafCoverage};
+use crate::core::history::commands::EnsureLeafCoverage;
 use crate::core::history::ddl::classes::{
     register_finite_retention_class, ClassRegistration, DEFAULT_RETENTION_CLASS_KEY,
     DEFAULT_RETENTION_DURATION_DAYS, FOREVER_CLASS_KEY,
@@ -17,7 +17,9 @@ use crate::core::history::heartbeats::partitioning::{
 use crate::core::history::names::{HEARTBEAT_CLASS_KEY, RETENTION_CLASSES};
 use crate::core::history::outcomes::LeafCreation;
 use crate::core::history::partitions::catalog::database_now;
-use crate::core::history::partitions::manager::{create_daily_leaf, ensure_leaf_coverage};
+use crate::core::history::partitions::manager::{
+    create_planned_leaf, ensure_leaf_coverage, PlannedLeaf,
+};
 use crate::core::history::partitions::publication::{LoaderPublication, UnpublishedLoader};
 
 use super::coverage_probe::{probe_partition_coverage, CoverageLeafRepair, CoverageProbe};
@@ -305,13 +307,14 @@ async fn retry_busy_leaf(attempt: u32) {
     tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
 }
 
-async fn create_daily_leaf_in_own_transaction(
+async fn create_history_leaf_in_own_transaction(
     pool: &PgPool,
-    command: &CreateDailyHistoryLeaf,
+    planned: &PlannedLeaf,
 ) -> Result<LeafCreation, HistoryError> {
     for attempt in 1..=LEAF_BUSY_ATTEMPTS {
         let mut transaction = pool.begin().await?;
-        let outcome = create_daily_leaf(transaction.as_mut(), command, &UnpublishedLoader).await?;
+        let outcome =
+            create_planned_leaf(transaction.as_mut(), planned, &UnpublishedLoader).await?;
         transaction.commit().await?;
         match outcome {
             LeafCreation::Busy { .. } if attempt < LEAF_BUSY_ATTEMPTS => {
@@ -370,7 +373,7 @@ fn first_probe_class_key(probe: &CoverageProbe) -> Option<String> {
         .map(|fault| fault.class_key.clone())
         .or_else(|| {
             probe.leaf_repairs.first().map(|repair| match repair {
-                CoverageLeafRepair::History(command) => command.leaf().class_key().to_owned(),
+                CoverageLeafRepair::History(planned) => planned.leaf().class_key().to_owned(),
                 CoverageLeafRepair::Heartbeat(command) => command.leaf().class_key().to_owned(),
             })
         })
@@ -389,10 +392,10 @@ fn failed_probe(
             .map(|fault| format!("{}: {}", fault.class_key, fault.detail)),
     );
     details.extend(probe.leaf_repairs.iter().map(|repair| match repair {
-        CoverageLeafRepair::History(command) => format!(
+        CoverageLeafRepair::History(planned) => format!(
             "{}: required leaf {:?} remains nonconformant",
-            command.leaf().class_key(),
-            command.leaf().leaf_name()
+            planned.leaf().class_key(),
+            planned.leaf().leaf_name()
         ),
         CoverageLeafRepair::Heartbeat(command) => format!(
             "{}: required leaf {:?} remains nonconformant",
@@ -576,9 +579,9 @@ pub async fn ensure_partition_coverage_in_pool<P: LoaderPublication>(
     let mut failures = Vec::new();
     for repair in repair_probe.leaf_repairs {
         match repair {
-            CoverageLeafRepair::History(create) => {
-                let class_key = create.leaf().class_key().to_owned();
-                let outcome = match create_daily_leaf_in_own_transaction(pool, &create).await {
+            CoverageLeafRepair::History(planned) => {
+                let class_key = planned.leaf().class_key().to_owned();
+                let outcome = match create_history_leaf_in_own_transaction(pool, &planned).await {
                     Ok(outcome) => outcome,
                     Err(error) => {
                         failures.push(format!("{class_key}: {error}"));

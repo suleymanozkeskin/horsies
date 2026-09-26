@@ -3,19 +3,20 @@
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 
-use chrono::{Duration, Timelike};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use sqlx::pool::PoolConnection;
 use sqlx::{PgConnection, PgPool, Postgres};
 use uuid::Uuid;
 
 use crate::core::history::commands::{
-    is_safe_identifier, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf,
-    EnsureLeafCoverage, FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafRef,
+    is_safe_identifier, open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf,
+    DetachEmptyForeverLeaf, DetachExpiredHistoryLeaf, DropDetachedHistoryLeaf, EnsureLeafCoverage,
+    FinalizeInterruptedLeafDetach, InspectHistoryLeaf, LeafBounds, LeafLifecycle, LeafRef,
 };
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
-    render_leaf_enqueued_index_ddl, render_leaf_id_index_ddl,
+    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, open_ended_leaf_name,
+    render_daily_leaf_ddl, render_leaf_enqueued_index_ddl, render_leaf_id_index_ddl,
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
@@ -26,9 +27,10 @@ use crate::core::history::outcomes::{
 };
 
 use super::catalog::{
-    capture_partition_bound_utc, database_now, read_leaf_catalog_row,
-    read_leaf_ordering_index_exists, read_leaf_physical_state, read_retention_class, LeafIndexKind,
-    LeafPartitionBoundExpectation, RetentionClassRow, INDEX_SCHEMA_VERSION,
+    capture_partition_bound_utc, database_now, open_ended_forever_start_sql, read_leaf_catalog_row,
+    read_leaf_ordering_index_exists, read_leaf_physical_state, read_open_ended_forever_leaf,
+    read_retention_class, LeafIndexKind, LeafPartitionBoundExpectation, RetentionClassRow,
+    INDEX_SCHEMA_VERSION,
 };
 use super::locks::{
     is_lock_not_available, try_lock_leaf_for_session, try_lock_leaf_for_transaction,
@@ -39,8 +41,38 @@ use super::publication::LoaderPublication;
 const DAILY: Duration = Duration::days(1);
 const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 
-pub(crate) enum DailyCoveragePlan {
-    Leaves(Vec<CreateDailyHistoryLeaf>),
+/// One leaf that coverage plans to ensure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlannedLeaf {
+    Daily(CreateDailyHistoryLeaf),
+    OpenEnded(CreateOpenEndedHistoryLeaf),
+}
+
+impl PlannedLeaf {
+    pub(crate) fn leaf(&self) -> &LeafRef {
+        match self {
+            Self::Daily(command) => command.leaf(),
+            Self::OpenEnded(command) => command.leaf(),
+        }
+    }
+}
+
+/// Creates or repairs one planned leaf.
+pub(crate) async fn create_planned_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    planned: &PlannedLeaf,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
+    match planned {
+        PlannedLeaf::Daily(create) => create_daily_leaf(connection, create, publisher).await,
+        PlannedLeaf::OpenEnded(create) => {
+            create_open_ended_leaf(connection, create, publisher).await
+        }
+    }
+}
+
+pub(crate) enum CoveragePlan {
+    Leaves(Vec<PlannedLeaf>),
     Refused(LeafCreation),
 }
 
@@ -183,15 +215,28 @@ pub async fn inspect_leaf(
             class_key: leaf.class_key().to_owned(),
         });
     };
-    let Some(duration) = retention_class.duration else {
-        return Ok(LeafInspection::ForeverClassLeaf {
-            class_key: leaf.class_key().to_owned(),
-        });
+    let (parent_name, eligible_at) = match (command.lifecycle(), retention_class.duration) {
+        (LeafLifecycle::Retention, None) => {
+            return Ok(LeafInspection::ForeverClassLeaf {
+                class_key: leaf.class_key().to_owned(),
+            });
+        }
+        (LeafLifecycle::Retention, Some(duration)) => (
+            retention_class.finite_parent_name.clone().ok_or_else(|| {
+                HistoryError::contract("finite retention class has no physical parent")
+            })?,
+            leaf.bounds().upper() + duration,
+        ),
+        (LeafLifecycle::ClosedEmptyForever, None) => {
+            (TASK_HISTORY_FOREVER.to_owned(), leaf.bounds().upper())
+        }
+        (LeafLifecycle::ClosedEmptyForever, Some(_)) => {
+            return Err(HistoryError::contract(
+                "the forever retention class carries a duration",
+            ));
+        }
     };
-    let parent_name = retention_class
-        .finite_parent_name
-        .as_deref()
-        .ok_or_else(|| HistoryError::contract("finite retention class has no physical parent"))?;
+    let parent_name = parent_name.as_str();
     let catalog = read_leaf_catalog_row(connection, leaf.leaf_name()).await?;
     let id_index_name = catalog.as_ref().map_or_else(
         || leaf_id_index_name(leaf.leaf_name()),
@@ -209,7 +254,6 @@ pub async fn inspect_leaf(
         },
     )
     .await?;
-    let expires_at = leaf.bounds().upper() + duration;
 
     let Some(catalog) = catalog else {
         if physical.relation_exists {
@@ -222,7 +266,7 @@ pub async fn inspect_leaf(
         return Ok(LeafInspection::Missing {
             leaf_name: leaf.leaf_name().to_owned(),
             cataloged: false,
-            expires_at: Some(expires_at),
+            eligible_at: Some(eligible_at),
         });
     };
 
@@ -246,7 +290,7 @@ pub async fn inspect_leaf(
             Ok(LeafInspection::Missing {
                 leaf_name: leaf.leaf_name().to_owned(),
                 cataloged: true,
-                expires_at: Some(expires_at),
+                eligible_at: Some(eligible_at),
             })
         };
     }
@@ -277,7 +321,7 @@ pub async fn inspect_leaf(
         return Ok(LeafInspection::PendingBlocked {
             leaf_name: leaf.leaf_name().to_owned(),
             blocker_count,
-            expires_at,
+            eligible_at,
             attachment,
         });
     }
@@ -285,26 +329,72 @@ pub async fn inspect_leaf(
     match physical.detach_pending {
         None => Ok(LeafInspection::Detached {
             leaf_name: leaf.leaf_name().to_owned(),
-            expires_at,
+            eligible_at,
         }),
         Some(true) => Ok(LeafInspection::DetachInterrupted {
             leaf_name: leaf.leaf_name().to_owned(),
-            expires_at,
+            eligible_at,
         }),
         Some(false) => {
             let now = database_now(connection).await?;
-            if expires_at <= now {
-                Ok(LeafInspection::Detachable {
-                    leaf_name: leaf.leaf_name().to_owned(),
-                    expires_at,
-                })
+            if eligible_at <= now {
+                let kept = match command.lifecycle() {
+                    LeafLifecycle::Retention => false,
+                    LeafLifecycle::ClosedEmptyForever => leaf_has_rows(connection, leaf).await?,
+                };
+                match kept {
+                    true => Ok(LeafInspection::KeptNonEmpty {
+                        leaf_name: leaf.leaf_name().to_owned(),
+                    }),
+                    false => Ok(LeafInspection::Detachable {
+                        leaf_name: leaf.leaf_name().to_owned(),
+                        eligible_at,
+                    }),
+                }
             } else {
                 Ok(LeafInspection::NotExpired {
                     leaf_name: leaf.leaf_name().to_owned(),
-                    expires_at,
+                    eligible_at,
                 })
             }
         }
+    }
+}
+
+/// The leaf relation holds at least one row. Reads only.
+async fn leaf_has_rows(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+) -> Result<bool, HistoryError> {
+    Ok(sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM {})",
+        leaf.leaf_name()
+    ))
+    .fetch_one(connection)
+    .await?)
+}
+
+fn lifecycle_inspection(
+    leaf: &LeafRef,
+    lifecycle: LeafLifecycle,
+) -> Result<InspectHistoryLeaf, HistoryError> {
+    InspectHistoryLeaf::with_lifecycle(leaf.clone(), lifecycle)
+        .map_err(|error| HistoryError::contract(error.to_string()))
+}
+
+/// The parent a leaf detaches from under its lifecycle.
+async fn lifecycle_parent(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    lifecycle: LeafLifecycle,
+) -> Result<String, HistoryError> {
+    match lifecycle {
+        LeafLifecycle::ClosedEmptyForever => Ok(TASK_HISTORY_FOREVER.to_owned()),
+        LeafLifecycle::Retention => read_retention_class(connection, leaf.class_key())
+            .await?
+            .ok_or_else(|| HistoryError::contract("detaching class disappeared"))?
+            .finite_parent_name
+            .ok_or_else(|| HistoryError::contract("detaching class has no finite parent")),
     }
 }
 
@@ -416,12 +506,44 @@ pub(crate) async fn remove_attached_index_for_repair(
     }
 }
 
+/// Creates or repairs one daily leaf. A daily `forever` leaf that the attached
+/// open-ended `forever` leaf covers is refused with `CoveredByOpenEndedLeaf`,
+/// and nothing is created.
 pub async fn create_daily_leaf<P: LoaderPublication>(
     connection: &mut PgConnection,
     command: &CreateDailyHistoryLeaf,
     publisher: &P,
 ) -> Result<LeafCreation, HistoryError> {
     let leaf = command.leaf();
+    let covering = match leaf.class_key() == FOREVER_CLASS_KEY {
+        true => read_open_ended_forever_leaf(connection)
+            .await?
+            .filter(|open| open.lower_anchor < leaf.bounds().upper()),
+        false => None,
+    };
+    match covering {
+        Some(open) => Ok(LeafCreation::CoveredByOpenEndedLeaf {
+            leaf_name: leaf.leaf_name().to_owned(),
+            open_leaf_name: open.leaf_name,
+        }),
+        None => create_leaf(connection, leaf, publisher).await,
+    }
+}
+
+/// Creates or repairs the open-ended `forever` leaf.
+pub async fn create_open_ended_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    command: &CreateOpenEndedHistoryLeaf,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
+    create_leaf(connection, command.leaf(), publisher).await
+}
+
+async fn create_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
     let Some(retention_class) = read_retention_class(connection, leaf.class_key()).await? else {
         return Ok(LeafCreation::RetentionClassAbsent {
             class_key: leaf.class_key().to_owned(),
@@ -670,13 +792,13 @@ pub async fn ensure_leaf_coverage<P: LoaderPublication>(
     command: &EnsureLeafCoverage,
     publisher: &P,
 ) -> Result<Vec<LeafCreation>, HistoryError> {
-    let commands = match plan_daily_leaf_coverage(connection, command).await? {
-        DailyCoveragePlan::Leaves(commands) => commands,
-        DailyCoveragePlan::Refused(refusal) => return Ok(vec![refusal]),
+    let commands = match plan_leaf_coverage(connection, command).await? {
+        CoveragePlan::Leaves(commands) => commands,
+        CoveragePlan::Refused(refusal) => return Ok(vec![refusal]),
     };
     let mut outcomes = Vec::with_capacity(commands.len());
-    for create in commands {
-        let outcome = create_daily_leaf(connection, &create, publisher).await?;
+    for planned in commands {
+        let outcome = create_planned_leaf(connection, &planned, publisher).await?;
         let keep_going = matches!(
             outcome,
             LeafCreation::Created { .. }
@@ -691,33 +813,34 @@ pub async fn ensure_leaf_coverage<P: LoaderPublication>(
     Ok(outcomes)
 }
 
-pub(crate) async fn plan_daily_leaf_coverage(
+/// Plans the leaves a class needs: one daily leaf per horizon day for a finite
+/// class; the one open-ended leaf for `forever`.
+pub(crate) async fn plan_leaf_coverage(
     connection: &mut PgConnection,
     command: &EnsureLeafCoverage,
-) -> Result<DailyCoveragePlan, HistoryError> {
+) -> Result<CoveragePlan, HistoryError> {
     let Some(retention_class) = read_retention_class(connection, command.class_key()).await? else {
-        return Ok(DailyCoveragePlan::Refused(
-            LeafCreation::RetentionClassAbsent {
-                class_key: command.class_key().to_owned(),
-            },
-        ));
+        return Ok(CoveragePlan::Refused(LeafCreation::RetentionClassAbsent {
+            class_key: command.class_key().to_owned(),
+        }));
     };
     let is_forever = command.class_key() == FOREVER_CLASS_KEY
         && retention_class.duration.is_none()
         && retention_class.partition_interval.is_none();
     if !is_forever && retention_class.partition_interval != Some(DAILY) {
-        return Ok(DailyCoveragePlan::Refused(
-            LeafCreation::ClassIntervalMismatch {
-                class_key: command.class_key().to_owned(),
-                partition_interval_days: interval_days(retention_class.partition_interval),
-            },
-        ));
+        return Ok(CoveragePlan::Refused(LeafCreation::ClassIntervalMismatch {
+            class_key: command.class_key().to_owned(),
+            partition_interval_days: interval_days(retention_class.partition_interval),
+        }));
     }
     let Some(parent_name) = history_class_parent(command.class_key(), &retention_class) else {
-        return Ok(DailyCoveragePlan::Refused(LeafCreation::ForeverClassLeaf {
+        return Ok(CoveragePlan::Refused(LeafCreation::ForeverClassLeaf {
             class_key: command.class_key().to_owned(),
         }));
     };
+    if is_forever {
+        return plan_open_ended_forever_leaf(connection, &parent_name).await;
+    }
     let now = database_now(connection).await?;
     let today = now
         .with_hour(0)
@@ -734,12 +857,50 @@ pub(crate) async fn plan_daily_leaf_coverage(
             .map_err(|error| HistoryError::contract(error.to_string()))?;
         let leaf = LeafRef::new(leaf_name, command.class_key(), bounds)
             .map_err(|error| HistoryError::contract(error.to_string()))?;
-        commands.push(
+        commands.push(PlannedLeaf::Daily(
             CreateDailyHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
-        );
+        ));
     }
-    Ok(DailyCoveragePlan::Leaves(commands))
+    Ok(CoveragePlan::Leaves(commands))
+}
+
+/// The attached open-ended leaf with its stored bounds, so conformance and
+/// index repair apply to it; otherwise a new one from
+/// `open_ended_forever_start_sql`.
+async fn plan_open_ended_forever_leaf(
+    connection: &mut PgConnection,
+    parent_name: &str,
+) -> Result<CoveragePlan, HistoryError> {
+    let command = open_ended_forever_command(connection, parent_name).await?;
+    Ok(CoveragePlan::Leaves(vec![PlannedLeaf::OpenEnded(command)]))
+}
+
+/// The open-ended `forever` leaf to ensure: the attached one with its stored
+/// bounds, or a new one from `open_ended_forever_start_sql`.
+pub(crate) async fn open_ended_forever_command(
+    connection: &mut PgConnection,
+    parent_name: &str,
+) -> Result<CreateOpenEndedHistoryLeaf, HistoryError> {
+    let (leaf_name, lower) = match read_open_ended_forever_leaf(connection).await? {
+        Some(open) => (open.leaf_name, open.lower_anchor),
+        None => {
+            let lower: DateTime<Utc> = sqlx::query_scalar(&format!(
+                "SELECT {}",
+                open_ended_forever_start_sql("date_trunc('day', statement_timestamp(), 'UTC')")
+            ))
+            .fetch_one(&mut *connection)
+            .await?;
+            let name = open_ended_leaf_name(parent_name, lower)
+                .map_err(|error| HistoryError::contract(error.to_string()))?;
+            (name, lower)
+        }
+    };
+    let bounds = LeafBounds::new(lower, open_end_anchor())
+        .map_err(|error| HistoryError::contract(error.to_string()))?;
+    let leaf = LeafRef::new(leaf_name, FOREVER_CLASS_KEY, bounds)
+        .map_err(|error| HistoryError::contract(error.to_string()))?;
+    CreateOpenEndedHistoryLeaf::new(leaf).map_err(|error| HistoryError::contract(error.to_string()))
 }
 
 /// Detach one expired leaf without waiting for its advisory lock.
@@ -797,10 +958,10 @@ where
         LeafInspection::Detachable { .. } => {}
         LeafInspection::PendingBlocked {
             attachment: LeafAttachment::Attached,
-            expires_at,
+            eligible_at,
             ..
         } if command.quarantine_horizon().is_some() => {
-            if *expires_at > database_now(connection).await? {
+            if *eligible_at > database_now(connection).await? {
                 return Ok(DetachExpiredLeafOutcome::Inspection(inspection));
             }
             let horizon = command.quarantine_horizon().expect("matched Some horizon");
@@ -816,13 +977,40 @@ where
         }
         _ => return Ok(DetachExpiredLeafOutcome::Inspection(inspection)),
     }
-    set_ddl_timeouts(connection, command.statement_timeout_ms()).await?;
-    let retention = read_retention_class(connection, leaf.class_key())
-        .await?
-        .ok_or_else(|| HistoryError::contract("detachable class disappeared"))?;
-    let parent = retention
-        .finite_parent_name
-        .ok_or_else(|| HistoryError::contract("detachable class has no finite parent"))?;
+    let parent = lifecycle_parent(connection, leaf, LeafLifecycle::Retention).await?;
+    match detach_attached_leaf(
+        connection,
+        leaf,
+        &parent,
+        command.statement_timeout_ms(),
+        publisher,
+    )
+    .await?
+    {
+        PhysicalDetach::Busy => Ok(DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }),
+        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Inspection(
+            inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
+        )),
+    }
+}
+
+enum PhysicalDetach {
+    Detached,
+    Busy,
+}
+
+/// `DETACH PARTITION ... CONCURRENTLY`, the catalog stamp, and republication.
+/// The caller holds the leaf's session lock and has checked the preconditions.
+async fn detach_attached_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    leaf: &LeafRef,
+    parent: &str,
+    statement_timeout_ms: Option<u64>,
+    publisher: &P,
+) -> Result<PhysicalDetach, HistoryError> {
+    set_ddl_timeouts(connection, statement_timeout_ms).await?;
     let detach = sqlx::query(&format!(
         "ALTER TABLE {parent} DETACH PARTITION {} CONCURRENTLY",
         leaf.leaf_name()
@@ -831,20 +1019,78 @@ where
     .await;
     match detach {
         Ok(_) => {}
-        Err(error) if is_lock_not_available(&error) => {
-            return Ok(DetachExpiredLeafOutcome::Busy {
-                leaf_name: leaf.leaf_name().to_owned(),
-            });
-        }
+        Err(error) if is_lock_not_available(&error) => return Ok(PhysicalDetach::Busy),
         Err(error) => return Err(error.into()),
     }
     record_detached(connection, leaf.leaf_name()).await?;
     if publisher.needs_republication(connection).await? {
         publisher.republish(connection).await?;
     }
-    Ok(DetachExpiredLeafOutcome::Inspection(
-        inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
-    ))
+    Ok(PhysicalDetach::Detached)
+}
+
+/// Detaches a closed daily `forever` leaf that holds no rows. Emptiness and
+/// the other preconditions are checked under the leaf's session lock; a leaf
+/// with rows returns `Inspection(KeptNonEmpty)` and is not touched.
+///
+/// `pool` must preserve PostgreSQL session affinity.
+pub async fn detach_empty_forever_leaf<P: LoaderPublication>(
+    pool: &PgPool,
+    command: &DetachEmptyForeverLeaf,
+    publisher: &P,
+) -> Result<DetachExpiredLeafOutcome, HistoryError> {
+    let leaf = command.leaf();
+    let mut connection = SessionConnection::new(pool.acquire().await?);
+    let prior_timeouts =
+        read_prior_timeouts(&mut connection, command.statement_timeout_ms()).await?;
+    if matches!(
+        try_lock_leaf_for_session(&mut connection, leaf.class_key(), leaf.bounds().lower()).await?,
+        LeafLockAttempt::Busy
+    ) {
+        connection.mark_reusable();
+        return Ok(DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        });
+    }
+    let result = detach_empty_forever_locked(&mut connection, command, publisher).await;
+    let cleanup = restore_timeouts_and_unlock(&mut connection, leaf, &prior_timeouts).await;
+    if cleanup.is_ok() {
+        connection.mark_reusable();
+    }
+    match (result, cleanup) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(outcome), Ok(())) => Ok(outcome),
+    }
+}
+
+async fn detach_empty_forever_locked<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    command: &DetachEmptyForeverLeaf,
+    publisher: &P,
+) -> Result<DetachExpiredLeafOutcome, HistoryError> {
+    let leaf = command.leaf();
+    let inspection = lifecycle_inspection(leaf, LeafLifecycle::ClosedEmptyForever)?;
+    let state = inspect_leaf(connection, &inspection).await?;
+    if !matches!(state, LeafInspection::Detachable { .. }) {
+        return Ok(DetachExpiredLeafOutcome::Inspection(state));
+    }
+    match detach_attached_leaf(
+        connection,
+        leaf,
+        TASK_HISTORY_FOREVER,
+        command.statement_timeout_ms(),
+        publisher,
+    )
+    .await?
+    {
+        PhysicalDetach::Busy => Ok(DetachExpiredLeafOutcome::Busy {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }),
+        PhysicalDetach::Detached => Ok(DetachExpiredLeafOutcome::Inspection(
+            inspect_leaf(connection, &inspection).await?,
+        )),
+    }
 }
 
 /// Finalize an interrupted detach without waiting for its advisory lock.
@@ -888,7 +1134,8 @@ async fn finalize_locked<P: LoaderPublication>(
 ) -> Result<FinalizeInterruptedLeafOutcome, HistoryError> {
     let leaf = command.leaf();
     set_ddl_timeouts(connection, command.statement_timeout_ms()).await?;
-    let inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
+    let inspect_command = lifecycle_inspection(leaf, command.lifecycle())?;
+    let inspection = inspect_leaf(connection, &inspect_command).await?;
     match inspection {
         LeafInspection::Detached { .. } => {
             record_detached(connection, leaf.leaf_name()).await?;
@@ -897,12 +1144,7 @@ async fn finalize_locked<P: LoaderPublication>(
             }
         }
         LeafInspection::DetachInterrupted { .. } => {
-            let retention = read_retention_class(connection, leaf.class_key())
-                .await?
-                .ok_or_else(|| HistoryError::contract("interrupted class disappeared"))?;
-            let parent = retention
-                .finite_parent_name
-                .ok_or_else(|| HistoryError::contract("interrupted class has no finite parent"))?;
+            let parent = lifecycle_parent(connection, leaf, command.lifecycle()).await?;
             let finalize = sqlx::query(&format!(
                 "ALTER TABLE {parent} DETACH PARTITION {} FINALIZE",
                 leaf.leaf_name()
@@ -926,7 +1168,7 @@ async fn finalize_locked<P: LoaderPublication>(
         other => return Ok(FinalizeInterruptedLeafOutcome::Inspection(other)),
     }
     Ok(FinalizeInterruptedLeafOutcome::Inspection(
-        inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?,
+        inspect_leaf(connection, &inspect_command).await?,
     ))
 }
 
@@ -936,7 +1178,8 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
     publisher: &P,
 ) -> Result<LeafDrop, HistoryError> {
     let leaf = command.leaf();
-    let mut inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
+    let inspect_command = lifecycle_inspection(leaf, command.lifecycle())?;
+    let mut inspection = inspect_leaf(connection, &inspect_command).await?;
     if !matches!(inspection, LeafInspection::Detached { .. }) {
         return Ok(LeafDrop::Inspection(inspection));
     }
@@ -948,7 +1191,7 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
             leaf_name: leaf.leaf_name().to_owned(),
         });
     }
-    inspection = inspect_leaf(connection, &InspectHistoryLeaf::new(leaf.clone())).await?;
+    inspection = inspect_leaf(connection, &inspect_command).await?;
     if !matches!(inspection, LeafInspection::Detached { .. }) {
         return Ok(LeafDrop::Inspection(inspection));
     }
@@ -967,6 +1210,17 @@ pub async fn drop_detached_leaf<P: LoaderPublication>(
         return Ok(LeafDrop::Busy {
             leaf_name: leaf.leaf_name().to_owned(),
         });
+    }
+    // Under the exclusive lock, a closed forever leaf that gained rows after
+    // its detach is kept, not dropped.
+    let kept = match command.lifecycle() {
+        LeafLifecycle::Retention => false,
+        LeafLifecycle::ClosedEmptyForever => leaf_has_rows(connection, leaf).await?,
+    };
+    if kept {
+        return Ok(LeafDrop::Inspection(LeafInspection::KeptNonEmpty {
+            leaf_name: leaf.leaf_name().to_owned(),
+        }));
     }
     sqlx::query(&format!("DROP TABLE {}", leaf.leaf_name()))
         .execute(&mut *connection)

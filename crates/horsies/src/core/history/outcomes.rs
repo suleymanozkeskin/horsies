@@ -17,28 +17,31 @@ pub enum LeafAttachment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// `eligible_at` is when the leaf may leave its parent: the upper bound plus
+/// the class duration under `LeafLifecycle::Retention`, the upper bound under
+/// `LeafLifecycle::ClosedEmptyForever`.
 pub enum LeafInspection {
     Detachable {
         leaf_name: String,
-        expires_at: DateTime<Utc>,
+        eligible_at: DateTime<Utc>,
     },
     NotExpired {
         leaf_name: String,
-        expires_at: DateTime<Utc>,
+        eligible_at: DateTime<Utc>,
     },
     PendingBlocked {
         leaf_name: String,
         blocker_count: i64,
-        expires_at: DateTime<Utc>,
+        eligible_at: DateTime<Utc>,
         attachment: LeafAttachment,
     },
     DetachInterrupted {
         leaf_name: String,
-        expires_at: DateTime<Utc>,
+        eligible_at: DateTime<Utc>,
     },
     Detached {
         leaf_name: String,
-        expires_at: DateTime<Utc>,
+        eligible_at: DateTime<Utc>,
     },
     Dropped {
         leaf_name: String,
@@ -46,13 +49,17 @@ pub enum LeafInspection {
     Missing {
         leaf_name: String,
         cataloged: bool,
-        expires_at: Option<DateTime<Utc>>,
+        eligible_at: Option<DateTime<Utc>>,
     },
     RetentionClassAbsent {
         class_key: String,
     },
     ForeverClassLeaf {
         class_key: String,
+    },
+    /// A closed daily `forever` leaf that holds rows: never detached.
+    KeptNonEmpty {
+        leaf_name: String,
     },
     CatalogConflict {
         leaf_name: String,
@@ -82,6 +89,12 @@ pub enum LeafCreation {
     },
     ForeverClassLeaf {
         class_key: String,
+    },
+    /// A daily `forever` leaf was requested for a range that the attached
+    /// open-ended `forever` leaf covers. Nothing was created.
+    CoveredByOpenEndedLeaf {
+        leaf_name: String,
+        open_leaf_name: String,
     },
     ClassIntervalMismatch {
         class_key: String,
@@ -176,25 +189,25 @@ mod tests {
         let inspections = [
             LeafInspection::Detachable {
                 leaf_name: "leaf".into(),
-                expires_at: now(),
+                eligible_at: now(),
             },
             LeafInspection::NotExpired {
                 leaf_name: "leaf".into(),
-                expires_at: now(),
+                eligible_at: now(),
             },
             LeafInspection::PendingBlocked {
                 leaf_name: "leaf".into(),
                 blocker_count: 1,
-                expires_at: now(),
+                eligible_at: now(),
                 attachment: LeafAttachment::Attached,
             },
             LeafInspection::DetachInterrupted {
                 leaf_name: "leaf".into(),
-                expires_at: now(),
+                eligible_at: now(),
             },
             LeafInspection::Detached {
                 leaf_name: "leaf".into(),
-                expires_at: now(),
+                eligible_at: now(),
             },
             LeafInspection::Dropped {
                 leaf_name: "leaf".into(),
@@ -202,7 +215,7 @@ mod tests {
             LeafInspection::Missing {
                 leaf_name: "leaf".into(),
                 cataloged: true,
-                expires_at: Some(now()),
+                eligible_at: Some(now()),
             },
             LeafInspection::RetentionClassAbsent {
                 class_key: "finite".into(),
@@ -239,6 +252,10 @@ mod tests {
             LeafCreation::ForeverClassLeaf {
                 class_key: "forever".into(),
             },
+            LeafCreation::CoveredByOpenEndedLeaf {
+                leaf_name: "leaf".into(),
+                open_leaf_name: "open_leaf".into(),
+            },
             LeafCreation::ClassIntervalMismatch {
                 class_key: "finite".into(),
                 partition_interval_days: Some(2),
@@ -249,7 +266,7 @@ mod tests {
                 detail: "bound mismatch".into(),
             },
         ];
-        assert_eq!(creations.len(), 8);
+        assert_eq!(creations.len(), 9);
 
         let drops = [
             LeafDrop::Busy {
@@ -264,7 +281,7 @@ mod tests {
             LeafDrop::Inspection(LeafInspection::Missing {
                 leaf_name: "leaf".into(),
                 cataloged: false,
-                expires_at: None,
+                eligible_at: None,
             }),
         ];
         assert_eq!(drops.len(), 4);

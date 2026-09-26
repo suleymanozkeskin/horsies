@@ -3,7 +3,8 @@
 use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
-use crate::core::history::commands::{is_safe_identifier, LeafBounds};
+use crate::core::history::commands::{is_safe_identifier, LeafBounds, OPEN_END_ANCHOR_SQL};
+use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES};
 
@@ -140,6 +141,44 @@ const LEAF_COLUMNS: &str = "leaf_name, parent_name, class_key,
     lower_anchor, upper_anchor, index_schema_version, id_index_name,
     partition_bound, min_birth_at, min_birth_verified, created_at,
     detached_at, dropped_at";
+
+/// Catalog predicate of the open-ended `forever` leaf: attached, open end.
+pub(crate) fn open_ended_forever_leaf_predicate(alias: &str) -> String {
+    format!(
+        "{alias}.class_key = '{FOREVER_CLASS_KEY}' AND {alias}.upper_anchor = {OPEN_END_ANCHOR_SQL} \
+         AND {alias}.detached_at IS NULL AND {alias}.dropped_at IS NULL"
+    )
+}
+
+/// Start of a new open-ended `forever` leaf: the later of `today_expression`
+/// and the largest upper anchor of the attached `forever` leaves, so the new
+/// leaf never overlaps a daily `forever` leaf, a future one included. The
+/// probe, the connection planner, and their tests use this one rendering.
+pub(crate) fn open_ended_forever_start_sql(today_expression: &str) -> String {
+    format!(
+        "GREATEST({today_expression}, COALESCE((SELECT max(forever_leaf.upper_anchor) \
+         FROM {LEAF_CATALOG} AS forever_leaf \
+         WHERE forever_leaf.class_key = '{FOREVER_CLASS_KEY}' \
+           AND forever_leaf.detached_at IS NULL AND forever_leaf.dropped_at IS NULL), \
+         {today_expression}))"
+    )
+}
+
+/// The catalog row of the attached open-ended `forever` leaf, when one exists.
+pub async fn read_open_ended_forever_leaf(
+    connection: &mut PgConnection,
+) -> Result<Option<LeafCatalogRow>, HistoryError> {
+    let sql = format!(
+        "SELECT {LEAF_COLUMNS} FROM {LEAF_CATALOG} AS catalog WHERE {} \
+         ORDER BY catalog.lower_anchor LIMIT 1",
+        open_ended_forever_leaf_predicate("catalog")
+    );
+    sqlx::query_as::<_, LeafCatalogRow>(&sql)
+        .fetch_optional(connection)
+        .await?
+        .map(LeafCatalogRow::validate)
+        .transpose()
+}
 
 pub async fn read_leaf_catalog_row(
     connection: &mut PgConnection,
@@ -553,4 +592,26 @@ pub async fn database_now(connection: &mut PgConnection) -> Result<DateTime<Utc>
     Ok(sqlx::query_scalar("SELECT statement_timestamp()")
         .fetch_one(connection)
         .await?)
+}
+
+#[cfg(test)]
+mod open_ended_leaf_sql_tests {
+    use super::*;
+
+    #[test]
+    fn open_ended_start_and_predicate_render_one_pinned_text() {
+        assert_eq!(
+            open_ended_forever_start_sql("t.today"),
+            "GREATEST(t.today, COALESCE((SELECT max(forever_leaf.upper_anchor) \
+             FROM horsies_task_history_leaf_catalog AS forever_leaf \
+             WHERE forever_leaf.class_key = 'forever' \
+               AND forever_leaf.detached_at IS NULL AND forever_leaf.dropped_at IS NULL), \
+             t.today))"
+        );
+        assert_eq!(
+            open_ended_forever_leaf_predicate("c"),
+            "c.class_key = 'forever' AND c.upper_anchor = TIMESTAMPTZ '9999-01-01 00:00:00+00' \
+             AND c.detached_at IS NULL AND c.dropped_at IS NULL"
+        );
+    }
 }
