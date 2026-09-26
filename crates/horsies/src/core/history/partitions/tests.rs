@@ -1499,7 +1499,7 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
                 index_schema_version, id_index_name, partition_bound, min_birth_at,
                 min_birth_verified, created_at, detached_at, dropped_at
          FROM {LEAF_CATALOG}
-         WHERE class_key <> $1
+         WHERE class_key NOT IN ($1, 'forever')
            AND detached_at IS NULL
            AND dropped_at IS NULL
          ORDER BY lower_anchor, leaf_name
@@ -1509,11 +1509,23 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
     .fetch_one(&database.pool)
     .await
     .expect("read history catalog row");
-    sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
-        .bind(&history.id_index_name)
-        .execute(&database.pool)
+    let mut reader = database
+        .pool
+        .acquire()
         .await
-        .expect("mark history index invalid");
+        .expect("acquire open leaf reader");
+    let open = super::catalog::read_open_ended_forever_leaf(&mut reader)
+        .await
+        .expect("read open-ended leaf")
+        .expect("coverage created the open-ended leaf");
+    drop(reader);
+    for index_name in [&history.id_index_name, &open.id_index_name] {
+        sqlx::query("UPDATE pg_index SET indisvalid = false WHERE indexrelid = to_regclass($1)")
+            .bind(index_name)
+            .execute(&database.pool)
+            .await
+            .expect("mark history index invalid");
+    }
 
     let outcome = ensure_partition_coverage_in_pool(&database.pool, 2, 2, &[], &UnpublishedLoader)
         .await
@@ -1548,6 +1560,21 @@ async fn coverage_repairs_same_name_wrong_shape_and_invalid_indexes() {
         )
         .await
         .expect("read repaired history index")
+        .id_index_conformant
+    );
+    let open_bounds =
+        LeafBounds::new(open.lower_anchor, open.upper_anchor).expect("open-ended bounds");
+    assert!(
+        read_leaf_physical_state(
+            &mut connection,
+            &open.leaf_name,
+            &open.parent_name,
+            &open.id_index_name,
+            LeafPartitionBoundExpectation::Requested(&open_bounds),
+            LeafIndexKind::History,
+        )
+        .await
+        .expect("read repaired open-ended index")
         .id_index_conformant
     );
     drop(connection);
@@ -3190,5 +3217,107 @@ async fn daily_forever_leaf_inside_the_open_ended_leaf_is_refused_without_change
         .unwrap();
     assert_eq!(relation, None);
     tx.rollback().await.unwrap();
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn pool_coverage_creates_one_open_ended_forever_leaf_and_then_nothing() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let mut reader = database.pool.acquire().await.unwrap();
+    let daily_before = forever_leaves(&mut reader).await;
+    drop(reader);
+    let first = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = first else {
+        panic!("{first:?}");
+    };
+    // Four standard daily leaves and the one open-ended forever leaf.
+    assert_eq!(report.created_history_leaves, 5);
+    let mut reader = database.pool.acquire().await.unwrap();
+    let after = forever_leaves(&mut reader).await;
+    drop(reader);
+    assert_eq!(after.len(), daily_before.len() + 1);
+    assert_eq!(
+        after
+            .iter()
+            .filter(|(_, _, upper)| *upper == open_end_anchor())
+            .count(),
+        1
+    );
+    let second = ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &UnpublishedLoader)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = second else {
+        panic!("{second:?}");
+    };
+    assert_eq!(report.created_history_leaves, 0);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn existing_daily_forever_leaves_keep_the_probe_healthy_before_the_open_leaf_starts() {
+    let database = TestDatabase::create_with_connections(4).await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let today = database_now(&mut tx)
+        .await
+        .unwrap()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc();
+    // Daily forever leaves through the horizon, as a deployment has them today.
+    for offset in 1..=3 {
+        let lower = today + Duration::days(offset);
+        let leaf = LeafRef::new(
+            daily_leaf_name(TASK_HISTORY_FOREVER, lower).unwrap(),
+            FOREVER_CLASS_KEY,
+            LeafBounds::new(lower, lower + Duration::days(1)).unwrap(),
+        )
+        .unwrap();
+        let outcome = create_daily_leaf(
+            tx.as_mut(),
+            &CreateDailyHistoryLeaf::new(leaf).unwrap(),
+            &UnpublishedLoader,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            LeafCreation::Created { .. } | LeafCreation::AlreadyConformant { .. }
+        ));
+    }
+    tx.commit().await.unwrap();
+
+    let setup =
+        ensure_partition_coverage_in_pool(&database.pool, 3, 2, &[], &StagedLoaderPublisher)
+            .await
+            .unwrap();
+    assert!(matches!(setup, CoverageOutcome::Ensured(_)), "{setup:?}");
+    let mut reader = database.pool.acquire().await.unwrap();
+    let leaves = forever_leaves(&mut reader).await;
+    drop(reader);
+    let open = leaves
+        .iter()
+        .find(|(_, _, upper)| *upper == open_end_anchor())
+        .expect("open-ended leaf");
+    // Starts where the last daily forever leaf ends: no overlap.
+    assert_eq!(open.1, today + Duration::days(4));
+    assert!(open.1 > today);
+
+    let (proxy, pool) = proxied_pool(&database, 0, 1).await;
+    proxy.reset();
+    let healthy = ensure_partition_coverage_in_pool(&pool, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    let CoverageOutcome::Ensured(report) = healthy else {
+        panic!("{healthy:?}");
+    };
+    assert_eq!(report.created_history_leaves, 0);
+    assert_eq!(proxy.statement_count(), 3);
+    pool.close().await;
+    proxy.stop().await;
     database.drop().await;
 }

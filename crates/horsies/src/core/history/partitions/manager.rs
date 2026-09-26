@@ -42,9 +42,33 @@ const DAILY: Duration = Duration::days(1);
 const LEAF_DDL_LOCK_TIMEOUT_MS: u64 = 2_000;
 
 /// One leaf that coverage plans to ensure.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PlannedLeaf {
     Daily(CreateDailyHistoryLeaf),
     OpenEnded(CreateOpenEndedHistoryLeaf),
+}
+
+impl PlannedLeaf {
+    pub(crate) fn leaf(&self) -> &LeafRef {
+        match self {
+            Self::Daily(command) => command.leaf(),
+            Self::OpenEnded(command) => command.leaf(),
+        }
+    }
+}
+
+/// Creates or repairs one planned leaf.
+pub(crate) async fn create_planned_leaf<P: LoaderPublication>(
+    connection: &mut PgConnection,
+    planned: &PlannedLeaf,
+    publisher: &P,
+) -> Result<LeafCreation, HistoryError> {
+    match planned {
+        PlannedLeaf::Daily(create) => create_daily_leaf(connection, create, publisher).await,
+        PlannedLeaf::OpenEnded(create) => {
+            create_open_ended_leaf(connection, create, publisher).await
+        }
+    }
 }
 
 pub(crate) enum CoveragePlan {
@@ -716,12 +740,7 @@ pub async fn ensure_leaf_coverage<P: LoaderPublication>(
     };
     let mut outcomes = Vec::with_capacity(commands.len());
     for planned in commands {
-        let outcome = match planned {
-            PlannedLeaf::Daily(create) => create_daily_leaf(connection, &create, publisher).await?,
-            PlannedLeaf::OpenEnded(create) => {
-                create_open_ended_leaf(connection, &create, publisher).await?
-            }
-        };
+        let outcome = create_planned_leaf(connection, &planned, publisher).await?;
         let keep_going = matches!(
             outcome,
             LeafCreation::Created { .. }

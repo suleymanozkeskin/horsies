@@ -6,7 +6,10 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 
 use super::coverage::DeclaredRetentionClass;
-use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
+use crate::core::history::commands::{
+    open_end_anchor, CreateDailyHistoryLeaf, CreateOpenEndedHistoryLeaf, LeafBounds, LeafRef,
+    OPEN_END_ANCHOR_SQL,
+};
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, DEFAULT_RETENTION_CLASS_KEY, DEFAULT_RETENTION_DURATION_DAYS,
     FOREVER_CLASS_KEY,
@@ -17,7 +20,10 @@ use crate::core::history::names::{
     HEARTBEATS_TABLE, HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RETENTION_CLASSES, TASK_HISTORY_FOREVER,
     TASK_HISTORY_PARENT,
 };
-use crate::core::history::partitions::catalog::INDEX_SCHEMA_VERSION;
+use crate::core::history::partitions::catalog::{
+    open_ended_forever_leaf_predicate, open_ended_forever_start_sql, INDEX_SCHEMA_VERSION,
+};
+use crate::core::history::partitions::manager::PlannedLeaf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CoverageClassFault {
@@ -27,7 +33,7 @@ pub(crate) struct CoverageClassFault {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CoverageLeafRepair {
-    History(CreateDailyHistoryLeaf),
+    History(PlannedLeaf),
     Heartbeat(CreateHourlyHeartbeatLeaf),
 }
 
@@ -131,12 +137,16 @@ fn decode_leaf_repair(row: &CoverageProbeRaw) -> Result<CoverageLeafRepair, Hist
         LeafBounds::new(lower, upper).map_err(|error| HistoryError::contract(error.to_string()))?;
     let leaf = LeafRef::new(leaf_name, class_key, bounds)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
-    match row.leaf_kind.as_deref() {
-        Some("history") => Ok(CoverageLeafRepair::History(
+    match (row.leaf_kind.as_deref(), upper == open_end_anchor()) {
+        (Some("history"), true) => Ok(CoverageLeafRepair::History(PlannedLeaf::OpenEnded(
+            CreateOpenEndedHistoryLeaf::new(leaf)
+                .map_err(|error| HistoryError::contract(error.to_string()))?,
+        ))),
+        (Some("history"), false) => Ok(CoverageLeafRepair::History(PlannedLeaf::Daily(
             CreateDailyHistoryLeaf::new(leaf)
                 .map_err(|error| HistoryError::contract(error.to_string()))?,
-        )),
-        Some("heartbeat") => Ok(CoverageLeafRepair::Heartbeat(
+        ))),
+        (Some("heartbeat"), _) => Ok(CoverageLeafRepair::Heartbeat(
             CreateHourlyHeartbeatLeaf::new(leaf)?,
         )),
         _ => Err(HistoryError::contract(
@@ -154,6 +164,9 @@ pub(crate) async fn probe_partition_coverage(
     let expected = expected_finite_classes(declared_classes)?;
     let history_horizon = i64::from(history_horizon_days);
     let heartbeat_horizon = i64::from(heartbeat_horizon_hours);
+    let open_start =
+        open_ended_forever_start_sql("date_trunc('day', db_clock.database_now, 'UTC')");
+    let open_predicate = open_ended_forever_leaf_predicate("catalog");
     let sql = format!(
         r#"
 WITH utc_timezone AS MATERIALIZED (
@@ -302,8 +315,12 @@ classes AS (
 desired AS (
     SELECT
         classes.*,
-        CASE classes.leaf_kind
-            WHEN 'history' THEN
+        classes.leaf_kind = 'history' AND classes.class_key = $5 AS open_ended,
+        open_leaf.leaf_name AS open_leaf_name,
+        CASE
+            WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN
+                COALESCE(open_leaf.lower_anchor, {open_start})
+            WHEN classes.leaf_kind = 'history' THEN
                 date_trunc('day', db_clock.database_now, 'UTC')
                 + series.value * classes.leaf_interval
             ELSE
@@ -312,18 +329,36 @@ desired AS (
         END AS lower_anchor
     FROM classes
     CROSS JOIN db_clock
-    CROSS JOIN LATERAL generate_series(0, classes.horizon) AS series(value)
+    CROSS JOIN LATERAL generate_series(
+        0,
+        CASE WHEN classes.leaf_kind = 'history' AND classes.class_key = $5 THEN 0
+             ELSE classes.horizon END
+    ) AS series(value)
+    LEFT JOIN LATERAL (
+        SELECT catalog.leaf_name, catalog.lower_anchor
+        FROM {LEAF_CATALOG} AS catalog
+        WHERE {open_predicate}
+        ORDER BY catalog.lower_anchor
+        LIMIT 1
+    ) AS open_leaf ON classes.leaf_kind = 'history' AND classes.class_key = $5
 ),
 named_desired AS (
     SELECT
         desired.*,
-        desired.lower_anchor + desired.leaf_interval AS upper_anchor,
-        desired.parent_name || '_' ||
-        CASE desired.leaf_kind
-            WHEN 'history' THEN to_char(
+        CASE WHEN desired.open_ended THEN {OPEN_END_ANCHOR_SQL}
+             ELSE desired.lower_anchor + desired.leaf_interval
+        END AS upper_anchor,
+        CASE
+            WHEN desired.open_ended THEN COALESCE(
+                desired.open_leaf_name,
+                desired.parent_name || '_open_' || to_char(
+                    desired.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD'
+                )
+            )
+            WHEN desired.leaf_kind = 'history' THEN desired.parent_name || '_' || to_char(
                 desired.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD'
             )
-            ELSE to_char(
+            ELSE desired.parent_name || '_' || to_char(
                 desired.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD_HH24'
             )
         END AS leaf_name
