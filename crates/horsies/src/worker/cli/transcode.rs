@@ -344,7 +344,7 @@ async fn status(pool: &sqlx::PgPool, job_id: Uuid) -> Result<(), TranscodeCliErr
         job.state.as_str(),
         job.component.as_str(),
         job.source_version,
-        job.target_version,
+        job.target.version(),
         job.copied_rows_completed,
         job.copied_rows_total,
         job.relation_count,

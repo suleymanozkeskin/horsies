@@ -4,6 +4,7 @@ use chrono::{DateTime, Duration, Utc};
 use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
+use crate::core::history::column_rules::HISTORY_COLUMN_RULES;
 use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::daily_leaf_name;
@@ -18,7 +19,9 @@ use crate::core::history::partitions::catalog::{
 use crate::core::history::partitions::forever::FOREVER_LEGACY_LEAF;
 use crate::core::history::partitions::manager::create_daily_leaf;
 use crate::core::history::partitions::publication::{LoaderPublication, UnpublishedLoader};
-use crate::core::history::projection::render_relocation_insert_sql;
+use crate::core::history::projection::{
+    render_relocation_insert_sql, render_relocation_rule_check_sql,
+};
 use crate::core::history::reads::publisher::StagedLoaderPublisher;
 
 pub const RELOCATION_LEDGER: &str = "horsies_cutover_relocation_ledger";
@@ -42,6 +45,10 @@ pub enum RelocationError {
     InvalidBatchSize,
     #[error("legacy task identity {0:?} is not a UUID")]
     InvalidTaskIdentity(String),
+    /// A selected legacy row fails one of `HISTORY_COLUMN_RULES`. The batch
+    /// made no change: the check runs before its first write.
+    #[error("legacy task {task_id} fails history column rule {rule}")]
+    ColumnRuleViolation { task_id: String, rule: &'static str },
     #[error(transparent)]
     History(#[from] HistoryError),
 }
@@ -52,6 +59,13 @@ struct Destination {
     lower_anchor: DateTime<Utc>,
 }
 
+/// Relocates one batch of pre-cutover terminal rows from the live table to
+/// history, on the caller's transaction.
+///
+/// Before its first write, the batch checks every selected row against
+/// `HISTORY_COLUMN_RULES` and returns `ColumnRuleViolation` for the first
+/// failure; the batch then made no change. Other errors can leave writes of
+/// this batch on the transaction; the caller rolls it back.
 pub async fn relocate_terminal_batch(
     connection: &mut PgConnection,
     batch_size: i64,
@@ -86,6 +100,10 @@ pub async fn relocate_terminal_batch(
         });
     }
 
+    match first_rule_violation(connection, &task_ids).await? {
+        Some(violation) => return Err(violation),
+        None => {}
+    }
     ensure_batch_leaf_coverage(connection, &task_ids).await?;
     let insert = format!(
         "{}\n    RETURNING (terminalization_kind = 'LEGACY_TERMINAL')::int",
@@ -163,6 +181,33 @@ pub async fn relocate_terminal_batch(
         rows_relocated: task_ids.len(),
         legacy_kind_rows,
     })
+}
+
+/// The first selected row that fails a history column rule, as a
+/// `ColumnRuleViolation`. Reads only.
+async fn first_rule_violation(
+    connection: &mut PgConnection,
+    task_ids: &[String],
+) -> Result<Option<RelocationError>, RelocationError> {
+    let failure: Option<(String, String)> =
+        sqlx::query_as(&render_relocation_rule_check_sql("$1::text[]"))
+            .bind(task_ids)
+            .fetch_optional(&mut *connection)
+            .await
+            .map_err(HistoryError::from)?;
+    let Some((task_id, rule_name)) = failure else {
+        return Ok(None);
+    };
+    let rule = HISTORY_COLUMN_RULES
+        .iter()
+        .find(|rule| rule.name == rule_name)
+        .map(|rule| rule.name)
+        .ok_or_else(|| {
+            HistoryError::contract(format!(
+                "relocation rule check returned unknown rule {rule_name:?}"
+            ))
+        })?;
+    Ok(Some(RelocationError::ColumnRuleViolation { task_id, rule }))
 }
 
 async fn ensure_batch_leaf_coverage(

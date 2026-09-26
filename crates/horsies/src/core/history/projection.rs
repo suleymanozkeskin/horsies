@@ -3,6 +3,7 @@
 use std::borrow::Cow;
 
 use crate::core::history::archive::rerun_input::RerunInputDisposition;
+use crate::core::history::column_rules::HISTORY_COLUMN_RULES;
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::lifecycle::TerminalizationKind;
 
@@ -272,9 +273,38 @@ pub fn render_relocation_insert_sql(task_ids_expression: &str) -> String {
         .map(|column| column.relocation_expression())
         .collect::<Vec<_>>()
         .join(",\n        ");
+    let source = relocation_source_sql(task_ids_expression);
+    format!(
+        "INSERT INTO horsies_task_history (\n        {columns}\n    )\n    SELECT\n        {values}\n    {source}"
+    )
+}
+
+/// The first relocation row, in task id order, that fails a rule of
+/// `HISTORY_COLUMN_RULES`, with the rule name: columns `task_id` (text) and
+/// `rule_name`. The row values come from the same projection as
+/// `render_relocation_insert_sql`. A rule fails when its predicate is FALSE;
+/// NULL passes, as it does for a CHECK constraint.
+pub fn render_relocation_rule_check_sql(task_ids_expression: &str) -> String {
+    let projected = HistoryProjectionColumn::ALL
+        .iter()
+        .map(|column| format!("{} AS {}", column.relocation_expression(), column.as_str()))
+        .collect::<Vec<_>>()
+        .join(",\n        ");
+    let rules = HISTORY_COLUMN_RULES
+        .iter()
+        .map(|rule| format!("('{}', {})", rule.name, rule.predicate))
+        .collect::<Vec<_>>()
+        .join(",\n        ");
+    let source = relocation_source_sql(task_ids_expression);
+    format!(
+        "WITH projected AS (\n    SELECT\n        {projected}\n    {source}\n)\nSELECT p.task_id::text AS task_id, r.rule_name\nFROM projected p\nCROSS JOIN LATERAL (\n    VALUES\n        {rules}\n) AS r(rule_name, passed)\nWHERE r.passed IS FALSE\nORDER BY p.task_id, r.rule_name\nLIMIT 1"
+    )
+}
+
+fn relocation_source_sql(task_ids_expression: &str) -> String {
     let disposition = relocation_disposition_case_expression();
     format!(
-        "INSERT INTO horsies_task_history (\n        {columns}\n    )\n    SELECT\n        {values}\n    FROM horsies_tasks t\n    LEFT JOIN LATERAL (\n        SELECT wt.workflow_id\n        FROM horsies_workflow_tasks wt\n        WHERE wt.task_id = t.id\n        ORDER BY wt.id\n        LIMIT 1\n    ) node ON TRUE\n    LEFT JOIN LATERAL (\n        SELECT a.failed_reason\n        FROM horsies_task_attempts a\n        WHERE a.task_id = CAST(t.id AS uuid)\n        ORDER BY a.attempt DESC\n        LIMIT 1\n    ) last_attempt ON TRUE\n    CROSS JOIN LATERAL (\n        SELECT {disposition} AS disposition\n    ) d\n    WHERE t.id::text = ANY({task_ids_expression})"
+        "FROM horsies_tasks t\n    LEFT JOIN LATERAL (\n        SELECT wt.workflow_id\n        FROM horsies_workflow_tasks wt\n        WHERE wt.task_id = t.id\n        ORDER BY wt.id\n        LIMIT 1\n    ) node ON TRUE\n    LEFT JOIN LATERAL (\n        SELECT a.failed_reason\n        FROM horsies_task_attempts a\n        WHERE a.task_id = CAST(t.id AS uuid)\n        ORDER BY a.attempt DESC\n        LIMIT 1\n    ) last_attempt ON TRUE\n    CROSS JOIN LATERAL (\n        SELECT {disposition} AS disposition\n    ) d\n    WHERE t.id::text = ANY({task_ids_expression})"
     )
 }
 

@@ -452,6 +452,49 @@ fn vocabulary_transforms_signature_and_cli_are_pinned() {
 
 #[tokio::test]
 #[serial]
+async fn plan_rejects_targets_outside_the_history_column_bounds() {
+    let database = P10Database::create().await;
+    let cases = [
+        (1_i16, 0_i16, "json-utf8", "target version 0 is below 1"),
+        (1, 2, "", "target codec is 0 bytes; allowed 1 to 64"),
+        (
+            1,
+            2,
+            &"c".repeat(65)[..],
+            "target codec is 65 bytes; allowed 1 to 64",
+        ),
+    ];
+    for (source_version, target_version, target_codec, reason) in cases {
+        let mut transaction = database.pool.begin().await.unwrap();
+        let outcome = plan_transcode(
+            &mut transaction,
+            Uuid::new_v4(),
+            ArchiveComponent::Result,
+            source_version,
+            target_version,
+            "json-utf8",
+            target_codec,
+        )
+        .await
+        .unwrap();
+        transaction.rollback().await.unwrap();
+        match outcome {
+            TranscodePlanOutcome::Rejected(rejected) => {
+                assert_eq!(rejected.reason, reason);
+                assert_eq!(rejected.affected_rows, 0);
+            }
+            other => panic!("target {target_version}/{target_codec:?} was not rejected: {other:?}"),
+        }
+    }
+    let jobs: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {TRANSCODE_JOBS}"))
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 0);
+}
+
+#[tokio::test]
+#[serial]
 async fn forward_reverse_pipeline_is_resumable_multi_relation_and_exact() {
     let database = P10Database::create().await;
     let ids = seed_result_rows(&database.pool, 3, 2).await;
