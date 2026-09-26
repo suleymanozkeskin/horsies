@@ -20,6 +20,20 @@ pub fn daily_leaf_name(
     Ok(name)
 }
 
+/// Name of the open-ended `forever` leaf that starts at `lower`.
+pub fn open_ended_leaf_name(
+    parent_name: &str,
+    lower: DateTime<Utc>,
+) -> Result<String, HistoryCommandError> {
+    let name = format!("{parent_name}_open_{}", lower.format("%Y_%m_%d"));
+    if !is_safe_identifier(&name) || !is_safe_identifier(&leaf_enqueued_index_name(&name)) {
+        return Err(HistoryCommandError::Invalid(
+            "derived open-ended leaf name must leave safe index names",
+        ));
+    }
+    Ok(name)
+}
+
 pub fn leaf_id_index_name(leaf_name: &str) -> String {
     format!("{leaf_name}_task_idx")
 }
@@ -114,5 +128,15 @@ mod tests {
             "CREATE INDEX horsies_task_history_standard_30d_2026_08_11_enqueued_idx ON horsies_task_history_standard_30d_2026_08_11 (enqueued_at)"
         );
         assert!(render_leaf_enqueued_index_ddl(&"a".repeat(55)).is_err());
+    }
+
+    #[test]
+    fn open_ended_leaf_name_keeps_index_names_safe() {
+        let lower = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 9, 26, 0, 0, 0).unwrap();
+        let name = open_ended_leaf_name("horsies_task_history_forever", lower).unwrap();
+        assert_eq!(name, "horsies_task_history_forever_open_2026_09_26");
+        assert_eq!(name.len(), 44);
+        assert!(leaf_enqueued_index_name(&name).len() <= 63);
+        assert!(open_ended_leaf_name(&"p".repeat(40), lower).is_err());
     }
 }
