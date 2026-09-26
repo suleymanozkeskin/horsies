@@ -5,6 +5,16 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [Unreleased]
+
+### Work reductions
+
+- Every new connection of the broker pools runs `SET jit = off`, except the
+  runtime pool in PgBouncer transaction mode, whose server sessions are
+  shared. On a PostgreSQL build with JIT on, the partition coverage probe
+  (cost estimate far above `jit_above_cost`) spent about 0.7 s in JIT
+  compilation for about 2 ms of execution on each call.
+
 ## [0.1.0-alpha.34] - 2026-09-17
 
 ### Fixed

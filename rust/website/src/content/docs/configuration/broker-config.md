@@ -99,6 +99,10 @@ The broker manages an async connection pool:
 
 Consider: `pool_size + max_overflow` should not exceed PostgreSQL's `max_connections` (divided by number of worker instances).
 
+### JIT
+
+Each new Horsies connection runs `SET jit = off`. Horsies statements are short, and PostgreSQL's JIT compile time exceeds their run time when a cost estimate passes `jit_above_cost`. The runtime pool in PgBouncer transaction mode is the exception: its server sessions are shared, so Horsies does not change session settings there. For that pool, set JIT off on the server side, for example `ALTER ROLE horsies_role SET jit = off;`.
+
 ## PgBouncer Transaction Pooling
 
 PgBouncer transaction pooling can be used for normal task and workflow SQL, but it cannot preserve session state for `LISTEN/NOTIFY`. Horsies therefore needs two URLs:

@@ -552,20 +552,63 @@ fn pg_connect_options(
     Ok(connect_options)
 }
 
-fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    PgPoolOptions::new()
-        .max_connections(config.pool_size + config.max_overflow)
-        .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-        .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-        .test_before_acquire(config.pool_pre_ping)
+/// Session setting for every Horsies connection that keeps its session. The
+/// Horsies statements are short; PostgreSQL's JIT compiles them when a cost
+/// estimate passes `jit_above_cost`, and the compile time then exceeds the
+/// run time by orders of magnitude (the partition coverage probe: about 2 ms
+/// of work, 0.7 s or more of JIT compile).
+const DISABLE_JIT_SQL: &str = "SET jit = off";
+
+/// Whether a pool's connections keep their own session settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSettings {
+    /// A direct or session-capable connection: a `SET` holds for the session.
+    Kept,
+    /// PgBouncer transaction mode: server sessions are shared, so a session
+    /// `SET` would leak to other clients. JIT stays as the server configures it.
+    NotKept,
 }
 
+fn session_settings(config: &PostgresConfig) -> SessionSettings {
+    match config.pgbouncer_transaction_mode {
+        true => SessionSettings::NotKept,
+        false => SessionSettings::Kept,
+    }
+}
+
+fn with_session_settings(options: PgPoolOptions, settings: SessionSettings) -> PgPoolOptions {
+    match settings {
+        SessionSettings::NotKept => options,
+        SessionSettings::Kept => options.after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query(DISABLE_JIT_SQL).execute(connection).await?;
+                Ok(())
+            })
+        }),
+    }
+}
+
+fn pg_pool_options(config: &PostgresConfig) -> PgPoolOptions {
+    with_session_settings(
+        PgPoolOptions::new()
+            .max_connections(config.pool_size + config.max_overflow)
+            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
+            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
+            .test_before_acquire(config.pool_pre_ping),
+        session_settings(config),
+    )
+}
+
+/// The session pool's URL is direct or session-capable (it carries LISTEN).
 fn pg_session_pool_options(config: &PostgresConfig) -> PgPoolOptions {
-    PgPoolOptions::new()
-        .max_connections(SESSION_POOL_MAX_CONNECTIONS)
-        .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
-        .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
-        .test_before_acquire(config.pool_pre_ping)
+    with_session_settings(
+        PgPoolOptions::new()
+            .max_connections(SESSION_POOL_MAX_CONNECTIONS)
+            .acquire_timeout(Duration::from_secs(config.pool_timeout as u64))
+            .idle_timeout(Duration::from_secs(config.pool_recycle as u64))
+            .test_before_acquire(config.pool_pre_ping),
+        SessionSettings::Kept,
+    )
 }
 
 fn listener_probe_failed(err: sqlx::Error) -> BrokerError {
@@ -5579,5 +5622,84 @@ mod terminal_at_stamp_tests {
         );
 
         cleanup(&pool, &id).await;
+    }
+}
+
+#[cfg(test)]
+mod session_settings_tests {
+    use super::*;
+    use serial_test::serial;
+
+    fn config(database_url: String, pgbouncer_transaction_mode: bool) -> PostgresConfig {
+        PostgresConfig {
+            database_url,
+            session_database_url: None,
+            pgbouncer_transaction_mode,
+            pool_pre_ping: true,
+            pool_size: 2,
+            max_overflow: 0,
+            retain_rerun_input_default: false,
+            pool_timeout: 30,
+            pool_recycle: 1800,
+            echo: false,
+        }
+    }
+
+    async fn jit(pool: &PgPool) -> String {
+        sqlx::query_scalar("SELECT current_setting('jit')")
+            .fetch_one(pool)
+            .await
+            .expect("read jit setting")
+    }
+
+    #[test]
+    fn transaction_mode_pools_do_not_keep_session_settings() {
+        let url = "postgresql://postgres@localhost/horsies".to_owned();
+        assert_eq!(
+            session_settings(&config(url.clone(), false)),
+            SessionSettings::Kept
+        );
+        assert_eq!(
+            session_settings(&config(url, true)),
+            SessionSettings::NotKept
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn broker_pools_that_keep_session_settings_run_without_jit() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let separator = if url.contains('?') { '&' } else { '?' };
+        let mut config = config(url.clone(), false);
+        config.session_database_url = Some(format!("{url}{separator}application_name=jit_session"));
+        let broker = PostgresBroker::connect_with(&config)
+            .await
+            .expect("connect broker");
+        assert_eq!(jit(broker.pool()).await, "off");
+        assert_eq!(jit(&broker.session_pool).await, "off");
+        broker.pool().close().await;
+        broker.session_pool.close().await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn pools_that_do_not_keep_session_settings_keep_the_server_jit() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let options = PgConnectOptions::from_str(&url).expect("parse test URL");
+        let plain = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .expect("connect plain pool");
+        let not_kept = with_session_settings(
+            PgPoolOptions::new().max_connections(1),
+            SessionSettings::NotKept,
+        )
+        .connect_with(options)
+        .await
+        .expect("connect not-kept pool");
+        assert_eq!(jit(&not_kept).await, jit(&plain).await);
+        plain.close().await;
+        not_kept.close().await;
     }
 }
