@@ -9,6 +9,11 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Work reductions
 
+- Every new connection of the broker pools runs `SET jit = off`, except the
+  runtime pool in PgBouncer transaction mode, whose server sessions are
+  shared. On a PostgreSQL build with JIT on, the partition coverage probe
+  (cost estimate far above `jit_above_cost`) spent about 0.7 s in JIT
+  compilation for about 2 ms of execution on each call.
 - Drop `horsies_task_notify_update_trigger`. It ran
   `horsies_notify_task_changes()` on every live status change: claim, start
   and requeue. Its UPDATE branch sends `task_done` only for terminal
@@ -19,7 +24,6 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   PostgreSQL rebuilt every CHECK expression from its stored text on each
   history INSERT. The cross-column CHECK constraints stay. The Horsies
   writers produce values inside the dropped rules.
-
 - The `forever` class uses one open-ended history leaf instead of one daily
   leaf per day. Partition coverage creates it after the last daily `forever`
   leaf and no longer creates daily `forever` leaves. The pruning pass
