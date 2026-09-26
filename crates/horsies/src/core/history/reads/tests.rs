@@ -1438,3 +1438,35 @@ async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() 
     drop(connection);
     database.drop().await;
 }
+
+#[test]
+fn open_ended_leaf_is_probed_in_the_pruned_and_legacy_passes_only() {
+    let daily_lower = timestamp("2026-09-25T00:00:00Z");
+    let open_lower = timestamp("2026-09-26T00:00:00Z");
+    let daily = "horsies_task_history_forever_2026_09_25";
+    let open = "horsies_task_history_forever_open_2026_09_26";
+    let manifest = LookupManifest::new(
+        vec![
+            LookupLeaf::new(daily, daily_lower, open_lower, None).unwrap(),
+            LookupLeaf::new(
+                open,
+                open_lower,
+                crate::core::history::commands::open_end_anchor(),
+                None,
+            )
+            .unwrap(),
+        ],
+        None,
+    )
+    .unwrap();
+    let provenance = render_staged_provenance_function(&manifest);
+    let guard = render_staged_duplicate_guard_function(&manifest);
+    let probes = |text: &str, relation: &str| text.matches(&format!("FROM {relation}")).count();
+    // Daily leaf: pruned, fallback, legacy. Open-ended leaf: pruned, legacy.
+    assert_eq!(probes(&provenance, daily), 3);
+    assert_eq!(probes(&provenance, open), 2);
+    assert!(provenance.contains("IF v_effective_birth < TIMESTAMPTZ '9999-01-01T00:00:00Z' THEN"));
+    assert!(!provenance.contains("IF v_effective_birth >= TIMESTAMPTZ '9999-01-01T00:00:00Z' THEN"));
+    assert_eq!(probes(&guard, daily), 2);
+    assert_eq!(probes(&guard, open), 2);
+}

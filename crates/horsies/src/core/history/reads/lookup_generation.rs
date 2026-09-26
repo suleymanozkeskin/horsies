@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Timelike, Utc};
 
-use crate::core::history::commands::is_safe_identifier;
+use crate::core::history::commands::{is_safe_identifier, open_end_anchor};
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
     HEARTBEAT_CLASS_KEY, LIVE_TASKS, TASK_DETAIL_FUNCTION, TASK_DUPLICATE_GUARD_FUNCTION,
@@ -282,6 +282,9 @@ fn staged_function(
                     .leaves
                     .iter()
                     .rev()
+                    // The open-ended leaf ends at the open-end anchor, so its
+                    // fallback condition can never hold.
+                    .filter(|leaf| leaf.upper_anchor != open_end_anchor())
                     .map(|leaf| fallback_probe(leaf, &history_probe(leaf.relation_name())))
                     .collect::<Vec<_>>()
                     .join("\n")

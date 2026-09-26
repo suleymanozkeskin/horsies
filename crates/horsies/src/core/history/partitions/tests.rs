@@ -3748,3 +3748,45 @@ async fn forever_drop_keeps_a_detached_leaf_that_gained_rows() {
     );
     database.drop().await;
 }
+
+#[tokio::test]
+#[serial]
+async fn guard_probe_set_is_standard_horizon_plus_the_open_ended_leaf() {
+    let database = TestDatabase::create().await;
+    let mut tx = database.pool.begin().await.unwrap();
+    let coverage = ensure_partition_coverage(&mut tx, 3, 2, &[], &StagedLoaderPublisher)
+        .await
+        .unwrap();
+    assert!(
+        matches!(coverage, CoverageOutcome::Ensured(_)),
+        "{coverage:?}"
+    );
+    // The guard probes the manifest leaves whose upper bound is after the id's
+    // birth: for an id born now, the leaves that end after now.
+    let probed: Vec<(String, String)> = sqlx::query_as(&format!(
+        "SELECT catalog.class_key, manifest.leaf_name
+         FROM {TASK_LOOKUP_MANIFEST} AS manifest
+         JOIN {LEAF_CATALOG} AS catalog USING (leaf_name)
+         WHERE manifest.upper_anchor > statement_timestamp()
+         ORDER BY 1, 2"
+    ))
+    .fetch_all(tx.as_mut())
+    .await
+    .unwrap();
+    let standard = probed
+        .iter()
+        .filter(|(class, _)| class == "standard_30d")
+        .count();
+    let forever: Vec<&str> = probed
+        .iter()
+        .filter(|(class, _)| class == "forever")
+        .map(|(_, name)| name.as_str())
+        .collect();
+    assert_eq!(standard, 4);
+    // The open-ended leaf, plus today's daily forever leaf from the migrations
+    // until it closes and the sweep removes it.
+    assert_eq!(forever.len(), 2, "{forever:?}");
+    assert!(forever.iter().any(|name| name.contains("_open_")));
+    tx.rollback().await.unwrap();
+    database.drop().await;
+}
