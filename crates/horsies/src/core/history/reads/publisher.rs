@@ -1,4 +1,4 @@
-//! Atomic publication of the staged reader triple and its probe manifest.
+//! Atomic publication of the staged readers, the duplicate guard, and their probe manifest.
 
 use std::collections::HashSet;
 
@@ -6,15 +6,15 @@ use sqlx::PgConnection;
 
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{
-    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION,
+    HEARTBEAT_CLASS_KEY, LEAF_CATALOG, RENDERED_GUARD_MARKER, TASK_DETAIL_FUNCTION,
+    TASK_DUPLICATE_GUARD_FUNCTION, TASK_LOOKUP_MANIFEST, TASK_PROVENANCE_FUNCTION,
 };
 use crate::core::history::partitions::catalog::read_manifest_leaf_rows;
 use crate::core::history::partitions::publication::{LoaderPublication, LoaderRepublished};
 
-use super::detail::staged_detail_published;
 use super::lookup_generation::{
-    manifest_from_catalog, render_staged_detail_function, render_staged_lookup_function,
-    render_staged_provenance_function, LookupManifest,
+    manifest_from_catalog, render_staged_detail_function, render_staged_duplicate_guard_function,
+    render_staged_lookup_function, render_staged_provenance_function, LookupManifest,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -42,6 +42,14 @@ impl LoaderPublication for StagedLoaderPublisher {
         sqlx::query(&render_staged_detail_function(&manifest))
             .execute(&mut *connection)
             .await?;
+        sqlx::query(&render_staged_duplicate_guard_function(&manifest))
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query(&format!(
+            "COMMENT ON FUNCTION {TASK_DUPLICATE_GUARD_FUNCTION}(uuid) IS '{RENDERED_GUARD_MARKER}'"
+        ))
+        .execute(&mut *connection)
+        .await?;
         rewrite_manifest_table(connection, &manifest).await?;
 
         let mut absent_leaves = selection.absent_relations;
@@ -69,11 +77,26 @@ impl LoaderPublication for StagedLoaderPublisher {
         &self,
         connection: &mut PgConnection,
     ) -> Result<bool, HistoryError> {
-        if !staged_detail_published(connection).await? {
+        if !staged_readers_published(connection).await? {
             return Ok(true);
         }
         Ok(!published_manifest_matches_catalog(connection).await?)
     }
+}
+
+/// The detail reader is installed and the duplicate guard is the rendered
+/// version (it carries the marker; the migration's first version does not).
+/// One statement: healthy coverage has a fixed statement budget.
+async fn staged_readers_published(connection: &mut PgConnection) -> Result<bool, HistoryError> {
+    Ok(sqlx::query_scalar(
+        "SELECT to_regprocedure($1) IS NOT NULL
+            AND obj_description(to_regprocedure($2), 'pg_proc') IS NOT DISTINCT FROM $3",
+    )
+    .bind(format!("{TASK_DETAIL_FUNCTION}(uuid)"))
+    .bind(format!("{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)"))
+    .bind(RENDERED_GUARD_MARKER)
+    .fetch_one(connection)
+    .await?)
 }
 
 async fn published_manifest_matches_catalog(

@@ -14,6 +14,63 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   shared. On a PostgreSQL build with JIT on, the partition coverage probe
   (cost estimate far above `jit_above_cost`) spent about 0.7 s in JIT
   compilation for about 2 ms of execution on each call.
+- Drop `horsies_task_notify_update_trigger`. It ran
+  `horsies_notify_task_changes()` on every live status change: claim, start
+  and requeue. Its UPDATE branch sends `task_done` only for terminal
+  statuses, which live rows cannot hold. The terminalization functions send
+  `task_done`. The function keeps its INSERT branch (`task_new`,
+  `task_queue_<queue>`).
+- Drop the 24 single-column CHECK constraints of `horsies_task_history`.
+  PostgreSQL rebuilt every CHECK expression from its stored text on each
+  history INSERT. The cross-column CHECK constraints stay. The Horsies
+  writers produce values inside the dropped rules.
+- The `forever` class uses one open-ended history leaf instead of one daily
+  leaf per day. Partition coverage creates it after the last daily `forever`
+  leaf and no longer creates daily `forever` leaves. The pruning pass
+  detaches and drops closed daily `forever` leaves that hold no rows (at most
+  32 per pass). Before, each day added a `forever` leaf that was never
+  removed, and every staged-reader miss and duplicate-identity guard probed
+  it. With PR #52's pruned guard, the guard for a UUIDv7 id probes today's and
+  the horizon's standard leaves plus one `forever` leaf.
+
+### Changed
+
+- `LeafCreation::CoveredByOpenEndedLeaf`: `create_daily_leaf` refuses a daily
+  `forever` leaf that the open-ended leaf covers, and creates nothing.
+- `LeafInspection` renames `expires_at` to `eligible_at` and adds
+  `KeptNonEmpty`. The inspection, finalize and drop commands carry a
+  `LeafLifecycle`; existing constructors use `Retention`.
+- `PrunePass` adds `forever_swept`.
+- The move family's duplicate-identity guard calls
+  `horsies_task_history_duplicate_staged(uuid)`. The staged reader publisher
+  renders it from the leaf manifest: a UUIDv7 id probes only the history
+  leaves that can hold it. The readers' clock-violation fallback probes are
+  omitted, so the guard does not detect a duplicate that a wrong client clock
+  placed in an older leaf. Other ids probe every leaf. The readers keep their
+  fallback. Before, every completion probed every history leaf.
+- Cutover relocation checks every selected legacy row against the dropped
+  rules before its first write. A row outside them stops the batch with
+  `RelocationError::ColumnRuleViolation { task_id, rule }`, and the batch
+  makes no change.
+- `horsies transcode plan` rejects a target version below 1 and a target
+  codec outside 1 to 64 bytes. The run path reads the target as a checked
+  `TranscodeTarget` from the job row.
+- `horsies transcode plan` and `horsies transcode run` refuse a target that
+  this binary's decoder does not read, before maintenance begins. Today the
+  decoder reads version 1 with `json-utf8` (`row-v1` for the history row
+  component). `plan_transcode` takes a `DecodableTarget`, parsed against a
+  named `DecoderSet`; `DecoderSet::current()` is built from the decoder's
+  constants.
+
+### Upgrade
+
+- Apply migrations 0063, 0064 and 0065 before processes use this release.
+- Migration 0065 installs a first version of the guard with the full probe.
+  The next partition coverage pass (worker startup) replaces it with the
+  rendered version.
+- Migration 0064 refuses a database whose single-column CHECK set on
+  `horsies_task_history` differs from the 24 expected names. It takes a short
+  exclusive lock on the history parent and its leaves, and scans no rows.
 
 ## [0.1.0-alpha.34] - 2026-09-17
 

@@ -5,6 +5,7 @@ pub mod jobs;
 pub mod maintenance;
 pub mod outcomes;
 pub mod signature;
+pub mod target;
 pub mod transforms;
 
 use crate::core::history::errors::HistoryError;

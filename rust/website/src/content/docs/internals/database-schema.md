@@ -59,11 +59,20 @@ The history table stores immutable terminal tasks. It is partitioned in two
 levels:
 
 1. `LIST (retention_class_key)` selects the class.
-2. `RANGE (retention_anchor_at)` selects a UTC day.
+2. `RANGE (retention_anchor_at)` selects a UTC day for finite classes, and a
+   range with an open end for `forever`.
 
 `standard_30d` keeps records for at least 30 days. Declared and queue-derived
-classes use their configured duration. `forever` uses daily range leaves but
-never prunes them.
+classes use their configured duration.
+
+`forever` keeps its rows without limit in one open-ended leaf,
+`horsies_task_history_forever_open_<YYYY_MM_DD>`. It covers every day from
+that date to `9999-01-01`. Partition coverage creates it once and repairs it.
+Older databases also have daily `forever` leaves. The pruning pass detaches
+and drops a closed daily `forever` leaf when it holds no rows. It keeps a
+daily `forever` leaf that holds rows, and it keeps the legacy
+`horsies_task_history_forever_before_v35` leaf. The pass runs only when the
+cutover is complete and no archive maintenance session is active.
 
 Each history leaf has two indexes:
 

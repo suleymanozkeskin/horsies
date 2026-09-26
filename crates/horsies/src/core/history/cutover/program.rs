@@ -22,6 +22,8 @@ const NON_RUNNABLE_LOOKUP_MIGRATION: &str =
     include_str!("../../../../migrations/0058_bound_non_runnable_workflow_lookup.sql");
 const NODE_STATUS_MIGRATION: &str =
     include_str!("../../../../migrations/0059_close_workflow_node_status.sql");
+const DUPLICATE_GUARD_MIGRATION: &str =
+    include_str!("../../../../migrations/0065_prune_duplicate_identity_guard.sql");
 const DROP_NON_RUNNABLE_LOOKUP: &str =
     "DROP FUNCTION IF EXISTS horsies_find_non_runnable_workflow_tasks(uuid[])";
 const IN_PLACE_PROGRAM_MIGRATION: &str =
@@ -158,8 +160,11 @@ pub async fn install_programs(
     sqlx::raw_sql(NODE_STATUS_MIGRATION)
         .execute(&mut *connection)
         .await?;
+    sqlx::raw_sql(DUPLICATE_GUARD_MIGRATION)
+        .execute(&mut *connection)
+        .await?;
     Ok(ProgramInstallation::Installed {
-        statements_executed: teardown.len() + installation.len() + 5,
+        statements_executed: teardown.len() + installation.len() + 6,
     })
 }
 

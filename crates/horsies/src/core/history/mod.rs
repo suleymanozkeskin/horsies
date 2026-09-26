@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod archive;
+pub mod column_rules;
 pub mod commands;
 pub mod cutover;
 pub mod ddl;

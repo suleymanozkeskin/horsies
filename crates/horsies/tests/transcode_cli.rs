@@ -158,10 +158,32 @@ async fn every_transcode_command_has_factual_output_and_typed_exit_posture() {
     let database = CliDatabase::create().await;
     let session = Uuid::new_v4().to_string();
     let job = Uuid::new_v4().to_string();
+    // A target this binary's decoder does not read is refused before anything runs.
+    let undecodable = invoke(
+        Some(&database.url),
+        &[
+            "plan",
+            "--job-id",
+            &job,
+            "--component",
+            "result",
+            "--source-version",
+            "1",
+            "--target-version",
+            "2",
+            "--source-codec",
+            "json-utf8",
+            "--target-codec",
+            "framed-v2",
+        ],
+    );
+    assert!(!undecodable.status.success());
+    assert!(stderr(&undecodable).contains("transcode target refused"));
     assert_success(
         invoke(Some(&database.url), &["begin", "--session-id", &session]),
         "archive maintenance active: session=",
     );
+    // The decoder reads version 1 json-utf8; the source is the adjacent version.
     assert_success(
         invoke(
             Some(&database.url),
@@ -172,13 +194,13 @@ async fn every_transcode_command_has_factual_output_and_typed_exit_posture() {
                 "--component",
                 "result",
                 "--source-version",
-                "1",
-                "--target-version",
                 "2",
+                "--target-version",
+                "1",
                 "--source-codec",
-                "json-utf8",
-                "--target-codec",
                 "framed-v2",
+                "--target-codec",
+                "json-utf8",
             ],
         ),
         "transcode planned: job=",
@@ -228,13 +250,13 @@ async fn every_transcode_command_has_factual_output_and_typed_exit_posture() {
                 "--component",
                 "attempts",
                 "--source-version",
-                "1",
-                "--target-version",
                 "2",
+                "--target-version",
+                "1",
                 "--source-codec",
-                "json-utf8",
-                "--target-codec",
                 "framed-v2",
+                "--target-codec",
+                "json-utf8",
                 "--batch-size",
                 "10",
             ],
