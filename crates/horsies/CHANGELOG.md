@@ -15,10 +15,27 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   statuses, which live rows cannot hold. The terminalization functions send
   `task_done`. The function keeps its INSERT branch (`task_new`,
   `task_queue_<queue>`).
+- Drop the 24 single-column CHECK constraints of `horsies_task_history`.
+  PostgreSQL rebuilt every CHECK expression from its stored text on each
+  history INSERT. The cross-column CHECK constraints stay. The Horsies
+  writers produce values inside the dropped rules.
+
+### Changed
+
+- Cutover relocation checks every selected legacy row against the dropped
+  rules before its first write. A row outside them stops the batch with
+  `RelocationError::ColumnRuleViolation { task_id, rule }`, and the batch
+  makes no change.
+- `horsies transcode plan` rejects a target version below 1 and a target
+  codec outside 1 to 64 bytes. The run path reads the target as a checked
+  `TranscodeTarget` from the job row.
 
 ### Upgrade
 
-- Apply migration 0063 before processes use this release.
+- Apply migrations 0063 and 0064 before processes use this release.
+- Migration 0064 refuses a database whose single-column CHECK set on
+  `horsies_task_history` differs from the 24 expected names. It takes a short
+  exclusive lock on the history parent and its leaves, and scans no rows.
 
 ## [0.1.0-alpha.34] - 2026-09-17
 

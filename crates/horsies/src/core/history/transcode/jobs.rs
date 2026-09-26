@@ -4,6 +4,7 @@ use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
 use super::outcomes::{ArchiveComponent, TranscodeJobState};
+use super::target::TranscodeTarget;
 use super::TranscodeError;
 
 pub const TRANSCODE_JOBS: &str = "horsies_archive_replacement_jobs";
@@ -17,9 +18,8 @@ pub struct TranscodeJobRow {
     pub maintenance_session_id: Uuid,
     pub component: ArchiveComponent,
     pub source_version: i16,
-    pub target_version: i16,
     pub source_codec: String,
-    pub target_codec: String,
+    pub target: TranscodeTarget,
     pub state: TranscodeJobState,
     pub transformed_rows: i64,
     pub copied_rows_total: i64,
@@ -121,14 +121,20 @@ pub async fn lock_job(
     let state = TranscodeJobState::parse(&raw.state).ok_or_else(|| {
         TranscodeError::contract(format!("unknown replacement job state {:?}", raw.state))
     })?;
+    let target =
+        TranscodeTarget::parse(raw.target_version, &raw.target_codec).map_err(|rejection| {
+            TranscodeError::contract(format!(
+                "replacement job {} carries a target outside the history bounds: {rejection}",
+                raw.job_id
+            ))
+        })?;
     Ok(TranscodeJobRow {
         job_id: raw.job_id,
         maintenance_session_id: raw.maintenance_session_id,
         component,
         source_version: raw.source_version,
-        target_version: raw.target_version,
         source_codec: raw.source_codec,
-        target_codec: raw.target_codec,
+        target,
         state,
         transformed_rows: raw.transformed_rows,
         copied_rows_total: raw.copied_rows_total,

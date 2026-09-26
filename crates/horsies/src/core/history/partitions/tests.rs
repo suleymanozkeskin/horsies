@@ -18,7 +18,9 @@ use crate::core::history::commands::{
     CollectPartitionHealth, CreateDailyHistoryLeaf, DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf, EnsureLeafCoverage, InspectHistoryLeaf, LeafBounds, LeafRef,
 };
-use crate::core::history::cutover::relocation::{relocate_terminal_batch, RelocationOutcome};
+use crate::core::history::cutover::relocation::{
+    relocate_terminal_batch, RelocationError, RelocationOutcome, RELOCATION_LEDGER,
+};
 use crate::core::history::ddl::classes::{
     finite_class_parent_name, register_finite_retention_class, ClassRegistration,
 };
@@ -2996,5 +2998,88 @@ async fn finalization_retries_publication_after_detach_committed() {
         .await
         .unwrap();
     assert_eq!(publisher.calls.load(Ordering::SeqCst), 1);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn relocation_refuses_a_row_outside_the_history_column_rules_without_writing() {
+    let database = TestDatabase::create().await;
+    let mut transaction = database
+        .pool
+        .begin()
+        .await
+        .expect("begin rule violation test");
+    sqlx::query("ALTER TABLE horsies_tasks DROP CONSTRAINT horsies_tasks_live_status_only")
+        .execute(&mut *transaction)
+        .await
+        .expect("restore pre-cutover terminal live-row posture");
+    let anchor = database_now(&mut transaction).await.expect("database now");
+    let task_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO horsies_tasks (
+             id, task_name, queue_name, priority, args, kwargs, status,
+             sent_at, enqueued_at, completed_at, result, terminal_at,
+             terminalization_kind, retry_count, max_retries, enqueue_sha,
+             is_workflow_task, command_fingerprint_version,
+             command_fingerprint, retention_class_key, retain_rerun_input,
+             prepared_rerun_input_disposition, created_at, updated_at
+         ) VALUES (
+             $1, 'legacy priority outside the rule', 'default', 0, '[]', '{}',
+             'COMPLETED', $2, $2, $2, NULL, $2, 'COMPLETE_LOCKED', 0, 0,
+             $1::text, FALSE, 1, $3, 'standard_30d', FALSE, 'NEVER_ELIGIBLE',
+             $2, $2
+         )",
+    )
+    .bind(task_id)
+    .bind(anchor)
+    .bind(vec![7_u8; 32])
+    .execute(&mut *transaction)
+    .await
+    .expect("seed legacy terminal row with priority 0");
+    let leaves_before: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {LEAF_CATALOG}"))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("count leaves before relocation");
+
+    let error = relocate_terminal_batch(&mut transaction, 10)
+        .await
+        .expect_err("relocation must refuse the legacy row");
+    match error {
+        RelocationError::ColumnRuleViolation {
+            task_id: found,
+            rule,
+        } => {
+            assert_eq!(found, task_id.to_string());
+            assert_eq!(rule, "horsies_task_history_priority_check");
+        }
+        other => panic!("unexpected relocation error: {other:?}"),
+    }
+
+    let history_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM horsies_task_history WHERE task_id = $1")
+            .bind(task_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .expect("count history rows");
+    let live_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks WHERE id = $1")
+        .bind(task_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("count live rows");
+    let ledger_rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {RELOCATION_LEDGER}"))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("count ledger rows");
+    let leaves_after: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {LEAF_CATALOG}"))
+        .fetch_one(&mut *transaction)
+        .await
+        .expect("count leaves after relocation");
+    assert_eq!((history_rows, live_rows, ledger_rows), (0, 1, 0));
+    assert_eq!(leaves_after, leaves_before);
+    transaction
+        .rollback()
+        .await
+        .expect("roll back rule violation test");
     database.drop().await;
 }

@@ -700,20 +700,13 @@ mod catalog_tests {
         }
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn kind_domain_check_pins_the_frozen_vocabulary() {
-        let pool = migrated_pool().await;
-        let definition: String = sqlx::query_scalar(
-            "SELECT pg_get_constraintdef(oid)
-             FROM pg_constraint
-             WHERE conrelid = 'horsies_task_history'::regclass
-               AND contype = 'c'
-               AND pg_get_constraintdef(oid) LIKE '%COMPLETE_LOCKED%'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("kind-domain constraint");
+    #[test]
+    fn kind_domain_rule_pins_the_frozen_vocabulary() {
+        let definition = crate::core::history::column_rules::HISTORY_COLUMN_RULES
+            .iter()
+            .find(|rule| rule.name == "horsies_task_history_terminalization_kind_check")
+            .expect("kind-domain rule")
+            .predicate;
         for kind in TerminalizationKind::ALL {
             assert!(
                 definition.contains(kind.as_str()),

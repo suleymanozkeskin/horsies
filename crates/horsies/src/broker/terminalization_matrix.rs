@@ -1610,6 +1610,80 @@ async fn pending_expiry_order_survives_upgrade_and_program_installation() {
     }
 }
 
+async fn history_single_column_checks(pool: &PgPool) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT conname::text, pg_get_constraintdef(oid)
+         FROM pg_constraint
+         WHERE conrelid = 'horsies_task_history'::regclass
+           AND contype = 'c'
+           AND cardinality(conkey) = 1
+         ORDER BY conname",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn history_cross_column_check_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+         FROM pg_constraint
+         WHERE conrelid = 'horsies_task_history'::regclass
+           AND contype = 'c'
+           AND cardinality(conkey) > 1",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[serial]
+async fn history_column_rules_match_the_checks_that_migration_0064_drops() {
+    use crate::core::history::column_rules::HISTORY_COLUMN_RULES;
+
+    let database = IsolatedTerminalizationTestDatabase::create_empty().await;
+    let pool = &database.pool;
+    crate::broker::migrations::run_horsies_migrations_through(pool, 63)
+        .await
+        .unwrap();
+    let expected: Vec<(String, String)> = HISTORY_COLUMN_RULES
+        .iter()
+        .map(|rule| (rule.name.to_owned(), format!("CHECK ({})", rule.predicate)))
+        .collect();
+    assert_eq!(history_single_column_checks(pool).await, expected);
+    let cross_column = history_cross_column_check_count(pool).await;
+    assert_eq!(cross_column, 8);
+
+    run_horsies_migrations(pool).await.unwrap();
+    assert!(history_single_column_checks(pool).await.is_empty());
+    assert_eq!(history_cross_column_check_count(pool).await, cross_column);
+    database.drop().await;
+}
+
+#[tokio::test]
+#[serial]
+async fn migration_0064_refuses_a_diverged_single_column_check_set() {
+    let database = IsolatedTerminalizationTestDatabase::create_empty().await;
+    let pool = &database.pool;
+    crate::broker::migrations::run_horsies_migrations_through(pool, 63)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE horsies_task_history DROP CONSTRAINT horsies_task_history_priority_check",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let error = run_horsies_migrations(pool).await.unwrap_err().to_string();
+    assert!(
+        error.contains("single-column CHECK set differs"),
+        "unexpected migration error: {error}"
+    );
+    assert_eq!(history_single_column_checks(pool).await.len(), 23);
+    database.drop().await;
+}
+
 async fn assert_pending_expiry_order(pool: &PgPool) {
     drain_pending_expiry(pool).await;
 
