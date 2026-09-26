@@ -5,6 +5,21 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [Unreleased]
+
+### Work reductions
+
+- Drop `horsies_task_notify_update_trigger`. It ran
+  `horsies_notify_task_changes()` on every live status change: claim, start
+  and requeue. Its UPDATE branch sends `task_done` only for terminal
+  statuses, which live rows cannot hold. The terminalization functions send
+  `task_done`. The function keeps its INSERT branch (`task_new`,
+  `task_queue_<queue>`).
+
+### Upgrade
+
+- Apply migration 0063 before processes use this release.
+
 ## [0.1.0-alpha.34] - 2026-09-17
 
 ### Fixed
