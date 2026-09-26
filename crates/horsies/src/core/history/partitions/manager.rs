@@ -872,6 +872,16 @@ async fn plan_open_ended_forever_leaf(
     connection: &mut PgConnection,
     parent_name: &str,
 ) -> Result<CoveragePlan, HistoryError> {
+    let command = open_ended_forever_command(connection, parent_name).await?;
+    Ok(CoveragePlan::Leaves(vec![PlannedLeaf::OpenEnded(command)]))
+}
+
+/// The open-ended `forever` leaf to ensure: the attached one with its stored
+/// bounds, or a new one from `open_ended_forever_start_sql`.
+pub(crate) async fn open_ended_forever_command(
+    connection: &mut PgConnection,
+    parent_name: &str,
+) -> Result<CreateOpenEndedHistoryLeaf, HistoryError> {
     let (leaf_name, lower) = match read_open_ended_forever_leaf(connection).await? {
         Some(open) => (open.leaf_name, open.lower_anchor),
         None => {
@@ -890,9 +900,7 @@ async fn plan_open_ended_forever_leaf(
         .map_err(|error| HistoryError::contract(error.to_string()))?;
     let leaf = LeafRef::new(leaf_name, FOREVER_CLASS_KEY, bounds)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let command = CreateOpenEndedHistoryLeaf::new(leaf)
-        .map_err(|error| HistoryError::contract(error.to_string()))?;
-    Ok(CoveragePlan::Leaves(vec![PlannedLeaf::OpenEnded(command)]))
+    CreateOpenEndedHistoryLeaf::new(leaf).map_err(|error| HistoryError::contract(error.to_string()))
 }
 
 /// Detach one expired leaf without waiting for its advisory lock.

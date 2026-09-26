@@ -26,7 +26,8 @@ use crate::core::history::ddl::classes::{
     finite_class_parent_name, register_finite_retention_class, ClassRegistration, FOREVER_CLASS_KEY,
 };
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, render_daily_leaf_ddl,
+    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name, open_ended_leaf_name,
+    render_daily_leaf_ddl,
 };
 use crate::core::history::heartbeats::partitioning::{
     create_hourly_heartbeat_leaf, ensure_heartbeat_coverage, heartbeat_horizon, hourly_leaf_name,
@@ -2482,7 +2483,7 @@ async fn pruning_contains_one_leaf_error_and_one_drop_refusal_then_keeps_going()
 
 #[tokio::test]
 #[serial]
-async fn forever_conversion_is_idempotent_and_reports_daily_coverage_health() {
+async fn forever_conversion_is_idempotent_and_reports_coverage_health() {
     let database = TestDatabase::create().await;
     let mut transaction = database.pool.begin().await.expect("begin forever check");
     assert_eq!(
@@ -2623,8 +2624,8 @@ async fn populated_v34_forever_leaf_converts_without_rewriting_old_rows() {
             .await
             .expect("read converted forever relkind");
     assert_eq!(relkind, "p");
-    let current_leaf =
-        daily_leaf_name(TASK_HISTORY_FOREVER, today).expect("current forever daily leaf name");
+    let current_leaf = open_ended_leaf_name(TASK_HISTORY_FOREVER, today)
+        .expect("current open-ended forever leaf name");
     let locations: Vec<(Uuid, String)> = sqlx::query_as(&format!(
         "SELECT task_id, tableoid::regclass::text
          FROM {TASK_HISTORY_PARENT} WHERE task_id = ANY($1) ORDER BY task_id"

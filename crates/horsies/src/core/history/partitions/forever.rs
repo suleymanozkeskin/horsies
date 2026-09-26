@@ -1,19 +1,21 @@
 //! Idempotent schema-v35 forever-class range conversion.
 
-use chrono::{DateTime, Duration, Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use sqlx::PgConnection;
 
-use crate::core::history::commands::{CreateDailyHistoryLeaf, LeafBounds, LeafRef};
+use crate::core::history::commands::{
+    open_end_anchor, CreateOpenEndedHistoryLeaf, LeafBounds, LeafRef,
+};
 use crate::core::history::ddl::classes::FOREVER_CLASS_KEY;
 use crate::core::history::ddl::runtime_names::{
-    daily_leaf_name, leaf_enqueued_index_name, leaf_id_index_name,
+    leaf_enqueued_index_name, leaf_id_index_name, open_ended_leaf_name,
 };
 use crate::core::history::errors::HistoryError;
 use crate::core::history::names::{LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT};
 use crate::core::history::outcomes::LeafCreation;
 
 use super::catalog::{capture_partition_bound_utc, database_now, INDEX_SCHEMA_VERSION};
-use super::manager::create_daily_leaf;
+use super::manager::{create_open_ended_leaf, open_ended_forever_command};
 use super::publication::UnpublishedLoader;
 
 pub const FOREVER_LEGACY_LEAF: &str = "horsies_task_history_forever_before_v35";
@@ -45,18 +47,8 @@ pub async fn ensure_forever_range_partitioning(
     } else {
         0
     };
-    let leaf_name = daily_leaf_name(TASK_HISTORY_FOREVER, today)
-        .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let leaf = LeafRef::new(
-        leaf_name,
-        FOREVER_CLASS_KEY,
-        LeafBounds::new(today, today + Duration::days(1))
-            .map_err(|error| HistoryError::contract(error.to_string()))?,
-    )
-    .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let command = CreateDailyHistoryLeaf::new(leaf)
-        .map_err(|error| HistoryError::contract(error.to_string()))?;
-    match create_daily_leaf(connection, &command, &UnpublishedLoader).await? {
+    let command = open_ended_forever_command(connection, TASK_HISTORY_FOREVER).await?;
+    match create_open_ended_leaf(connection, &command, &UnpublishedLoader).await? {
         LeafCreation::Created { .. }
         | LeafCreation::AlreadyConformant { .. }
         | LeafCreation::IndexRepaired { .. } => Ok(moved),
@@ -72,9 +64,9 @@ async fn convert_unbounded_leaf(
 ) -> Result<u64, HistoryError> {
     let legacy_id = leaf_id_index_name(FOREVER_LEGACY_LEAF);
     let legacy_order = leaf_enqueued_index_name(FOREVER_LEGACY_LEAF);
-    let today_leaf = daily_leaf_name(TASK_HISTORY_FOREVER, today)
+    let open_leaf = open_ended_leaf_name(TASK_HISTORY_FOREVER, today)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
-    for identifier in [FOREVER_LEGACY_LEAF, &legacy_id, &legacy_order, &today_leaf] {
+    for identifier in [FOREVER_LEGACY_LEAF, &legacy_id, &legacy_order, &open_leaf] {
         if identifier.len() > 63 {
             return Err(HistoryError::contract(
                 "forever conversion identifier exceeds PostgreSQL limit",
@@ -108,16 +100,16 @@ async fn convert_unbounded_leaf(
     .execute(&mut *connection)
     .await?;
     let current = LeafRef::new(
-        today_leaf,
+        open_leaf,
         FOREVER_CLASS_KEY,
-        LeafBounds::new(today, today + Duration::days(1))
+        LeafBounds::new(today, open_end_anchor())
             .map_err(|error| HistoryError::contract(error.to_string()))?,
     )
     .map_err(|error| HistoryError::contract(error.to_string()))?;
-    let create = CreateDailyHistoryLeaf::new(current)
+    let create = CreateOpenEndedHistoryLeaf::new(current)
         .map_err(|error| HistoryError::contract(error.to_string()))?;
     if !matches!(
-        create_daily_leaf(connection, &create, &UnpublishedLoader).await?,
+        create_open_ended_leaf(connection, &create, &UnpublishedLoader).await?,
         LeafCreation::Created { .. }
     ) {
         return Err(HistoryError::contract(
