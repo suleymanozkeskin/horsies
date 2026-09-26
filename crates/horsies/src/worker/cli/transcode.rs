@@ -14,6 +14,9 @@ use crate::core::history::transcode::maintenance::{
 use crate::core::history::transcode::outcomes::{
     ArchiveComponent, TranscodeCopyOutcome, TranscodePlanOutcome, TranscodeSwapOutcome,
 };
+use crate::core::history::transcode::target::{
+    DecodableTarget, DecodableTargetRejection, DecoderSet,
+};
 use crate::core::history::transcode::TranscodeError;
 
 #[derive(Debug, Args)]
@@ -129,6 +132,8 @@ pub enum TranscodeCliError {
     MissingDatabaseUrl,
     #[error("transcode refused at {stage}: {reason}")]
     Refused { stage: &'static str, reason: String },
+    #[error("transcode target refused: {0}")]
+    Target(#[from] DecodableTargetRejection),
     #[error(transparent)]
     Transcode(#[from] TranscodeError),
     #[error(transparent)]
@@ -151,16 +156,28 @@ async fn begin(pool: &sqlx::PgPool, session_id: Uuid) -> Result<(), TranscodeCli
     Ok(())
 }
 
-async fn plan(pool: &sqlx::PgPool, command: &PlanArgs) -> Result<(), TranscodeCliError> {
+/// The requested target, checked against what this binary's decoder reads.
+fn parse_target(command: &PlanArgs) -> Result<DecodableTarget, TranscodeCliError> {
+    Ok(DecodableTarget::parse(
+        command.component.into(),
+        command.target_version,
+        &command.target_codec,
+        &DecoderSet::current(),
+    )?)
+}
+
+async fn plan(
+    pool: &sqlx::PgPool,
+    command: &PlanArgs,
+    target: &DecodableTarget,
+) -> Result<(), TranscodeCliError> {
     let mut transaction = pool.begin().await?;
     let outcome = plan_transcode(
         &mut transaction,
         command.job_id,
-        command.component.into(),
         command.source_version,
-        command.target_version,
         &command.source_codec,
-        &command.target_codec,
+        target,
     )
     .await?;
     match outcome {
@@ -359,7 +376,10 @@ pub async fn execute_transcode(args: TranscodeArgs) -> Result<(), TranscodeCliEr
     let pool = pool(&args).await?;
     match args.command {
         TranscodeCommand::Begin(command) => begin(&pool, command.session_id).await,
-        TranscodeCommand::Plan(command) => plan(&pool, &command).await,
+        TranscodeCommand::Plan(command) => {
+            let target = parse_target(&command)?;
+            plan(&pool, &command, &target).await
+        }
         TranscodeCommand::Copy(command) => copy(&pool, command.job_id, command.batch_size).await,
         TranscodeCommand::Verify(command) => verify(&pool, command.job_id).await,
         TranscodeCommand::Swap(command) => swap(&pool, command.job_id).await,
@@ -367,19 +387,18 @@ pub async fn execute_transcode(args: TranscodeArgs) -> Result<(), TranscodeCliEr
         TranscodeCommand::Finish(command) => finish(&pool, command.session_id).await,
         TranscodeCommand::Status(command) => status(&pool, command.job_id).await,
         TranscodeCommand::Run(command) => {
+            let plan_args = PlanArgs {
+                job_id: command.job_id,
+                component: command.component,
+                source_version: command.source_version,
+                target_version: command.target_version,
+                source_codec: command.source_codec,
+                target_codec: command.target_codec,
+            };
+            // Checked before maintenance begins, so a refused target leaves no session.
+            let target = parse_target(&plan_args)?;
             begin(&pool, command.session_id).await?;
-            plan(
-                &pool,
-                &PlanArgs {
-                    job_id: command.job_id,
-                    component: command.component,
-                    source_version: command.source_version,
-                    target_version: command.target_version,
-                    source_codec: command.source_codec,
-                    target_codec: command.target_codec,
-                },
-            )
-            .await?;
+            plan(&pool, &plan_args, &target).await?;
             copy(&pool, command.job_id, command.batch_size).await?;
             verify(&pool, command.job_id).await?;
             swap(&pool, command.job_id).await?;

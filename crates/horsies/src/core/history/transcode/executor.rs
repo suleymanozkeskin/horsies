@@ -30,7 +30,7 @@ use super::outcomes::{
     SWAP_RETRY_BACKOFF_SECONDS,
 };
 use super::signature::relation_schema_signature;
-use super::target::TranscodeTarget;
+use super::target::DecodableTarget;
 use super::transforms::{
     backup_relation_name, column_list, component_columns, encoded_source_select, quoted_identifier,
     replacement_bound_name, replacement_index_name, replacement_ordering_index_name,
@@ -54,32 +54,24 @@ struct InventoryRow {
     distinct_task_ids: i64,
 }
 
+/// Plans a transcode of `target.component()` from `source_version` and
+/// `source_codec` to a target that a decoder reads (see `DecodableTarget`).
 pub async fn plan_transcode(
     connection: &mut PgConnection,
     job_id: Uuid,
-    component: ArchiveComponent,
     source_version: i16,
-    target_version: i16,
     source_codec: &str,
-    target_codec: &str,
+    decodable_target: &DecodableTarget,
 ) -> Result<TranscodePlanOutcome, TranscodeError> {
-    if (i32::from(target_version) - i32::from(source_version)).abs() != 1 {
+    let component = decodable_target.component();
+    let target = decodable_target.target();
+    if (i32::from(target.version()) - i32::from(source_version)).abs() != 1 {
         return Ok(TranscodePlanOutcome::Rejected(TranscodePlanRejected {
             component,
             reason: "unsupported transcode direction".to_owned(),
             affected_rows: 0,
         }));
     }
-    let target = match TranscodeTarget::parse(target_version, target_codec) {
-        Ok(target) => target,
-        Err(rejection) => {
-            return Ok(TranscodePlanOutcome::Rejected(TranscodePlanRejected {
-                component,
-                reason: rejection.to_string(),
-                affected_rows: 0,
-            }));
-        }
-    };
     lock_transcode_program(&mut *connection).await?;
     crate::core::history::maintenance::gate::lock_archive_gate_row(&mut *connection).await?;
     let Some(session_id) = active_maintenance_session(&mut *connection).await? else {

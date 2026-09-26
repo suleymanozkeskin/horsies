@@ -22,6 +22,7 @@ use super::outcomes::{
     SWAP_RETRY_BACKOFF_SECONDS,
 };
 use super::signature::{relation_schema_signature, RELATION_SCHEMA_SIGNATURE_SQL};
+use super::target::{DecodableTarget, DecoderSet};
 use super::transforms::{
     backup_relation_name, component_columns, encoded_source_select, quoted_identifier,
     replacement_relation_name, transformed_select,
@@ -219,6 +220,32 @@ async fn begin(pool: &PgPool, session_id: Uuid) {
     transaction.commit().await.unwrap();
 }
 
+/// Synthetic decoder for these tests: it reads versions 2 and 3, which this
+/// binary's decoder does not, so the forward and reverse pipelines can run.
+fn test_decoders() -> DecoderSet {
+    let mut entries = vec![
+        (ArchiveComponent::HistoryRow, 1, "row-v1"),
+        (ArchiveComponent::HistoryRow, 2, "row-v2"),
+    ];
+    for component in [
+        ArchiveComponent::Result,
+        ArchiveComponent::Attempts,
+        ArchiveComponent::RerunInput,
+    ] {
+        entries.extend([
+            (component, 1, "json-utf8"),
+            (component, 2, "framed-v2"),
+            (component, 3, "framed-v3"),
+        ]);
+    }
+    DecoderSet::new(entries)
+}
+
+fn test_target(component: ArchiveComponent, version: i16, codec: &str) -> DecodableTarget {
+    DecodableTarget::parse(component, version, codec, &test_decoders())
+        .expect("test target in the synthetic decoder set")
+}
+
 async fn plan_result(
     pool: &PgPool,
     job_id: Uuid,
@@ -231,11 +258,9 @@ async fn plan_result(
     let outcome = plan_transcode(
         &mut transaction,
         job_id,
-        ArchiveComponent::Result,
         source_version,
-        target_version,
         source_codec,
-        target_codec,
+        &test_target(ArchiveComponent::Result, target_version, target_codec),
     )
     .await
     .unwrap();
@@ -261,11 +286,9 @@ async fn complete_component(
     let plan = plan_transcode(
         &mut transaction,
         job_id,
-        component,
         source_version,
-        target_version,
         source_codec,
-        target_codec,
+        &test_target(component, target_version, target_codec),
     )
     .await
     .unwrap();
@@ -452,45 +475,60 @@ fn vocabulary_transforms_signature_and_cli_are_pinned() {
 
 #[tokio::test]
 #[serial]
-async fn plan_rejects_targets_outside_the_history_column_bounds() {
+async fn cli_run_refuses_an_undecodable_target_before_maintenance_begins() {
+    use crate::core::history::transcode::target::DecodableTargetRejection;
+    use crate::worker::cli::transcode::{execute_transcode, TranscodeCliError};
+
     let database = P10Database::create().await;
-    let cases = [
-        (1_i16, 0_i16, "json-utf8", "target version 0 is below 1"),
-        (1, 2, "", "target codec is 0 bytes; allowed 1 to 64"),
-        (
-            1,
-            2,
-            &"c".repeat(65)[..],
-            "target codec is 65 bytes; allowed 1 to 64",
-        ),
-    ];
-    for (source_version, target_version, target_codec, reason) in cases {
-        let mut transaction = database.pool.begin().await.unwrap();
-        let outcome = plan_transcode(
-            &mut transaction,
-            Uuid::new_v4(),
-            ArchiveComponent::Result,
-            source_version,
-            target_version,
-            "json-utf8",
-            target_codec,
-        )
-        .await
-        .unwrap();
-        transaction.rollback().await.unwrap();
-        match outcome {
-            TranscodePlanOutcome::Rejected(rejected) => {
-                assert_eq!(rejected.reason, reason);
-                assert_eq!(rejected.affected_rows, 0);
-            }
-            other => panic!("target {target_version}/{target_codec:?} was not rejected: {other:?}"),
-        }
+    let base = test_db_url();
+    let url = format!(
+        "{}/{}",
+        base.rsplit_once('/').expect("database path in test URL").0,
+        database.name
+    );
+    let parsed = Cli::try_parse_from([
+        "horsies",
+        "transcode",
+        "--database-url",
+        url.as_str(),
+        "run",
+        "--session-id",
+        "00000000-0000-0000-0000-0000000000a1",
+        "--job-id",
+        "00000000-0000-0000-0000-0000000000a2",
+        "--component",
+        "result",
+        "--source-version",
+        "1",
+        "--target-version",
+        "2",
+        "--source-codec",
+        "json-utf8",
+        "--target-codec",
+        "framed-v2",
+    ])
+    .unwrap();
+    let Command::Transcode(args) = parsed.command else {
+        panic!("expected the transcode command");
+    };
+    match execute_transcode(args).await {
+        Err(TranscodeCliError::Target(DecodableTargetRejection::NotDecodable {
+            version: 2,
+            ref codec,
+            ..
+        })) if codec == "framed-v2" => {}
+        other => panic!("unexpected transcode outcome: {other:?}"),
     }
+    let sessions: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM horsies_archive_maintenance_sessions")
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
     let jobs: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {TRANSCODE_JOBS}"))
         .fetch_one(&database.pool)
         .await
         .unwrap();
-    assert_eq!(jobs, 0);
+    assert_eq!((sessions, jobs), (0, 0));
 }
 
 #[tokio::test]
@@ -519,11 +557,9 @@ async fn forward_reverse_pipeline_is_resumable_multi_relation_and_exact() {
         plan_transcode(
             &mut no_maintenance,
             Uuid::new_v4(),
-            ArchiveComponent::Result,
             1,
-            2,
             "json-utf8",
-            "framed-v2",
+            &test_target(ArchiveComponent::Result, 2, "framed-v2"),
         )
         .await
         .unwrap(),
@@ -534,11 +570,9 @@ async fn forward_reverse_pipeline_is_resumable_multi_relation_and_exact() {
         plan_transcode(
             &mut no_maintenance,
             Uuid::new_v4(),
-            ArchiveComponent::Result,
             1,
-            3,
             "json-utf8",
-            "framed-v3",
+            &test_target(ArchiveComponent::Result, 3, "framed-v3"),
         )
         .await
         .unwrap(),
@@ -568,11 +602,9 @@ async fn forward_reverse_pipeline_is_resumable_multi_relation_and_exact() {
         plan_transcode(
             &mut corrupt_tx,
             Uuid::new_v4(),
-            ArchiveComponent::Result,
             1,
-            2,
             "json-utf8",
-            "framed-v2",
+            &test_target(ArchiveComponent::Result, 2, "framed-v2"),
         )
         .await
         .unwrap(),
@@ -618,11 +650,9 @@ async fn forward_reverse_pipeline_is_resumable_multi_relation_and_exact() {
         plan_transcode(
             &mut rejected_tx,
             Uuid::new_v4(),
-            ArchiveComponent::Result,
             1,
-            2,
             "json-utf8",
-            "framed-v2",
+            &test_target(ArchiveComponent::Result, 2, "framed-v2"),
         )
         .await
         .unwrap(),

@@ -5,6 +5,8 @@ use sha2::{Digest, Sha256};
 pub const ARCHIVE_VERSION_1: i16 = 1;
 pub const JSON_UTF8_CODEC: &str = "json-utf8";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
+/// Codec of history rows at `history_schema_version` 1 (transcode component `HistoryRow`).
+pub const HISTORY_ROW_V1_CODEC: &str = "row-v1";
 pub const DIGEST_LENGTH_BYTES: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -36,6 +36,12 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 - `horsies transcode plan` rejects a target version below 1 and a target
   codec outside 1 to 64 bytes. The run path reads the target as a checked
   `TranscodeTarget` from the job row.
+- `horsies transcode plan` and `horsies transcode run` refuse a target that
+  this binary's decoder does not read, before maintenance begins. Today the
+  decoder reads version 1 with `json-utf8` (`row-v1` for the history row
+  component). `plan_transcode` takes a `DecodableTarget`, parsed against a
+  named `DecoderSet`; `DecoderSet::current()` is built from the decoder's
+  constants.
 
 ### Upgrade
 
