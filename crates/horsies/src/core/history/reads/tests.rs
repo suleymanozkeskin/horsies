@@ -41,8 +41,8 @@ use super::aggregates::{
 use super::detail::staged_detail_published;
 use super::identity_lookup::{decode_lookup_row, LookupWireRow, TaskIdentityLookup};
 use super::lookup_generation::{
-    manifest_from_catalog, render_staged_detail_function, render_staged_lookup_function,
-    render_staged_provenance_function, LookupLeaf, LookupManifest,
+    manifest_from_catalog, render_staged_detail_function, render_staged_duplicate_guard_function,
+    render_staged_lookup_function, render_staged_provenance_function, LookupLeaf, LookupManifest,
 };
 use super::pages::{
     history_facet_statement, history_page_statement, history_sort_expression, HistoryBindValue,
@@ -1298,6 +1298,143 @@ async fn page_facet_aggregate_estimate_and_plans_are_window_and_index_bounded() 
         pruning_plan.contains(finite_leaf.leaf_name()),
         "{pruning_plan}"
     );
+    drop(connection);
+    database.drop().await;
+}
+
+#[test]
+fn duplicate_guard_renders_pruned_and_legacy_probes_without_fallback_or_live() {
+    let (manifest, _) = fixture_manifest();
+    assert!(!manifest.leaves().is_empty());
+    let guard = render_staged_duplicate_guard_function(&manifest);
+    let provenance = render_staged_provenance_function(&manifest);
+    assert!(guard.contains("horsies_task_history_duplicate_staged(p_task_id uuid)"));
+    assert!(guard.contains("RETURNS boolean"));
+    assert!(guard.contains("IF v_effective_birth < "));
+    assert!(!guard.contains("IF v_effective_birth >= "));
+    assert!(!guard.contains("Birth time is an optimization hint"));
+    assert!(!guard.contains("horsies_tasks"));
+    assert!(provenance.contains("IF v_effective_birth >= "));
+    for leaf in manifest.leaves() {
+        let probe = format!(
+            "PERFORM 1 FROM {} h WHERE h.task_id = p_task_id;",
+            leaf.relation_name()
+        );
+        // One pruned probe and one legacy probe per leaf.
+        assert_eq!(guard.matches(&probe).count(), 2, "{}", leaf.relation_name());
+    }
+    assert!(guard.trim_end().ends_with("$function$"));
+    assert!(guard.contains("RETURN FALSE;"));
+}
+
+async fn duplicate_guard(connection: &mut PgConnection, task_id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT horsies_task_history_duplicate_staged($1)")
+        .bind(task_id)
+        .fetch_one(connection)
+        .await
+        .expect("call duplicate guard")
+}
+
+async fn guard_marker(connection: &mut PgConnection) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT obj_description(to_regprocedure('horsies_task_history_duplicate_staged(uuid)'), 'pg_proc')",
+    )
+    .fetch_one(connection)
+    .await
+    .expect("read duplicate guard marker")
+}
+
+#[tokio::test]
+#[serial]
+async fn duplicate_guard_probes_the_pruned_set_and_replaces_the_first_version() {
+    let database = TestDatabase::create().await;
+    let class_key = "p4_guard";
+    let mut transaction = database.pool.begin().await.expect("begin guard setup");
+    assert_eq!(guard_marker(&mut transaction).await, None);
+    let now = database_now(&mut transaction).await.expect("database now");
+    let today = utc_day(now);
+    let parent = register_test_class(&mut transaction, class_key, 30).await;
+    let _today_leaf = create_test_leaf(&mut transaction, &parent, class_key, today).await;
+    let _older_leaf = create_test_leaf(
+        &mut transaction,
+        &parent,
+        class_key,
+        today - Duration::days(1),
+    )
+    .await;
+    let normal_id = v7_with_birth(today + Duration::hours(2));
+    let legacy_id = Uuid::new_v4();
+    // Born today, stored in yesterday's leaf: a wrong client clock.
+    let clock_violation_id = v7_with_birth(today + Duration::hours(3));
+    let absent_id = v7_with_birth(today + Duration::hours(4));
+    for (task_id, anchor) in [
+        (normal_id, today + Duration::hours(2)),
+        (legacy_id, today + Duration::hours(2)),
+        (clock_violation_id, today - Duration::hours(12)),
+    ] {
+        seed_history_row(
+            &mut transaction,
+            task_id,
+            class_key,
+            anchor,
+            "FAILED",
+            "FAIL_RUNNING",
+        )
+        .await;
+    }
+    StagedLoaderPublisher
+        .republish(&mut transaction)
+        .await
+        .expect("publish staged readers");
+    transaction.commit().await.expect("commit guard setup");
+
+    let mut connection = database.pool.acquire().await.expect("acquire guard reads");
+    assert_eq!(
+        guard_marker(&mut connection).await.as_deref(),
+        Some("horsies:rendered")
+    );
+    assert!(duplicate_guard(&mut connection, normal_id).await);
+    assert!(duplicate_guard(&mut connection, legacy_id).await);
+    assert!(!duplicate_guard(&mut connection, absent_id).await);
+    // The stated loss: the guard skips the older leaf; the reader still finds the row.
+    assert!(!duplicate_guard(&mut connection, clock_violation_id).await);
+    let reader_found: bool =
+        sqlx::query_scalar("SELECT found FROM horsies_task_provenance_staged($1, FALSE)")
+            .bind(clock_violation_id)
+            .fetch_one(&mut *connection)
+            .await
+            .expect("provenance reader");
+    assert!(reader_found);
+
+    assert!(!StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .expect("republication probe after publish"));
+    sqlx::query("DROP FUNCTION horsies_task_history_duplicate_staged(uuid)")
+        .execute(&mut *connection)
+        .await
+        .expect("drop rendered guard");
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/0065_prune_duplicate_identity_guard.sql"
+    ))
+    .execute(&mut *connection)
+    .await
+    .expect("rerun migration 0065");
+    assert_eq!(guard_marker(&mut connection).await, None);
+    assert!(duplicate_guard(&mut connection, clock_violation_id).await);
+    assert!(StagedLoaderPublisher
+        .needs_republication(&mut connection)
+        .await
+        .expect("republication probe with the first version"));
+    StagedLoaderPublisher
+        .republish(&mut connection)
+        .await
+        .expect("replace the first version");
+    assert_eq!(
+        guard_marker(&mut connection).await.as_deref(),
+        Some("horsies:rendered")
+    );
+    assert!(!duplicate_guard(&mut connection, clock_violation_id).await);
     drop(connection);
     database.drop().await;
 }

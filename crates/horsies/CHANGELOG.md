@@ -22,6 +22,13 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Changed
 
+- The move family's duplicate-identity guard calls
+  `horsies_task_history_duplicate_staged(uuid)`. The staged reader publisher
+  renders it from the leaf manifest: a UUIDv7 id probes only the history
+  leaves that can hold it. The readers' clock-violation fallback probes are
+  omitted, so the guard does not detect a duplicate that a wrong client clock
+  placed in an older leaf. Other ids probe every leaf. The readers keep their
+  fallback. Before, every completion probed every history leaf.
 - Cutover relocation checks every selected legacy row against the dropped
   rules before its first write. A row outside them stops the batch with
   `RelocationError::ColumnRuleViolation { task_id, rule }`, and the batch
@@ -32,7 +39,10 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
 
 ### Upgrade
 
-- Apply migrations 0063 and 0064 before processes use this release.
+- Apply migrations 0063, 0064 and 0065 before processes use this release.
+- Migration 0065 installs a first version of the guard with the full probe.
+  The next partition coverage pass (worker startup) replaces it with the
+  rendered version.
 - Migration 0064 refuses a database whose single-column CHECK set on
   `horsies_task_history` differs from the 24 expected names. It takes a short
   exclusive lock on the history parent and its leaves, and scans no rows.
