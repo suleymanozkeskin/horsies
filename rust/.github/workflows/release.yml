@@ -42,8 +42,23 @@ jobs:
         run: echo "Preparing release for horsies ${{ steps.version.outputs.version }}"
 
   tests:
+    name: tests (${{ matrix.variant }})
     needs: metadata
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            command: cargo test --workspace
+          # `web` only adds the `web` module and the `horsies web` CLI; the
+          # rest of the workspace compiles to the same code as the default run.
+          - variant: web
+            command: cargo test -p horsies --features web
+          # `arbitrary-precision` changes serde_json number handling for the
+          # whole build graph, so the whole workspace runs again.
+          - variant: arbitrary-precision
+            command: cargo test --workspace --features horsies/arbitrary-precision
     services:
       postgres:
         image: postgres:16
@@ -65,7 +80,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.variant }}
+
       - name: Enable statement planning counters
+        if: ${{ matrix.variant == 'default' }}
         run: |
           docker exec ${{ job.services.postgres.id }} psql -U postgres -d horsies-rust-port -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements'"
           docker restart ${{ job.services.postgres.id }}
@@ -77,25 +98,18 @@ jobs:
           done
           docker exec ${{ job.services.postgres.id }} pg_isready -U postgres
 
+      # --workspace resolves the same features as the default test step, so
+      # both steps share one build. The filter selects tests in horsies only.
       - name: Verify claim candidate plan reuse
+        if: ${{ matrix.variant == 'default' }}
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test -p horsies claim_candidate_plan_ -- --ignored --test-threads=1
+        run: cargo test --workspace claim_candidate_plan_ -- --ignored --test-threads=1
 
-      - name: Run default workspace tests
+      - name: Run ${{ matrix.variant }} tests
         env:
           DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace
-
-      - name: Run web-feature workspace tests
-        env:
-          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace --features horsies/web
-
-      - name: Run arbitrary-precision workspace tests
-        env:
-          DATABASE_URL: postgresql://postgres:testpassword@localhost:5432/horsies-rust-port
-        run: cargo test --workspace --features horsies/arbitrary-precision
+        run: ${{ matrix.command }}
 
   frontend:
     needs: metadata
