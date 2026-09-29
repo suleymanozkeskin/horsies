@@ -5,7 +5,7 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
-## [Unreleased]
+## [0.1.0-alpha.35] - 2026-09-29
 
 ### Work reductions
 
@@ -14,6 +14,9 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   shared. On a PostgreSQL build with JIT on, the partition coverage probe
   (cost estimate far above `jit_above_cost`) spent about 0.7 s in JIT
   compilation for about 2 ms of execution on each call.
+- The partition coverage probe's cost estimate stays below the default
+  `jit_above_cost`, so it runs without JIT on any pool, including pools
+  passed to `PostgresBroker::from_pool`.
 - Drop `horsies_task_notify_update_trigger`. It ran
   `horsies_notify_task_changes()` on every live status change: claim, start
   and requeue. Its UPDATE branch sends `task_done` only for terminal
@@ -83,6 +86,15 @@ The project is pre-1.0. Breaking changes may ship in alpha releases.
   exclusive lock on the history parent and its leaves, and scans no rows.
 - The next partition coverage pass installs `horsies_task_result_staged`.
   Until then, result reads use the previous three-statement path.
+- Upgrade every worker in one deployment. A worker of an earlier release
+  still creates daily `forever` leaves; once this release creates the
+  open-ended `forever` leaf, the earlier worker's next daily `forever` leaf
+  overlaps it, and its partition coverage fails until it is upgraded.
+
+### Testing
+
+- The release workflow runs the default, `web` and `arbitrary-precision`
+  test variants as parallel jobs, each with its own PostgreSQL service.
 
 ## [0.1.0-alpha.34] - 2026-09-17
 
