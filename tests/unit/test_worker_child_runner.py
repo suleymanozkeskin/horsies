@@ -7,7 +7,6 @@ C. _child_initializer
 D. _heartbeat_worker
 E. _get_workflow_status_for_task
 F. _handle_workflow_stop_before_start (wildcard branch)
-G. _update_workflow_task_running_with_retry
 I. _run_task_entry error paths
 J. Workflow injection deserialization errors in _run_task_entry
 """
@@ -40,7 +39,6 @@ from horsies.core.worker.child_runner import (
     _is_retryable_db_error,
     _run_task_entry,
     _serialization_error_response,
-    _update_workflow_task_running_with_retry,
 )
 
 
@@ -780,103 +778,6 @@ class TestHandleWorkflowStopBeforeStart:
         command = apply.call_args.args[1]
         assert isinstance(command, CancelOwnedNode)
         assert command.accepts_requeued_pending is True
-
-
-# ===================================================================
-# G. _update_workflow_task_running_with_retry
-# ===================================================================
-
-
-@pytest.mark.unit
-class TestUpdateWorkflowTaskRunningWithRetry:
-    """Retry logic for _update_workflow_task_running_with_retry."""
-
-    def test_success_on_first_attempt(self) -> None:
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool = _FakePool(conn)
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            return_value=pool,
-        ):
-            result = _update_workflow_task_running_with_retry('task-1')
-
-        assert result is True
-        assert conn.commits == 1
-        assert len(cursor.queries) == 1
-
-    def test_retryable_error_retries_then_succeeds(self) -> None:
-        """OperationalError on first call, success on second."""
-        from psycopg import OperationalError
-
-        cursor = _FakeCursor()
-        conn = _FakeConn(cursor)
-        pool_ok = _FakePool(conn)
-
-        call_count = 0
-
-        def _pool_factory() -> Any:
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise OperationalError('transient')
-            return pool_ok
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=_pool_factory,
-        ), patch('horsies.core.worker.child_runner.time.sleep'):
-            result = _update_workflow_task_running_with_retry('task-1')
-
-        assert result is True
-        assert call_count == 2
-        assert conn.commits == 1
-
-    def test_retryable_error_exhausts_all_attempts(self) -> None:
-        """OperationalError on all attempts → returns False."""
-        from psycopg import OperationalError
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=OperationalError('permanent'),
-        ), patch('horsies.core.worker.child_runner.time.sleep'):
-            result = _update_workflow_task_running_with_retry('task-1')
-
-        assert result is False
-
-    def test_non_retryable_error_fails_immediately(self) -> None:
-        """Non-retryable error (e.g. ValueError) → returns False without retry."""
-        call_count = 0
-
-        def _pool_factory() -> Any:
-            nonlocal call_count
-            call_count += 1
-            raise ValueError('schema error')
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=_pool_factory,
-        ):
-            result = _update_workflow_task_running_with_retry('task-1')
-
-        assert result is False
-        assert call_count == 1  # No retries for non-retryable
-
-    def test_retryable_sleeps_with_backoff(self) -> None:
-        """Verify sleep is called with increasing delays on retries."""
-        from psycopg import OperationalError
-
-        with patch(
-            'horsies.core.worker.child_runner._get_worker_pool',
-            side_effect=OperationalError('fail'),
-        ), patch('horsies.core.worker.child_runner.time.sleep') as mock_sleep:
-            _update_workflow_task_running_with_retry('task-1')
-
-        # backoff_seconds = (0.0, 0.25, 0.75) — sleep only called when delay > 0
-        assert mock_sleep.call_count == 2
-        mock_sleep.assert_any_call(0.25)
-        mock_sleep.assert_any_call(0.75)
 
 
 # ===================================================================
@@ -1647,8 +1548,6 @@ class TestOwnershipLostWorkflowBranch:
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             return_value=None,
         ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ), patch(
             'horsies.core.worker.child_runner.apply_sync',
             return_value=MagicMock(spec=Applied),
         ) as apply:
@@ -1683,15 +1582,13 @@ class TestOwnershipLostWorkflowBranch:
         ), patch(
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             side_effect=expire_and_commit,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ) as update_workflow_task:
+        ):
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
         assert result == (False, '', OutcomeCode.TASK_EXPIRED.value)
         assert conn.commits == 1
         assert conn.rollbacks == 0
-        update_workflow_task.assert_not_called()
+        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
         executed_sql = '\n'.join(sql for sql, _ in cursor.queries)
         assert 'good_until IS NULL OR good_until > now()' in executed_sql
 
@@ -1723,15 +1620,13 @@ class TestOwnershipLostWorkflowBranch:
         ), patch(
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             return_value=None,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ) as update_workflow_task:
+        ):
             result = _confirm_ownership_and_set_running('task-1', 'worker-A')
 
         assert result == (False, '', 'CLAIM_LOST')
         assert conn.commits == 0
         assert conn.rollbacks == 1
-        update_workflow_task.assert_not_called()
+        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
 
 
 # ===================================================================

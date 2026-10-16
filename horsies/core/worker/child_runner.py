@@ -612,57 +612,6 @@ def _require_known_workflow_stop_outcome(
             assert_never(unreachable)
 
 
-def _update_workflow_task_running_with_retry(task_id: str) -> bool:
-    backoff_seconds = (0.0, 0.25, 0.75)
-    total_attempts = len(backoff_seconds)
-    for attempt_index, delay in enumerate(backoff_seconds):
-        if delay > 0:
-            time.sleep(delay)
-        try:
-            pool = _get_worker_pool()
-            with pool.connection() as conn:
-                cursor = conn.cursor(row_factory=namedtuple_row)
-                cursor.execute(
-                    """
-                    UPDATE horsies_workflow_tasks wt
-                    SET status = 'RUNNING', started_at = NOW()
-                    FROM horsies_workflows w
-                    WHERE wt.task_id = %s
-                      AND wt.status = 'ENQUEUED'
-                      AND wt.workflow_id = w.id
-                      AND w.status = 'RUNNING'
-                    """,
-                    (task_id,),
-                )
-                conn.commit()
-            return True
-        except Exception as exc:
-            retryable = _is_retryable_db_error(exc)
-            is_last_attempt = attempt_index == total_attempts - 1
-            match (retryable, is_last_attempt):
-                case (True, True):
-                    logger.error(
-                        f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
-                    )
-                    return False
-                case (True, False):
-                    logger.warning(
-                        f'Retrying workflow_tasks RUNNING update for task {task_id}: {exc}'
-                    )
-                    continue
-                case (False, _):
-                    logger.error(
-                        f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
-                    )
-                    return False
-                case _:
-                    logger.error(
-                        f'Failed to update workflow_tasks to RUNNING for task {task_id}: {exc}'
-                    )
-                    return False
-    return False
-
-
 def _expire_claimed_task_before_start(
     cursor: Cursor[Any],
     conn: Connection[Any],
