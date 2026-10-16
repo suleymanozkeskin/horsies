@@ -89,7 +89,7 @@ BASELINE_SCHEMA_VERSION: Final = 26
 # deliberate consequence and not an accident of the bump.
 # Schema 37 changes workflow nodes, outside the task-table copy. Rebuild the
 # candidate database at this version before new measurements.
-CANDIDATE_SCHEMA_VERSION: Final = 37
+CANDIDATE_SCHEMA_VERSION: Final = 38
 
 SIDE_IDENTITY_MARKER: Final = '__horsies_side_identity__'
 

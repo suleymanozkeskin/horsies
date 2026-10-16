@@ -80,6 +80,16 @@ RECOVERY_INDEXES = (
             "AND status IN ('CLAIMED', 'PENDING')"
         ),
     ),
+    RecoveryIndex(
+        name='idx_horsies_workflow_tasks_nonterminal',
+        table='horsies_workflow_tasks',
+        create_sql=(
+            'CREATE INDEX CONCURRENTLY '
+            'idx_horsies_workflow_tasks_nonterminal '
+            'ON horsies_workflow_tasks (workflow_id) '
+            "WHERE status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')"
+        ),
+    ),
 )
 
 _INDEX_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
@@ -210,7 +220,7 @@ async def _remove_abandoned_claims(
 
 
 async def install_recovery_indexes(engine: 'AsyncEngine') -> None:
-    """Install both exact indexes outside a transaction."""
+    """Install the exact indexes outside a transaction."""
     for index in RECOVERY_INDEXES:
         claim_name = await _claim_existing_index(engine, index)
         if claim_name is not None:
@@ -352,6 +362,75 @@ BEGIN
             'idx_horsies_tasks_orphan_recovery_scan is absent, invalid, or noncanonical'
             USING ERRCODE = 'object_not_in_prerequisite_state';
     END IF;
+    CREATE TEMP TABLE horsies_expected_nonterminal_node_index
+        ON COMMIT DROP
+        AS SELECT workflow_id, status
+           FROM horsies_workflow_tasks WITH NO DATA;
+    CREATE INDEX horsies_expected_nonterminal_node_index_idx
+        ON horsies_expected_nonterminal_node_index (workflow_id)
+        WHERE status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING');
+
+    SELECT jsonb_build_object(
+               'method', am.amname,
+               'valid', i.indisvalid,
+               'ready', i.indisready,
+               'live', i.indislive,
+               'unique', i.indisunique,
+               'exclusion', i.indisexclusion,
+               'immediate', i.indimmediate,
+               'key_count', i.indnkeyatts,
+               'attribute_count', i.indnatts,
+               'has_expressions', i.indexprs IS NOT NULL,
+               'columns', (
+                   SELECT jsonb_agg(pg_get_indexdef(i.indexrelid, n, FALSE)
+                                    ORDER BY n)
+                   FROM generate_series(1, i.indnatts) AS n
+               ),
+               'operator_classes', to_jsonb(i.indclass::oid[]),
+               'collations', to_jsonb(i.indcollation::oid[]),
+               'options', to_jsonb(i.indoption::smallint[]),
+               'predicate', pg_get_expr(i.indpred, i.indrelid)
+           )
+    INTO v_expected
+    FROM pg_index AS i
+    JOIN pg_class AS ic ON ic.oid = i.indexrelid
+    JOIN pg_am AS am ON am.oid = ic.relam
+    WHERE ic.oid = to_regclass('horsies_expected_nonterminal_node_index_idx');
+
+    SELECT jsonb_build_object(
+               'method', am.amname,
+               'valid', i.indisvalid,
+               'ready', i.indisready,
+               'live', i.indislive,
+               'unique', i.indisunique,
+               'exclusion', i.indisexclusion,
+               'immediate', i.indimmediate,
+               'key_count', i.indnkeyatts,
+               'attribute_count', i.indnatts,
+               'has_expressions', i.indexprs IS NOT NULL,
+               'columns', (
+                   SELECT jsonb_agg(pg_get_indexdef(i.indexrelid, n, FALSE)
+                                    ORDER BY n)
+                   FROM generate_series(1, i.indnatts) AS n
+               ),
+               'operator_classes', to_jsonb(i.indclass::oid[]),
+               'collations', to_jsonb(i.indcollation::oid[]),
+               'options', to_jsonb(i.indoption::smallint[]),
+               'predicate', pg_get_expr(i.indpred, i.indrelid)
+           )
+    INTO v_actual
+    FROM pg_index AS i
+    JOIN pg_class AS ic ON ic.oid = i.indexrelid
+    JOIN pg_am AS am ON am.oid = ic.relam
+    WHERE ic.oid = to_regclass('idx_horsies_workflow_tasks_nonterminal')
+      AND i.indrelid = 'horsies_workflow_tasks'::regclass;
+
+    IF v_actual IS DISTINCT FROM v_expected THEN
+        RAISE EXCEPTION
+            'idx_horsies_workflow_tasks_nonterminal is absent, invalid, or noncanonical'
+            USING ERRCODE = 'object_not_in_prerequisite_state';
+    END IF;
+
 END
 $migration$
 """)

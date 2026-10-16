@@ -766,3 +766,113 @@ async def test_recovery_index_claim_refuses_foreign_name_reuse(
         '''))).scalar_one())
     assert owner == 'foreign_recovery_index_owner'
     assert saved_owner == 'horsies_workflows'
+
+
+@pytest.mark.parametrize('node_status', ['COMPLETED', 'RUNNING'])
+async def test_generic_audit_uses_partial_node_index(
+    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
+    node_status: str,
+) -> None:
+    import json
+
+    _broker, engine = bounded_recovery_database
+    await _seed_workflow_page_fixture(engine, rows=200, terminal_last=False)
+    async with engine.begin() as connection:
+        await connection.execute(text('''
+            INSERT INTO horsies_workflow_tasks (
+                id, workflow_id, task_index, task_name, status, queue_name,
+                priority, dependencies, allow_failed_deps, join_type,
+                is_subworkflow, created_at
+            )
+            SELECT md5('wide-partial-' || n)::uuid,
+                   md5('bounded-workflow-200')::uuid, n,
+                   'partial_index', 'COMPLETED', 'default', 100, '{}'::integer[],
+                   FALSE, 'all', FALSE, NOW()
+            FROM generate_series(1, 1000) n
+        '''))
+        await connection.execute(
+            text('UPDATE horsies_workflow_tasks SET status=:status '
+                 'WHERE task_index IN (0,1000)'),
+            {'status': node_status},
+        )
+        await connection.execute(text(
+            'ANALYZE horsies_workflows, horsies_workflow_tasks'
+        ))
+        await connection.execute(text('SET LOCAL plan_cache_mode=force_generic_plan'))
+        prepared = GLOBAL_WORKFLOW_AUDIT_SQL.text.replace(
+            ':max_rows', '$1'
+        ).replace(':claim_token', '$2').replace(':claim_ttl_ms', '$3')
+        await connection.execute(text(
+            'PREPARE partial_audit(bigint,uuid,bigint) AS ' + prepared
+        ))
+        execute = (
+            "EXECUTE partial_audit(200,"
+            "'00000000-0000-4000-8000-000000000001',30000)"
+        )
+        async with connection.begin_nested() as probe:
+            result = await connection.execute(text(
+                'EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ' + execute
+            ))
+            plan = cast(object, result.scalar_one())
+            assert 'idx_horsies_workflow_tasks_nonterminal' in json.dumps(plan)
+            assert _relation_rows_examined(plan, 'horsies_workflow_tasks') <= 400
+            await probe.rollback()
+        row = (await connection.execute(text(execute))).one()
+        match node_status:
+            case 'COMPLETED':
+                assert len(row.completion_ids) == 200
+            case 'RUNNING':
+                assert len(row.completion_ids) == 0
+            case _:
+                raise AssertionError(node_status)
+        await connection.execute(text('DEALLOCATE partial_audit'))
+
+
+async def test_partial_node_index_upgrade_repairs_shape_and_preserves_rows(
+    bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
+) -> None:
+    broker, engine = bounded_recovery_database
+    await _seed_workflow_page_fixture(engine, rows=200, terminal_last=True)
+    row_sql = text(
+        'SELECT jsonb_agg(to_jsonb(n) ORDER BY id) '
+        'FROM horsies_workflow_tasks n'
+    )
+    async with engine.begin() as connection:
+        before = (await connection.execute(row_sql)).scalar_one()
+        await connection.execute(text(
+            'DELETE FROM horsies_schema_version WHERE version >= 38'
+        ))
+        await connection.execute(text(
+            'DROP INDEX idx_horsies_workflow_tasks_nonterminal'
+        ))
+        await connection.execute(text(
+            'CREATE INDEX idx_horsies_workflow_tasks_nonterminal '
+            'ON horsies_workflow_tasks(status)'
+        ))
+    upgrade = PostgresBroker(broker.config)
+    try:
+        for _ in range(2):
+            initialized = await upgrade.ensure_schema_initialized()
+            assert initialized.is_ok(), initialized
+    finally:
+        await upgrade.close_async()
+    async with engine.begin() as connection:
+        after = (await connection.execute(row_sql)).scalar_one()
+        assert after == before
+        definition = (await connection.execute(text(
+            "SELECT pg_get_indexdef('idx_horsies_workflow_tasks_nonterminal'::regclass)"
+        ))).scalar_one()
+        assert "(workflow_id)" in definition
+        async with connection.begin_nested() as wrong_shape:
+            await connection.execute(text(
+                'DROP INDEX idx_horsies_workflow_tasks_nonterminal'
+            ))
+            await connection.execute(text(
+                'CREATE INDEX idx_horsies_workflow_tasks_nonterminal '
+                "ON horsies_workflow_tasks(workflow_id) WHERE status='RUNNING'"
+            ))
+            from sqlalchemy.exc import DBAPIError
+
+            with pytest.raises(DBAPIError, match='absent, invalid, or noncanonical'):
+                await connection.execute(recovery_schema.VALIDATE_RECOVERY_INDEXES_SQL)
+            await wrong_shape.rollback()
