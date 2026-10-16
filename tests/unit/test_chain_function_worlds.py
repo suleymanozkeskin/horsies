@@ -34,6 +34,11 @@ DISPOSITIONS: dict[str, tuple[str, str]] = {
         'identity declared text and returned through an explicit cast; '
         'both birth shapes satisfy it',
     ),
+    'horsies_claim_candidates': (
+        'type-agnostic',
+        'identity returned through an explicit text cast, and the '
+        'return-order join compares the identity as text',
+    ),
     'horsies_terminalization_miss': (
         'varchar-world-only',
         'installed inside the fork else-arm; the move family carries '

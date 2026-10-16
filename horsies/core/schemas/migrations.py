@@ -314,7 +314,13 @@ from sqlalchemy import text
 
 # v37: close the workflow-node status set and reject unsupported phase-two inputs.
 
-SCHEMA_VERSION = 38
+# v38: partial index on nonterminal workflow nodes for recovery probes.
+
+# v39: claim candidates bounded by queue cap and batch limit, selected by a
+#      generically planned helper, returned in dispatch order; the claimed
+#      non-runnable workflow lookup becomes a bounded uuid-world function.
+
+SCHEMA_VERSION = 39
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -627,8 +633,53 @@ BEGIN
         RETURN;
     END IF;
 
-    -- 4. Windowed claim: two-arm eligibility per queue (bounded lock fan-out),
-    --    per-queue cap filter, global priority rank, global budget trim.
+    -- 4. Candidate selection runs in horsies_claim_candidates, which reuses
+    --    one generic plan; the accounting above keeps parameter-specific
+    --    plans. Everything stays in this transaction.
+    RETURN QUERY
+    SELECT * FROM horsies_claim_candidates(
+        v_total, p_queues, p_queue_priority, p_queue_max_concurrency,
+        v_queue_counts, p_max_claim_batch, p_worker_id, p_lease_ms
+    );
+END;
+$func$;
+""")
+
+# v39: candidate selection moved out of horsies_claim into a helper that is
+# planned once per connection (plan_cache_mode = force_generic_plan). The
+# parent keeps automatic planning: forcing a generic plan on the in-flight
+# accounting makes it slower under a large in-flight population. The helper
+# signature is stable, so CREATE OR REPLACE installs it on every apply.
+CREATE_CLAIM_CANDIDATES_FUNCTION_SQL = text("""
+CREATE OR REPLACE FUNCTION horsies_claim_candidates(
+    v_total integer,
+    p_queues jsonb,
+    p_queue_priority jsonb,
+    p_queue_max_concurrency jsonb,
+    v_queue_counts jsonb,
+    p_max_claim_batch integer,
+    p_worker_id text,
+    p_lease_ms bigint
+)
+RETURNS TABLE(
+    id text,
+    task_name varchar,
+    args text,
+    kwargs text,
+    queue_name varchar,
+    is_workflow_task boolean,
+    task_options text,
+    claimed_at timestamptz
+)
+LANGUAGE plpgsql
+SET plan_cache_mode = force_generic_plan
+AS $candidates$
+#variable_conflict use_column
+BEGIN
+    -- Two-arm eligibility per queue, each arm and the merge bounded by the
+    -- queue's remaining cap and the batch limit, so a queue never locks
+    -- more candidates than it can claim. Then the per-queue cap filter,
+    -- the global priority rank, and the global budget trim.
     RETURN QUERY
     WITH cand AS (
         SELECT c.id, qn.name AS queue_name, c.priority, c.enqueued_at,
@@ -648,7 +699,16 @@ BEGIN
                   AND (t.good_until IS NULL OR t.good_until > now())
                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
                 FOR UPDATE SKIP LOCKED
-                LIMIT v_total
+                LIMIT LEAST(
+                    v_total,
+                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
+                        GREATEST(0,
+                            (p_queue_max_concurrency ->> qn.name)::int
+                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
+                        ELSE v_total END,
+                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
+                        ELSE v_total END
+                )
             ),
             expired AS (
                 SELECT t.id, t.priority, t.enqueued_at
@@ -662,12 +722,30 @@ BEGIN
                   AND (t.good_until IS NULL OR t.good_until > now())
                 ORDER BY t.priority ASC, t.enqueued_at ASC, t.id ASC
                 FOR UPDATE SKIP LOCKED
-                LIMIT v_total
+                LIMIT LEAST(
+                    v_total,
+                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
+                        GREATEST(0,
+                            (p_queue_max_concurrency ->> qn.name)::int
+                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
+                        ELSE v_total END,
+                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
+                        ELSE v_total END
+                )
             )
             SELECT m.id, m.priority, m.enqueued_at
             FROM (SELECT * FROM pend UNION ALL SELECT * FROM expired) m
             ORDER BY m.priority ASC, m.enqueued_at ASC, m.id ASC
-            LIMIT v_total
+            LIMIT LEAST(
+                    v_total,
+                    CASE WHEN p_queue_max_concurrency ? qn.name THEN
+                        GREATEST(0,
+                            (p_queue_max_concurrency ->> qn.name)::int
+                            - COALESCE((v_queue_counts ->> qn.name)::int, 0))
+                        ELSE v_total END,
+                    CASE WHEN p_max_claim_batch > 0 THEN p_max_claim_batch
+                        ELSE v_total END
+                )
         ) c
     ),
     per_queue AS (
@@ -702,22 +780,35 @@ BEGIN
     ),
     pick AS (
         SELECT ranked.id FROM ranked WHERE ranked.rn <= v_total
+    ),
+    -- Targets are looked up by id; the selected batch never drives a scan
+    -- of the live table.
+    updated AS (
+        UPDATE horsies_tasks t
+        SET status = 'CLAIMED',
+            claimed = TRUE,
+            claimed_at = now(),
+            claimed_by_worker_id = p_worker_id,
+            claim_expires_at = now() + p_lease_ms * INTERVAL '1 millisecond',
+            finalizing_at = NULL,
+            finalizing_by_worker_id = NULL,
+            updated_at = now()
+        WHERE t.id = ANY(ARRAY(SELECT id FROM pick))
+        RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
+                  t.is_workflow_task, t.task_options, t.claimed_at
+    ),
+    return_order AS (
+        SELECT ranked.id, min(ranked.rn) AS rn
+        FROM ranked
+        GROUP BY ranked.id
     )
-    UPDATE horsies_tasks t
-    SET status = 'CLAIMED',
-        claimed = TRUE,
-        claimed_at = now(),
-        claimed_by_worker_id = p_worker_id,
-        claim_expires_at = now() + p_lease_ms * INTERVAL '1 millisecond',
-        finalizing_at = NULL,
-        finalizing_by_worker_id = NULL,
-        updated_at = now()
-    FROM pick
-    WHERE t.id = pick.id
-    RETURNING t.id::text, t.task_name, t.args, t.kwargs, t.queue_name,
-              t.is_workflow_task, t.task_options, t.claimed_at;
+    -- Dispatch order is the global rank. The id is compared as text so the
+    -- statement runs against both the varchar and the uuid identity.
+    SELECT updated.* FROM updated
+    JOIN return_order ON return_order.id::text = updated.id
+    ORDER BY return_order.rn;
 END;
-$func$;
+$candidates$;
 """)
 
 # v12: the RETURNS TABLE column set changed (claimed_at added), and

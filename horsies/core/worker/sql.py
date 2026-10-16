@@ -219,13 +219,11 @@ COUNT_IN_FLIGHT_FOR_WORKER_SQL = text("""
                AND (claim_expires_at IS NULL OR claim_expires_at > now())))
 """)
 
+# The bounded lookup lives in horsies_find_non_runnable_workflow_tasks
+# (horsies/core/schemas/non_runnable_lookup.py).
 GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL = text("""
-    SELECT t.id, w.status
-    FROM horsies_tasks t
-    JOIN horsies_workflow_tasks wt ON wt.task_id = t.id
-    JOIN horsies_workflows w ON w.id = wt.workflow_id
-    WHERE t.id = ANY(:ids)
-      AND w.status IN ('PAUSED', 'CANCELLED')
+    SELECT id, status
+    FROM horsies_find_non_runnable_workflow_tasks(CAST(:ids AS uuid[]))
 """)
 
 # The optional :claimed_at fence scopes the release to a specific claim
