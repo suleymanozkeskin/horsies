@@ -103,6 +103,17 @@ class _FakeRow:
             setattr(self, k, v)
 
 
+class _SequenceCursor(_FakeCursor):
+    """Cursor whose fetchone returns the given rows in order."""
+
+    def __init__(self, rows: list[Any]) -> None:
+        super().__init__()
+        self._rows = rows
+
+    def fetchone(self) -> Any:
+        return self._rows.pop(0)
+
+
 # ---------------------------------------------------------------------------
 # Helper to parse a TaskResult from serialized JSON produced by child_runner
 # ---------------------------------------------------------------------------
@@ -1733,20 +1744,12 @@ class TestWorkflowTaskRunningSyncFailureAborts:
     """Workflow RUNNING sync failures abort before user code starts."""
 
     def test_running_sync_failure_returns_preexec_abort(self) -> None:
-        """Task rolls back when workflow_task RUNNING update fails."""
+        """Task rolls back when no waiting or RUNNING node is linked."""
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
         )
 
-        class _SequenceCursor(_FakeCursor):
-            def __init__(self) -> None:
-                super().__init__()
-                self._rows = [_FakeRow(id='task-1'), None]
-
-            def fetchone(self) -> Any:
-                return self._rows.pop(0)
-
-        cursor = _SequenceCursor()
+        cursor = _SequenceCursor([_FakeRow(id='task-1'), (False,)])
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 
@@ -1761,12 +1764,12 @@ class TestWorkflowTaskRunningSyncFailureAborts:
         assert conn.rollbacks == 1
 
     def test_running_sync_success_returns_none(self) -> None:
-        """When workflow_task RUNNING update succeeds, returns None (proceed)."""
+        """When a node is linked, returns None (proceed)."""
         from horsies.core.worker.child_runner import (
             _confirm_ownership_and_set_running,
         )
 
-        cursor = _FakeCursor(fetchone_return=_FakeRow(id='task-1'))
+        cursor = _SequenceCursor([_FakeRow(id='task-1'), (True,)])
         conn = _FakeConn(cursor)
         pool = _FakePool(conn)
 

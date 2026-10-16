@@ -35,6 +35,7 @@ from horsies.core.lifecycle.persistence import (
     apply_async,
     classify_locked_read_miss_async,
 )
+from horsies.core.worker.child_runner import _mark_task_finalizing
 from horsies.core.worker.worker import (
     _confirm_ownership_and_set_running,
     _initialize_worker_pool,
@@ -898,3 +899,52 @@ async def test_confirm_ownership_rejects_stale_claim_generation(
     )
     assert live_result is None
     assert await _get_task_status(session, task_id) == 'RUNNING'
+
+
+async def _get_finalizing_worker(session: AsyncSession, task_id: str) -> str | None:
+    """Read the worker id of the task's finalizing marker."""
+    result = await session.execute(
+        text(
+            'SELECT finalizing_by_worker_id FROM horsies_tasks '
+            'WHERE id = CAST(:id AS uuid)'
+        ),
+        {'id': task_id},
+    )
+    row = result.fetchone()
+    assert row is not None, f'Task {task_id} not found'
+    return None if row[0] is None else str(row[0])
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_finalizing_marker_rejects_stale_claim_generation(
+    session: AsyncSession,
+    broker: 'PostgresBroker',
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A stale attempt cannot mark a later claim of the same task finalizing."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await session.commit()  # the child marker runs on its own connection
+
+    _initialize_worker_pool(broker.listener.database_url)
+
+    _mark_task_finalizing(task_id, OWNER_WORKER_ID, GEN_STALE)
+    assert await _get_finalizing_worker(session, task_id) is None
+
+    _mark_task_finalizing(task_id, OWNER_WORKER_ID, GEN_CURRENT)
+    assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID
+
+
+@pytest.mark.asyncio(loop_scope='function')
+async def test_finalizing_marker_null_fence_matches_any_generation(
+    session: AsyncSession,
+    broker: 'PostgresBroker',
+    clean_workflow_tables: None,  # noqa: ARG001
+) -> None:
+    """A NULL claimed_at disables the generation half of the marker fence."""
+    task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
+    await session.commit()
+
+    _initialize_worker_pool(broker.listener.database_url)
+
+    _mark_task_finalizing(task_id, OWNER_WORKER_ID, None)
+    assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID

@@ -21,7 +21,7 @@ from horsies.core.models.schedule import (
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
-from horsies.core.scheduler.service import Scheduler
+from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
 from horsies.core.scheduler.validation import (
     _serializable_error,
     _signature_error,
@@ -67,6 +67,14 @@ def _make_task_mock(fn: object) -> MagicMock:
     task._original_fn = fn
     task.task_queue_name = None
     return task
+
+
+def _lock_database_for(broker: MagicMock) -> ScheduleLockDatabase:
+    """Route the scheduler's lock sessions through the broker mock's factory."""
+    return ScheduleLockDatabase(
+        engine=MagicMock(dispose=AsyncMock()),
+        session_factory=broker.session_factory,
+    )
 
 
 # =============================================================================
@@ -635,6 +643,7 @@ class TestCheckScheduleSkipsMissedRuns:
             return_value=False,
         )
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = next_run_at
@@ -919,6 +928,7 @@ class TestCheckScheduleSessionUsage:
         broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         now = _utc(2025, 6, 1, 12, 0, 0)
@@ -955,6 +965,7 @@ class TestCheckScheduleSessionUsage:
         broker.session_factory.return_value.__aenter__ = AsyncMock(return_value=session)
         broker.session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state_manager = MagicMock()
         state_manager.get_state = AsyncMock(return_value=None)
@@ -1003,6 +1014,9 @@ def _make_broker_mock(
             )),
         )
     broker.session_factory = MagicMock()
+    broker.create_single_connection_engine = MagicMock(
+        return_value=MagicMock(dispose=AsyncMock()),
+    )
     return broker
 
 
@@ -1156,6 +1170,32 @@ class TestSchedulerStop:
 
         assert scheduler._stop.is_set()
         scheduler.broker.close_async.assert_awaited_once()
+
+    async def test_stop_disposes_the_lock_engine(self) -> None:
+        """The private lock engine is disposed and released on stop."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        scheduler = Scheduler(app)
+        broker = _make_broker_mock(close_ok=True)
+        scheduler.broker = broker
+        dispose = AsyncMock()
+        scheduler._lock_database = ScheduleLockDatabase(
+            engine=MagicMock(dispose=dispose),
+            session_factory=broker.session_factory,
+        )
+
+        await scheduler.stop()
+
+        dispose.assert_awaited_once()
+        assert scheduler._lock_database is None
 
     async def test_stop_no_broker_only_sets_event(self) -> None:
         """No broker → just sets stop event, no crash."""
@@ -1698,6 +1738,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         # State exists but not due yet
         state = MagicMock()
@@ -1734,6 +1775,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         # State: due since 12:00:00, now is 12:00:17 → 4 slots
         state = MagicMock()
@@ -1784,6 +1826,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -1836,6 +1879,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -1878,6 +1922,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -1924,6 +1969,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         due_slot = _utc(2025, 6, 1, 12, 0, 0)
         state = MagicMock()
@@ -1978,6 +2024,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -2022,6 +2069,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -2065,6 +2113,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)
@@ -2114,6 +2163,7 @@ class TestCheckScheduleAdditionalPaths:
 
         session, broker = _make_session_and_broker()
         scheduler.broker = broker
+        scheduler._lock_database = _lock_database_for(broker)
 
         state = MagicMock()
         state.next_run_at = _utc(2025, 6, 1, 12, 0, 0)

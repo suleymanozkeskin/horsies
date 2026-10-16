@@ -794,18 +794,36 @@ def _confirm_ownership_and_set_running(
                 return (False, '', 'CLAIM_LOST')
 
             if is_workflow_task:
+                # A retried attempt finds its node already RUNNING: the node
+                # keeps its tuple and its first started_at. Only a node that
+                # is not RUNNING yet is written. A node in none of the four
+                # statuses (or no node) fails the workflow check.
                 cursor.execute(
                     """
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'RUNNING',
-                        started_at = NOW()
-                    WHERE task_id = %s
-                      AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-                    RETURNING task_id
+                    WITH linked AS MATERIALIZED (
+                        SELECT id, status
+                        FROM horsies_workflow_tasks
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                        FOR UPDATE
+                    ),
+                    changed AS (
+                        UPDATE horsies_workflow_tasks node
+                        SET status = 'RUNNING',
+                            started_at = NOW()
+                        FROM linked
+                        WHERE node.id = linked.id
+                          AND linked.status <> 'RUNNING'
+                        RETURNING node.id
+                    )
+                    SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
                     """,
                     (task_id,),
                 )
-                if cursor.fetchone() is None:
+                handoff_row = cursor.fetchone()
+                assert handoff_row is not None, 'SELECT EXISTS returns one row'
+                node_linked = bool(handoff_row[0])
+                if not node_linked:
                     conn.rollback()
                     logger.error(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}'
@@ -870,8 +888,19 @@ def _start_heartbeat_thread(
     return heartbeat_thread
 
 
-def _mark_task_finalizing(task_id: str, worker_id: str) -> None:
-    """Mark a completed child result as waiting for parent finalization."""
+def _mark_task_finalizing(
+    task_id: str,
+    worker_id: str,
+    claimed_at: Optional[datetime],
+) -> None:
+    """Mark a completed child result as waiting for parent finalization.
+
+    The marker is fenced on the claim generation (worker_id, claimed_at): a
+    stale attempt cannot refresh the marker of a later claim of the same
+    task, which would delay that claim's stale-RUNNING recovery. A NULL
+    claimed_at disables the generation half, matching the ownership confirm.
+    The marker is best effort: a skipped or failed write is logged only.
+    """
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
@@ -885,12 +914,20 @@ def _mark_task_finalizing(task_id: str, worker_id: str) -> None:
                 WHERE id = %s
                   AND status = 'RUNNING'
                   AND claimed_by_worker_id = %s
+                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
                 """,
-                (worker_id, task_id, worker_id),
+                (worker_id, task_id, worker_id, claimed_at, claimed_at),
             )
+            marked_rows = cursor.rowcount
             conn.commit()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
+        return
+    if marked_rows == 0:
+        logger.debug(
+            'Finalizing marker for task %s skipped: the claim changed',
+            task_id,
+        )
 
 
 def _run_task_entry(
@@ -1318,7 +1355,7 @@ def _run_task_entry(
         # Mark finalizing before stopping heartbeat so the reaper does not
         # mistake a completed child for a crashed child while the parent writes
         # the durable terminal state.
-        _mark_task_finalizing(task_id, master_worker_id)
+        _mark_task_finalizing(task_id, master_worker_id, claimed_at)
         # Always stop the heartbeat thread when task completes (success/failure/error)
         heartbeat_stop_event.set()
         logger.debug(f'Heartbeat stop signal sent for task {task_id}')
