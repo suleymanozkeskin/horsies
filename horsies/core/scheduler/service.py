@@ -5,9 +5,11 @@ import hashlib
 import importlib
 import os
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.retention import resolve_queue_retention_class
@@ -47,6 +49,19 @@ SCHEDULE_ADVISORY_LOCK_SQL = text(
 _EXISTENCE_CHECK_INTERVAL_S = 60.0
 
 
+@dataclass(frozen=True, slots=True)
+class ScheduleLockDatabase:
+    """The private one-connection engine for schedule lock transactions.
+
+    A schedule's lock transaction holds its connection while the enqueue
+    checks out another one from the runtime pool. Keeping the lock off the
+    runtime pool lets a runtime pool of one connection still enqueue.
+    """
+
+    engine: AsyncEngine
+    session_factory: async_sessionmaker[AsyncSession]
+
+
 class Scheduler:
     """
     Main scheduler service for executing scheduled tasks.
@@ -65,6 +80,7 @@ class Scheduler:
         self.app = app
         self.broker: Optional[PostgresBroker] = None
         self.state_manager: Optional[ScheduleStateManager] = None
+        self._lock_database: Optional[ScheduleLockDatabase] = None
         self._stop = asyncio.Event()
         self._initialized = False
         # 0 -> the next tick runs the missing-row existence check.
@@ -122,6 +138,11 @@ class Scheduler:
                 f'Schema initialization failed: {err.message}',
             ) from err.exception
         logger.info('Broker initialized')
+        lock_engine = self.broker.create_single_connection_engine()
+        self._lock_database = ScheduleLockDatabase(
+            engine=lock_engine,
+            session_factory=async_sessionmaker(lock_engine, expire_on_commit=False),
+        )
 
         # Import task modules so task registry is populated for scheduled names
         self._preload_task_modules()
@@ -146,6 +167,10 @@ class Scheduler:
         stop inside run_forever's finally cannot mask the original error.
         """
         self._stop.set()
+
+        if self._lock_database is not None:
+            await self._lock_database.engine.dispose()
+            self._lock_database = None
 
         if self.broker:
             close_result = await self.broker.close_async()
@@ -475,13 +500,13 @@ class Scheduler:
             RuntimeError: scheduler not initialized (programmer error).
             Exception: DB failure on the advisory lock or state reads.
         """
-        if not self.state_manager or not self.broker:
+        if not self.state_manager or not self.broker or self._lock_database is None:
             raise RuntimeError('Scheduler not properly initialized')
 
         # Use advisory lock to prevent double-enqueue from concurrent schedulers
         lock_key = self._schedule_advisory_key(schedule.name)
 
-        async with self.broker.session_factory() as session:
+        async with self._lock_database.session_factory() as session:
             # Acquire transaction-scoped advisory lock for this specific schedule
             await session.execute(
                 SCHEDULE_ADVISORY_LOCK_SQL,

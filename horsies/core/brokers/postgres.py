@@ -669,6 +669,22 @@ class PostgresBroker:
             engine_cfg['connect_args'] = connect_args
         return engine_cfg
 
+    def create_single_connection_engine(self) -> AsyncEngine:
+        """Create a private engine of at most one connection.
+
+        It has the runtime engine's URL, options, and read hooks, and does
+        not share the runtime pool. It opens its connection on first use.
+        The caller owns the engine and disposes it.
+        """
+        engine_cfg = self._runtime_engine_config()
+        engine_cfg['pool_size'] = 1
+        engine_cfg['max_overflow'] = 0
+        engine = create_async_engine(
+            self.config.database_url.get_secret_value(), **engine_cfg,
+        )
+        register_identity_text_reads(engine)
+        return engine
+
     @property
     def app(self) -> 'Horsies | None':
         """Get the attached Horsies app instance (if any)."""
