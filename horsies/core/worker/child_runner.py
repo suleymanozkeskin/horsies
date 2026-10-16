@@ -870,8 +870,19 @@ def _start_heartbeat_thread(
     return heartbeat_thread
 
 
-def _mark_task_finalizing(task_id: str, worker_id: str) -> None:
-    """Mark a completed child result as waiting for parent finalization."""
+def _mark_task_finalizing(
+    task_id: str,
+    worker_id: str,
+    claimed_at: Optional[datetime],
+) -> None:
+    """Mark a completed child result as waiting for parent finalization.
+
+    The marker is fenced on the claim generation (worker_id, claimed_at): a
+    stale attempt cannot refresh the marker of a later claim of the same
+    task, which would delay that claim's stale-RUNNING recovery. A NULL
+    claimed_at disables the generation half, matching the ownership confirm.
+    The marker is best effort: a skipped or failed write is logged only.
+    """
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
@@ -885,12 +896,20 @@ def _mark_task_finalizing(task_id: str, worker_id: str) -> None:
                 WHERE id = %s
                   AND status = 'RUNNING'
                   AND claimed_by_worker_id = %s
+                  AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
                 """,
-                (worker_id, task_id, worker_id),
+                (worker_id, task_id, worker_id, claimed_at, claimed_at),
             )
+            marked_rows = cursor.rowcount
             conn.commit()
     except Exception as exc:
         logger.warning('Failed to mark task %s finalizing: %s', task_id, exc)
+        return
+    if marked_rows == 0:
+        logger.debug(
+            'Finalizing marker for task %s skipped: the claim changed',
+            task_id,
+        )
 
 
 def _run_task_entry(
@@ -1318,7 +1337,7 @@ def _run_task_entry(
         # Mark finalizing before stopping heartbeat so the reaper does not
         # mistake a completed child for a crashed child while the parent writes
         # the durable terminal state.
-        _mark_task_finalizing(task_id, master_worker_id)
+        _mark_task_finalizing(task_id, master_worker_id, claimed_at)
         # Always stop the heartbeat thread when task completes (success/failure/error)
         heartbeat_stop_event.set()
         logger.debug(f'Heartbeat stop signal sent for task {task_id}')
