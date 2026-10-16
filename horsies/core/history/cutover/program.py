@@ -55,6 +55,10 @@ from ..transcode.jobs import (
     TRANSCODE_RELATIONS,
     job_state_fragments,
 )
+from ...schemas.non_runnable_lookup import (
+    DROP_NON_RUNNABLE_LOOKUP_DDL,
+    NON_RUNNABLE_LOOKUP_DDL,
+)
 from ...schemas.terminalization import (
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
@@ -79,6 +83,7 @@ def installation_fragments(
         *quarantine_fragments(),
         *job_state_fragments(),
         RELOCATION_LEDGER_DDL,
+        NON_RUNNABLE_LOOKUP_DDL,
     )
 
 
@@ -143,8 +148,8 @@ def teardown_statements() -> tuple[str, ...]:
 
     The outcome-type CASCADE removes every terminalization operation
     returning it; the remaining drops name the encoder, the phase-2
-    programs (by their cascade roots), the transcode state, and the
-    relocation ledger.
+    programs (by their cascade roots), the transcode state, the
+    relocation ledger, and the uuid-bound non-runnable workflow lookup.
     """
     return (
         'DROP TYPE IF EXISTS horsies_terminalization_outcome CASCADE',
@@ -162,6 +167,7 @@ def teardown_statements() -> tuple[str, ...]:
         f'DROP TABLE IF EXISTS {TRANSCODE_JOBS}',
         f'DROP FUNCTION IF EXISTS {TRANSCODE_MUTATION_FUNCTION}() CASCADE',
         f'DROP TABLE IF EXISTS {RELOCATION_LEDGER}',
+        DROP_NON_RUNNABLE_LOOKUP_DDL,
     )
 
 

@@ -162,6 +162,7 @@ from horsies.core.schemas.migrations import (
     ADD_TERMINALIZATION_KIND_CHECK_SQL,
     ADD_TERMINALIZATION_KIND_COLUMN_SQL,
     BACKFILL_TERMINAL_AT_SQL,
+    CREATE_CLAIM_CANDIDATES_FUNCTION_SQL,
     CREATE_CLAIM_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
@@ -957,10 +958,18 @@ class PostgresBroker:
         )
 
         from horsies.core.schemas.node_status import close_workflow_node_status_set
+        from horsies.core.schemas.non_runnable_lookup import (
+            NON_RUNNABLE_LOOKUP_DDL,
+        )
 
         async with engine.begin() as conn:
             await close_workflow_node_status_set(conn)
             await conn.execute(VALIDATE_RECOVERY_INDEXES_SQL)
+            # v39 on a database already past the v35 apply path: the claim
+            # pair keeps its signatures and return columns, so CREATE OR
+            # REPLACE installs the current bodies.
+            await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
+            await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
             uuid_identity = bool(
                 (await conn.execute(FRESH_IDENTITY_PREDICATE_SQL)).scalar_one()
             )
@@ -970,6 +979,7 @@ class PostgresBroker:
                     'horsies_cancel_orphaned_tasks(integer)'
                 ))
                 await conn.execute(text(bounded_cancel_orphan_sweep_ddl()))
+                await conn.execute(text(NON_RUNNABLE_LOOKUP_DDL))
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -1086,7 +1096,9 @@ class PostgresBroker:
             # Migration (v12): claimed_at added to the function's OUT columns
             # (claim-generation fence, C10); the return-type change requires
             # dropping the v10/v11 definition first.
+            # Migration (v39): candidate selection moved into its own helper.
             await conn.execute(DROP_CLAIM_FUNCTION_SQL)
+            await conn.execute(CREATE_CLAIM_CANDIDATES_FUNCTION_SQL)
             await conn.execute(CREATE_CLAIM_FUNCTION_SQL)
 
             # Migration (v18): terminal_at completeness. Backfill first, then

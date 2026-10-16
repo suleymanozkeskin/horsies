@@ -1052,6 +1052,54 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_claim_programs_upgrade_from_38(
+        self, scratch_database: str,
+    ) -> None:
+        """A v38 database receives the v39 claim pair and the lookup."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'DROP FUNCTION horsies_claim_candidates('
+                    'integer, jsonb, jsonb, jsonb, jsonb, integer, text, bigint)'
+                ))
+                await conn.execute(text(
+                    'DROP FUNCTION horsies_find_non_runnable_workflow_tasks(uuid[])'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 39'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (38) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                installed = dict((await conn.execute(text("""
+                    SELECT proname, coalesce(array_to_string(proconfig, ','), '')
+                    FROM pg_proc
+                    WHERE proname IN (
+                        'horsies_claim', 'horsies_claim_candidates',
+                        'horsies_find_non_runnable_workflow_tasks'
+                    )
+                """))).tuples().all())
+                assert installed == {
+                    'horsies_claim': '',
+                    'horsies_claim_candidates': 'plan_cache_mode=force_generic_plan',
+                    'horsies_find_non_runnable_workflow_tasks': (
+                        'plan_cache_mode=force_generic_plan'
+                    ),
+                }
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,
