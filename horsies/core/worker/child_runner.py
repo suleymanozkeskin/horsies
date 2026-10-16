@@ -794,18 +794,36 @@ def _confirm_ownership_and_set_running(
                 return (False, '', 'CLAIM_LOST')
 
             if is_workflow_task:
+                # A retried attempt finds its node already RUNNING: the node
+                # keeps its tuple and its first started_at. Only a node that
+                # is not RUNNING yet is written. A node in none of the four
+                # statuses (or no node) fails the workflow check.
                 cursor.execute(
                     """
-                    UPDATE horsies_workflow_tasks
-                    SET status = 'RUNNING',
-                        started_at = NOW()
-                    WHERE task_id = %s
-                      AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
-                    RETURNING task_id
+                    WITH linked AS MATERIALIZED (
+                        SELECT id, status
+                        FROM horsies_workflow_tasks
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'READY', 'PENDING', 'RUNNING')
+                        FOR UPDATE
+                    ),
+                    changed AS (
+                        UPDATE horsies_workflow_tasks node
+                        SET status = 'RUNNING',
+                            started_at = NOW()
+                        FROM linked
+                        WHERE node.id = linked.id
+                          AND linked.status <> 'RUNNING'
+                        RETURNING node.id
+                    )
+                    SELECT EXISTS (SELECT 1 FROM linked) AS node_linked
                     """,
                     (task_id,),
                 )
-                if cursor.fetchone() is None:
+                handoff_row = cursor.fetchone()
+                assert handoff_row is not None, 'SELECT EXISTS returns one row'
+                node_linked = bool(handoff_row[0])
+                if not node_linked:
                     conn.rollback()
                     logger.error(
                         f'Failed to update workflow_tasks to RUNNING for task {task_id}'
