@@ -1135,6 +1135,54 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_pause_abandon_recheck_upgrade_from_40(
+        self, scratch_database: str,
+    ) -> None:
+        """A v40 database receives the pause abandons that re-check PAUSED."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                for signature in (
+                    'horsies_abandon_owned_node('
+                    'p_task_id uuid, p_worker_id text, p_claimed_at timestamptz)',
+                    'horsies_abandon_owned_nodes('
+                    'p_ids uuid[], p_claimed_ats timestamptz[], p_worker_id text)',
+                ):
+                    await conn.execute(text(
+                        f'CREATE OR REPLACE FUNCTION {signature} '
+                        'RETURNS SETOF horsies_terminalization_outcome '
+                        'LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$'
+                    ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 41'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (40) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                rechecks = dict((await conn.execute(text("""
+                    SELECT proname, prosrc LIKE '%WORKFLOW_STATUS%'
+                    FROM pg_proc
+                    WHERE proname IN (
+                        'horsies_abandon_owned_node', 'horsies_abandon_owned_nodes'
+                    )
+                """))).tuples().all())
+                assert rechecks == {
+                    'horsies_abandon_owned_node': True,
+                    'horsies_abandon_owned_nodes': True,
+                }
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

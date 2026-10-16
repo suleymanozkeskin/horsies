@@ -29,7 +29,7 @@ deadlock against any advisory-first caller on the same task.
 
 from __future__ import annotations
 
-from typing import Final
+from typing import Final, assert_never
 
 from ...lifecycle.operations import TerminalizationKind, equivalence_class_of
 
@@ -1621,6 +1621,7 @@ def _id_keyed_batch_ddl(
     kind: TerminalizationKind,
     error_expression: str,
     reason_expression: str,
+    required_workflow_status: str | None,
 ) -> str:
     """The id-keyed pairwise wrapper around the shared move-stage core.
 
@@ -1633,7 +1634,80 @@ def _id_keyed_batch_ddl(
     emitted at input ordinality; the client decoder reconstructs by
     ordinality value and never trusts result order. Every non-applied
     input gets its answer through the ONE miss classifier.
+
+    ``required_workflow_status`` set: the linked workflow rows are locked
+    FOR SHARE in sorted id order before the task rows (the workflow-then-
+    task order), and a row whose claim matches applies only when every
+    linked workflow still has that status. A claim-matched row whose
+    workflow moved on is answered SOURCE_STATE_CONFLICT with
+    WORKFLOW_STATUS evidence instead of being moved.
     """
+    match required_workflow_status:
+        case None:
+            workflow_lock_sql = ''
+            workflow_guard_sql = ''
+            refused_sql = ''
+        case str() as required:
+            workflow_lock_sql = f"""    -- Linked workflow rows first, in sorted id order.
+    PERFORM 1 FROM (
+        SELECT w.id FROM horsies_workflows w
+        WHERE w.id IN (
+            SELECT wt.workflow_id FROM horsies_workflow_tasks wt
+            WHERE wt.task_id = ANY(p_ids)
+        )
+        ORDER BY w.id
+        FOR SHARE
+    ) locked_workflows;
+
+"""
+            workflow_guard_sql = f"""
+      AND NOT EXISTS (
+          SELECT 1
+          FROM horsies_workflow_tasks wt
+          JOIN horsies_workflows w ON w.id = wt.workflow_id
+          WHERE wt.task_id = t.id
+            AND w.status <> '{required}'
+      )"""
+            refused_sql = f"""
+    -- Fence classified before guard: claim-matched rows whose workflow
+    -- is no longer {required} are refused with the workflow's evidence.
+    SELECT COALESCE(array_agg(input.task_id), '{{}}') INTO v_refused_ids
+    FROM unnest(p_ids, p_claimed_ats)
+        AS input(task_id, expected_claimed_at)
+    JOIN {LIVE_TASKS} t ON t.id = input.task_id
+    WHERE t.status = 'CLAIMED'
+      AND t.claimed_by_worker_id = CAST(p_worker_id AS VARCHAR)
+      AND (
+          input.expected_claimed_at IS NULL
+          OR t.claimed_at = input.expected_claimed_at
+      )
+      AND NOT (t.id = ANY(v_applied_ids));
+
+    RETURN QUERY
+    SELECT t.id, input.ordinality, 'SOURCE_STATE_CONFLICT'::text,
+           NULL::timestamptz, NULL::text,
+           t.status::text, t.claimed_by_worker_id::varchar, t.claimed_at,
+           'WORKFLOW_STATUS'::text,
+           jsonb_build_object(
+               'workflow_id', moved_on.workflow_id::text,
+               'workflow_status', moved_on.workflow_status
+           )
+    FROM {LIVE_TASKS} t
+    JOIN unnest(p_ids) WITH ORDINALITY AS input(task_id, ordinality)
+        ON input.task_id = t.id
+    CROSS JOIN LATERAL (
+        SELECT w.id AS workflow_id, w.status AS workflow_status
+        FROM horsies_workflow_tasks wt
+        JOIN horsies_workflows w ON w.id = wt.workflow_id
+        WHERE wt.task_id = t.id
+          AND w.status <> '{required}'
+        ORDER BY w.id
+        LIMIT 1
+    ) moved_on
+    WHERE t.id = ANY(v_refused_ids);
+"""
+        case _ as unreachable:
+            assert_never(unreachable)
     core = _move_stage_core(
         kind=kind,
         status='CANCELLED',
@@ -1666,6 +1740,7 @@ LANGUAGE plpgsql
 AS $function$
 DECLARE
     v_applied_ids uuid[];
+    v_refused_ids uuid[] := '{{}}';
     v_terminal_at timestamptz;
     v_moved bigint;
     v_deleted bigint;
@@ -1694,7 +1769,7 @@ BEGIN
     END IF;
     PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
 
-    -- Waits-in-global-order: lock every present input row in sorted id
+{workflow_lock_sql}    -- Waits-in-global-order: lock every present input row in sorted id
     -- order before anything is judged.
     PERFORM 1 FROM (
         SELECT t.id FROM {LIVE_TASKS} t
@@ -1712,12 +1787,12 @@ BEGIN
       AND (
           input.expected_claimed_at IS NULL
           OR t.claimed_at = input.expected_claimed_at
-      );
-
+      ){workflow_guard_sql};
+{refused_sql}
     IF cardinality(v_applied_ids) > 0 THEN
 {core}    END IF;
 
-    -- Every non-applied input gets its answer through the ONE miss
+    -- Every other input gets its answer through the ONE miss
     -- classifier, at its own ordinality.
     RETURN QUERY
     SELECT input.task_id, input.ordinality,
@@ -1730,7 +1805,8 @@ BEGIN
         input.task_id, {_equivalence_class_sql(kind)},
         p_worker_id, input.expected_claimed_at
     ) m
-    WHERE NOT (input.task_id = ANY(v_applied_ids));
+    WHERE NOT (input.task_id = ANY(v_applied_ids))
+      AND NOT (input.task_id = ANY(v_refused_ids));
 END
 $function$
 """
@@ -1752,7 +1828,20 @@ DECLARE
     v_worker varchar;
     v_claimed_at timestamptz;
     v_terminal_at timestamptz;
+    v_workflow_id uuid;
+    v_workflow_status text;
 BEGIN
+    -- The workflow row first, in the workflow-then-task lock order. The
+    -- caller read PAUSED before this call; a resume that committed since
+    -- then shows here, and its status update waits for this lock.
+    SELECT w.id, w.status
+    INTO v_workflow_id, v_workflow_status
+    FROM horsies_workflow_tasks wt
+    JOIN horsies_workflows w ON w.id = wt.workflow_id
+    WHERE wt.task_id = p_task_id
+    ORDER BY w.id
+    LIMIT 1
+    FOR SHARE OF w;
     PERFORM pg_advisory_xact_lock(
         hashtextextended(p_task_id::text, {_TASK_LOCK_SEED})
     );
@@ -1769,6 +1858,21 @@ BEGIN
             p_task_id, {_equivalence_class_sql(TerminalizationKind(kind))},
             p_worker_id, p_claimed_at
         );
+        RETURN;
+    END IF;
+
+    -- Fence classified before guard: the claim is this caller's, and the
+    -- workflow is no longer paused, so the task is runnable again.
+    IF v_workflow_id IS NOT NULL AND v_workflow_status <> 'PAUSED' THEN
+        RETURN QUERY SELECT
+            p_task_id, NULL::bigint, 'SOURCE_STATE_CONFLICT'::text,
+            NULL::timestamptz, NULL::text,
+            v_status, v_worker, v_claimed_at,
+            'WORKFLOW_STATUS'::text,
+            jsonb_build_object(
+                'workflow_id', v_workflow_id::text,
+                'workflow_status', v_workflow_status
+            );
         RETURN;
     END IF;
 
@@ -1853,6 +1957,7 @@ def _abandon_owned_nodes_ddl() -> str:
         kind=TerminalizationKind.PAUSE_ABANDON_CLAIM_BATCH,
         error_expression="'TASK_CANCELLED'",
         reason_expression="'Workflow paused before task start'",
+        required_workflow_status='PAUSED',
     )
 
 
@@ -1862,6 +1967,21 @@ def _cancel_owned_nodes_ddl() -> str:
         kind=TerminalizationKind.WORKFLOW_CANCEL_CLAIM_BATCH,
         error_expression='NULL',
         reason_expression='NULL',
+        # CANCELLED is final, so no later transition can make the task
+        # runnable between the caller's read and this call.
+        required_workflow_status=None,
+    )
+
+
+def pause_abandon_replacement_ddl() -> tuple[str, ...]:
+    """The claim-fenced pause abandons, as CREATE OR REPLACE statements.
+
+    Schema v41 installs them on a uuid database whose move program predates
+    the pause re-check. Signatures and return types are unchanged.
+    """
+    return tuple(
+        ddl.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1)
+        for ddl in (_abandon_owned_node_ddl(), _abandon_owned_nodes_ddl())
     )
 
 

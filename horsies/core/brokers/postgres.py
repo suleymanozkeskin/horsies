@@ -955,6 +955,7 @@ class PostgresBroker:
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
         from horsies.core.history.terminalization.move import (
             bounded_cancel_orphan_sweep_ddl,
+            pause_abandon_replacement_ddl,
         )
 
         from horsies.core.schemas.node_status import close_workflow_node_status_set
@@ -980,6 +981,10 @@ class PostgresBroker:
                 ))
                 await conn.execute(text(bounded_cancel_orphan_sweep_ddl()))
                 await conn.execute(text(NON_RUNNABLE_LOOKUP_DDL))
+                # v41: the pause abandons re-check PAUSED under the
+                # workflow lock.
+                for statement in pause_abandon_replacement_ddl():
+                    await conn.execute(text(statement))
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
