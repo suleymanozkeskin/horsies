@@ -42,11 +42,33 @@ from horsies.core.types.status import TaskStatus
 # ---------------------------------------------------------------------------
 
 
-def _schema_lock_connection() -> AsyncMock:
+def _schema_lock_connection(
+    *,
+    lock_attempts: tuple[bool, ...] = (True,),
+    unlock_succeeds: bool = True,
+) -> AsyncMock:
+    """A schema lock connection whose lock tries return ``lock_attempts``.
+
+    Each key takes lock tries from ``lock_attempts`` in order; after the
+    last one, every try succeeds.
+    """
     connection = AsyncMock()
-    cursor = AsyncMock()
-    cursor.fetchone = AsyncMock(return_value=(True,))
-    connection.execute = AsyncMock(return_value=cursor)
+    pending_attempts = list(lock_attempts)
+    unlock_cursor = AsyncMock()
+    unlock_cursor.fetchone = AsyncMock(return_value=(unlock_succeeds,))
+
+    async def _execute(sql: str, params: tuple[object, ...]) -> AsyncMock:
+        _ = params
+        match sql:
+            case 'SELECT pg_advisory_unlock(%s)':
+                return unlock_cursor
+            case _:
+                acquired = pending_attempts.pop(0) if pending_attempts else True
+                lock_cursor = AsyncMock()
+                lock_cursor.fetchone = AsyncMock(return_value=(acquired,))
+                return lock_cursor
+
+    connection.execute = AsyncMock(side_effect=_execute)
     connection.close = AsyncMock()
     return connection
 
@@ -519,7 +541,7 @@ class TestPostgresBrokerPgBouncerWiring:
 
         lock_calls = [
             call for call in lock_connection.execute.await_args_list
-            if call.args[0] == 'SELECT pg_advisory_lock(%s)'
+            if call.args[0] == 'SELECT pg_try_advisory_lock(%s)'
         ]
         assert [call.args[1][0] for call in lock_calls] == [
             broker._legacy_schema_advisory_key(),
@@ -589,7 +611,7 @@ class TestPostgresBrokerPgBouncerWiring:
         lock_keys = [
             call.args[1][0]
             for call in lock_connection.execute.await_args_list
-            if call.args[0] == 'SELECT pg_advisory_lock(%s)'
+            if call.args[0] == 'SELECT pg_try_advisory_lock(%s)'
         ]
         expected_legacy_keys = broker._legacy_schema_advisory_keys()
         assert lock_keys == [
@@ -601,9 +623,7 @@ class TestPostgresBrokerPgBouncerWiring:
     @pytest.mark.asyncio
     async def test_schema_lock_unlock_failure_closes_connection(self) -> None:
         broker = _make_broker()
-        lock_connection = _schema_lock_connection()
-        lock_cursor = lock_connection.execute.return_value
-        lock_cursor.fetchone.return_value = (False,)
+        lock_connection = _schema_lock_connection(unlock_succeeds=False)
 
         with patch(
             'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
@@ -623,9 +643,7 @@ class TestPostgresBrokerPgBouncerWiring:
         self,
     ) -> None:
         broker = _make_broker()
-        lock_connection = _schema_lock_connection()
-        lock_cursor = lock_connection.execute.return_value
-        lock_cursor.fetchone.return_value = (False,)
+        lock_connection = _schema_lock_connection(unlock_succeeds=False)
 
         with patch(
             'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
@@ -639,6 +657,37 @@ class TestPostgresBrokerPgBouncerWiring:
             'schema advisory lock ownership was lost'
         ]
         lock_connection.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_schema_lock_polls_until_the_key_is_free(self) -> None:
+        """A held key is retried after a sleep, never with a waiting statement."""
+        broker = _make_broker()
+        lock_connection = _schema_lock_connection(lock_attempts=(False, False, True))
+
+        with (
+            patch(
+                'horsies.core.brokers.postgres.psycopg.AsyncConnection.connect',
+                new=AsyncMock(return_value=lock_connection),
+            ),
+            patch(
+                'horsies.core.brokers.postgres.asyncio.sleep',
+                new=AsyncMock(),
+            ) as sleep,
+        ):
+            async with broker._schema_session_lock():
+                pass
+
+        statements = [call.args[0] for call in lock_connection.execute.await_args_list]
+        assert 'SELECT pg_advisory_lock(%s)' not in statements
+        first_key = broker._legacy_schema_advisory_keys()[0]
+        first_key_tries = [
+            call
+            for call in lock_connection.execute.await_args_list
+            if call.args[0] == 'SELECT pg_try_advisory_lock(%s)'
+            and call.args[1][0] == first_key
+        ]
+        assert len(first_key_tries) == 3
+        assert sleep.await_count == 2
 
     @pytest.mark.asyncio
     async def test_schema_lock_cancellation_releases_and_closes(self) -> None:

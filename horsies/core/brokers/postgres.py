@@ -245,6 +245,33 @@ _SCHEMA_INIT_MAX_ATTEMPTS = 5
 _SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
 _SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
 _PRE_CONCURRENT_SCHEMA_VERSION = 35
+_SCHEMA_LOCK_POLL_INTERVAL_SECONDS = 0.025
+
+
+async def _acquire_session_advisory_lock(
+    connection: psycopg.AsyncConnection[Any],
+    key: int,
+) -> None:
+    """Take a session advisory lock without a statement that waits for it.
+
+    A blocked ``pg_advisory_lock`` statement holds a snapshot, and a
+    ``CREATE INDEX CONCURRENTLY`` that the lock holder runs on another
+    connection waits for that snapshot: the cycle passes through the
+    holder's client process, so PostgreSQL does not detect it.
+    Each ``pg_try_advisory_lock`` ends its statement before the next poll.
+    The wait has no bound, as with the blocking form: it ends when the
+    holder releases the lock or its session ends.
+    """
+    while True:
+        cursor = await connection.execute(
+            'SELECT pg_try_advisory_lock(%s)',
+            (key,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None, 'pg_try_advisory_lock returns one row'
+        if bool(row[0]):
+            return
+        await asyncio.sleep(_SCHEMA_LOCK_POLL_INTERVAL_SECONDS)
 
 # ---- Monitoring queries ----
 
@@ -865,10 +892,7 @@ class PostgresBroker:
         body_error: BaseException | None = None
         try:
             for key in keys:
-                await connection.execute(
-                    'SELECT pg_advisory_lock(%s)',
-                    (key,),
-                )
+                await _acquire_session_advisory_lock(connection, key)
                 held.append(key)
             yield
         except BaseException as exc:
