@@ -1100,6 +1100,41 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_phase2_consume_generic_plan_upgrade_from_39(
+        self, scratch_database: str,
+    ) -> None:
+        """A v39 database receives the phase-2 function's plan setting."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'ALTER FUNCTION horsies_phase2_consume(uuid, text) '
+                    'RESET plan_cache_mode'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 40'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (39) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                assert (await conn.execute(text("""
+                    SELECT array_to_string(proconfig, ',')
+                    FROM pg_proc
+                    WHERE oid = to_regprocedure('horsies_phase2_consume(uuid,text)')
+                """))).scalar_one() == 'plan_cache_mode=force_generic_plan'
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

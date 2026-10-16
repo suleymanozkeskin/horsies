@@ -90,6 +90,28 @@ class TestProgramInstallation:
                     )
                 ).scalar_one()
                 assert bool(move_present)
+                # Installed by the program, so a database cut over after
+                # its schema activation still receives them.
+                assert (
+                    await connection.execute(
+                        text(
+                            "SELECT array_to_string(proconfig, ',') FROM pg_proc "
+                            "WHERE oid = to_regprocedure("
+                            "'horsies_phase2_consume(uuid,text)')"
+                        )
+                    )
+                ).scalar_one() == 'plan_cache_mode=force_generic_plan'
+                assert bool(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT to_regprocedure("
+                                "'horsies_find_non_runnable_workflow_tasks(uuid[])'"
+                                ") IS NOT NULL"
+                            )
+                        )
+                    ).scalar_one()
+                )
                 removed = await uninstall_programs(connection)
                 assert removed > 0
                 move_present = (
@@ -101,6 +123,17 @@ class TestProgramInstallation:
                     )
                 ).scalar_one()
                 assert not bool(move_present)
+                assert not bool(
+                    (
+                        await connection.execute(
+                            text(
+                                "SELECT to_regprocedure("
+                                "'horsies_find_non_runnable_workflow_tasks(uuid[])'"
+                                ") IS NOT NULL"
+                            )
+                        )
+                    ).scalar_one()
+                )
                 # R2 left nothing behind that blocks a second pass.
                 second_pass = await install_programs(connection)
                 assert isinstance(second_pass, int)
