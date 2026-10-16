@@ -329,9 +329,7 @@ class TestOwnershipGateBehavioral:
         ), patch(
             'horsies.core.worker.child_runner._expire_claimed_task_before_start',
             return_value=None,
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ) as mock_wf_update:
+        ):
             from horsies.core.worker.child_runner import (
                 _confirm_ownership_and_set_running,
             )
@@ -344,16 +342,14 @@ class TestOwnershipGateBehavioral:
         assert reason == 'CLAIM_LOST'
         assert conn.rollbacks == 1, 'Should rollback on ownership loss'
         assert conn.commits == 0, 'No commit on ownership loss'
-        mock_wf_update.assert_not_called()
+        assert not any('UPDATE horsies_workflow_tasks' in sql for sql, _ in cursor.queries)
 
     def test_exception_returns_ownership_unconfirmed(self) -> None:
         """When pool raises an exception, returns OWNERSHIP_UNCONFIRMED."""
         with patch(
             'horsies.core.worker.child_runner._get_worker_pool',
             side_effect=RuntimeError('pool unavailable'),
-        ), patch(
-            'horsies.core.worker.child_runner._update_workflow_task_running_with_retry',
-        ) as mock_wf_update:
+        ):
             from horsies.core.worker.child_runner import (
                 _confirm_ownership_and_set_running,
             )
@@ -364,7 +360,6 @@ class TestOwnershipGateBehavioral:
         ok, _result_json, reason = result
         assert ok is False
         assert reason == 'OWNERSHIP_UNCONFIRMED'
-        mock_wf_update.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
