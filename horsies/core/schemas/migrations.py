@@ -334,7 +334,10 @@ from sqlalchemy import text
 # v44: horsies_expire_pending_tasks returns its outcomes in ascending
 #      good_until order.
 
-SCHEMA_VERSION = 44
+# v45: ix_horsies_workflow_tasks_node_id, ix_horsies_workflow_tasks_workflow_id
+#      and idx_horsies_workflow_tasks_deps are dropped concurrently.
+
+SCHEMA_VERSION = 45
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
