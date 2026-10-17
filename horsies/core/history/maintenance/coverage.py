@@ -838,13 +838,16 @@ async def ensure_partition_coverage(
             # health probe this function ends on; rolling back to the
             # savepoint leaves the caller's transaction usable, so
             # containment survives the failure kind that most needs it.
+            # Leaves are created unpublished: the caller's transaction
+            # commits once, and the publication after this loop (any
+            # created leaf triggers it) covers every class's leaves.
             async with connection.begin_nested():
                 creations = await ensure_leaf_coverage(
                     connection,
                     EnsureLeafCoverage(
                         class_key=class_key, horizon_days=history_horizon_days
                     ),
-                    publisher,
+                    UnpublishedLoader(),
                 )
         except Exception as class_error:
             failures.append(f'{class_key}: {class_error!r}')
