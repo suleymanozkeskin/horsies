@@ -45,6 +45,14 @@ CREATE_TASK_NOTIFY_TRIGGER_SQL = text("""
         EXECUTE FUNCTION horsies_notify_task_changes();
 """)
 
+# The move program limits live rows to PENDING, CLAIMED and RUNNING, and
+# the terminalization functions send task_done after the move; the update
+# trigger's task_done branch cannot fire there. Only the in-place program
+# terminalizes live rows, so only it keeps the trigger.
+DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL = (
+    'DROP TRIGGER IF EXISTS horsies_task_notify_update_trigger ON horsies_tasks'
+)
+
 
 # ---- Task status triggers (TUI/monitoring) ----
 # Fire on ANY status change so the TUI gets real-time updates.
