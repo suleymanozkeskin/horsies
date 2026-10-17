@@ -23,6 +23,7 @@ from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
+    ObservedWorkflowState,
     SourceStateConflict,
     TaskAbsent,
     TerminalizationOutcome,
@@ -60,6 +61,35 @@ def _newly_terminalized_task_ids(
                 task_ids.append(task_id)
             case (
                 AlreadyApplied()
+                | LostClaim()
+                | SourceStateConflict()
+                | TaskAbsent()
+            ):
+                continue
+            case _ as unreachable:
+                assert_never(unreachable)
+    return task_ids
+
+
+def _resumed_before_abandon_task_ids(
+    outcomes: list[TerminalizationOutcome],
+) -> set[str]:
+    """Claims the pause abandon refused because the workflow runs again.
+
+    A refusal whose workflow is CANCELLED stays blocked: the cancellation
+    path owns that row.
+    """
+    task_ids: set[str] = set()
+    for outcome in outcomes:
+        match outcome:
+            case SourceStateConflict(
+                task_id=task_id,
+                evidence=ObservedWorkflowState(workflow_status=status),
+            ) if status != 'CANCELLED':
+                task_ids.add(task_id)
+            case (
+                Applied()
+                | AlreadyApplied()
                 | LostClaim()
                 | SourceStateConflict()
                 | TaskAbsent()
@@ -249,6 +279,11 @@ class ClaimMixin:
                     ),
                 )
                 unclaimed_paused_task_ids = _newly_terminalized_task_ids(
+                    paused_outcomes,
+                )
+                # A resume that committed after the lookup makes the abandon
+                # refuse; those claims are runnable again and are dispatched.
+                paused_task_ids -= _resumed_before_abandon_task_ids(
                     paused_outcomes,
                 )
                 # Keep workflow_task metadata consistent with unclaimed tasks.

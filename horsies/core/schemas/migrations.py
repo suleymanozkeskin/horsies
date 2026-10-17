@@ -322,7 +322,10 @@ from sqlalchemy import text
 
 # v40: horsies_phase2_consume runs with plan_cache_mode = force_generic_plan.
 
-SCHEMA_VERSION = 40
+# v41: the claim-fenced pause abandons re-check PAUSED under the workflow
+#      lock and refuse when a resume committed first.
+
+SCHEMA_VERSION = 41
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
