@@ -3,7 +3,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from enum import Enum
+from typing import Any, Final
 
 from psycopg import InterfaceError, OperationalError
 from psycopg.types.string import TextLoader
@@ -47,6 +48,58 @@ def register_identity_text_reads(engine: AsyncEngine) -> None:
         dbapi_connection.driver_connection.adapters.register_loader(
             'uuid', TextLoader
         )
+
+
+class SessionSettings(Enum):
+    """Whether a pooled server session keeps a client's session settings.
+
+    KEPT: a direct or session-pooled connection; a session-level SET stays
+    with the client that issued it. NOT_KEPT: a PgBouncer transaction-mode
+    connection; server sessions are shared between clients, so a session
+    SET would leak to other clients.
+    """
+
+    KEPT = 'KEPT'
+    NOT_KEPT = 'NOT_KEPT'
+
+
+# The partition coverage probe's cost estimate is above the default
+# jit_above_cost, so a JIT-enabled server compiles it on every call.
+DISABLE_JIT_SQL: Final = 'SET jit = off'
+
+
+def register_session_settings(
+    engine: AsyncEngine,
+    settings: SessionSettings,
+) -> None:
+    """Run ``SET jit = off`` once on each new connection that keeps it.
+
+    The SET runs in autocommit, so a rollback of the connection's first
+    transaction cannot undo it. A NOT_KEPT engine keeps the server's JIT
+    configuration. Like ``register_identity_text_reads``, registration is
+    a no-op for anything that is not a real ``AsyncEngine``.
+    """
+    if not isinstance(engine, AsyncEngine):  # pyright: ignore[reportUnnecessaryIsInstance]
+        return
+    match settings:
+        case SessionSettings.NOT_KEPT:
+            return
+        case SessionSettings.KEPT:
+            pass
+
+    def _disable_jit(dbapi_connection: Any, _connection_record: Any) -> None:
+        autocommit = dbapi_connection.autocommit
+        dbapi_connection.autocommit = True
+        try:
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute(DISABLE_JIT_SQL)
+            finally:
+                cursor.close()
+        finally:
+            dbapi_connection.autocommit = autocommit
+
+    event.listen(engine.sync_engine, 'connect', _disable_jit)
 
 
 def is_dbapi_disconnect(exc: DBAPIError) -> bool:

@@ -117,6 +117,20 @@ Rules:
 - PgBouncer-only worker deployment is unsupported.
 - Horsies does not infer PgBouncer mode from port numbers.
 
+### JIT
+
+Horsies runs `SET jit = off` once on each new broker connection that keeps
+session settings. Some partition-maintenance statements have cost estimates
+above the default `jit_above_cost`, so a JIT-enabled server would compile
+them on every call.
+
+- Direct connections and the `session_database_url` pool always run without JIT.
+- With `pgbouncer_transaction_mode=True`, the `database_url` pool keeps the
+  server's JIT setting, because server sessions are shared between clients.
+  To disable JIT there too, set it for the role:
+  `ALTER ROLE <horsies_role> SET jit = off;`
+- Your `database_url` options are not changed.
+
 ## Connection Pooling
 
 The broker uses SQLAlchemy's async connection pool:

@@ -68,7 +68,9 @@ from horsies.core.history.cutover.state import (
 )
 from horsies.core.utils.db import (
     is_retryable_connection_error,
+    SessionSettings,
     register_identity_text_reads,
+    register_session_settings,
 )
 from horsies.core.utils.loop_runner import LoopRunner
 from horsies.core.utils.url import to_psycopg_url
@@ -614,6 +616,9 @@ class PostgresBroker:
             self.config.database_url.get_secret_value(), **engine_cfg,
         )
         register_identity_text_reads(self.async_engine)
+        register_session_settings(
+            self.async_engine, self._runtime_session_settings(),
+        )
         self.session_factory = async_sessionmaker(
             self.async_engine, expire_on_commit=False
         )
@@ -624,6 +629,11 @@ class PostgresBroker:
         else:
             self._session_engine = create_async_engine(
                 session_url, **self._session_engine_config()
+            )
+            # The session URL must keep session state (LISTEN, session
+            # advisory locks), so it keeps session settings too.
+            register_session_settings(
+                self._session_engine, SessionSettings.KEPT,
             )
         self.partition_maintenance = PartitionMaintenanceDatabase(
             self._session_engine,
@@ -645,6 +655,14 @@ class PostgresBroker:
             self.logger.debug('PostgresBroker initialized')
         else:
             self.logger.info('PostgresBroker initialized')
+
+    def _runtime_session_settings(self) -> SessionSettings:
+        """Whether runtime-pool connections keep session settings."""
+        match self.config.pgbouncer_transaction_mode:
+            case True:
+                return SessionSettings.NOT_KEPT
+            case False:
+                return SessionSettings.KEPT
 
     def _base_engine_config(self) -> dict[str, Any]:
         return self.config.sqlalchemy_engine_kwargs()
@@ -683,6 +701,7 @@ class PostgresBroker:
             self.config.database_url.get_secret_value(), **engine_cfg,
         )
         register_identity_text_reads(engine)
+        register_session_settings(engine, self._runtime_session_settings())
         return engine
 
     @property
