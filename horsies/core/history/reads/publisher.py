@@ -211,27 +211,36 @@ async def _rewrite_manifest_table(
     connection: AsyncConnection,
     manifest: LookupManifest,
 ) -> None:
+    # One DELETE and one array INSERT: every row of a publication shares
+    # one statement timestamp, and the probe position is the array index.
     await connection.execute(text(f'DELETE FROM {TASK_LOOKUP_MANIFEST}'))
-    for position, leaf in enumerate(manifest.leaves):
-        await connection.execute(
-            text(
-                f"""
-                INSERT INTO {TASK_LOOKUP_MANIFEST} (
-                    leaf_name, probe_position,
-                    lower_anchor, upper_anchor, min_birth_at,
-                    published_at
-                ) VALUES (
-                    :leaf_name, :probe_position,
-                    :lower_anchor, :upper_anchor, :min_birth_at,
-                    statement_timestamp()
-                )
-                """
-            ),
-            {
-                'leaf_name': leaf.relation_name,
-                'probe_position': position,
-                'lower_anchor': leaf.lower_anchor,
-                'upper_anchor': leaf.upper_anchor,
-                'min_birth_at': leaf.min_birth_at,
-            },
-        )
+    if not manifest.leaves:
+        return
+    await connection.execute(
+        text(
+            f"""
+            INSERT INTO {TASK_LOOKUP_MANIFEST} (
+                leaf_name, probe_position,
+                lower_anchor, upper_anchor, min_birth_at,
+                published_at
+            )
+            SELECT leaf.leaf_name, leaf.position - 1,
+                   leaf.lower_anchor, leaf.upper_anchor, leaf.min_birth_at,
+                   statement_timestamp()
+            FROM unnest(
+                CAST(:leaf_names AS text[]),
+                CAST(:lower_anchors AS timestamptz[]),
+                CAST(:upper_anchors AS timestamptz[]),
+                CAST(:min_births AS timestamptz[])
+            ) WITH ORDINALITY
+                AS leaf(leaf_name, lower_anchor, upper_anchor, min_birth_at,
+                        position)
+            """
+        ),
+        {
+            'leaf_names': [leaf.relation_name for leaf in manifest.leaves],
+            'lower_anchors': [leaf.lower_anchor for leaf in manifest.leaves],
+            'upper_anchors': [leaf.upper_anchor for leaf in manifest.leaves],
+            'min_births': [leaf.min_birth_at for leaf in manifest.leaves],
+        },
+    )
