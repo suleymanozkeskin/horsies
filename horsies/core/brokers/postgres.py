@@ -152,7 +152,6 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
     CREATE_WORKER_STATES_WORKER_SNAPSHOT_INDEX_SQL,
-    CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL,
     CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL,
     CREATE_WORKFLOWS_RETENTION_INDEX_SQL,
 )
@@ -804,13 +803,9 @@ class PostgresBroker:
         Set up workflow-specific schema elements.
 
         Creates:
-        - GIN index on workflow_tasks.dependencies for efficient dependency lookups
         - Trigger for workflow completion notifications
         - Migration: adds task_options column if missing (for existing installs)
         """
-        # GIN index for efficient dependency array lookups
-        await conn.execute(CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL)
-
         # Migration (v8): first-failed lookups inside the completion lock.
         await conn.execute(CREATE_WORKFLOW_TASKS_WF_STATUS_IDX_INDEX_SQL)
 
@@ -969,6 +964,8 @@ class PostgresBroker:
                 return
             await install_recovery_indexes(engine)
             # v43: drop the task retention indexes that no query reads.
+            # v45: drop the workflow-node indexes that the workflow-scoped
+            # indexes make redundant.
             await remove_retired_indexes(engine)
             await self._activate_bounded_recovery(engine)
 

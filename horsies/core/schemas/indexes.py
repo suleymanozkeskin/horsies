@@ -34,13 +34,6 @@ WORKFLOW_TERMINAL_STATUS_SQL_LITERALS: str = ', '.join(
 # IN-list, and the planner falls back to the heap walk the index removed.
 
 
-# GIN index on workflow_tasks.dependencies for efficient dependency array lookups.
-# Cannot use ORM __table_args__ because SQLAlchemy does not support GIN indexes directly.
-CREATE_WORKFLOW_TASKS_DEPS_INDEX_SQL = text("""
-    CREATE INDEX IF NOT EXISTS idx_horsies_workflow_tasks_deps
-    ON horsies_workflow_tasks USING GIN(dependencies);
-""")
-
 # v8: serves the first-failed lookups (GET_FIRST_FAILED_TASK_RESULT_SQL and
 # the required-task variant), which filter workflow_id + status and order by
 # task_index. Without it, every FAILED completion paid an O(N) ordered scan

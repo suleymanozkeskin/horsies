@@ -1358,6 +1358,67 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_workflow_node_index_upgrade_from_44_drops_three_indexes(
+        self, scratch_database: str,
+    ) -> None:
+        """A v44 database loses the three redundant workflow-node indexes."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        retired = (
+            'ix_horsies_workflow_tasks_node_id',
+            'ix_horsies_workflow_tasks_workflow_id',
+            'idx_horsies_workflow_tasks_deps',
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'CREATE INDEX ix_horsies_workflow_tasks_node_id '
+                    'ON horsies_workflow_tasks (node_id)'
+                ))
+                await conn.execute(text(
+                    'CREATE INDEX ix_horsies_workflow_tasks_workflow_id '
+                    'ON horsies_workflow_tasks (workflow_id)'
+                ))
+                await conn.execute(text(
+                    'CREATE INDEX idx_horsies_workflow_tasks_deps '
+                    'ON horsies_workflow_tasks USING GIN (dependencies)'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 45'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (44) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                present = (await conn.execute(
+                    text(
+                        'SELECT count(*) FROM pg_class '
+                        'WHERE oid = ANY(ARRAY['
+                        'to_regclass(:a), to_regclass(:b), to_regclass(:c)])'
+                    ),
+                    dict(zip(('a', 'b', 'c'), retired)),
+                )).scalar_one()
+                assert present == 0
+                kept = set((await conn.execute(text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE tablename = 'horsies_workflow_tasks'"
+                ))).scalars().all())
+                assert {
+                    'uq_horsies_workflow_task_index',
+                    'idx_horsies_workflow_tasks_wf_status_idx',
+                    'idx_horsies_workflow_tasks_nonterminal',
+                } <= kept
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

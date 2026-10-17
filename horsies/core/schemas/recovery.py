@@ -456,6 +456,21 @@ RETIRED_INDEXES: Final[tuple[RetiredIndex, ...]] = (
         name='idx_horsies_tasks_queue_retention',
         table='horsies_tasks',
     ),
+    # Every reader that filters nodes by node_id or dependencies also
+    # filters workflow_id, which uq_horsies_workflow_task_index and the
+    # workflow/status indexes serve; workflow_id alone is their prefix.
+    RetiredIndex(
+        name='ix_horsies_workflow_tasks_node_id',
+        table='horsies_workflow_tasks',
+    ),
+    RetiredIndex(
+        name='ix_horsies_workflow_tasks_workflow_id',
+        table='horsies_workflow_tasks',
+    ),
+    RetiredIndex(
+        name='idx_horsies_workflow_tasks_deps',
+        table='horsies_workflow_tasks',
+    ),
 )
 
 
