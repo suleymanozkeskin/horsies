@@ -16,14 +16,18 @@ from typing import get_args
 import pytest
 
 from horsies.core.history.commands import (
+    OPEN_END_ANCHOR,
     CollectPartitionHealth,
     CreateDailyHistoryLeaf,
+    CreateOpenEndedHistoryLeaf,
+    DetachEmptyForeverLeaf,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     EnsureLeafCoverage,
     FinalizeInterruptedLeafDetach,
     InspectHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
     PartitionMaintenanceCommand,
     is_safe_identifier,
@@ -200,7 +204,9 @@ class TestDetachExpiredHistoryLeaf:
     ) -> None:
         with pytest.raises(ValueError, match='positive'):
             FinalizeInterruptedLeafDetach(
-                leaf=make_leaf_ref(), statement_timeout_ms=timeout_ms
+                leaf=make_leaf_ref(),
+                statement_timeout_ms=timeout_ms,
+                lifecycle=LeafLifecycle.RETENTION,
             )
 
     def test_accepts_positive_horizon(self) -> None:
@@ -220,6 +226,62 @@ class TestDetachExpiredHistoryLeaf:
                 leaf=make_leaf_ref(),
                 quarantine_horizon=horizon,  # type: ignore[arg-type]
                 statement_timeout_ms=None,
+            )
+
+
+def daily_forever_leaf() -> LeafRef:
+    return make_leaf_ref(
+        leaf_name=daily_leaf_name('horsies_task_history_forever', LOWER),
+        class_key='forever',
+    )
+
+
+class TestLeafLifecycle:
+    """`CLOSED_EMPTY_FOREVER` accepts only daily `forever` leaves."""
+
+    @pytest.mark.parametrize(
+        'leaf',
+        (
+            pytest.param(make_leaf_ref(), id='finite_class'),
+            pytest.param(
+                make_leaf_ref(
+                    leaf_name='horsies_task_history_forever_open_2026_08_06',
+                    class_key='forever',
+                    bounds=LeafBounds(lower=LOWER, upper=OPEN_END_ANCHOR),
+                ),
+                id='open_ended_forever',
+            ),
+        ),
+    )
+    def test_every_forever_lifecycle_command_refuses_other_leaves(
+        self, leaf: LeafRef
+    ) -> None:
+        lifecycle = LeafLifecycle.CLOSED_EMPTY_FOREVER
+        message = 'accepts only daily forever leaves'
+        with pytest.raises(ValueError, match=message):
+            InspectHistoryLeaf(leaf=leaf, lifecycle=lifecycle)
+        with pytest.raises(ValueError, match=message):
+            DropDetachedHistoryLeaf(leaf=leaf, lifecycle=lifecycle)
+        with pytest.raises(ValueError, match=message):
+            FinalizeInterruptedLeafDetach(
+                leaf=leaf, statement_timeout_ms=None, lifecycle=lifecycle
+            )
+        with pytest.raises(ValueError, match=message):
+            DetachEmptyForeverLeaf(leaf=leaf, statement_timeout_ms=None)
+
+    def test_a_daily_forever_leaf_constructs_under_both_lifecycles(self) -> None:
+        leaf = daily_forever_leaf()
+        for lifecycle in LeafLifecycle:
+            assert InspectHistoryLeaf(leaf=leaf, lifecycle=lifecycle).leaf == leaf
+        assert DetachEmptyForeverLeaf(leaf=leaf, statement_timeout_ms=5).leaf == leaf
+
+    @pytest.mark.parametrize('timeout_ms', (0, -1))
+    def test_forever_detach_refuses_a_non_positive_timeout(
+        self, timeout_ms: int
+    ) -> None:
+        with pytest.raises(ValueError, match='statement timeout must be positive'):
+            DetachEmptyForeverLeaf(
+                leaf=daily_forever_leaf(), statement_timeout_ms=timeout_ms
             )
 
 
@@ -244,8 +306,10 @@ class TestCommandUnion:
         assert set(get_args(PartitionMaintenanceCommand.__value__)) == {
             InspectHistoryLeaf,
             CreateDailyHistoryLeaf,
+            CreateOpenEndedHistoryLeaf,
             EnsureLeafCoverage,
             DetachExpiredHistoryLeaf,
+            DetachEmptyForeverLeaf,
             FinalizeInterruptedLeafDetach,
             DropDetachedHistoryLeaf,
             CollectPartitionHealth,
@@ -258,19 +322,22 @@ class TestCommandUnion:
 
     def test_every_field_is_accounted_for(self) -> None:
         permitted: dict[type, set[str]] = {
-            InspectHistoryLeaf: {'leaf'},
+            InspectHistoryLeaf: {'leaf', 'lifecycle'},
             CreateDailyHistoryLeaf: {'leaf'},
+            CreateOpenEndedHistoryLeaf: {'lower'},
             EnsureLeafCoverage: {'class_key', 'horizon_days'},
             DetachExpiredHistoryLeaf: {
                 'leaf',
                 'quarantine_horizon',
                 'statement_timeout_ms',
             },
+            DetachEmptyForeverLeaf: {'leaf', 'statement_timeout_ms'},
             FinalizeInterruptedLeafDetach: {
                 'leaf',
                 'statement_timeout_ms',
+                'lifecycle',
             },
-            DropDetachedHistoryLeaf: {'leaf'},
+            DropDetachedHistoryLeaf: {'leaf', 'lifecycle'},
             CollectPartitionHealth: {'class_key', 'application_managed'},
         }
         for variant in get_args(PartitionMaintenanceCommand.__value__):

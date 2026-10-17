@@ -15,11 +15,11 @@ from typing import get_args
 import pytest
 
 from horsies.core.history.outcomes import (
-    CoveredByOpenEndedLeaf,
     CatalogConflictKind,
     ClassCoverage,
     ClassIntervalMismatch,
     CoverageBelowFloor,
+    CoveredByOpenEndedLeaf,
     DetachAwaitingFinalize,
     DropRefusedLoaderReferences,
     ForeverClassLeaf,
@@ -35,6 +35,7 @@ from horsies.core.history.outcomes import (
     LeafDropped,
     LeafIndexRepaired,
     LeafInspection,
+    LeafKeptNonEmpty,
     LeafMaintenanceBusy,
     LeafMissing,
     LeafNonconformant,
@@ -55,6 +56,7 @@ class TestInspectionUnion:
     def test_union_members_are_exactly_the_lifecycle_states(self) -> None:
         assert set(get_args(LeafInspection.__value__)) == {
             LeafDetachable,
+            LeafKeptNonEmpty,
             LeafNotExpired,
             LeafPendingBlocked,
             LeafDetachInterrupted,

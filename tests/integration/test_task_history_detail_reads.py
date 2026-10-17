@@ -23,6 +23,7 @@ from horsies.core.history.commands import (
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.outcomes import LeafCreated, LeafDropped
@@ -281,7 +282,11 @@ class TestDetail:
         )
         async with terminalization_schema.engine.begin() as connection:
             dropped = await drop_detached_leaf(
-                connection, DropDetachedHistoryLeaf(leaf=ref), publisher
+                connection,
+                DropDetachedHistoryLeaf(
+                    leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                ),
+                publisher,
             )
             assert dropped == LeafDropped(leaf_name=ref.leaf_name)
             # Retirement recomputes the retained floor; stamp the

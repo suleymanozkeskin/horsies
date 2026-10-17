@@ -22,6 +22,7 @@ from horsies.core.history.commands import (
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.maintenance.database import PartitionMaintenanceDatabase
@@ -177,7 +178,11 @@ async def test_dropping_a_leaf_deletes_the_exceptions_of_its_rows(
     assert isinstance(detached, LeafDetached)
     async with terminalization_schema.engine.begin() as connection:
         dropped = await drop_detached_leaf(
-            connection, DropDetachedHistoryLeaf(leaf=ref), StagedLoaderPublisher(),
+            connection,
+            DropDetachedHistoryLeaf(
+                leaf=ref, lifecycle=LeafLifecycle.RETENTION
+            ),
+            StagedLoaderPublisher(),
         )
         assert dropped == LeafDropped(leaf_name=ref.leaf_name)
         assert await exception_ids(connection) == {outside}

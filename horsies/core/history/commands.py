@@ -18,6 +18,9 @@ from typing import Final
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from enum import Enum
+
+from .ddl.tables import FOREVER_CLASS_KEY
 
 
 _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
@@ -75,11 +78,40 @@ class LeafRef:
 # ---------------------------------------------------------------------------
 
 
+class LeafLifecycle(Enum):
+    """When a leaf becomes eligible to detach."""
+
+    RETENTION = 'retention'
+    """A finite retention class: eligible at the upper bound plus the class
+    duration. A `forever` leaf is classified `ForeverClassLeaf`."""
+
+    CLOSED_EMPTY_FOREVER = 'closed_empty_forever'
+    """A closed daily `forever` leaf: eligible at its upper bound, and only
+    while it holds no rows."""
+
+
+def _require_lifecycle_leaf(leaf: LeafRef, lifecycle: LeafLifecycle) -> None:
+    """Refuse a leaf that the lifecycle does not accept."""
+    match lifecycle:
+        case LeafLifecycle.RETENTION:
+            return
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            if leaf.class_key != FOREVER_CLASS_KEY or not leaf.bounds.spans_one_day:
+                raise ValueError(
+                    'the closed-empty-forever lifecycle accepts only daily '
+                    'forever leaves'
+                )
+
+
 @dataclass(frozen=True, slots=True)
 class InspectHistoryLeaf:
     """Classify one leaf's lifecycle state without changing anything."""
 
     leaf: LeafRef
+    lifecycle: LeafLifecycle
+
+    def __post_init__(self) -> None:
+        _require_lifecycle_leaf(self.leaf, self.lifecycle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,10 +239,30 @@ class FinalizeInterruptedLeafDetach:
 
     leaf: LeafRef
     statement_timeout_ms: int | None
+    lifecycle: LeafLifecycle
 
     def __post_init__(self) -> None:
         if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
             raise ValueError('statement timeout must be positive')
+        _require_lifecycle_leaf(self.leaf, self.lifecycle)
+
+
+@dataclass(frozen=True, slots=True)
+class DetachEmptyForeverLeaf:
+    """Concurrently detach one closed daily `forever` leaf that holds no rows.
+
+    Emptiness and the other preconditions are checked again under the
+    leaf's session lock. `statement_timeout_ms` carries no default, for the
+    same reason as `DetachExpiredHistoryLeaf`.
+    """
+
+    leaf: LeafRef
+    statement_timeout_ms: int | None
+
+    def __post_init__(self) -> None:
+        if self.statement_timeout_ms is not None and self.statement_timeout_ms <= 0:
+            raise ValueError('statement timeout must be positive')
+        _require_lifecycle_leaf(self.leaf, LeafLifecycle.CLOSED_EMPTY_FOREVER)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,9 +272,15 @@ class DropDetachedHistoryLeaf:
     Refused while the published staged loader still references the leaf:
     dropping a relation the loader probes would turn retained-row lookups
     into errors, and a regeneration gap must block the drop, not the reader.
+    Under `CLOSED_EMPTY_FOREVER`, a leaf that gained rows after its detach
+    is kept, not dropped.
     """
 
     leaf: LeafRef
+    lifecycle: LeafLifecycle
+
+    def __post_init__(self) -> None:
+        _require_lifecycle_leaf(self.leaf, self.lifecycle)
 
 
 @dataclass(frozen=True, slots=True)
@@ -252,8 +310,10 @@ class CollectPartitionHealth:
 type PartitionMaintenanceCommand = (
     InspectHistoryLeaf
     | CreateDailyHistoryLeaf
+    | CreateOpenEndedHistoryLeaf
     | EnsureLeafCoverage
     | DetachExpiredHistoryLeaf
+    | DetachEmptyForeverLeaf
     | FinalizeInterruptedLeafDetach
     | DropDetachedHistoryLeaf
     | CollectPartitionHealth

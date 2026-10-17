@@ -28,6 +28,7 @@ from horsies.core.history.commands import (
     EnsureLeafCoverage,
     InspectHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.ddl.classes import (
@@ -270,7 +271,8 @@ class TestInspection:
                         bounds=LeafBounds(
                             lower=lower, upper=lower + timedelta(days=1)
                         ),
-                    )
+                    ),
+                    lifecycle=LeafLifecycle.RETENTION,
                 ),
             )
             assert absent == RetentionClassAbsent(class_key='ghost')
@@ -283,7 +285,8 @@ class TestInspection:
                         bounds=LeafBounds(
                             lower=lower, upper=lower + timedelta(days=1)
                         ),
-                    )
+                    ),
+                    lifecycle=LeafLifecycle.RETENTION,
                 ),
             )
             assert forever == ForeverClassLeaf(class_key='forever')
@@ -301,7 +304,10 @@ class TestInspection:
             )
             assert isinstance(created, LeafCreated)
             inspection = await inspect_leaf(
-                connection, InspectHistoryLeaf(leaf=ref)
+                connection,
+                InspectHistoryLeaf(
+                    leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                ),
             )
             assert isinstance(inspection, LeafNotExpired)
 
@@ -316,7 +322,10 @@ class TestDetachAndDrop:
         ref = await make_expired_leaf(history_schema, parent)
         async with history_schema.engine.connect() as connection:
             inspection = await inspect_leaf(
-                connection, InspectHistoryLeaf(leaf=ref)
+                connection,
+                InspectHistoryLeaf(
+                    leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                ),
             )
             assert isinstance(inspection, LeafDetachable)
         detached = await detach_expired_leaf(
@@ -332,11 +341,16 @@ class TestDetachAndDrop:
         async with history_schema.engine.begin() as connection:
             dropped = await drop_detached_leaf(
                 connection,
-                DropDetachedHistoryLeaf(leaf=ref),
+                DropDetachedHistoryLeaf(
+                    leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                ),
                 UnpublishedLoader(),
             )
             assert dropped == LeafDropped(leaf_name=ref.leaf_name)
-            after = await inspect_leaf(connection, InspectHistoryLeaf(leaf=ref))
+            after = await inspect_leaf(
+                connection,
+                InspectHistoryLeaf(leaf=ref, lifecycle=LeafLifecycle.RETENTION),
+            )
             assert after == LeafDropped(leaf_name=ref.leaf_name)
 
     @pytest.mark.asyncio

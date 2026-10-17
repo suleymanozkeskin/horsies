@@ -24,6 +24,7 @@ from horsies.core.history.commands import (
     DetachExpiredHistoryLeaf,
     InspectHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.heartbeats.partitioning import (
@@ -425,7 +426,10 @@ class TestHistoryPruning:
 
         async with schema.engine.connect() as connection:
             inspection = await inspect_leaf(
-                connection, InspectHistoryLeaf(leaf=expired)
+                connection,
+                InspectHistoryLeaf(
+                    leaf=expired, lifecycle=LeafLifecycle.RETENTION
+                ),
             )
         assert isinstance(inspection, LeafDetachInterrupted)
 

@@ -18,6 +18,7 @@ from horsies.core.history.commands import (
     DetachExpiredHistoryLeaf,
     FinalizeInterruptedLeafDetach,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.heartbeats.partitioning import (
@@ -113,7 +114,9 @@ async def test_history_detach_republishes_once_and_a_recorded_detach_does_not(
 
     finalized = await finalize_interrupted_detach(
         _database(terminalization_schema),
-        FinalizeInterruptedLeafDetach(leaf=ref, statement_timeout_ms=None),
+        FinalizeInterruptedLeafDetach(
+            leaf=ref, statement_timeout_ms=None, lifecycle=LeafLifecycle.RETENTION,
+        ),
         publisher,
     )
     assert isinstance(finalized, LeafDetached)
