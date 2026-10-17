@@ -57,6 +57,10 @@ class LoaderPublication(Protocol):
         """Regenerate the staged lookup function from the full catalog."""
         ...
 
+    async def is_current(self, connection: AsyncConnection) -> bool:
+        """Whether the published readers already match the catalog."""
+        ...
+
     async def references_leaf(
         self,
         connection: AsyncConnection,
@@ -79,6 +83,9 @@ class UnpublishedLoader:
         self, connection: AsyncConnection
     ) -> LoaderRepublished:
         return LoaderRepublished(absent_leaves=())
+
+    async def is_current(self, connection: AsyncConnection) -> bool:
+        return True
 
     async def references_leaf(
         self,
