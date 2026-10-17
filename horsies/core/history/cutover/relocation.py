@@ -80,7 +80,9 @@ from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import create_daily_leaf
 from ..partitions.publication import UnpublishedLoader
 from ..reads.publisher import StagedLoaderPublisher
+from ..ddl.column_rules import first_rule_violation_sql
 from ..terminalization.move import (
+    history_projection_sql,
     ATTEMPT_ENCODER_FUNCTION,
     LIVE_ATTEMPTS,
     LIVE_TASKS,
@@ -117,6 +119,19 @@ class RelocationBatch:
 
 
 @dataclass(frozen=True, slots=True)
+class RelocationRuleViolation:
+    """A selected row breaks a history column rule; nothing was written.
+
+    `task_id` is the first violating row in id order and `constraint_name`
+    the first rule it breaks. The live row stays; an operator corrects it
+    before relocation can continue.
+    """
+
+    task_id: str
+    constraint_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class RelocationComplete:
     """No terminal rows remain live."""
 
@@ -126,13 +141,30 @@ class RelocationComplete:
 
 def relocation_insert_sql() -> str:
     """The relocation projection over the shared column authority."""
+    return history_insert_sql(
+        _relocation_values(), select_tail=_RELOCATION_SELECT_TAIL,
+    )
+
+
+def relocation_rule_check_sql() -> str:
+    """The first selected row that breaks a history column rule.
+
+    Evaluated over the same projection the relocation insert writes.
+    """
+    return first_rule_violation_sql(
+        history_projection_sql(
+            _relocation_values(), select_tail=_RELOCATION_SELECT_TAIL,
+        )
+    )
+
+
+def _relocation_values() -> dict[str, str]:
     result_bytes = (
         "CASE WHEN t.result IS NULL THEN NULL "
         "ELSE convert_to(t.result, 'UTF8') END"
     )
     swap_is_admin = "t.terminalization_kind = 'CANCEL_ADMIN'"
-    return history_insert_sql(
-        {
+    return {
             'task_id': 'CAST(t.id AS uuid)',
             'task_name': 't.task_name',
             'queue_name': 't.queue_name',
@@ -207,8 +239,10 @@ def relocation_insert_sql() -> str:
             'rerun_input_digest': rerun_carriage_expression('digest'),
             'rerun_input_inline': rerun_carriage_expression('inline'),
             'rerun_input_reference': rerun_carriage_expression('reference'),
-        },
-        select_tail=f"""FROM {LIVE_TASKS} t
+        }
+
+
+_RELOCATION_SELECT_TAIL: Final = f"""FROM {LIVE_TASKS} t
     LEFT JOIN LATERAL (
         SELECT wt.workflow_id
         FROM horsies_workflow_tasks wt
@@ -226,15 +260,14 @@ def relocation_insert_sql() -> str:
     CROSS JOIN LATERAL (
         SELECT {disposition_case_expression('t', 't.status')} AS disposition
     ) d
-    WHERE t.id::text = ANY(CAST(:task_ids AS text[]))""",
-    )
+    WHERE t.id::text = ANY(CAST(:task_ids AS text[]))"""
 
 
 async def relocate_terminal_batch(
     connection: AsyncConnection,
     *,
     batch_size: int,
-) -> RelocationBatch | RelocationComplete:
+) -> RelocationBatch | RelocationComplete | RelocationRuleViolation:
     """Relocate one bounded batch; the caller owns the transaction.
 
     Selection is the idempotence probe: terminal live rows whose
@@ -273,6 +306,19 @@ async def relocate_terminal_batch(
         return RelocationComplete(
             batches_committed=int(totals.batches),
             rows_relocated=int(totals.rows),
+        )
+
+    # Every history column rule is checked over the projection the insert
+    # writes, before the first write of the batch.
+    violation = (
+        await connection.execute(
+            text(relocation_rule_check_sql()), {'task_ids': task_ids},
+        )
+    ).one_or_none()
+    if violation is not None:
+        return RelocationRuleViolation(
+            task_id=str(violation.task_id),
+            constraint_name=str(violation.constraint_name),
         )
 
     await _ensure_batch_leaf_coverage(connection, task_ids=task_ids)

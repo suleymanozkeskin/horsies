@@ -531,6 +531,97 @@ class TestTypedRefusals:
             assert outcome.affected_rows == 0
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('target_version', 'target_codec'),
+        [(0, 'json-utf8'), (2, ''), (2, 'x' * 65)],
+        ids=['version-zero', 'empty-codec', 'codec-over-64-bytes'],
+    )
+    async def test_target_outside_the_column_bounds_is_refused(
+        self,
+        terminalization_schema: HistorySchema,
+        target_version: int,
+        target_codec: str,
+    ) -> None:
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await install_job_state(connection)
+            outcome = await plan_transcode(
+                connection,
+                job_id=str(uuid4()),
+                component=ArchiveComponent.RESULT,
+                source_version=1,
+                target_version=target_version,
+                source_codec='json-utf8',
+                target_codec=target_codec,
+                decoders=DecoderSet(entries=TEST_DECODERS.entries | {
+                    DecoderEntry(ArchiveComponent.RESULT, target_version, target_codec),
+                }),
+            )
+            assert isinstance(outcome, TranscodePlanRejected)
+            assert 'outside the history column bounds' in outcome.reason
+
+    @pytest.mark.asyncio
+    async def test_forward_framing_past_the_inline_bound_is_refused(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """A 65,535-byte inline would be 65,537 bytes after framing."""
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await install_job_state(connection)
+            for size in (65_534, 65_535):
+                terminal_at = datetime.now(UTC).replace(microsecond=0)
+                task_id = v7_with_birth(terminal_at - timedelta(seconds=30))
+                inline = b'x' * size
+                await connection.execute(
+                    text(GATED_HISTORY_ROW_SQL),
+                    {
+                        **frozen_history_row(
+                            task_id=task_id,
+                            class_key=CLASS_KEY,
+                            terminal_at=terminal_at,
+                            status='FAILED',
+                        ),
+                        'attempt_archive_version': 1,
+                        'attempt_snapshot_codec': 'json-utf8',
+                        'attempt_snapshot_content_type': 'application/json',
+                        'attempt_snapshot': b'[]',
+                        'attempt_snapshot_digest': sha256(b'[]').digest(),
+                        'rerun_input_disposition': 'NEVER_ELIGIBLE',
+                    },
+                )
+                await connection.execute(
+                    text(
+                        "UPDATE horsies_task_history SET "
+                        "rerun_input_disposition = 'INLINE', "
+                        "rerun_input_version = 1, "
+                        "rerun_input_codec = 'json-utf8', "
+                        "rerun_input_content_type = 'application/json', "
+                        "rerun_input_digest = :digest, "
+                        "rerun_input_inline = :inline "
+                        "WHERE task_id = CAST(:task_id AS uuid)"
+                    ),
+                    {
+                        'digest': sha256(inline).digest(),
+                        'inline': inline,
+                        'task_id': task_id,
+                    },
+                )
+            await begin_transcode_maintenance(connection, session_id=str(uuid4()))
+            outcome = await plan_transcode(
+                connection,
+                job_id=str(uuid4()),
+                component=ArchiveComponent.RERUN_INPUT,
+                source_version=1,
+                target_version=2,
+                source_codec='json-utf8',
+                target_codec='framed-v2',
+                decoders=TEST_DECODERS,
+            )
+            assert isinstance(outcome, TranscodePlanRejected), outcome
+            assert 'exceed the inline bound' in outcome.reason
+            assert outcome.affected_rows == 1
+
+    @pytest.mark.asyncio
     async def test_mutation_between_verify_and_swap_refuses(
         self, terminalization_schema: HistorySchema
     ) -> None:

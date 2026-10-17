@@ -42,6 +42,7 @@ from horsies.core.history.cutover.preparation import (
 )
 from horsies.core.history.cutover.relocation import (
     RelocationComplete,
+    RelocationRuleViolation,
     relocate_terminal_batch,
 )
 
@@ -505,6 +506,8 @@ async def _drive_relocation(
         await connection.commit()
         if isinstance(outcome, RelocationComplete):
             break
+        if isinstance(outcome, RelocationRuleViolation):
+            raise AssertionError(f'relocation refused: {outcome!r}')
         cumulative += outcome.rows_relocated
         batches += 1
         commits.append(

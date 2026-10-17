@@ -959,6 +959,26 @@ $function$
 """
 
 
+def history_projection_sql(
+    values: dict[str, str],
+    *,
+    select_tail: str,
+) -> str:
+    """The history projection as a SELECT whose columns carry the history
+    column names, over the same expressions `history_insert_sql` writes."""
+    missing = [c for c in HISTORY_PROJECTION_COLUMNS if c not in values]
+    extra = [c for c in values if c not in HISTORY_PROJECTION_COLUMNS]
+    if missing or extra:
+        raise ValueError(
+            f'history projection mismatch: missing={missing} extra={extra}'
+        )
+    expressions = ',\n        '.join(
+        f'{values[column]} AS {column}'
+        for column in HISTORY_PROJECTION_COLUMNS
+    )
+    return f'SELECT\n        {expressions}\n    {select_tail}'
+
+
 def rerun_carriage_expression(column: str) -> str:
     """One envelope-carriage column, gated on the shared ladder's verdict."""
     return (

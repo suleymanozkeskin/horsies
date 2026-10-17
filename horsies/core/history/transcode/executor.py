@@ -39,6 +39,7 @@ from ..archive.versions import JSON_UTF8_CODEC
 from ..maintenance.database import PartitionMaintenanceDatabase
 from ..names import LEAF_CATALOG, TASK_HISTORY_PARENT
 from ..partitions.locks import LeafLockAttempt, try_lock_leaf_for_transaction
+from ..rerun.input_envelope import INPUT_ENVELOPE_INLINE_MAX_BYTES
 from .jobs import (
     TRANSCODE_BATCHES,
     TRANSCODE_JOBS,
@@ -82,6 +83,7 @@ from .outcomes import (
 from .signature import relation_schema_signature
 from .targets import DecoderSet
 from .transforms import (
+    FRAMING_HEADER_BYTES,
     backup_relation_name,
     column_list,
     component_columns,
@@ -93,6 +95,11 @@ from .transforms import (
     replacement_relation_name,
     transformed_select,
 )
+
+# The history table's bounds on a stamped version and codec.
+TARGET_CODEC_MIN_BYTES = 1
+TARGET_CODEC_MAX_BYTES = 64
+
 
 class TranscodeStateError(Exception):
     """A stage was invoked from a job state that cannot accept it."""
@@ -124,6 +131,19 @@ async def plan_transcode(
         return TranscodePlanRejected(
             component=component,
             reason='unsupported transcode direction',
+            affected_rows=0,
+        )
+    if target_version <= 0 or not (
+        TARGET_CODEC_MIN_BYTES
+        <= len(target_codec.encode('utf-8'))
+        <= TARGET_CODEC_MAX_BYTES
+    ):
+        return TranscodePlanRejected(
+            component=component,
+            reason=(
+                f'target version {target_version} codec {target_codec!r} '
+                'is outside the history column bounds'
+            ),
             affected_rows=0,
         )
     if not decoders.reads(
@@ -204,6 +224,13 @@ async def plan_transcode(
                              AND {columns.codec} = :source_codec
                              AND ({columns.presence_predicate})
                        ), 0) AS payload_bytes,
+                       count(*) FILTER (
+                           WHERE {columns.version} = :source_version
+                             AND {columns.codec} = :source_codec
+                             AND ({columns.presence_predicate})
+                             AND octet_length({columns.payload})
+                                 > :framed_payload_limit
+                       ) AS over_framed_limit_rows,
                        pg_total_relation_size(history.tableoid)
                            AS relation_bytes,
                        count(DISTINCT task_id) AS distinct_task_ids
@@ -225,6 +252,9 @@ async def plan_transcode(
             {
                 'source_version': source_version,
                 'source_codec': source_codec,
+                'framed_payload_limit': (
+                    INPUT_ENVELOPE_INLINE_MAX_BYTES - FRAMING_HEADER_BYTES
+                ),
             },
         )
     ).all()
@@ -240,12 +270,26 @@ async def plan_transcode(
             affected_rows=int(duplicate_identities),
         )
 
+    forward = target_version > source_version
+    over_framed_limit = sum(int(row.over_framed_limit_rows) for row in inventory)
+    if (
+        forward
+        and component is ArchiveComponent.RERUN_INPUT
+        and over_framed_limit
+    ):
+        # The framing header would push these inline payloads past the
+        # history column's inline bound.
+        return TranscodePlanRejected(
+            component=component,
+            reason='framed rerun input would exceed the inline bound',
+            affected_rows=over_framed_limit,
+        )
+
     transformed_rows = sum(int(row.transformed_rows) for row in inventory)
     copied_rows = sum(int(row.row_count) for row in inventory)
     payload_rows = sum(int(row.payload_rows) for row in inventory)
     payload_bytes = sum(int(row.payload_bytes) for row in inventory)
     relation_bytes = sum(int(row.relation_bytes) for row in inventory)
-    forward = target_version > source_version
     projected = (
         payload_bytes + 2 * payload_rows
         if forward

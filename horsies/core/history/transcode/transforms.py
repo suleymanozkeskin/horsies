@@ -11,6 +11,7 @@ prototype's pre-ratification `rerun_input_form`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Final
 
 from .outcomes import ArchiveComponent
 
@@ -24,6 +25,11 @@ class ComponentColumns:
     payload: str
     presence_predicate: str
     metadata_only: bool
+
+
+FRAMING_HEADER_HEX: Final = '4832'
+FRAMING_HEADER_BYTES: Final = len(FRAMING_HEADER_HEX) // 2
+"""The header a forward transcode prepends to each payload."""
 
 
 def component_columns(component: ArchiveComponent) -> ComponentColumns:
@@ -149,7 +155,7 @@ def encoded_source_select(
     for payload_column in payload_columns:
         source = f'{alias}.{quoted_identifier(payload_column)}'
         transformed = (
-            f"decode('4832', 'hex') || {source}"
+            f"decode('{FRAMING_HEADER_HEX}', 'hex') || {source}"
             if forward
             else f'substring({source} FROM 3)'
         )
