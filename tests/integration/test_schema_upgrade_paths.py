@@ -1459,6 +1459,40 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_active_catalog_index_upgrade_from_46(
+        self, scratch_database: str,
+    ) -> None:
+        """A v46 database receives the active leaf-catalog index."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        definition_sql = text(
+            "SELECT pg_get_indexdef(to_regclass('idx_horsies_history_catalog_active'))"
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'DROP INDEX IF EXISTS idx_horsies_history_catalog_active'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 47'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (46) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                assert (await conn.execute(definition_sql)).scalar_one() is None
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                definition = (await conn.execute(definition_sql)).scalar_one()
+            assert definition is not None
+            assert '(class_key, upper_anchor)' in definition
+            assert 'WHERE (dropped_at IS NULL)' in definition
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

@@ -340,7 +340,10 @@ from sqlalchemy import text
 # v46: uuid databases drop horsies_task_notify_update_trigger; the move
 #      program sends task_done itself.
 
-SCHEMA_VERSION = 46
+# v47: idx_horsies_history_catalog_active, a partial index on the leaf
+#      catalog's records whose leaf is not dropped.
+
+SCHEMA_VERSION = 47
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

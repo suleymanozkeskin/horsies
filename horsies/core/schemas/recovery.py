@@ -94,6 +94,19 @@ RECOVERY_INDEXES = (
             "WHERE status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')"
         ),
     ),
+    # Retention, coverage and publication scans read only catalog records
+    # whose leaf is not dropped; dropped records stay in the catalog and
+    # grow by one per class per day.
+    RecoveryIndex(
+        name='idx_horsies_history_catalog_active',
+        table='horsies_task_history_leaf_catalog',
+        create_sql=(
+            'CREATE INDEX CONCURRENTLY '
+            'idx_horsies_history_catalog_active '
+            'ON horsies_task_history_leaf_catalog (class_key, upper_anchor) '
+            'WHERE dropped_at IS NULL'
+        ),
+    ),
 )
 
 _INDEX_NAME = re.compile(r'^[a-z][a-z0-9_]*$')
