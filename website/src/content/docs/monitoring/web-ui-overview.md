@@ -36,7 +36,9 @@ Three surfaces, one per route.
 Server-paginated, server-sorted, server-filtered task list, plus:
 
 - Status cards for the seven `TaskStatus` values, always rendered in fixed order
-  and zero-filled. Clicking a card toggles that status in the filter.
+  and zero-filled. Clicking a card toggles that status in the filter. The
+  counts are exact when loaded and can be up to 10 seconds old: all clients
+  of one monitoring app share one cached answer per filter scope.
 - Scoped facet filters for worker, task name, queue, and error code. Values OR
   within a dimension and AND across dimensions.
 - An error-code rollup by taxonomy family (`OPERATIONAL`, `CONTRACT`,

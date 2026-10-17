@@ -34,6 +34,7 @@ from horsies.monitoring import (
     task_facets,
     task_stats,
 )
+from horsies.web.task_stats_cache import TaskStatsCache, TaskStatsScope
 from horsies.web.routes._common import (
     parse_error_categories,
     parse_group_by,
@@ -57,8 +58,16 @@ def _window_or_400(
     return resolved
 
 
-def build_router(broker: PostgresBroker) -> APIRouter:
-    """Build the ``/tasks`` router bound to one broker."""
+def build_router(
+    broker: PostgresBroker,
+    *,
+    stats_cache: TaskStatsCache,
+) -> APIRouter:
+    """Build the ``/tasks`` router bound to one broker.
+
+    ``/stats`` answers through ``stats_cache``, so a status count is at
+    most the cache's TTL old.
+    """
     router = APIRouter(prefix='/tasks', tags=['tasks'])
 
     @router.get('/stats')
@@ -74,15 +83,30 @@ def build_router(broker: PostgresBroker) -> APIRouter:
     ) -> list[StatusCount]:
         """Task counts by status. Deliberately unscoped by status: the cards
         this feeds are the status selector."""
-        result = await task_stats(
-            broker,
-            window=_window_or_400(since, until),
-            task_names=task_name,
-            queues=queue,
-            workers=worker,
-            error_codes=error_code,
-            error_categories=parse_error_categories(error_category),
+        window = _window_or_400(since, until)
+        categories = parse_error_categories(error_category)
+        scope = TaskStatsScope(
+            since=since,
+            until=until,
+            task_names=tuple(task_name),
+            queues=tuple(queue),
+            workers=tuple(worker),
+            error_codes=tuple(error_code),
+            error_categories=tuple(categories),
             retried_only=retried_only,
+        )
+        result = await stats_cache.get(
+            scope,
+            lambda: task_stats(
+                broker,
+                window=window,
+                task_names=task_name,
+                queues=queue,
+                workers=worker,
+                error_codes=error_code,
+                error_categories=categories,
+                retried_only=retried_only,
+            ),
         )
         if is_err(result):
             raise query_failed('Task stats', result.err_value)

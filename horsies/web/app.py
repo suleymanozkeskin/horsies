@@ -30,6 +30,7 @@ from horsies.core.utils.url import to_psycopg_url
 from horsies.web.auth import MonitoringAuthPolicy, act_guard, view_guard
 from horsies.web.events import EventBroadcaster
 from horsies.web.routes import actions, events, tasks, workers, workflows
+from horsies.web.task_stats_cache import TaskStatsCache
 from horsies.web.schema import (
     SCHEMA_INCOMPATIBLE,
     SCHEMA_UNKNOWN,
@@ -210,7 +211,9 @@ def create_monitoring_app(
         )
 
     monitoring_app.include_router(
-        tasks.build_router(broker), prefix='/api', dependencies=[view_only]
+        tasks.build_router(broker, stats_cache=TaskStatsCache()),
+        prefix='/api',
+        dependencies=[view_only],
     )
     monitoring_app.include_router(
         workflows.build_router(broker), prefix='/api', dependencies=[view_only]
