@@ -1321,6 +1321,43 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_pending_expiry_order_upgrade_from_43(
+        self, scratch_database: str,
+    ) -> None:
+        """A v43 database receives the deadline-ordered pending expiry."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'CREATE OR REPLACE FUNCTION horsies_expire_pending_tasks('
+                    'p_batch_size integer, p_result text, p_error_code text) '
+                    'RETURNS SETOF horsies_terminalization_outcome '
+                    'LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 44'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (43) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                body = (await conn.execute(text(
+                    "SELECT prosrc FROM pg_proc "
+                    "WHERE proname = 'horsies_expire_pending_tasks'"
+                ))).scalar_one()
+                assert 'ORDER BY t.good_until ASC' in body
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

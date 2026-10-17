@@ -296,6 +296,31 @@ class TestDiscoveryBatch:
             assert wf_disposition == 'NEVER_ELIGIBLE'
 
     @pytest.mark.asyncio
+    async def test_outcomes_follow_ascending_deadlines(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """Outcome order is deadline order, not id, heap, or insertion order.
+
+        Each later insert mints a larger v7 id and lands later in the heap
+        while carrying an earlier deadline, so id order and heap order are
+        both the reverse of deadline order.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            inserted = [
+                await insert_live_task(
+                    connection,
+                    class_key=CLASS_KEY,
+                    status='PENDING',
+                    worker=None,
+                    good_until_offset=timedelta(minutes=-minutes),
+                )
+                for minutes in (10, 20, 30, 40)
+            ]
+            outcomes = await expire_pending(connection, batch_size=10)
+            assert [str(row.task_id) for row in outcomes] == inserted[::-1]
+
+    @pytest.mark.asyncio
     async def test_oldest_first_bound_honors_the_batch_size(
         self, terminalization_schema: HistorySchema
     ) -> None:

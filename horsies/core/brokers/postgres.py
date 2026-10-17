@@ -988,7 +988,8 @@ class PostgresBroker:
                 for statement in pause_abandon_replacement_ddl():
                     await conn.execute(text(statement))
                 # v42: the moves encode each attempt snapshot once and hash
-                # the result once.
+                # the result once. v44: the same statements install the
+                # pending expiry whose outcomes follow ascending deadlines.
                 for statement in terminal_snapshot_replacement_ddl():
                     await conn.execute(text(statement))
             await conn.execute(
