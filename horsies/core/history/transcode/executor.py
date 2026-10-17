@@ -80,6 +80,7 @@ from .outcomes import (
     TranscodeVerificationOutcome,
 )
 from .signature import relation_schema_signature
+from .targets import DecoderSet
 from .transforms import (
     backup_relation_name,
     column_list,
@@ -111,12 +112,29 @@ async def plan_transcode(
     target_version: int,
     source_codec: str,
     target_codec: str,
+    decoders: DecoderSet,
 ) -> TranscodePlanOutcome:
-    """Inventory, preflight, and record one reversible job."""
+    """Inventory, preflight, and record one reversible job.
+
+    `decoders` names the targets a reader decodes; production passes
+    `current_decoder_set()`. A target outside it is rejected before any
+    lock or write.
+    """
     if abs(target_version - source_version) != 1:
         return TranscodePlanRejected(
             component=component,
             reason='unsupported transcode direction',
+            affected_rows=0,
+        )
+    if not decoders.reads(
+        component=component, version=target_version, codec=target_codec,
+    ):
+        return TranscodePlanRejected(
+            component=component,
+            reason=(
+                f'target version {target_version} codec {target_codec!r} '
+                'is not decodable'
+            ),
             affected_rows=0,
         )
     await lock_transcode_program(connection)

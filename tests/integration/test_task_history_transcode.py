@@ -36,6 +36,11 @@ from horsies.core.history.transcode.executor import (
     verify_transcode,
 )
 from horsies.core.history.transcode.jobs import job_state_fragments
+from horsies.core.history.transcode.targets import (
+    DecoderEntry,
+    DecoderSet,
+    current_decoder_set,
+)
 from horsies.core.history.transcode.maintenance import (
     begin_transcode_maintenance,
     finish_transcode_maintenance,
@@ -68,6 +73,14 @@ pytestmark = [pytest.mark.integration]
 
 CLASS_KEY = 'it_transcode'
 WORKER = 'worker-tc-1'
+
+# The forward pipelines write version 2 with framed-v2, which no reader in
+# this build decodes; the tests name a decoder set that reads it.
+TEST_DECODERS = DecoderSet(
+    entries=current_decoder_set().entries | frozenset(
+        DecoderEntry(component, 2, 'framed-v2') for component in ArchiveComponent
+    ),
+)
 
 terminalization_schema = terminalization_schema_fixture(
     'task_history_it_transcode'
@@ -195,6 +208,7 @@ class TestFullLifecycle:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(plan, TranscodePlan), plan
             lock_row = (
@@ -259,6 +273,7 @@ class TestFullLifecycle:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(plan, TranscodePlan), plan
             assert plan.copied_rows == 5
@@ -429,6 +444,7 @@ class TestMultiRelationSwap:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(plan, TranscodePlan), plan
             assert plan.relation_count == 2
@@ -483,9 +499,36 @@ class TestTypedRefusals:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(outcome, TranscodePlanRejected)
             assert 'maintenance' in outcome.reason
+
+    @pytest.mark.asyncio
+    async def test_undecodable_target_is_refused_before_any_lock(
+        self, terminalization_schema: HistorySchema
+    ) -> None:
+        """This build reads version 1 only, so a version-2 target is refused.
+
+        No maintenance session is open: the refusal comes first, so the
+        reason names the target rather than the missing session.
+        """
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            await install_job_state(connection)
+            outcome = await plan_transcode(
+                connection,
+                job_id=str(uuid4()),
+                component=ArchiveComponent.ATTEMPTS,
+                source_version=1,
+                target_version=2,
+                source_codec='json-utf8',
+                target_codec='framed-v2',
+                decoders=current_decoder_set(),
+            )
+            assert isinstance(outcome, TranscodePlanRejected)
+            assert 'not decodable' in outcome.reason
+            assert outcome.affected_rows == 0
 
     @pytest.mark.asyncio
     async def test_mutation_between_verify_and_swap_refuses(
@@ -507,6 +550,7 @@ class TestTypedRefusals:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(plan, TranscodePlan)
             await run_to_ready(connection, job_id)
@@ -562,6 +606,7 @@ class TestSwapContention:
                 target_version=2,
                 source_codec='json-utf8',
                 target_codec='framed-v2',
+                decoders=TEST_DECODERS,
             )
             assert isinstance(plan, TranscodePlan)
             await run_to_ready(connection, job_id)
