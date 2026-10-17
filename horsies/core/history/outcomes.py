@@ -47,6 +47,13 @@ class LeafDetachable:
 
 
 @dataclass(frozen=True, slots=True)
+class LeafKeptNonEmpty:
+    """A closed daily `forever` leaf that holds rows: never detached."""
+
+    leaf_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class LeafNotExpired:
     """Attached and healthy; its retention window has not elapsed."""
 
@@ -141,6 +148,7 @@ class LeafCatalogConflict:
 
 type LeafInspection = (
     LeafDetachable
+    | LeafKeptNonEmpty
     | LeafNotExpired
     | LeafPendingBlocked
     | LeafDetachInterrupted

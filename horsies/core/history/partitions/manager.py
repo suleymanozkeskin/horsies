@@ -38,7 +38,9 @@ from ..commands import (
     DropDetachedHistoryLeaf,
     EnsureLeafCoverage,
     FinalizeInterruptedLeafDetach,
+    DetachEmptyForeverLeaf,
     InspectHistoryLeaf,
+    LeafLifecycle,
     LeafBounds,
     LeafRef,
 )
@@ -64,6 +66,7 @@ from ..outcomes import (
     LeafCreated,
     LeafCreation,
     LeafDetachable,
+    LeafKeptNonEmpty,
     LeafDetached,
     LeafDetachInterrupted,
     LeafDrop,
@@ -148,17 +151,16 @@ async def inspect_leaf(
     """Classify one leaf without changing anything."""
     leaf = command.leaf
     retention_class = await read_retention_class(connection, leaf.class_key)
-    match retention_class:
-        case None:
-            return RetentionClassAbsent(class_key=leaf.class_key)
-        case RetentionClassRow(duration=None):
-            return ForeverClassLeaf(class_key=leaf.class_key)
-        case RetentionClassRow():
+    if retention_class is None:
+        return RetentionClassAbsent(class_key=leaf.class_key)
+    terms = _lifecycle_terms(command, retention_class)
+    match terms:
+        case ForeverClassLeaf():
+            return terms
+        case _LifecycleTerms():
             pass
-    duration = retention_class.duration
-    parent_name = retention_class.finite_parent_name
-    if duration is None or parent_name is None:
-        raise AssertionError('finite class invariant enforced by the catalog reader')
+    parent_name = terms.parent_name
+    expires_at = terms.eligible_at
 
     catalog = await read_leaf_catalog_row(connection, leaf.leaf_name)
     match leaf.class_key:
@@ -178,7 +180,6 @@ async def inspect_leaf(
         bound_expectation=RequestedPartitionBounds(leaf.bounds),
         index_kind=index_kind,
     )
-    expires_at = leaf.bounds.upper + duration
 
     if catalog is None:
         if physical.relation_exists:
@@ -252,9 +253,71 @@ async def inspect_leaf(
             pass
 
     now = await database_now(connection)
-    if expires_at <= now:
-        return LeafDetachable(leaf_name=leaf.leaf_name, expires_at=expires_at)
-    return LeafNotExpired(leaf_name=leaf.leaf_name, expires_at=expires_at)
+    if expires_at > now:
+        return LeafNotExpired(leaf_name=leaf.leaf_name, expires_at=expires_at)
+    if await _kept_non_empty(connection, leaf, command.lifecycle):
+        return LeafKeptNonEmpty(leaf_name=leaf.leaf_name)
+    return LeafDetachable(leaf_name=leaf.leaf_name, expires_at=expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class _LifecycleTerms:
+    """The parent a leaf detaches from, and when it becomes eligible."""
+
+    parent_name: str
+    eligible_at: datetime
+
+
+def _lifecycle_terms(
+    command: InspectHistoryLeaf,
+    retention_class: RetentionClassRow,
+) -> _LifecycleTerms | ForeverClassLeaf:
+    """The detach terms of a leaf under the command's lifecycle.
+
+    A `forever` leaf under `RETENTION` is `ForeverClassLeaf`. A `forever`
+    class with a duration, or a finite class without a parent, is a catalog
+    defect and fails loud.
+    """
+    leaf = command.leaf
+    duration = retention_class.duration
+    match command.lifecycle:
+        case LeafLifecycle.RETENTION:
+            if duration is None:
+                return ForeverClassLeaf(class_key=leaf.class_key)
+            if retention_class.finite_parent_name is None:
+                raise AssertionError(
+                    'finite class invariant enforced by the catalog reader'
+                )
+            return _LifecycleTerms(
+                parent_name=retention_class.finite_parent_name,
+                eligible_at=leaf.bounds.upper + duration,
+            )
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            if duration is not None:
+                raise AssertionError('the forever retention class carries a duration')
+            return _LifecycleTerms(
+                parent_name=TASK_HISTORY_FOREVER,
+                eligible_at=leaf.bounds.upper,
+            )
+
+
+async def _kept_non_empty(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+    lifecycle: LeafLifecycle,
+) -> bool:
+    """Whether the lifecycle keeps the leaf because it holds rows. Reads only."""
+    match lifecycle:
+        case LeafLifecycle.RETENTION:
+            return False
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            return bool(
+                (
+                    await connection.execute(
+                        text(f'SELECT EXISTS (SELECT 1 FROM {leaf.leaf_name})')
+                    )
+                ).scalar_one()
+            )
 
 
 async def create_daily_leaf(
@@ -720,8 +783,9 @@ async def detach_expired_leaf(
     function sees a standalone table, never a missing one.
     """
     leaf = command.leaf
+    inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=LeafLifecycle.RETENTION)
     async with database.autocommit() as connection:
-        inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        inspection = await inspect_leaf(connection, inspect)
         match inspection:
             case LeafDetachable():
                 pass
@@ -740,7 +804,7 @@ async def detach_expired_leaf(
             if lock_attempt is LeafLockAttempt.BUSY:
                 return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
             lock_acquired = True
-            inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+            inspection = await inspect_leaf(connection, inspect)
             match inspection:
                 case LeafDetachable():
                     pass
@@ -764,9 +828,7 @@ async def detach_expired_leaf(
                             return quarantined
                         case _:
                             pass
-                    inspection = await inspect_leaf(
-                        connection, InspectHistoryLeaf(leaf=leaf)
-                    )
+                    inspection = await inspect_leaf(connection, inspect)
                     match inspection:
                         case LeafDetachable():
                             pass
@@ -799,7 +861,7 @@ async def detach_expired_leaf(
                 raise
             await _record_detached(connection, leaf.leaf_name)
             await _republish_if_stale(connection, publisher)
-            return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+            return await inspect_leaf(connection, inspect)
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -811,6 +873,97 @@ async def detach_expired_leaf(
                     prior_timeouts=prior_timeouts,
                     uncertain=cancelled,
                 )
+
+
+async def detach_empty_forever_leaf(
+    database: PartitionMaintenanceDatabase,
+    command: DetachEmptyForeverLeaf,
+    publisher: LoaderPublication,
+) -> LeafInspection | LeafMaintenanceBusy:
+    """Concurrently detach one closed daily `forever` leaf that holds no rows.
+
+    Every classification other than `LeafDetachable` is returned unchanged
+    and nothing is detached; a leaf with rows is `LeafKeptNonEmpty`. The
+    classification, emptiness included, is repeated under the leaf's session
+    lock. After the detach the readers are republished without the leaf.
+    It does not drop the leaf.
+    """
+    leaf = command.leaf
+    inspect = InspectHistoryLeaf(
+        leaf=leaf, lifecycle=LeafLifecycle.CLOSED_EMPTY_FOREVER
+    )
+    async with database.autocommit() as connection:
+        inspection = await inspect_leaf(connection, inspect)
+        match inspection:
+            case LeafDetachable():
+                pass
+            case _:
+                return inspection
+
+        lock_acquired = False
+        prior_timeouts: _SessionTimeouts | None = None
+        cancelled = False
+        try:
+            lock_attempt = await _try_session_leaf_lock(connection, leaf=leaf)
+            if lock_attempt is LeafLockAttempt.BUSY:
+                return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+            lock_acquired = True
+            inspection = await inspect_leaf(connection, inspect)
+            match inspection:
+                case LeafDetachable():
+                    pass
+                case _:
+                    return inspection
+            prior_timeouts = await _read_session_timeouts(connection)
+            await _set_session_timeouts(
+                connection,
+                statement_timeout_ms=command.statement_timeout_ms,
+            )
+            try:
+                await connection.execute(
+                    text(
+                        f"""
+                        ALTER TABLE {TASK_HISTORY_FOREVER}
+                        DETACH PARTITION {leaf.leaf_name} CONCURRENTLY
+                        """
+                    )
+                )
+            except DBAPIError as error:
+                if is_lock_not_available(error):
+                    return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+                raise
+            await _record_detached(connection, leaf.leaf_name)
+            await _republish_if_stale(connection, publisher)
+            return await inspect_leaf(connection, inspect)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if lock_acquired:
+                await _cleanup_session_leaf_lock(
+                    connection,
+                    leaf=leaf,
+                    prior_timeouts=prior_timeouts,
+                    uncertain=cancelled,
+                )
+
+
+async def _lifecycle_parent(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+    lifecycle: LeafLifecycle,
+) -> str:
+    """The parent a leaf detaches from under its lifecycle."""
+    match lifecycle:
+        case LeafLifecycle.CLOSED_EMPTY_FOREVER:
+            return TASK_HISTORY_FOREVER
+        case LeafLifecycle.RETENTION:
+            retention_class = await read_retention_class(connection, leaf.class_key)
+            if retention_class is None or retention_class.finite_parent_name is None:
+                raise AssertionError(
+                    'interrupted-detach classification requires a finite class'
+                )
+            return retention_class.finite_parent_name
 
 
 async def finalize_interrupted_detach(
@@ -826,8 +979,9 @@ async def finalize_interrupted_detach(
     pending until its recovery evidence drains or is quarantined.
     """
     leaf = command.leaf
+    inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=command.lifecycle)
     async with database.autocommit() as connection:
-        inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+        inspection = await inspect_leaf(connection, inspect)
         match inspection:
             case LeafDetached() | LeafDetachInterrupted():
                 pass
@@ -842,12 +996,12 @@ async def finalize_interrupted_detach(
             if lock_attempt is LeafLockAttempt.BUSY:
                 return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
             lock_acquired = True
-            inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+            inspection = await inspect_leaf(connection, inspect)
             match inspection:
                 case LeafDetached():
                     await _record_detached(connection, leaf.leaf_name)
                     await _republish_if_stale(connection, publisher)
-                    return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+                    return await inspect_leaf(connection, inspect)
                 case LeafDetachInterrupted():
                     pass
                 case _:
@@ -857,16 +1011,14 @@ async def finalize_interrupted_detach(
                 connection,
                 statement_timeout_ms=command.statement_timeout_ms,
             )
-            retention_class = await read_retention_class(connection, leaf.class_key)
-            if retention_class is None or retention_class.finite_parent_name is None:
-                raise AssertionError(
-                    'interrupted-detach classification requires a finite class'
-                )
+            parent_name = await _lifecycle_parent(
+                connection, leaf, command.lifecycle
+            )
             try:
                 await connection.execute(
                     text(
                         f"""
-                        ALTER TABLE {retention_class.finite_parent_name}
+                        ALTER TABLE {parent_name}
                         DETACH PARTITION {leaf.leaf_name} FINALIZE
                         """
                     )
@@ -877,7 +1029,7 @@ async def finalize_interrupted_detach(
                 raise
             await _record_detached(connection, leaf.leaf_name)
             await _republish_if_stale(connection, publisher)
-            return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+            return await inspect_leaf(connection, inspect)
         except asyncio.CancelledError:
             cancelled = True
             raise
@@ -901,9 +1053,12 @@ async def drop_detached_leaf(
     Refused while the published staged loader still references the relation:
     the regeneration gap blocks the drop, never the reader. The catalog
     retains the dropped leaf's row as durable memory that it existed.
+    Under `CLOSED_EMPTY_FOREVER`, a leaf holding rows under the exclusive
+    lock is `LeafKeptNonEmpty`.
     """
     leaf = command.leaf
-    inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+    inspect = InspectHistoryLeaf(leaf=leaf, lifecycle=command.lifecycle)
+    inspection = await inspect_leaf(connection, inspect)
     match inspection:
         case LeafDetached():
             pass
@@ -914,7 +1069,7 @@ async def drop_detached_leaf(
     )
     if lock_attempt is LeafLockAttempt.BUSY:
         return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
-    inspection = await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
+    inspection = await inspect_leaf(connection, inspect)
     match inspection:
         case LeafDetached():
             pass
@@ -927,6 +1082,10 @@ async def drop_detached_leaf(
     )
     if relation_lock is LeafLockAttempt.BUSY:
         return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
+    # Under the exclusive lock, a closed forever leaf that gained rows after
+    # its detach is kept, not dropped.
+    if await _kept_non_empty(connection, leaf, command.lifecycle):
+        return LeafKeptNonEmpty(leaf_name=leaf.leaf_name)
     await connection.execute(text(f'DROP TABLE {leaf.leaf_name}'))
     await _delete_leaf_clock_exceptions(connection, leaf)
     await connection.execute(

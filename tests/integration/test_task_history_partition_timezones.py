@@ -24,6 +24,7 @@ from horsies.core.history.commands import (
     CreateDailyHistoryLeaf,
     InspectHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
 )
 from horsies.core.history.heartbeats.partitioning import (
@@ -154,7 +155,10 @@ class TestConformanceIsSessionIndependent:
                 leaf_name=ref.leaf_name
             ), verified
             inspection = await inspect_leaf(
-                connection, InspectHistoryLeaf(leaf=ref)
+                connection,
+                InspectHistoryLeaf(
+                    leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                ),
             )
             assert isinstance(
                 inspection, (LeafNotExpired, LeafDetachable)

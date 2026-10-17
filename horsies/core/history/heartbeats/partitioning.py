@@ -41,6 +41,7 @@ from ..commands import (
     DropDetachedHistoryLeaf,
     InspectHistoryLeaf,
     LeafBounds,
+    LeafLifecycle,
     LeafRef,
     is_safe_identifier,
 )
@@ -626,14 +627,19 @@ async def sweep_expired_heartbeat_leaves(
             # next sweep must still drop; re-inspect for that state.
             async with database.connect() as connection:
                 inspection = await inspect_leaf(
-                    connection, InspectHistoryLeaf(leaf=ref)
+                    connection,
+                    InspectHistoryLeaf(
+                        leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                    ),
                 )
             detached = isinstance(inspection, LeafDetached)
         if detached:
             async with database.begin() as connection:
                 drop_outcome = await drop_detached_leaf(
                     connection,
-                    DropDetachedHistoryLeaf(leaf=ref),
+                    DropDetachedHistoryLeaf(
+                        leaf=ref, lifecycle=LeafLifecycle.RETENTION
+                    ),
                     publisher,
                 )
         swept.append(
