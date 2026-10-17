@@ -337,7 +337,10 @@ from sqlalchemy import text
 # v45: ix_horsies_workflow_tasks_node_id, ix_horsies_workflow_tasks_workflow_id
 #      and idx_horsies_workflow_tasks_deps are dropped concurrently.
 
-SCHEMA_VERSION = 45
+# v46: idx_horsies_history_catalog_active, a partial index on the leaf
+#      catalog's records whose leaf is not dropped.
+
+SCHEMA_VERSION = 46
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
