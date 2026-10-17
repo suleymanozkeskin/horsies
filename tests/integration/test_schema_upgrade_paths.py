@@ -1358,6 +1358,46 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_uuid_upgrade_drops_the_task_update_notify_trigger(
+        self, scratch_database: str,
+    ) -> None:
+        """A uuid database at v44 loses only the task update notify trigger."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        triggers_sql = text(
+            "SELECT tgname::text FROM pg_trigger "
+            "WHERE tgrelid = 'horsies_tasks'::regclass AND NOT tgisinternal"
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE TRIGGER horsies_task_notify_update_trigger
+                        AFTER UPDATE ON horsies_tasks
+                        FOR EACH ROW
+                        WHEN (OLD.status IS DISTINCT FROM NEW.status)
+                        EXECUTE FUNCTION horsies_notify_task_changes()
+                """))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 45'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (44) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                before = set((await conn.execute(triggers_sql)).scalars().all())
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                after = set((await conn.execute(triggers_sql)).scalars().all())
+            assert before - after == {'horsies_task_notify_update_trigger'}
+            assert after - before == set()
+            assert 'horsies_task_notify_insert_trigger' in after
+            assert 'horsies_task_status_notify_update_trigger' in after
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

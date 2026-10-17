@@ -125,6 +125,7 @@ def _is_missing_schema_version_table(exc: BaseException) -> bool:
 from horsies.core.schemas.triggers import (
     CREATE_TASK_NOTIFY_FUNCTION_SQL,
     CREATE_TASK_NOTIFY_TRIGGER_SQL,
+    DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL,
     CREATE_TASK_STATUS_NOTIFY_FUNCTION_SQL,
     CREATE_TASK_STATUS_NOTIFY_TRIGGER_SQL,
     CREATE_WORKER_STATE_NOTIFY_FUNCTION_SQL,
@@ -1011,6 +1012,8 @@ class PostgresBroker:
                 # pending expiry whose outcomes follow ascending deadlines.
                 for statement in terminal_snapshot_replacement_ddl():
                     await conn.execute(text(statement))
+                # v46: the update trigger cannot send task_done here.
+                await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},

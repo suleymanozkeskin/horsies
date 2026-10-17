@@ -334,7 +334,10 @@ from sqlalchemy import text
 # v44: horsies_expire_pending_tasks returns its outcomes in ascending
 #      good_until order.
 
-SCHEMA_VERSION = 44
+# v46: uuid databases drop horsies_task_notify_update_trigger; the move
+#      program sends task_done itself.
+
+SCHEMA_VERSION = 46
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

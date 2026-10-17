@@ -59,6 +59,10 @@ from ...schemas.non_runnable_lookup import (
     DROP_NON_RUNNABLE_LOOKUP_DDL,
     NON_RUNNABLE_LOOKUP_DDL,
 )
+from ...schemas.triggers import (
+    CREATE_TASK_NOTIFY_TRIGGER_SQL,
+    DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL,
+)
 from ...schemas.terminalization import (
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
@@ -84,6 +88,7 @@ def installation_fragments(
         *job_state_fragments(),
         RELOCATION_LEDGER_DDL,
         NON_RUNNABLE_LOOKUP_DDL,
+        DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL,
     )
 
 
@@ -180,4 +185,7 @@ async def uninstall_programs(connection: AsyncConnection) -> int:
     await connection.execute(CREATE_OUTCOME_TYPE_SQL)
     for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
         await connection.execute(create_function)
+    # The in-place program terminalizes live rows, so task_done comes from
+    # the update trigger again.
+    await connection.execute(CREATE_TASK_NOTIFY_TRIGGER_SQL)
     return len(statements)
