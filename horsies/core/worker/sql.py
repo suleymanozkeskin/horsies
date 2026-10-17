@@ -498,40 +498,6 @@ DELETE_EXPIRED_WORKFLOWS_SQL = text(f"""
     WHERE id IN (SELECT id FROM budgeted)
 """)
 
-# The status + COALESCE predicates must stay textually aligned with
-# idx_horsies_tasks_retention (schemas/indexes.py).
-#
-# task_attempts are purged set-wise in the purged_attempts CTE rather than
-# left to the FK ON DELETE CASCADE: RI triggers are row-level, so the
-# cascade issues one child DELETE per doomed task inside this statement's
-# transaction — costlier in aggregate than the parent delete itself. The
-# CTE removes the whole child set in one indexed statement; the cascade
-# trigger still fires per parent row but finds nothing, and remains the
-# correctness net for non-retention deletes. doomed is referenced twice,
-# so Postgres materializes the candidate scan once.
-# :excluded_queues carries the queues with a per-queue override window
-# (queue_terminal_record_retention_hours); an empty array excludes
-# nothing. The exclusion shields PLAIN tasks only: workflow-backing rows
-# (is_workflow_task = TRUE) age under the global window even on override
-# queues, because the per-queue statement filters them out — an
-# unconditional exclusion would leave them unreachable by both statements
-# and retained forever. The exclusion is a heap filter on the
-# already-bounded candidate scan, so the v11 index plan is unchanged.
-
-
-# Per-queue override delete (queue_terminal_record_retention_hours). The
-# queue_name equality + COALESCE predicates must stay textually aligned
-# with idx_horsies_tasks_queue_retention (schemas/indexes.py) — the v11
-# expression index cannot serve an override window efficiently because
-# the override cutoff is far more recent than the global one, making
-# every other queue's retained terminal rows heap-filter misses.
-# Scoped to plain tasks (is_workflow_task = FALSE): workflow-backing rows use
-# the global window and are protected separately while their workflow remains
-# non-terminal. The NOT EXISTS guard is kept as defense in depth (plain tasks
-# have no workflow_task linkage). Same purged_attempts mechanism as the global
-# delete.
-
-
 SELECT_RUNNING_TASK_CONTEXT_FOR_UPDATE_SQL = text("""
     SELECT task_name, retry_count, started_at, claimed_by_worker_id,
            worker_hostname, worker_pid, worker_process_name,

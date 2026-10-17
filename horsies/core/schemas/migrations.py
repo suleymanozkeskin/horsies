@@ -328,7 +328,10 @@ from sqlalchemy import text
 # v42: the single-row move hashes the result once, and the six batch moves
 #      encode each attempt snapshot once.
 
-SCHEMA_VERSION = 42
+# v43: idx_horsies_tasks_retention and idx_horsies_tasks_queue_retention are
+#      dropped concurrently; terminal tasks no longer age in horsies_tasks.
+
+SCHEMA_VERSION = 43
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
