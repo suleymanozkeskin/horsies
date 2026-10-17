@@ -27,7 +27,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import LeafBounds, is_safe_identifier
+from ..commands import OPEN_END_ANCHOR, LeafBounds, is_safe_identifier
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryContractError, HistoryParentAbsent
 from ..names import (
     HEARTBEAT_CLASS_KEY,
@@ -161,6 +162,14 @@ def daily_leaf_name(parent_name: str, lower: datetime) -> str:
     return name
 
 
+def open_ended_leaf_name(parent_name: str, lower: datetime) -> str:
+    """The canonical relation name for the open-ended leaf of `parent_name`."""
+    name = f'{parent_name}_open_{lower:%Y_%m_%d}'
+    if not is_safe_identifier(name):
+        raise ValueError(f'derived leaf name is not a safe identifier: {name!r}')
+    return name
+
+
 def leaf_id_index_name(leaf_name: str) -> str:
     """The canonical per-leaf task-ID index name."""
     return f'{leaf_name}_task_idx'
@@ -281,6 +290,51 @@ async def read_retention_class(
         partition_interval=partition_interval,
         finite_parent_name=finite_parent_name,
     )
+
+
+async def read_attached_open_ended_leaf(
+    connection: AsyncConnection,
+) -> LeafCatalogRow | None:
+    """The attached open-ended `forever` leaf, or None when there is none."""
+    leaf_name = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT leaf_name FROM {LEAF_CATALOG}
+                WHERE class_key = :forever_class
+                  AND upper_anchor = :open_end
+                  AND detached_at IS NULL
+                  AND dropped_at IS NULL
+                ORDER BY lower_anchor
+                LIMIT 1
+                """
+            ),
+            {'forever_class': FOREVER_CLASS_KEY, 'open_end': OPEN_END_ANCHOR},
+        )
+    ).scalar_one_or_none()
+    if leaf_name is None:
+        return None
+    return await read_leaf_catalog_row(connection, str(leaf_name))
+
+
+async def read_largest_attached_forever_upper(
+    connection: AsyncConnection,
+) -> datetime | None:
+    """The largest upper anchor of the attached `forever` leaves."""
+    value = (
+        await connection.execute(
+            text(
+                f"""
+                SELECT max(upper_anchor) FROM {LEAF_CATALOG}
+                WHERE class_key = :forever_class
+                  AND detached_at IS NULL
+                  AND dropped_at IS NULL
+                """
+            ),
+            {'forever_class': FOREVER_CLASS_KEY},
+        )
+    ).scalar_one()
+    return _optional_datetime(value, 'upper_anchor')
 
 
 async def read_leaf_catalog_row(

@@ -30,7 +30,7 @@ from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime, timezone
 
-from ..commands import is_safe_identifier
+from ..commands import OPEN_END_ANCHOR, is_safe_identifier
 from ..names import (
     CLOCK_SKEW_EXCEPTIONS,
     TASK_DUPLICATE_GUARD_FUNCTION,
@@ -395,6 +395,10 @@ def _staged_function(
                     + '\n'.join(
                         _fallback_probe(leaf, history_probe(leaf.relation_name))
                         for leaf in reversed(manifest.leaves)
+                        # No birth can reach the open end, so its fallback
+                        # condition never holds.
+                        if leaf.upper_anchor.astimezone(timezone.utc)
+                        != OPEN_END_ANCHOR
                     )
                 )
             case FallbackProbes.OMITTED:

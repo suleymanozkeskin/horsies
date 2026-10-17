@@ -20,6 +20,7 @@ from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from horsies.core.history.commands import (
+    OPEN_END_ANCHOR,
     CollectPartitionHealth,
     CreateDailyHistoryLeaf,
     DetachExpiredHistoryLeaf,
@@ -894,7 +895,7 @@ class TestLockContention:
 
 class TestHealth:
     @pytest.mark.asyncio
-    async def test_forever_class_has_daily_coverage_health(
+    async def test_forever_class_is_covered_by_one_open_ended_leaf(
         self, history_schema: HistorySchema
     ) -> None:
         async with history_schema.engine.begin() as connection:
@@ -903,6 +904,9 @@ class TestHealth:
                 EnsureLeafCoverage(class_key='forever', horizon_days=3),
                 UnpublishedLoader(),
             )
+            assert [type(creation) for creation in creations] == [
+                LeafAlreadyConformant
+            ]
             assert not any(
                 isinstance(creation, ForeverClassLeaf)
                 for creation in creations
@@ -915,7 +919,7 @@ class TestHealth:
             )
             assert report.is_healthy
             assert report.coverage is not None
-            assert report.coverage.complete_future_intervals >= 2
+            assert report.coverage.coverage_until == OPEN_END_ANCHOR
             assert report.coverage.detachable_leaf_count == 0
 
     @pytest.mark.asyncio

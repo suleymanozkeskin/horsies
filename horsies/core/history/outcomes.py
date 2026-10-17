@@ -168,6 +168,15 @@ class LeafCreated:
 
 
 @dataclass(frozen=True, slots=True)
+class CoveredByOpenEndedLeaf:
+    """A daily `forever` leaf was requested inside the attached open-ended
+    leaf; nothing was created."""
+
+    leaf_name: str
+    open_ended_leaf_name: str
+
+
+@dataclass(frozen=True, slots=True)
 class LeafAlreadyConformant:
     """The leaf already exists and matches its catalog row exactly."""
 
@@ -200,6 +209,7 @@ class ClassIntervalMismatch:
 type LeafCreation = (
     LeafCreated
     | LeafAlreadyConformant
+    | CoveredByOpenEndedLeaf
     | LeafIndexRepaired
     | LeafMaintenanceBusy
     | RetentionClassAbsent

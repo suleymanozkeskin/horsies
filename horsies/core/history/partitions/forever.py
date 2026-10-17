@@ -3,19 +3,20 @@
 The top-level history table remains LIST-partitioned by retention class.
 ``forever`` changes from one unbounded leaf into a RANGE parent. Existing
 rows older than the current UTC day stay in one bounded legacy leaf; rows
-from the current day move into its daily leaf. The conversion therefore
+from the current day on move into the open-ended leaf, which covers every
+later day. The conversion therefore
 does not rewrite the historical population, while every subsequent window
 can prune the legacy leaf once its upper bound is outside the window.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
+from ..commands import CreateOpenEndedHistoryLeaf
 from ..ddl.tables import FOREVER_CLASS_KEY, TASK_HISTORY_FOREVER_DDL
 from ..errors import HistoryContractError
 from ..names import LEAF_CATALOG, TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
@@ -23,12 +24,12 @@ from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
 from .catalog import (
     INDEX_SCHEMA_VERSION,
     capture_partition_bound_utc,
-    daily_leaf_name,
     database_now,
     leaf_enqueued_index_name,
     leaf_id_index_name,
+    open_ended_leaf_name,
 )
-from .manager import create_daily_leaf
+from .manager import create_open_ended_leaf, open_ended_leaf_lower
 from .publication import UnpublishedLoader
 
 
@@ -40,10 +41,10 @@ _CATALOG_LOWER = datetime(1970, 1, 1, tzinfo=_UTC)
 async def ensure_forever_range_partitioning(
     connection: AsyncConnection,
 ) -> int:
-    """Ensure a RANGE parent and current daily leaf for ``forever``.
+    """Ensure a RANGE parent and the open-ended leaf for ``forever``.
 
     Returns the number of rows moved from the old unbounded leaf into the
-    current daily leaf. The caller owns the transaction. A v34 conversion is
+    retained legacy leaf. The caller owns the transaction. A v34 conversion is
     atomic: any refusal rolls the relation renames, row move, attachment, and
     catalog writes back together.
     """
@@ -61,20 +62,16 @@ async def ensure_forever_range_partitioning(
 
     now = await database_now(connection)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow = today + timedelta(days=1)
 
     moved = 0
     if relkind == 'r':
         moved = await _convert_unbounded_leaf(connection, today=today)
 
-    leaf = LeafRef(
-        leaf_name=daily_leaf_name(TASK_HISTORY_FOREVER, today),
-        class_key=FOREVER_CLASS_KEY,
-        bounds=LeafBounds(lower=today, upper=tomorrow),
-    )
-    creation = await create_daily_leaf(
+    creation = await create_open_ended_leaf(
         connection,
-        CreateDailyHistoryLeaf(leaf=leaf),
+        CreateOpenEndedHistoryLeaf(
+            lower=await open_ended_leaf_lower(connection, today),
+        ),
         UnpublishedLoader(),
     )
     match creation:
@@ -82,7 +79,7 @@ async def ensure_forever_range_partitioning(
             return moved
         case _:
             raise HistoryContractError(
-                f'current forever leaf could not be ensured: {creation!r}'
+                f'open-ended forever leaf could not be ensured: {creation!r}'
             )
 
 
@@ -93,7 +90,7 @@ async def _convert_unbounded_leaf(
 ) -> int:
     legacy_id_index = leaf_id_index_name(FOREVER_LEGACY_LEAF)
     legacy_ordering_index = leaf_enqueued_index_name(FOREVER_LEGACY_LEAF)
-    today_leaf = daily_leaf_name(TASK_HISTORY_FOREVER, today)
+    open_leaf = open_ended_leaf_name(TASK_HISTORY_FOREVER, today)
 
     if any(
         len(identifier.encode()) > 63
@@ -101,7 +98,9 @@ async def _convert_unbounded_leaf(
             FOREVER_LEGACY_LEAF,
             legacy_id_index,
             legacy_ordering_index,
-            today_leaf,
+            open_leaf,
+            leaf_id_index_name(open_leaf),
+            leaf_enqueued_index_name(open_leaf),
         )
     ):
         raise AssertionError('forever conversion identifier exceeds PostgreSQL limit')
@@ -123,21 +122,17 @@ async def _convert_unbounded_leaf(
     )
     await connection.execute(text(TASK_HISTORY_FOREVER_DDL))
 
-    # Create the current leaf without publishing while the legacy leaf is
-    # detached. The caller republishes only after the conversion is complete.
-    current = LeafRef(
-        leaf_name=today_leaf,
-        class_key=FOREVER_CLASS_KEY,
-        bounds=LeafBounds(lower=today, upper=today + timedelta(days=1)),
-    )
-    creation = await create_daily_leaf(
+    # Create the open-ended leaf without publishing while the legacy leaf
+    # is detached. The caller republishes only after the conversion is
+    # complete.
+    creation = await create_open_ended_leaf(
         connection,
-        CreateDailyHistoryLeaf(leaf=current),
+        CreateOpenEndedHistoryLeaf(lower=today),
         UnpublishedLoader(),
     )
     if not isinstance(creation, LeafCreated):
         raise HistoryContractError(
-            f'forever conversion could not create current leaf: {creation!r}'
+            f'forever conversion could not create the open-ended leaf: {creation!r}'
         )
 
     moved = int(

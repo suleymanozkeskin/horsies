@@ -172,7 +172,16 @@ async def collect_partition_health(
         elif duration is not None and leaf.upper_anchor + duration <= now:
             detachable += 1
 
-    if complete_future < COVERAGE_FLOOR_INTERVALS:
+    match duration:
+        case None:
+            # `forever` is covered by one open-ended leaf, not by a count of
+            # future daily leaves.
+            below_floor = coverage_until is None or coverage_until < (
+                now + timedelta(days=COVERAGE_FLOOR_INTERVALS)
+            )
+        case timedelta():
+            below_floor = complete_future < COVERAGE_FLOOR_INTERVALS
+    if below_floor:
         faults.append(
             CoverageBelowFloor(
                 class_key=command.class_key,
