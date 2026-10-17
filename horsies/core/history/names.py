@@ -85,3 +85,12 @@ TASK_LOOKUP_MANIFEST: Final = 'horsies_task_lookup_manifest'
 TASK_PROVENANCE_FUNCTION: Final = 'horsies_task_provenance_staged'
 TASK_PROVENANCE_TYPE: Final = 'horsies_task_provenance'
 TASK_DETAIL_FUNCTION: Final = 'horsies_task_detail_staged'
+TASK_DUPLICATE_GUARD_FUNCTION: Final = 'horsies_task_history_duplicate_staged'
+# Comment that marks the guard rendered from the published manifest, as
+# opposed to the first version installed before any publication.
+TASK_DUPLICATE_GUARD_RENDERED_MARKER: Final = 'horsies:rendered'
+
+# Owned by the terminalization move program: ids moved to history with a
+# terminal time more than the clock bound before their v7 birth time.
+CLOCK_SKEW_EXCEPTIONS: Final = 'horsies_task_history_clock_exceptions'
+UUID7_BIRTH_FUNCTION: Final = 'horsies_uuid7_birth'
