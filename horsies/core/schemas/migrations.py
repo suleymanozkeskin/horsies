@@ -334,6 +334,9 @@ from sqlalchemy import text
 # v44: horsies_expire_pending_tasks returns its outcomes in ascending
 #      good_until order.
 
+# v45: ix_horsies_workflow_tasks_node_id, ix_horsies_workflow_tasks_workflow_id
+#      and idx_horsies_workflow_tasks_deps are dropped concurrently.
+
 # v46: uuid databases drop horsies_task_notify_update_trigger; the move
 #      program sends task_done itself.
 

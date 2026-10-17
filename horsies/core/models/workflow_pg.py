@@ -132,13 +132,12 @@ class WorkflowTaskModel(Base):
         Uuid(as_uuid=False),
         ForeignKey('horsies_workflows.id', ondelete='CASCADE'),
         nullable=False,
-        index=True,
     )
 
     # Position in workflow
     task_index: Mapped[int] = mapped_column(Integer, nullable=False)
     node_id: Mapped[Optional[str]] = mapped_column(
-        String(128), nullable=True, index=True
+        String(128), nullable=True,
     )
 
     # Task specification
@@ -239,7 +238,3 @@ class WorkflowTaskModel(Base):
         ),
     )
 
-
-# Note: The following index should be created via raw SQL for optimal performance:
-# CREATE INDEX IF NOT EXISTS idx_horsies_workflow_tasks_deps ON horsies_workflow_tasks USING GIN(dependencies);
-# This is handled in the broker's schema initialization.
