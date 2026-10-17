@@ -370,13 +370,7 @@ def _single_row_history_insert() -> str:
         'result_content_type': "'application/json'",
         'result_payload': 'v_result_payload',
         'prior_result_payload': 'v_prior_result_payload',
-        'result_digest': (
-            'CASE WHEN v_result_payload IS NOT NULL\n'
-            '                 THEN sha256(v_result_payload)\n'
-            '             WHEN v_prior_result_payload IS NOT NULL\n'
-            '                 THEN sha256(v_prior_result_payload)\n'
-            '             ELSE NULL END'
-        ),
+        'result_digest': 'v_result_digest',
         'error_code': 'p_error_code',
         'final_failed_reason': 'p_failed_reason',
         'retry_count': 'v_task.retry_count',
@@ -428,6 +422,7 @@ DECLARE
     v_attempt_snapshot bytea;
     v_result_payload bytea;
     v_prior_result_payload bytea;
+    v_result_digest bytea;
     v_workflow_id uuid;
     v_workflow_node_row_id uuid;
     v_link_count integer;
@@ -552,6 +547,15 @@ BEGIN
         v_prior_result_payload := NULL;
     END IF;
 
+    -- One digest serves the history row and the deferred record. A
+    -- deferred kind never carries a prior payload, so the deferred
+    -- record's digest is the digest of the result payload.
+    v_result_digest := CASE WHEN v_result_payload IS NOT NULL
+                 THEN sha256(v_result_payload)
+             WHEN v_prior_result_payload IS NOT NULL
+                 THEN sha256(v_prior_result_payload)
+             ELSE NULL END;
+
     {_single_row_history_insert()};
     GET DIAGNOSTICS v_history_rows = ROW_COUNT;
     IF v_history_rows <> 1 THEN
@@ -569,7 +573,7 @@ BEGIN
             v_task.id, v_workflow_id, v_workflow_node_row_id,
             p_terminal_status, p_terminal_at, p_terminalization_kind,
             'HISTORY', v_task.retention_class_key, p_terminal_at,
-            1, sha256(v_result_payload),
+            1, v_result_digest,
             gen_random_uuid(), statement_timestamp(), 0
         );
     END IF;
@@ -973,8 +977,19 @@ def _batch_history_insert(
     disposition_case: str,
     ids_var: str,
 ) -> str:
-    """The batch families' projection, over the shared column authority."""
-    return history_insert_sql(
+    """The batch families' projection, over the shared column authority.
+
+    The materialized CTE encodes each task's attempt snapshot once; the
+    snapshot column and its digest both read that one encoding.
+    """
+    attempt_data_sql = (
+        'WITH attempt_data AS MATERIALIZED (\n'
+        f'        SELECT id, {ATTEMPT_ENCODER_FUNCTION}(id) AS snapshot\n'
+        f'        FROM unnest({ids_var}) AS u(id)\n'
+        '    )\n'
+        '    '
+    )
+    return attempt_data_sql + history_insert_sql(
         {
             'task_id': 't.id',
             'task_name': 't.task_name',
@@ -1021,10 +1036,8 @@ def _batch_history_insert(
             'attempt_archive_version': '1',
             'attempt_snapshot_codec': "'json-utf8'",
             'attempt_snapshot_content_type': "'application/json'",
-            'attempt_snapshot': f'{ATTEMPT_ENCODER_FUNCTION}(t.id)',
-            'attempt_snapshot_digest': (
-                f'sha256({ATTEMPT_ENCODER_FUNCTION}(t.id))'
-            ),
+            'attempt_snapshot': 'attempt_data.snapshot',
+            'attempt_snapshot_digest': 'sha256(attempt_data.snapshot)',
             'rerun_input_disposition': 'd.disposition',
             'rerun_input_version': rerun_carriage_expression('version'),
             'rerun_input_codec': rerun_carriage_expression('codec'),
@@ -1035,6 +1048,7 @@ def _batch_history_insert(
         },
         select_tail=(
             f'FROM {LIVE_TASKS} t\n'
+            '    JOIN attempt_data ON attempt_data.id = t.id\n'
             f'    {linkage_join}\n'
             f'    CROSS JOIN LATERAL (\n'
             f'        SELECT {disposition_case} AS disposition\n'
@@ -1973,6 +1987,11 @@ def _cancel_owned_nodes_ddl() -> str:
     )
 
 
+def _create_or_replace(ddl: str) -> str:
+    """Render a function DDL as CREATE OR REPLACE for an installed program."""
+    return ddl.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1)
+
+
 def pause_abandon_replacement_ddl() -> tuple[str, ...]:
     """The claim-fenced pause abandons, as CREATE OR REPLACE statements.
 
@@ -1980,8 +1999,29 @@ def pause_abandon_replacement_ddl() -> tuple[str, ...]:
     the pause re-check. Signatures and return types are unchanged.
     """
     return tuple(
-        ddl.replace('CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 1)
+        _create_or_replace(ddl)
         for ddl in (_abandon_owned_node_ddl(), _abandon_owned_nodes_ddl())
+    )
+
+
+def terminal_snapshot_replacement_ddl() -> tuple[str, ...]:
+    """The single-row move and the six batch moves, as CREATE OR REPLACE.
+
+    Schema v42 installs them on a uuid database whose move program encodes
+    each batch attempt snapshot twice and hashes a deferred result twice.
+    Signatures and return types are unchanged.
+    """
+    return tuple(
+        _create_or_replace(ddl)
+        for ddl in (
+            _move_ddl(),
+            _expire_pending_ddl(),
+            bounded_cancel_orphan_sweep_ddl(),
+            _abandon_owned_nodes_ddl(),
+            _cancel_owned_nodes_ddl(),
+            _abandon_paused_sweep_ddl(),
+            _cancel_cancelled_sweep_ddl(),
+        )
     )
 
 

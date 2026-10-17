@@ -21,12 +21,15 @@ from horsies.core.history.terminalization.live_cutover import (
 )
 from horsies.core.history.terminalization.move import (
     ATTEMPT_ENCODER_DDL,
+    ATTEMPT_ENCODER_FUNCTION,
+    KIND_PROJECTIONS,
     cancellation_family_fragments,
     completion_family_fragments,
     disposition_case_expression,
     disposition_if_chain,
     expiry_family_fragments,
     failure_family_fragments,
+    terminal_snapshot_replacement_ddl,
     workflow_node_family_fragments,
 )
 from horsies.core.history.terminalization.outcome import (
@@ -387,6 +390,54 @@ class TestBatchBuilder:
         assert 'ORDER BY t.created_at, t.id' in bounded_scan
         assert 'LIMIT p_batch_size' in bounded_scan
         assert 'FOR UPDATE OF t SKIP LOCKED' in sweep[classification:]
+
+
+_BATCH_MOVES = (
+    expiry_family_fragments()[1],
+    cancellation_family_fragments()[2],
+    *workflow_node_family_fragments()[2:],
+)
+_BATCH_MOVE_IDS = (
+    'expire_pending',
+    'cancel_orphan_sweep',
+    'abandon_owned_nodes',
+    'cancel_owned_nodes',
+    'abandon_paused_sweep',
+    'cancel_cancelled_sweep',
+)
+
+
+class TestSnapshotAndDigestReuse:
+    """Each move encodes an attempt snapshot once and hashes a result once."""
+
+    @pytest.mark.parametrize('batch', _BATCH_MOVES, ids=_BATCH_MOVE_IDS)
+    def test_batch_encodes_each_snapshot_once(self, batch: str) -> None:
+        assert batch.count(f'{ATTEMPT_ENCODER_FUNCTION}(') == 1
+        assert 'WITH attempt_data AS MATERIALIZED' in batch
+        assert 'JOIN attempt_data ON attempt_data.id = t.id' in batch
+        assert 'sha256(attempt_data.snapshot)' in batch
+
+    def test_move_hashes_the_result_once(self) -> None:
+        assert MOVE_BODY.count('sha256(v_result_payload)') == 1
+        assert MOVE_BODY.count('sha256(v_prior_result_payload)') == 1
+        pending = MOVE_BODY[
+            MOVE_BODY.index('INSERT INTO horsies_workflow_phase2_pending'):
+        ]
+        assert '1, v_result_digest,' in pending
+
+    def test_the_prior_payload_kind_is_never_deferred(self) -> None:
+        """The deferred digest equals the result digest only while this holds."""
+        deferred = {kind: flag for kind, _, _, flag in KIND_PROJECTIONS}
+        assert deferred[TerminalizationKind.CANCEL_ADMIN] is False
+
+    def test_replacement_covers_every_reusing_move(self) -> None:
+        statements = terminal_snapshot_replacement_ddl()
+        assert all(
+            s.lstrip().startswith('CREATE OR REPLACE FUNCTION')
+            for s in statements
+        )
+        assert [s for s in statements if 'CREATE FUNCTION' in s] == []
+        assert len(statements) == len(_BATCH_MOVES) + 1
 
 
 class TestCancellationFamily:
