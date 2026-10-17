@@ -20,6 +20,7 @@ from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
 from horsies.core.worker.finalize import _PersistedTaskOutcome
+from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.worker import (
     Worker,
@@ -2930,6 +2931,156 @@ class TestBackgroundFatalCapture:
 
         with pytest.raises(ExecutorRestartFailedError):
             await worker.run_forever()
+
+
+# A poll interval long enough that only a wake can end a wait inside the
+# test timeout.
+_LONG_POLL_MS = 60_000
+_WAKE_TIMEOUT_S = 5.0
+
+
+async def _finish_finalizer(worker: Worker, outcome: str) -> None:
+    """Spawn a finalizer task that ends with outcome and let _on_done run."""
+
+    async def _finalizer() -> None:
+        match outcome:
+            case 'ok':
+                return None
+            case 'error':
+                raise RuntimeError('finalize failed')
+            case 'cancelled':
+                await asyncio.sleep(_WAKE_TIMEOUT_S)
+            case _:
+                raise AssertionError(f'unknown outcome {outcome!r}')
+
+    task = worker._spawn_background(
+        _finalizer(),
+        name=f'finalize-{outcome}',
+        finalizer=True,
+    )
+    if outcome == 'cancelled':
+        await asyncio.sleep(0)
+        task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+
+@pytest.mark.unit
+class TestCapacityReleaseWake:
+    """A finalizer ending wakes the claim loop without a queue NOTIFY."""
+
+    @pytest.mark.parametrize('outcome', ['ok', 'error', 'cancelled'])
+    @pytest.mark.asyncio
+    async def test_finalizer_end_sets_the_wake(self, outcome: str) -> None:
+        worker = _make_worker()
+
+        await _finish_finalizer(worker, outcome)
+
+        assert worker._capacity_released.is_set()
+
+    @pytest.mark.asyncio
+    async def test_service_task_end_does_not_set_the_wake(self) -> None:
+        worker = _make_worker()
+        worker._stop.set()  # a requested shutdown: the loop may end
+
+        async def _service_loop() -> None:
+            return None
+
+        task = worker._spawn_background(
+            _service_loop(),
+            name='service-loop',
+            service=True,
+        )
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0)
+
+        assert not worker._capacity_released.is_set()
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_on_a_release_during_the_wait(self) -> None:
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        wait = asyncio.create_task(
+            worker._wait_for_any_notify(poll_interval_ms=_LONG_POLL_MS),
+        )
+        await asyncio.sleep(0.01)
+        assert not wait.done()
+
+        await _finish_finalizer(worker, 'ok')
+
+        await asyncio.wait_for(wait, timeout=_WAKE_TIMEOUT_S)
+
+    @pytest.mark.asyncio
+    async def test_wait_returns_at_once_on_a_release_before_the_wait(
+        self,
+    ) -> None:
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        await _finish_finalizer(worker, 'ok')
+
+        await asyncio.wait_for(
+            worker._wait_for_any_notify(poll_interval_ms=_LONG_POLL_MS),
+            timeout=_WAKE_TIMEOUT_S,
+        )
+
+    @pytest.mark.asyncio
+    async def test_run_forever_claims_again_after_a_finalizer_ends(self) -> None:
+        """No queue NOTIFY arrives; the finalizer's end drives the next pass."""
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> None:
+            nonlocal passes
+            passes += 1
+            match passes:
+                case 1:
+                    await _finish_finalizer(worker, 'ok')
+                case 2:
+                    worker._stop.set()
+                case _:
+                    raise AssertionError(f'unexpected claim pass {passes}')
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+
+        await asyncio.wait_for(worker.run_forever(), timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 2
+
+    @pytest.mark.asyncio
+    async def test_a_consumed_release_does_not_wake_again(self) -> None:
+        """One release causes one extra pass, not a claim loop that spins.
+
+        Passes: 1 releases, 2 follows the wake, 3 starts the next round,
+        whose wait blocks until stop; 4 is the pass after that wait.
+        """
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> None:
+            nonlocal passes
+            passes += 1
+            if passes == 1:
+                await _finish_finalizer(worker, 'ok')
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.2)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 4
 
 
 @pytest.mark.unit

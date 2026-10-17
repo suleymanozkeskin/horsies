@@ -174,6 +174,11 @@ class Worker(
         self._ping_queue: asyncio.Queue[Any] | None = None
         self._service_tasks: set[asyncio.Task[Any]] = set()
         self._finalizer_tasks: set[asyncio.Task[Any]] = set()
+        # Set when a finalizer task ends, on every outcome. Some exits free
+        # a slot without a queue NOTIFY (a requeue to PENDING, an expiry
+        # before start), so the claim loop also waits on this local wake.
+        # Releases coalesce: the loop clears it before each claim pass.
+        self._capacity_released = asyncio.Event()
         self._finalize_retry_attempts: dict[tuple[str, str], int] = {}
         self._fatal_background_error: (
             ExecutorRestartFailedError | ServiceLoopDiedError | None
@@ -221,6 +226,8 @@ class Worker(
 
         def _on_done(t: asyncio.Task[Any]) -> None:
             task_group.discard(t)
+            if finalizer:
+                self._capacity_released.set()
             if t.cancelled():
                 return
             shutdown_requested = t.cancelling() > 0 or self._stop.is_set()
@@ -1185,13 +1192,18 @@ class Worker(
             backoff = self._make_retry_backoff()
             while not self._stop.is_set():
                 try:
-                    # Single budgeted claim pass, then wait for new NOTIFY
+                    # Single budgeted claim pass, then wait for new NOTIFY.
+                    # A capacity release during a pass leaves the wake set,
+                    # so the next wait returns at once.
+                    self._capacity_released.clear()
                     await self._claim_and_dispatch_all()
 
-                    # Wait for a NOTIFY from any queue (coalesce bursts).
+                    # Wait for a NOTIFY from any queue or a local capacity
+                    # release (coalesce bursts).
                     await self._wait_for_any_notify(
                         poll_interval_ms=self._resilience.notify_poll_interval_ms
                     )
+                    self._capacity_released.clear()
                     await self._claim_and_dispatch_all()
                     backoff.reset()
                 except asyncio.CancelledError:
@@ -1216,17 +1228,19 @@ class Worker(
         self._raise_captured_fatal_error()
 
     async def _wait_for_any_notify(self, poll_interval_ms: int) -> None:
-        """Wait on any subscribed queue channel; coalesce a burst.
+        """Wait on any subscribed queue channel or a local capacity release;
+        coalesce a burst.
 
-        Pending waiter tasks are cancelled and awaited on every exit path;
-        an unexpected escape lands in ``run_forever``'s loop policy.
+        Returns at once when a release is already pending. Pending waiter
+        tasks are cancelled and awaited on every exit path; an unexpected
+        escape lands in ``run_forever``'s loop policy.
         """
         import contextlib
 
         queue_tasks = [asyncio.create_task(q.get()) for q in self._queues]
-        # Add only the stop event as an additional wait condition (no periodic polling)
         stop_task = asyncio.create_task(self._stop.wait())
-        all_tasks = queue_tasks + [stop_task]
+        capacity_task = asyncio.create_task(self._capacity_released.wait())
+        all_tasks = queue_tasks + [stop_task, capacity_task]
         timeout_seconds = max(0.0, poll_interval_ms / 1000.0)
         try:
             done, pending = await asyncio.wait(
