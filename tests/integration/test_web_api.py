@@ -324,6 +324,22 @@ class TestTaskReads:
         ]
         assert {row['status']: row['count'] for row in body}['FAILED'] == 1
 
+    async def test_stats_answer_from_the_shared_cache_within_its_ttl(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        """A second poll of the same scope inside the TTL is the cached answer."""
+        await persist(session, make_task(status=TaskStatus.FAILED))
+        first = (await api.get('/api/tasks/stats')).json()
+
+        await persist(session, make_task(status=TaskStatus.FAILED))
+        second = (await api.get('/api/tasks/stats')).json()
+        other_scope = (await api.get('/api/tasks/stats?retried_only=false&queue=default')).json()
+
+        failed = {row['status']: row['count'] for row in first}['FAILED']
+        assert failed == 1
+        assert second == first
+        assert {row['status']: row['count'] for row in other_scope}['FAILED'] == 2
+
     async def test_list_returns_the_page_envelope(
         self, api: AsyncClient, session: AsyncSession
     ) -> None:
