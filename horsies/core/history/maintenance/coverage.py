@@ -64,6 +64,8 @@ from ..names import (
     LEAF_CATALOG,
     RETENTION_CLASSES,
     TASK_DETAIL_FUNCTION,
+    TASK_DUPLICATE_GUARD_FUNCTION,
+    TASK_DUPLICATE_GUARD_RENDERED_MARKER,
     TASK_HISTORY_FOREVER,
     TASK_LOOKUP_MANIFEST,
 )
@@ -85,6 +87,7 @@ from ..reads.detail import staged_detail_published
 from ..reads.publisher import (
     StagedLoaderPublisher,
     published_manifest_matches_catalog,
+    staged_duplicate_guard_rendered,
 )
 from .database import PartitionMaintenanceDatabase
 
@@ -407,6 +410,8 @@ attached_history AS (
 publication_health AS (
     SELECT
         to_regprocedure(:detail_function) IS NOT NULL
+        AND obj_description(to_regprocedure(:guard_function), 'pg_proc')
+            = :guard_marker
         AND NOT EXISTS (
             SELECT 1
             FROM {TASK_LOOKUP_MANIFEST} AS manifest
@@ -624,6 +629,8 @@ async def _probe_complete_coverage(
                 'forever_class': FOREVER_CLASS_KEY,
                 'forever_parent': TASK_HISTORY_FOREVER,
                 'detail_function': f'{TASK_DETAIL_FUNCTION}(uuid)',
+                'guard_function': f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
+                'guard_marker': TASK_DUPLICATE_GUARD_RENDERED_MARKER,
             },
         )
     ).all()
@@ -912,6 +919,7 @@ async def ensure_partition_coverage(
         created_history > 0
         or not await published_manifest_matches_catalog(connection)
         or not await staged_detail_published(connection)
+        or not await staged_duplicate_guard_rendered(connection)
     ):
         republication = await publisher.republish(connection)
         republished = True

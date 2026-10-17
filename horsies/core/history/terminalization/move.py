@@ -52,10 +52,11 @@ def _equivalence_class_sql(kind: TerminalizationKind) -> str:
 from ..maintenance.gate import ARCHIVE_AVAILABILITY_FUNCTION
 from ..names import (
     LIVE_TASKS,
+    TASK_DUPLICATE_GUARD_FUNCTION,
     TASK_HISTORY_PARENT,
-    TASK_PROVENANCE_FUNCTION,
     WORKFLOW_PHASE2_PENDING,
 )
+from .duplicate_guard import record_skewed_ids_sql
 from .outcome import MISS_CLASSIFIER_FUNCTION, OUTCOME_TYPE
 
 LIVE_ATTEMPTS: Final = 'horsies_task_attempts'
@@ -463,8 +464,7 @@ BEGIN
     IF p_terminal_at IS NULL THEN
         RAISE EXCEPTION 'terminal timestamp is required';
     END IF;
-    IF (SELECT prov.found
-        FROM {TASK_PROVENANCE_FUNCTION}(p_task_id, FALSE) AS prov) THEN
+    IF {TASK_DUPLICATE_GUARD_FUNCTION}(p_task_id) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
             USING ERRCODE = 'data_corrupted';
     END IF;
@@ -561,6 +561,10 @@ BEGIN
     IF v_history_rows <> 1 THEN
         RAISE EXCEPTION 'terminal history insert did not affect one row';
     END IF;
+    {record_skewed_ids_sql(
+        ids_sql=f'FROM {LIVE_TASKS} t WHERE t.id = p_task_id',
+        terminal_at_sql='p_terminal_at',
+    )};
 
     IF v_requires_deferred_phase2 AND v_task.is_workflow_task THEN
         INSERT INTO {WORKFLOW_PHASE2_PENDING} (
@@ -1153,8 +1157,7 @@ def _move_stage_core(
     -- Per-row uniqueness guard through the staged mechanism.
     IF EXISTS (
         SELECT 1 FROM unnest({ids_var}) AS u(tid)
-        WHERE (SELECT prov.found
-               FROM {TASK_PROVENANCE_FUNCTION}(u.tid, FALSE) AS prov)
+        WHERE {TASK_DUPLICATE_GUARD_FUNCTION}(u.tid)
     ) THEN
         RAISE EXCEPTION 'task identity exists in multiple locations'
             USING ERRCODE = 'data_corrupted';
@@ -1180,6 +1183,10 @@ def _move_stage_core(
         RAISE EXCEPTION 'batch history insert moved % of % rows',
             v_moved, cardinality({ids_var});
     END IF;
+    {record_skewed_ids_sql(
+        ids_sql=f'FROM {LIVE_TASKS} t WHERE t.id = ANY({ids_var})',
+        terminal_at_sql='v_terminal_at',
+    )};
 {pending_stage}
     -- The reservation transition has ONE owner: the registry module.
     PERFORM horsies_key_reservation_terminalize_batch(

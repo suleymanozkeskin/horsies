@@ -976,6 +976,9 @@ class PostgresBroker:
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
         )
+        from horsies.core.history.terminalization.duplicate_guard import (
+            duplicate_guard_fragments,
+        )
 
         from horsies.core.schemas.node_status import close_workflow_node_status_set
         from horsies.core.schemas.non_runnable_lookup import (
@@ -1007,6 +1010,10 @@ class PostgresBroker:
                 # v42: the moves encode each attempt snapshot once and hash
                 # the result once. v44: the same statements install the
                 # pending expiry whose outcomes follow ascending deadlines.
+                # v48: the duplicate guard prunes its probes by birth time;
+                # skewed ids go to the clock-skew exception table.
+                for statement in duplicate_guard_fragments():
+                    await conn.execute(text(statement))
                 for statement in terminal_snapshot_replacement_ddl():
                     await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.

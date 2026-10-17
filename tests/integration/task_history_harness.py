@@ -361,6 +361,9 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
         from horsies.core.history.terminalization.outcome import (
             outcome_fragments,
         )
+        from horsies.core.history.terminalization.duplicate_guard import (
+            duplicate_guard_fragments,
+        )
 
         url = _database_url()
         admin_engine = create_async_engine(url, isolation_level='AUTOCOMMIT')
@@ -391,6 +394,7 @@ def terminalization_schema_fixture(  # type: ignore[no-untyped-def]
                     else HEARTBEATS_STANDIN_DDL
                 ),
                 *outcome_fragments(),
+                *duplicate_guard_fragments(),
                 *completion_family_fragments(),
                 *failure_family_fragments(),
                 *expiry_family_fragments(),
@@ -442,11 +446,15 @@ async def insert_live_task(
     started_at_offset: timedelta = timedelta(0),
     good_until_offset: timedelta | None = None,
     live_result: str | None = None,
+    task_id: str | None = None,
 ) -> str:
-    """Insert one post-cutover live row and return its minted v7 id."""
+    """Insert one post-cutover live row and return its id.
+
+    The id is minted from the process generator unless `task_id` names one.
+    """
     from horsies.core.history.identity.uuid7 import mint_task_id
 
-    task_id = mint_task_id()
+    task_id = task_id if task_id is not None else mint_task_id()
     now = datetime.now(timezone.utc)
     envelope: dict[str, object] = {
         'version': None,

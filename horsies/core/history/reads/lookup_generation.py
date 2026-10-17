@@ -27,10 +27,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timezone
 
 from ..commands import is_safe_identifier
 from ..names import (
+    CLOCK_SKEW_EXCEPTIONS,
+    TASK_DUPLICATE_GUARD_FUNCTION,
     HEARTBEAT_CLASS_KEY,
     LIVE_TASKS,
     TASK_DETAIL_FUNCTION,
@@ -192,6 +195,7 @@ def render_staged_lookup_function(manifest: LookupManifest) -> str:
     """
     return _staged_function(
         function_name=TASK_LOOKUP_FUNCTION,
+        fallback_probes=FallbackProbes.INCLUDED,
         return_type=TASK_LOOKUP_TYPE,
         declares=(
             'v_task_id uuid;',
@@ -225,6 +229,7 @@ def render_staged_provenance_function(manifest: LookupManifest) -> str:
 '''
     return _staged_function(
         function_name=TASK_PROVENANCE_FUNCTION,
+        fallback_probes=FallbackProbes.INCLUDED,
         return_type=TASK_PROVENANCE_TYPE,
         extra_parameters=', p_include_live boolean DEFAULT TRUE',
         declares=(
@@ -276,6 +281,7 @@ def render_staged_detail_function(manifest: LookupManifest) -> str:
 """
     return _staged_function(
         function_name=TASK_DETAIL_FUNCTION,
+        fallback_probes=FallbackProbes.INCLUDED,
         return_type=(
             f'TABLE (location text, task_row {TASK_HISTORY_PARENT})'
         ),
@@ -287,6 +293,58 @@ def render_staged_detail_function(manifest: LookupManifest) -> str:
     )
 
 
+def render_staged_duplicate_guard_function(manifest: LookupManifest) -> str:
+    """Render the move family's duplicate-identity guard: TRUE when the id
+    is already in a history leaf that can hold it, or is a recorded
+    clock-skew exception.
+
+    A UUIDv7 id probes only the leaves whose upper anchor is after its
+    birth minus the clock bound; other ids probe every leaf. The live table
+    is not probed, and the readers' fallback probes are omitted: a row that
+    a wrong producer clock placed in an older leaf is recorded in the
+    clock-skew exception table by the move that wrote it, and absence
+    consults that table.
+    """
+
+    def history_probe(relation: str) -> str:
+        if not is_safe_identifier(relation):
+            raise ValueError(
+                f'relation name is not a safe identifier: {relation!r}'
+            )
+        return f"""
+        PERFORM 1 FROM {relation} h WHERE h.task_id = p_task_id;
+        IF FOUND THEN
+            RETURN TRUE;
+        END IF;
+"""
+
+    return _staged_function(
+        function_name=TASK_DUPLICATE_GUARD_FUNCTION,
+        return_type='boolean',
+        declares=(),
+        absence_statement=(
+            f'RETURN EXISTS (SELECT 1 FROM {CLOCK_SKEW_EXCEPTIONS} '
+            'WHERE task_id = p_task_id);'
+        ),
+        live_probe='',
+        history_probe=history_probe,
+        manifest=manifest,
+        fallback_probes=FallbackProbes.OMITTED,
+    )
+
+
+class FallbackProbes(Enum):
+    """Whether a staged function probes the leaves its birth pruning skipped.
+
+    INCLUDED: a reader; a caller-clock violation cannot hide a retained row.
+    OMITTED: the duplicate-identity guard; rows placed by a wrong clock are
+    found through the clock-skew exception table instead.
+    """
+
+    INCLUDED = 'INCLUDED'
+    OMITTED = 'OMITTED'
+
+
 def _staged_function(
     *,
     function_name: str,
@@ -295,11 +353,12 @@ def _staged_function(
     live_probe: str,
     history_probe: Callable[[str], str],
     manifest: LookupManifest,
+    fallback_probes: FallbackProbes,
     absence_values: str | None = None,
     absence_statement: str | None = None,
     extra_parameters: str = '',
 ) -> str:
-    """The one staged skeleton all three generated functions render from.
+    """The one staged skeleton every generated function renders from.
 
     Absence is either a composite `ROW(FALSE, ...)` return built from
     `absence_values` (the scalar-returning pair) or a caller-supplied
@@ -327,10 +386,19 @@ def _staged_function(
             _pruned_probe(leaf, history_probe(leaf.relation_name))
             for leaf in manifest.leaves
         )
-        fallback_probes = '\n'.join(
-            _fallback_probe(leaf, history_probe(leaf.relation_name))
-            for leaf in reversed(manifest.leaves)
-        )
+        match fallback_probes:
+            case FallbackProbes.INCLUDED:
+                fallback_section = (
+                    '            -- Birth time is an optimization hint, not an integrity\n'
+                    '            -- constraint. Probe every leaf skipped above before declaring\n'
+                    '            -- absence so a caller-clock violation cannot hide a retained row.\n'
+                    + '\n'.join(
+                        _fallback_probe(leaf, history_probe(leaf.relation_name))
+                        for leaf in reversed(manifest.leaves)
+                    )
+                )
+            case FallbackProbes.OMITTED:
+                fallback_section = ''
         legacy_probes = '\n'.join(
             history_probe(leaf.relation_name)
             for leaf in reversed(manifest.leaves)
@@ -354,10 +422,7 @@ def _staged_function(
             v_effective_birth :=
                 v_birth_at - INTERVAL '{CLOCK_BOUND_SECONDS} seconds';
 {pruned_probes}
-            -- Birth time is an optimization hint, not an integrity
-            -- constraint. Probe every leaf skipped above before declaring
-            -- absence so a caller-clock violation cannot hide a retained row.
-{fallback_probes}
+{fallback_section}
         ELSE
 {legacy_probes}
         END IF;

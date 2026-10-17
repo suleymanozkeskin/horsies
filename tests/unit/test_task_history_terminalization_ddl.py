@@ -93,7 +93,7 @@ class TestMoveStructure:
         availability = MOVE_BODY.index('horsies_assert_archive_available')
         advisory = MOVE_BODY.index('pg_advisory_xact_lock')
         snapshot = MOVE_BODY.index('SELECT * INTO STRICT v_task')
-        uniqueness = MOVE_BODY.index('horsies_task_provenance_staged')
+        uniqueness = MOVE_BODY.index('horsies_task_history_duplicate_staged')
         insert = MOVE_BODY.index('INSERT INTO horsies_task_history')
         deletes = MOVE_BODY.index('DELETE FROM horsies_task_attempts')
         notify = MOVE_BODY.index("pg_notify('task_done'")
@@ -102,11 +102,11 @@ class TestMoveStructure:
             < deletes < notify
         )
 
-    def test_uniqueness_guard_excludes_live(self) -> None:
-        assert (
-            'FROM horsies_task_provenance_staged(p_task_id, FALSE)'
-            in MOVE_BODY
-        )
+    def test_uniqueness_guard_uses_the_duplicate_guard(self) -> None:
+        # The guard never probes the live table; the miss classifier keeps
+        # the full provenance probe.
+        assert 'horsies_task_history_duplicate_staged(p_task_id)' in MOVE_BODY
+        assert 'horsies_task_provenance_staged' not in MOVE_BODY
 
     def test_node_lookup_is_strict_with_ownership_predicate(self) -> None:
         assert 'INTO STRICT v_workflow_node_row_id' in MOVE_BODY

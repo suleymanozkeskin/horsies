@@ -343,7 +343,11 @@ from sqlalchemy import text
 # v47: idx_horsies_history_catalog_active, a partial index on the leaf
 #      catalog's records whose leaf is not dropped.
 
-SCHEMA_VERSION = 47
+# v48: the move program's duplicate-identity guard probes only the leaves
+#      that can hold an id born at its time; ids moved with a terminal time
+#      before their birth minus the clock bound are recorded as exceptions.
+
+SCHEMA_VERSION = 48
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

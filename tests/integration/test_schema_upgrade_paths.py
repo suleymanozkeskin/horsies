@@ -1493,6 +1493,53 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_duplicate_guard_upgrade_from_47(
+        self, scratch_database: str,
+    ) -> None:
+        """A v47 database receives the guard, its helper and its exception table."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        presence_sql = text("""
+            SELECT to_regprocedure('horsies_task_history_duplicate_staged(uuid)') IS NOT NULL,
+                   to_regprocedure('horsies_uuid7_birth(uuid)') IS NOT NULL,
+                   to_regclass('horsies_task_history_clock_exceptions') IS NOT NULL
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'DROP FUNCTION horsies_task_history_duplicate_staged(uuid)'
+                ))
+                await conn.execute(text('DROP FUNCTION horsies_uuid7_birth(uuid)'))
+                await conn.execute(text(
+                    'DROP TABLE horsies_task_history_clock_exceptions'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 48'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (47) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                assert tuple((await conn.execute(presence_sql)).one()) == (
+                    False, False, False,
+                )
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert tuple((await conn.execute(presence_sql)).one()) == (
+                    True, True, True,
+                )
+                move_body = (await conn.execute(text(
+                    "SELECT prosrc FROM pg_proc "
+                    "WHERE proname = 'horsies_move_task_to_history'"
+                ))).scalar_one()
+                assert 'horsies_task_history_duplicate_staged(p_task_id)' in move_body
+                assert 'horsies_task_history_clock_exceptions' in move_body
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,
