@@ -337,7 +337,10 @@ from sqlalchemy import text
 # v45: ix_horsies_workflow_tasks_node_id, ix_horsies_workflow_tasks_workflow_id
 #      and idx_horsies_workflow_tasks_deps are dropped concurrently.
 
-SCHEMA_VERSION = 45
+# v46: uuid databases drop horsies_task_notify_update_trigger; the move
+#      program sends task_done itself.
+
+SCHEMA_VERSION = 46
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

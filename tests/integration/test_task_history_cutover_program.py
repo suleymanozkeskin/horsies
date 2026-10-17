@@ -43,6 +43,13 @@ __all__ = ['make_database']
 pytestmark = [pytest.mark.integration]
 
 
+_UPDATE_TRIGGER_PRESENT_SQL = text(
+    "SELECT EXISTS (SELECT 1 FROM pg_trigger "
+    "WHERE tgrelid = 'horsies_tasks'::regclass "
+    "AND tgname = 'horsies_task_notify_update_trigger')"
+)
+
+
 async def _prepare_db(url: str) -> None:
     broker = PostgresBroker(PostgresConfig(database_url=SecretStr(url)))
     try:
@@ -90,6 +97,11 @@ class TestProgramInstallation:
                     )
                 ).scalar_one()
                 assert bool(move_present)
+                # The move program sends task_done itself; the update
+                # trigger's task_done branch cannot fire on live statuses.
+                assert not (
+                    await connection.execute(_UPDATE_TRIGGER_PRESENT_SQL)
+                ).scalar_one()
                 # Installed by the program, so a database cut over after
                 # its schema activation still receives them.
                 assert (
@@ -123,6 +135,11 @@ class TestProgramInstallation:
                     )
                 ).scalar_one()
                 assert not bool(move_present)
+                # The in-place program terminalizes live rows, so the
+                # update trigger sends task_done again.
+                assert (
+                    await connection.execute(_UPDATE_TRIGGER_PRESENT_SQL)
+                ).scalar_one()
                 assert not bool(
                     (
                         await connection.execute(
@@ -138,6 +155,9 @@ class TestProgramInstallation:
                 second_pass = await install_programs(connection)
                 assert isinstance(second_pass, int)
                 assert second_pass == installed
+                assert not (
+                    await connection.execute(_UPDATE_TRIGGER_PRESENT_SQL)
+                ).scalar_one()
         finally:
             await engine.dispose()
 
