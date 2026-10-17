@@ -1257,6 +1257,70 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_retired_index_upgrade_from_42_drops_only_task_owned_indexes(
+        self, scratch_database: str,
+    ) -> None:
+        """A v42 database loses the index horsies_tasks owns, nothing else."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("""
+                    CREATE INDEX idx_horsies_tasks_retention
+                    ON horsies_tasks (
+                        COALESCE(completed_at, failed_at, updated_at, created_at)
+                    )
+                    WHERE status IN ('CANCELLED', 'COMPLETED', 'EXPIRED', 'FAILED')
+                """))
+                await conn.execute(text(
+                    'CREATE TABLE retired_index_foreign_owner (value integer)'
+                ))
+                await conn.execute(text(
+                    'CREATE INDEX idx_horsies_tasks_queue_retention '
+                    'ON retired_index_foreign_owner (value)'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 43'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (42) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                owners = dict((await conn.execute(text("""
+                    SELECT relation.relname::text,
+                           index_state.indrelid::regclass::text
+                    FROM pg_index AS index_state
+                    JOIN pg_class AS relation
+                        ON relation.oid = index_state.indexrelid
+                    WHERE relation.oid IN (
+                        to_regclass('idx_horsies_tasks_retention'),
+                        to_regclass('idx_horsies_tasks_queue_retention')
+                    )
+                """))).tuples().all())
+                assert owners == {
+                    'idx_horsies_tasks_queue_retention':
+                        'retired_index_foreign_owner',
+                }
+                claims = (await conn.execute(text("""
+                    SELECT count(*)
+                    FROM pg_index AS index_state
+                    JOIN pg_class AS relation
+                        ON relation.oid = index_state.indexrelid
+                    WHERE index_state.indrelid = 'horsies_tasks'::regclass
+                      AND relation.relname LIKE 'horsies_recovery_index_claim%'
+                """))).scalar_one()
+                assert claims == 0
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

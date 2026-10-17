@@ -146,8 +146,6 @@ from horsies.core.schemas.indexes import (
     CREATE_TASKS_CLAIM_EXPIRED_ORDERED_INDEX_SQL,
     CREATE_TASKS_ENQUEUED_AT_INDEX_SQL,
     CREATE_TASKS_ERROR_CODE_INDEX_SQL,
-    CREATE_TASKS_RETENTION_INDEX_SQL,
-    CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL,
     CREATE_TASKS_TASK_NAME_INDEX_SQL,
     CREATE_TASKS_WORKER_STATUS_INDEX_SQL,
     CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL,
@@ -240,6 +238,7 @@ from horsies.core.schemas.recovery import (
     SEED_RECOVERY_SCAN_CURSORS_SQL,
     VALIDATE_RECOVERY_INDEXES_SQL,
     install_recovery_indexes,
+    remove_retired_indexes,
 )
 
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
@@ -950,6 +949,8 @@ class PostgresBroker:
             if await self._read_schema_version_if_exists(engine) >= SCHEMA_VERSION:
                 return
             await install_recovery_indexes(engine)
+            # v43: drop the task retention indexes that no query reads.
+            await remove_retired_indexes(engine)
             await self._activate_bounded_recovery(engine)
 
     async def _activate_bounded_recovery(self, engine: AsyncEngine) -> None:
@@ -1151,8 +1152,8 @@ class PostgresBroker:
                 for create_function in CREATE_TERMINALIZATION_FUNCTIONS_SQL:
                     await conn.execute(create_function)
 
-            # Migration (v11): retention eligibility indexes.
-            await conn.execute(CREATE_TASKS_RETENTION_INDEX_SQL)
+            # Migration (v11): retention eligibility indexes. The task index
+            # is retired at v43.
             await conn.execute(CREATE_WORKER_STATES_SNAPSHOT_AT_INDEX_SQL)
 
             # Migration (v12): heartbeat retention eligibility index (the
@@ -1173,11 +1174,6 @@ class PostgresBroker:
             await conn.execute(CREATE_TASKS_RETENTION_STATISTICS_SQL)
             await conn.execute(CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL)
             await conn.execute(ANALYZE_EXPRESSION_INDEXED_TABLES_SQL)
-
-            # Migration (v15): queue-leading retention index for the
-            # per-queue override deletes
-            # (queue_terminal_record_retention_hours).
-            await conn.execute(CREATE_TASKS_QUEUE_RETENTION_INDEX_SQL)
 
             # Migration (v16): monitoring read-path indexes — task list
             # default sort and task-name facet.

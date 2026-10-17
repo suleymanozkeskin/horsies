@@ -1,4 +1,8 @@
-"""Durable state and exact indexes for bounded recovery scans."""
+"""Durable state and exact indexes for bounded recovery scans.
+
+The module also removes retired indexes with the same concurrent-drop
+machinery.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from sqlalchemy import text
 
@@ -434,3 +438,75 @@ BEGIN
 END
 $migration$
 """)
+
+
+@dataclass(frozen=True, slots=True)
+class RetiredIndex:
+    """One index to remove, and the table that must own it."""
+
+    name: str
+    table: str
+
+
+RETIRED_INDEXES: Final[tuple[RetiredIndex, ...]] = (
+    # Terminal tasks move to history, so no retention delete reads the live
+    # table by terminal age.
+    RetiredIndex(name='idx_horsies_tasks_retention', table='horsies_tasks'),
+    RetiredIndex(
+        name='idx_horsies_tasks_queue_retention',
+        table='horsies_tasks',
+    ),
+)
+
+
+async def _claim_retired_index(
+    engine: 'AsyncEngine',
+    index: RetiredIndex,
+) -> str | None:
+    """Rename the index to a claim name when its table owns it.
+
+    Returns the claim name, or None when no index of that name exists or
+    a relation other than `index.table` owns the name. The rename and the
+    owner checks share one transaction, so the claimed relation is the
+    checked one. An interrupted removal leaves a recovery claim name on
+    the table, which `install_recovery_indexes` removes.
+    """
+    async with engine.begin() as connection:
+        owner = await _relation_owner(
+            connection,
+            index_name=index.name,
+            table_name=index.table,
+        )
+        match owner:
+            case None | False:
+                return None
+            case True:
+                pass
+        claim_name = f'{_CLAIM_PREFIX}{uuid.uuid4().hex}'
+        await connection.execute(text(
+            f'ALTER INDEX {_safe_index_name(index.name)} '
+            f'RENAME TO {_safe_index_name(claim_name)}'
+        ))
+        claimed_owner = await _relation_owner(
+            connection,
+            index_name=claim_name,
+            table_name=index.table,
+        )
+        if claimed_owner is not True:
+            raise RuntimeError(
+                f'{index.name} changed owner while it was claimed for removal'
+            )
+        return claim_name
+
+
+async def remove_retired_indexes(engine: 'AsyncEngine') -> None:
+    """Drop each retired index concurrently, outside a transaction.
+
+    An index that is absent, or whose name belongs to another relation,
+    is left alone. Database errors propagate; a removal that fails after
+    its claim leaves the claim name for the recovery-index cleanup.
+    """
+    for index in RETIRED_INDEXES:
+        claim_name = await _claim_retired_index(engine, index)
+        if claim_name is not None:
+            await _drop_index_concurrently(engine, claim_name)
