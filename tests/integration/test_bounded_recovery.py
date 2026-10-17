@@ -212,7 +212,12 @@ async def test_global_workflow_page_has_a_strict_production_plan(
         plan = cast(object, result.scalar_one()[0]['Plan'])
 
     assert _relation_rows_examined(plan, 'horsies_workflows') <= 201
-    assert _relation_rows_examined(plan, 'horsies_workflow_tasks') <= 400
+    # Every scanned workflow has a RUNNING node, so the nonterminal probe
+    # answers both questions and the any-node probe never runs.
+    assert (
+        _relation_rows_examined(plan, 'horsies_workflow_tasks')
+        <= GLOBAL_SCAN_ROW_CAP
+    )
 
 
 async def test_cycle_upper_bound_defers_a_new_workflow(

@@ -284,15 +284,10 @@ scanned AS MATERIALIZED (
 ),
 classified AS MATERIALIZED (
     SELECT s.created_at, s.id, s.name,
-           any_task.found IS NOT NULL AS has_tasks,
+           nonterminal_task.found IS NOT NULL
+               OR any_task.found IS NOT NULL AS has_tasks,
            nonterminal_task.found IS NULL AS all_tasks_terminal
     FROM scanned s
-    LEFT JOIN LATERAL (
-        SELECT TRUE AS found
-        FROM horsies_workflow_tasks wt
-        WHERE wt.workflow_id = s.id
-        LIMIT 1
-    ) any_task ON TRUE
     LEFT JOIN LATERAL (
         SELECT TRUE AS found
         FROM horsies_workflow_tasks wt
@@ -300,6 +295,15 @@ classified AS MATERIALIZED (
           AND wt.status IN ('PENDING', 'READY', 'ENQUEUED', 'RUNNING')
         LIMIT 1
     ) nonterminal_task ON TRUE
+    -- A nonterminal node already proves the workflow has nodes; the
+    -- any-node probe runs only when the nonterminal probe found none.
+    LEFT JOIN LATERAL (
+        SELECT TRUE AS found
+        FROM horsies_workflow_tasks wt
+        WHERE nonterminal_task.found IS NULL
+          AND wt.workflow_id = s.id
+        LIMIT 1
+    ) any_task ON TRUE
 ),
 summary AS MATERIALIZED (
     SELECT count(*)::bigint AS scanned_count,
