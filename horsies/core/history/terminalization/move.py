@@ -1208,7 +1208,17 @@ def _move_stage_core(
 """
 
 
-def _discovery_outcome_sql(kind: TerminalizationKind, ids_var: str) -> str:
+def _discovery_outcome_sql(
+    kind: TerminalizationKind,
+    ids_var: str,
+    order_by_sql: str | None,
+) -> str:
+    """The applied outcomes of a discovery batch.
+
+    `order_by_sql` is the batch's result-order contract, or None when the
+    batch promises no order.
+    """
+    order_clause = '' if order_by_sql is None else f'\n    {order_by_sql}'
     return f"""    -- Outcome rows stream from the still-locked live rows BEFORE the
     -- deletes: reading them back through the partitioned parent by
     -- task id would be the rejected fan-out mechanism. RETURN QUERY
@@ -1219,7 +1229,7 @@ def _discovery_outcome_sql(kind: TerminalizationKind, ids_var: str) -> str:
         t.status::text, t.claimed_by_worker_id::varchar, t.claimed_at,
         NULL::text, NULL::jsonb
     FROM {LIVE_TASKS} t
-    WHERE t.id = ANY({ids_var});
+    WHERE t.id = ANY({ids_var}){order_clause};
 """
 
 
@@ -1234,6 +1244,7 @@ def _batch_move_ddl(
     error_expression: str,
     reason_expression: str,
     deferred: bool,
+    outcome_order_sql: str | None,
     has_batch_size: bool = True,
 ) -> str:
     """The discovery-batch wrapper around the shared move-stage core.
@@ -1250,7 +1261,7 @@ def _batch_move_ddl(
         reason_expression=reason_expression,
         deferred=deferred,
         ids_var='v_ids',
-        outcome_sql=_discovery_outcome_sql(kind, 'v_ids'),
+        outcome_sql=_discovery_outcome_sql(kind, 'v_ids', outcome_order_sql),
     )
     # Workflow-scoped sweeps are SCOPE-bounded by the caller's workflow
     # array, not size-bounded; production takes no LIMIT for them.
@@ -1314,6 +1325,9 @@ def _expire_pending_ddl() -> str:
         error_expression='p_error_code',
         reason_expression='NULL',
         deferred=True,
+        # Outcomes follow ascending deadlines; equal deadlines have no
+        # specified relative order.
+        outcome_order_sql='ORDER BY t.good_until ASC',
     )
 
 
@@ -1340,6 +1354,7 @@ def _cancel_orphan_sweep_ddl() -> str:
             "'Workflow task orphaned: no live workflow_task linkage'"
         ),
         deferred=False,
+        outcome_order_sql=None,
     )
 
 
@@ -1356,7 +1371,7 @@ def bounded_cancel_orphan_sweep_ddl() -> str:
         ),
         deferred=False,
         ids_var='v_ids',
-        outcome_sql=_discovery_outcome_sql(kind, 'v_ids'),
+        outcome_sql=_discovery_outcome_sql(kind, 'v_ids', None),
     )
     return f"""
 CREATE FUNCTION {CANCEL_ORPHAN_SWEEP_FUNCTION}(
@@ -2009,7 +2024,9 @@ def terminal_snapshot_replacement_ddl() -> tuple[str, ...]:
 
     Schema v42 installs them on a uuid database whose move program encodes
     each batch attempt snapshot twice and hashes a deferred result twice.
-    Signatures and return types are unchanged.
+    Schema v44 relies on the same statements to install the pending expiry
+    whose outcomes follow ascending deadlines. Signatures and return types
+    are unchanged.
     """
     return tuple(
         _create_or_replace(ddl)
@@ -2047,6 +2064,7 @@ def _abandon_paused_sweep_ddl() -> str:
         error_expression="'TASK_CANCELLED'",
         reason_expression="'Workflow paused before task start'",
         deferred=False,
+        outcome_order_sql=None,
         has_batch_size=False,
     )
 
@@ -2076,6 +2094,7 @@ def _cancel_cancelled_sweep_ddl() -> str:
         error_expression='NULL',
         reason_expression='NULL',
         deferred=False,
+        outcome_order_sql=None,
         has_batch_size=False,
     )
 

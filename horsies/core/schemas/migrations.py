@@ -331,7 +331,10 @@ from sqlalchemy import text
 # v43: idx_horsies_tasks_retention and idx_horsies_tasks_queue_retention are
 #      dropped concurrently; terminal tasks no longer age in horsies_tasks.
 
-SCHEMA_VERSION = 43
+# v44: horsies_expire_pending_tasks returns its outcomes in ascending
+#      good_until order.
+
+SCHEMA_VERSION = 44
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
