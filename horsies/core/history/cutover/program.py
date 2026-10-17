@@ -67,6 +67,10 @@ from ...schemas.terminalization import (
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
 )
+from ..terminalization.duplicate_guard import (
+    duplicate_guard_fragments,
+    duplicate_guard_teardown,
+)
 from .relocation import RELOCATION_LEDGER, RELOCATION_LEDGER_DDL
 
 
@@ -78,6 +82,7 @@ def installation_fragments(
     # The completion family carries the attempt encoder itself.
     return (
         *outcome_fragments(),
+        *duplicate_guard_fragments(),
         *completion_family_fragments(),
         *failure_family_fragments(),
         *expiry_family_fragments(),
@@ -173,6 +178,7 @@ def teardown_statements() -> tuple[str, ...]:
         f'DROP FUNCTION IF EXISTS {TRANSCODE_MUTATION_FUNCTION}() CASCADE',
         f'DROP TABLE IF EXISTS {RELOCATION_LEDGER}',
         DROP_NON_RUNNABLE_LOOKUP_DDL,
+        *duplicate_guard_teardown(),
     )
 
 

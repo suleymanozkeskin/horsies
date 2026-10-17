@@ -34,7 +34,13 @@ from __future__ import annotations
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from ..names import HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_LOOKUP_MANIFEST
+from ..names import (
+    HEARTBEAT_CLASS_KEY,
+    LEAF_CATALOG,
+    TASK_DUPLICATE_GUARD_FUNCTION,
+    TASK_DUPLICATE_GUARD_RENDERED_MARKER,
+    TASK_LOOKUP_MANIFEST,
+)
 from ..partitions.catalog import read_manifest_leaf_rows
 from ..partitions.publication import LoaderRepublished
 from .detail import staged_detail_published
@@ -42,6 +48,7 @@ from .lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
     render_staged_detail_function,
+    render_staged_duplicate_guard_function,
     render_staged_lookup_function,
     render_staged_provenance_function,
 )
@@ -83,6 +90,13 @@ class StagedLoaderPublisher:
         await connection.execute(
             text(render_staged_detail_function(manifest))
         )
+        await connection.execute(
+            text(render_staged_duplicate_guard_function(manifest))
+        )
+        await connection.execute(text(
+            f'COMMENT ON FUNCTION {TASK_DUPLICATE_GUARD_FUNCTION}(uuid) '
+            f"IS '{TASK_DUPLICATE_GUARD_RENDERED_MARKER}'"
+        ))
         await _rewrite_manifest_table(connection, manifest)
         return LoaderRepublished(
             absent_leaves=tuple(sorted(selection.absent_relations))
@@ -98,6 +112,7 @@ class StagedLoaderPublisher:
         return (
             await published_manifest_matches_catalog(connection)
             and await staged_detail_published(connection)
+            and await staged_duplicate_guard_rendered(connection)
         )
 
     async def references_leaf(
@@ -120,6 +135,28 @@ class StagedLoaderPublisher:
             )
         ).scalar_one()
         return bool(referenced)
+
+
+async def staged_duplicate_guard_rendered(connection: AsyncConnection) -> bool:
+    """Whether the duplicate guard is the version rendered from a manifest.
+
+    The first version installed with the move program keeps the full probe
+    and carries no marker; the next publication replaces it.
+    """
+    return bool(
+        (
+            await connection.execute(
+                text(
+                    'SELECT obj_description('
+                    "to_regprocedure(:name), 'pg_proc') = :marker"
+                ),
+                {
+                    'name': f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
+                    'marker': TASK_DUPLICATE_GUARD_RENDERED_MARKER,
+                },
+            )
+        ).scalar_one()
+    )
 
 
 async def published_manifest_absent_leaves(

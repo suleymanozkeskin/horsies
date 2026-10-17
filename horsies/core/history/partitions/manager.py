@@ -42,11 +42,13 @@ from ..commands import (
 )
 from ..errors import HistoryParentAbsent
 from ..names import (
+    CLOCK_SKEW_EXCEPTIONS,
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
     TASK_HISTORY_FOREVER,
     WORKFLOW_PHASE2_PENDING,
 )
+from ..terminalization.duplicate_guard import DELETE_LEAF_EXCEPTIONS_SQL
 from ..outcomes import (
     CatalogConflictKind,
     ClassIntervalMismatch,
@@ -833,6 +835,7 @@ async def drop_detached_leaf(
     if relation_lock is LeafLockAttempt.BUSY:
         return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     await connection.execute(text(f'DROP TABLE {leaf.leaf_name}'))
+    await _delete_leaf_clock_exceptions(connection, leaf)
     await connection.execute(
         text(
             f"""
@@ -921,6 +924,33 @@ async def _try_session_leaf_lock(
     except BaseException as error:
         await connection.invalidate(error)
         raise
+
+
+async def _delete_leaf_clock_exceptions(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+) -> None:
+    """Delete the clock-skew exceptions of the rows a dropped leaf held.
+
+    The exception table belongs to the move program, so a database whose
+    cutover has not installed it has no exceptions to delete.
+    """
+    installed = (
+        await connection.execute(
+            text('SELECT to_regclass(:name) IS NOT NULL'),
+            {'name': CLOCK_SKEW_EXCEPTIONS},
+        )
+    ).scalar_one()
+    if not installed:
+        return
+    await connection.execute(
+        text(DELETE_LEAF_EXCEPTIONS_SQL),
+        {
+            'class_key': leaf.class_key,
+            'lower': leaf.bounds.lower,
+            'upper': leaf.bounds.upper,
+        },
+    )
 
 
 async def _republish_if_stale(

@@ -32,6 +32,9 @@ from horsies.core.history.cutover.identity import (
     normalize_attempt_identity,
 )
 from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
+from horsies.core.history.terminalization.duplicate_guard import (
+    duplicate_guard_fragments,
+)
 from horsies.core.history.cutover.relocation import (
     RELOCATION_LEDGER_DDL,
     RelocationBatch,
@@ -156,8 +159,11 @@ async def install_program_state(connection: AsyncConnection) -> None:
     await prepare_move_storage(connection, CLASS_KEY)
     await connection.execute(text(RELOCATION_LEDGER_DDL))
     await normalize_attempt_identity(connection)
-    # Stage-2 program the relocation consumes: the one attempt encoder.
+    # Stage-2 program the relocation consumes: the attempt encoder, and
+    # the clock-skew exception table with its birth helper.
     await connection.execute(text(ATTEMPT_ENCODER_DDL))
+    for statement in duplicate_guard_fragments():
+        await connection.execute(text(statement))
 
 
 async def insert_legacy_task(

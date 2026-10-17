@@ -66,7 +66,12 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import CreateDailyHistoryLeaf, LeafBounds, LeafRef
 from ..ddl.tables import FOREVER_CLASS_KEY
-from ..names import TASK_HISTORY_FOREVER, TASK_HISTORY_PARENT
+from ..names import (
+    CLOCK_SKEW_EXCEPTIONS,
+    TASK_HISTORY_FOREVER,
+    TASK_HISTORY_PARENT,
+    UUID7_BIRTH_FUNCTION,
+)
 from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
 from ..partitions.catalog import (
     CatalogPartitionBound,
@@ -79,6 +84,7 @@ from ..partitions.catalog import (
 from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import create_daily_leaf
 from ..partitions.publication import UnpublishedLoader
+from ..reads.lookup_generation import CLOCK_BOUND_SECONDS
 from ..reads.publisher import StagedLoaderPublisher
 from ..terminalization.move import (
     ATTEMPT_ENCODER_FUNCTION,
@@ -294,6 +300,28 @@ async def relocate_terminal_batch(
             'selected rows'
         )
     legacy_kind_rows = sum(int(flag) for flag in inserted)
+
+    # Legacy v7 ids whose terminal time is before their birth minus the
+    # clock bound sit in leaves the duplicate guard skips; record them.
+    await connection.execute(
+        text(f"""
+            INSERT INTO {CLOCK_SKEW_EXCEPTIONS} (
+                task_id, retention_class_key, terminal_at, birth_at,
+                recorded_at
+            )
+            SELECT CAST(t.id AS uuid),
+                   COALESCE(t.retention_class_key, '{FOREVER_CLASS_KEY}'),
+                   t.terminal_at,
+                   {UUID7_BIRTH_FUNCTION}(CAST(t.id AS uuid)),
+                   statement_timestamp()
+            FROM {LIVE_TASKS} t
+            WHERE t.id::text = ANY(CAST(:task_ids AS text[]))
+              AND {UUID7_BIRTH_FUNCTION}(CAST(t.id AS uuid))
+                  - INTERVAL '{CLOCK_BOUND_SECONDS} seconds' > t.terminal_at
+            ON CONFLICT (task_id) DO NOTHING
+        """),
+        {'task_ids': task_ids},
+    )
 
     await connection.execute(
         text(
