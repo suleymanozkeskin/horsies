@@ -1183,6 +1183,80 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_terminal_snapshot_reuse_upgrade_from_41(
+        self, scratch_database: str,
+    ) -> None:
+        """A v41 database receives the moves that encode a snapshot once."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(PostgresConfig(database_url=SecretStr(scratch_database)))
+        moves = (
+            'horsies_move_task_to_history',
+            'horsies_expire_pending_tasks',
+            'horsies_cancel_orphaned_tasks',
+            'horsies_abandon_owned_nodes',
+            'horsies_cancel_owned_nodes',
+            'horsies_abandon_nodes_of_paused_workflows',
+            'horsies_cancel_nodes_of_cancelled_workflow',
+        )
+        shape_sql = text("""
+            SELECT proname::text, pg_get_function_identity_arguments(oid),
+                   pg_get_function_result(oid)
+            FROM pg_proc
+            WHERE proname LIKE 'horsies_%'
+            ORDER BY 1, 2
+        """)
+        try:
+            async with engine.begin() as conn:
+                for name in moves:
+                    signature, result = (await conn.execute(
+                        text(
+                            'SELECT pg_get_function_arguments(oid), '
+                            'pg_get_function_result(oid) '
+                            'FROM pg_proc WHERE proname = :name'
+                        ),
+                        {'name': name},
+                    )).one()
+                    body = (
+                        'BEGIN END' if result == 'void'
+                        else 'BEGIN RETURN; END'
+                    )
+                    await conn.execute(text(
+                        f'CREATE OR REPLACE FUNCTION {name}({signature}) '
+                        f'RETURNS {result} LANGUAGE plpgsql AS $$ {body} $$'
+                    ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 42'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (41) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                shape_before = (await conn.execute(shape_sql)).tuples().all()
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                assert (await conn.execute(shape_sql)).tuples().all() == (
+                    shape_before
+                )
+                bodies = dict((await conn.execute(
+                    text("""
+                        SELECT proname::text, prosrc
+                        FROM pg_proc WHERE proname = ANY(:moves)
+                    """),
+                    {'moves': list(moves)},
+                )).tuples().all())
+                assert set(bodies) == set(moves)
+                assert 'v_result_digest' in bodies['horsies_move_task_to_history']
+                for name in moves[1:]:
+                    assert 'attempt_data AS MATERIALIZED' in bodies[name], name
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

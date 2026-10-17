@@ -956,6 +956,7 @@ class PostgresBroker:
         from horsies.core.history.terminalization.move import (
             bounded_cancel_orphan_sweep_ddl,
             pause_abandon_replacement_ddl,
+            terminal_snapshot_replacement_ddl,
         )
 
         from horsies.core.schemas.node_status import close_workflow_node_status_set
@@ -984,6 +985,10 @@ class PostgresBroker:
                 # v41: the pause abandons re-check PAUSED under the
                 # workflow lock.
                 for statement in pause_abandon_replacement_ddl():
+                    await conn.execute(text(statement))
+                # v42: the moves encode each attempt snapshot once and hash
+                # the result once.
+                for statement in terminal_snapshot_replacement_ddl():
                     await conn.execute(text(statement))
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,

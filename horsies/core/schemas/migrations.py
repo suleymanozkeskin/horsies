@@ -325,7 +325,10 @@ from sqlalchemy import text
 # v41: the claim-fenced pause abandons re-check PAUSED under the workflow
 #      lock and refuse when a resume committed first.
 
-SCHEMA_VERSION = 41
+# v42: the single-row move hashes the result once, and the six batch moves
+#      encode each attempt snapshot once.
+
+SCHEMA_VERSION = 42
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
