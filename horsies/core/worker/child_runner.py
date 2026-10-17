@@ -10,6 +10,7 @@ import socket
 import threading
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
 from typing import Any, Optional, Tuple, assert_never, cast
@@ -58,12 +59,31 @@ from horsies.core.lifecycle.outcomes import (
     AlreadyApplied,
     Applied,
     LostClaim,
+    ObservedWorkflowState,
     SourceStateConflict,
     TaskAbsent,
     TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.types.result import is_err
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkflowResumedBeforeStart:
+    """The pre-start abandon refused: the workflow is no longer PAUSED.
+
+    A resume committed after this child read PAUSED. The claim is still this
+    child's and the task is runnable again, so the RUNNING transition is
+    attempted again instead of stopping the task.
+    """
+
+    workflow_status: str
+
+
+# One attempt plus one after a resume. A workflow paused and resumed again
+# between the two ends as OWNERSHIP_UNCONFIRMED; the claim lease then
+# returns the task to the queue.
+_PRE_START_CONFIRM_ATTEMPTS = 2
 
 
 def _serialization_error_response(
@@ -511,6 +531,36 @@ def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | No
     return None
 
 
+def _claim_still_startable(
+    cursor: Cursor[Any],
+    task_id: str,
+    worker_id: str,
+    claimed_at: Optional[datetime],
+) -> bool:
+    """Whether every guard of the RUNNING transition but the workflow holds.
+
+    The same claim, lease, and deadline predicates as the transition; a NULL
+    claimed_at disables the generation half, as there.
+    """
+    cursor.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM horsies_tasks
+            WHERE id = %s
+              AND status = 'CLAIMED'
+              AND claimed_by_worker_id = %s
+              AND (%s::timestamptz IS NULL OR claimed_at = %s::timestamptz)
+              AND (claim_expires_at IS NULL OR claim_expires_at > now())
+              AND (good_until IS NULL OR good_until > now())
+        ) AS startable
+        """,
+        (task_id, worker_id, claimed_at, claimed_at),
+    )
+    row = cursor.fetchone()
+    assert row is not None, 'SELECT EXISTS returns one row'
+    return bool(row[0])
+
+
 def _handle_workflow_stop_before_start(
     cursor: Cursor[Any],
     conn: Connection[Any],
@@ -518,7 +568,7 @@ def _handle_workflow_stop_before_start(
     workflow_status: str,
     worker_id: str,
     claimed_at: Optional[datetime] = None,
-) -> Tuple[bool, str, Optional[str]]:
+) -> Tuple[bool, str, Optional[str]] | _WorkflowResumedBeforeStart:
     """Skip a task whose workflow is PAUSED/CANCELLED; return the wire tuple.
 
     Both branches carry the ClaimedOwnerFence pair (worker_id, claimed_at) —
@@ -527,6 +577,11 @@ def _handle_workflow_stop_before_start(
     row requeued and re-claimed since this child was handed its dispatch is a
     different claim generation and must not be terminalized here. A NULL
     claimed_at disables the generation half, matching the ownership confirm.
+
+    PAUSED: the abandon re-checks the pause under the workflow lock. A refusal
+    because the workflow was resumed returns ``_WorkflowResumedBeforeStart``
+    with nothing written; every other outcome keeps the unconditional node
+    reset.
 
     Raises:
         Exception: DB errors propagate to the wrapped caller,
@@ -551,7 +606,31 @@ def _handle_workflow_stop_before_start(
                     ),
                 ),
             )
-            _require_known_workflow_stop_outcome(outcome)
+            match outcome:
+                case SourceStateConflict(
+                    evidence=ObservedWorkflowState(
+                        workflow_id=workflow_id,
+                        workflow_status=resumed_status,
+                    ),
+                ):
+                    conn.rollback()
+                    logger.info(
+                        f'Task {task_id} abandon refused: workflow {workflow_id} '
+                        f'is {resumed_status}, no longer PAUSED'
+                    )
+                    return _WorkflowResumedBeforeStart(
+                        workflow_status=resumed_status,
+                    )
+                case (
+                    Applied()
+                    | AlreadyApplied()
+                    | LostClaim()
+                    | SourceStateConflict()
+                    | TaskAbsent()
+                ):
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
             cursor.execute(
                 """
                 UPDATE horsies_workflow_tasks
@@ -648,12 +727,47 @@ def _expire_claimed_task_before_start(
             assert_never(unreachable)
 
 
+def _confirm_until_not_resumed(
+    task_id: str,
+    worker_id: str,
+    is_workflow_task: bool,
+    claimed_at: Optional[datetime],
+) -> Optional[Tuple[bool, str, Optional[str]]]:
+    """Run the RUNNING transition again when a resume refused the abandon.
+
+    Returns None to start the task, or the wire tuple that stops it. A
+    workflow resumed on every one of ``_PRE_START_CONFIRM_ATTEMPTS`` tries
+    returns OWNERSHIP_UNCONFIRMED; the task stays claimed until its lease
+    returns it to the queue.
+    """
+    for _ in range(_PRE_START_CONFIRM_ATTEMPTS):
+        result = _confirm_ownership_and_set_running(
+            task_id,
+            worker_id,
+            is_workflow_task,
+            claimed_at,
+        )
+        match result:
+            case _WorkflowResumedBeforeStart():
+                continue
+            case None | tuple():
+                return result
+            case _ as unreachable:
+                assert_never(unreachable)
+    logger.warning(
+        f'Task {task_id} workflow was resumed on each of '
+        f'{_PRE_START_CONFIRM_ATTEMPTS} start attempts; leaving the claim '
+        f'to its lease'
+    )
+    return (False, '', 'OWNERSHIP_UNCONFIRMED')
+
+
 def _confirm_ownership_and_set_running(
     task_id: str,
     worker_id: str,
     is_workflow_task: bool = True,
     claimed_at: Optional[datetime] = None,
-) -> Optional[Tuple[bool, str, Optional[str]]]:
+) -> Optional[Tuple[bool, str, Optional[str]]] | _WorkflowResumedBeforeStart:
     try:
         pool = _get_worker_pool()
         with pool.connection() as conn:
@@ -732,6 +846,18 @@ def _confirm_ownership_and_set_running(
                                 workflow_status,
                                 worker_id,
                                 claimed_at,
+                            )
+                        case 'RUNNING' if _claim_still_startable(
+                            cursor,
+                            task_id,
+                            worker_id,
+                            claimed_at,
+                        ):
+                            # The transition missed on the paused guard, and
+                            # a resume committed before this read.
+                            conn.rollback()
+                            return _WorkflowResumedBeforeStart(
+                                workflow_status=workflow_status,
                             )
                         case _:
                             pass
@@ -916,7 +1042,7 @@ def _run_task_entry(
     # lease expires. The statement's guards also cover expiry (good_until) and
     # paused/cancelled workflows; its miss path diagnoses which one fired —
     # there is deliberately no separate pre-flight round trip.
-    ownership_result = _confirm_ownership_and_set_running(
+    ownership_result = _confirm_until_not_resumed(
         task_id,
         master_worker_id,
         is_workflow_task,

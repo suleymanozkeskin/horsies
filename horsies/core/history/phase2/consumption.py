@@ -51,12 +51,18 @@ CREATE TYPE {PHASE2_DISPOSITION_TYPE} AS (
 )
 """
 
+# The history lookup reads through the partitioned parent. With a custom
+# plan on every call, planning over each leaf costs more than the lookup;
+# the generic plan prunes leaves at run time. The setting holds only while
+# the function runs. Schema activation re-creates an installed function from
+# this text (close_workflow_node_status_set), so upgrades receive it too.
 PHASE2_CONSUME_FUNCTION_DDL = f"""
 CREATE FUNCTION {PHASE2_CONSUME_FUNCTION}(
     p_task_id uuid,
     p_terminal_node_status text
 ) RETURNS {PHASE2_DISPOSITION_TYPE}
 LANGUAGE plpgsql
+SET plan_cache_mode = force_generic_plan
 AS $function$
 DECLARE
     v_pending {WORKFLOW_PHASE2_PENDING}%ROWTYPE;
