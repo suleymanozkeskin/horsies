@@ -41,6 +41,7 @@ from horsies.core.history.cutover.relocation import (
     RelocationComplete,
     relocation_insert_sql,
     relocate_terminal_batch,
+    RelocationRuleViolation,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.history.terminalization.move import ATTEMPT_ENCODER_DDL
@@ -466,6 +467,47 @@ class TestRelocation:
                     )
                 ).scalar_one()
                 assert int(remaining) == 0
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_row_outside_a_column_rule_is_refused_without_writing(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """A legacy row with priority 0 is named, and the batch writes nothing."""
+        url = await make_database()
+        await _prepare(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                invalid = await insert_legacy_task(
+                    connection, status='COMPLETED', kind='COMPLETE_LOCKED',
+                )
+                await connection.execute(
+                    text(
+                        'UPDATE horsies_tasks SET priority = 0 '
+                        'WHERE id = CAST(:t AS varchar)'
+                    ),
+                    {'t': invalid},
+                )
+                leaves_before = (await connection.execute(text(
+                    'SELECT count(*) FROM horsies_task_history_leaf_catalog'
+                ))).scalar_one()
+
+                outcome = await relocate_terminal_batch(connection, batch_size=10)
+
+                assert outcome == RelocationRuleViolation(
+                    task_id=invalid,
+                    constraint_name='horsies_task_history_priority_check',
+                )
+                counts = (await connection.execute(text(
+                    "SELECT (SELECT count(*) FROM horsies_task_history), "
+                    "(SELECT count(*) FROM horsies_tasks), "
+                    "(SELECT count(*) FROM horsies_cutover_relocation_ledger), "
+                    "(SELECT count(*) FROM horsies_task_history_leaf_catalog)"
+                ))).one()
+                assert tuple(counts) == (0, 1, 0, leaves_before)
         finally:
             await engine.dispose()
 
