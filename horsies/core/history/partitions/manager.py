@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -31,7 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ..maintenance.database import PartitionMaintenanceDatabase
 
 from ..commands import (
+    OPEN_END_ANCHOR,
     CreateDailyHistoryLeaf,
+    CreateOpenEndedHistoryLeaf,
     DetachExpiredHistoryLeaf,
     DropDetachedHistoryLeaf,
     EnsureLeafCoverage,
@@ -40,6 +42,7 @@ from ..commands import (
     LeafBounds,
     LeafRef,
 )
+from ..ddl.tables import FOREVER_CLASS_KEY
 from ..errors import HistoryParentAbsent
 from ..names import (
     CLOCK_SKEW_EXCEPTIONS,
@@ -52,6 +55,7 @@ from ..terminalization.duplicate_guard import DELETE_LEAF_EXCEPTIONS_SQL
 from ..outcomes import (
     CatalogConflictKind,
     ClassIntervalMismatch,
+    CoveredByOpenEndedLeaf,
     DropRefusedLoaderReferences,
     ForeverClassLeaf,
     LeafAlreadyConformant,
@@ -84,6 +88,9 @@ from .catalog import (
     database_now,
     leaf_enqueued_index_name,
     leaf_id_index_name,
+    open_ended_leaf_name,
+    read_attached_open_ended_leaf,
+    read_largest_attached_forever_upper,
     read_leaf_catalog_row,
     read_leaf_ordering_index_exists,
     read_leaf_physical_state,
@@ -282,7 +289,82 @@ async def create_daily_leaf(
     parent_name = _history_class_parent(leaf.class_key, retention_class)
     if parent_name is None:
         return ForeverClassLeaf(class_key=leaf.class_key)
+    if leaf.class_key == FOREVER_CLASS_KEY:
+        open_leaf = await read_attached_open_ended_leaf(connection)
+        if open_leaf is not None and (
+            leaf.bounds.lower.astimezone(timezone.utc)
+            >= open_leaf.lower_anchor.astimezone(timezone.utc)
+        ):
+            return CoveredByOpenEndedLeaf(
+                leaf_name=leaf.leaf_name,
+                open_ended_leaf_name=open_leaf.leaf_name,
+            )
+    return await _create_or_verify_history_leaf(
+        connection, leaf=leaf, parent_name=parent_name, publisher=publisher,
+    )
 
+
+async def open_ended_leaf_lower(
+    connection: AsyncConnection,
+    today_lower: datetime,
+) -> datetime:
+    """The lower anchor of the open-ended `forever` leaf.
+
+    The attached leaf keeps its stored lower anchor. A new leaf starts at
+    the later of today and the largest upper anchor of the attached
+    `forever` leaves, so it never overlaps the daily leaves already made.
+    """
+    attached = await read_attached_open_ended_leaf(connection)
+    if attached is not None:
+        return attached.lower_anchor.astimezone(timezone.utc)
+    largest_upper = await read_largest_attached_forever_upper(connection)
+    if largest_upper is None:
+        return today_lower
+    return max(today_lower, largest_upper.astimezone(timezone.utc))
+
+
+async def create_open_ended_leaf(
+    connection: AsyncConnection,
+    command: CreateOpenEndedHistoryLeaf,
+    publisher: LoaderPublication,
+) -> LeafCreation:
+    """Create or verify the open-ended `forever` leaf in the caller's
+    transaction, with the same creation, repair and publication as a daily
+    leaf."""
+    retention_class = await read_retention_class(connection, FOREVER_CLASS_KEY)
+    match retention_class:
+        case None:
+            return RetentionClassAbsent(class_key=FOREVER_CLASS_KEY)
+        case RetentionClassRow(duration=None, partition_interval=None):
+            pass
+        case RetentionClassRow(partition_interval=interval):
+            return ClassIntervalMismatch(
+                class_key=FOREVER_CLASS_KEY,
+                partition_interval_days=(
+                    interval.days if interval is not None else None
+                ),
+            )
+    leaf = LeafRef(
+        leaf_name=open_ended_leaf_name(TASK_HISTORY_FOREVER, command.lower),
+        class_key=FOREVER_CLASS_KEY,
+        bounds=LeafBounds(lower=command.lower, upper=OPEN_END_ANCHOR),
+    )
+    return await _create_or_verify_history_leaf(
+        connection,
+        leaf=leaf,
+        parent_name=TASK_HISTORY_FOREVER,
+        publisher=publisher,
+    )
+
+
+async def _create_or_verify_history_leaf(
+    connection: AsyncConnection,
+    *,
+    leaf: LeafRef,
+    parent_name: str,
+    publisher: LoaderPublication,
+) -> LeafCreation:
+    """Create, verify, or repair one history leaf of `parent_name`."""
     state = await _read_daily_leaf_creation_state(
         connection, leaf=leaf, parent_name=parent_name
     )
@@ -583,6 +665,17 @@ async def ensure_leaf_coverage(
 
     now = await database_now(connection)
     today_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if command.class_key == FOREVER_CLASS_KEY:
+        # One open-ended leaf covers every future day of `forever`.
+        return (
+            await create_open_ended_leaf(
+                connection,
+                CreateOpenEndedHistoryLeaf(
+                    lower=await open_ended_leaf_lower(connection, today_lower),
+                ),
+                publisher,
+            ),
+        )
     outcomes: list[LeafCreation] = []
     for day_offset in range(command.horizon_days + 1):
         lower = today_lower + timedelta(days=day_offset)

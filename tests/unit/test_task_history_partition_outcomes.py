@@ -15,6 +15,7 @@ from typing import get_args
 import pytest
 
 from horsies.core.history.outcomes import (
+    CoveredByOpenEndedLeaf,
     CatalogConflictKind,
     ClassCoverage,
     ClassIntervalMismatch,
@@ -90,6 +91,7 @@ class TestCreationUnion:
         assert set(get_args(LeafCreation.__value__)) == {
             LeafCreated,
             LeafAlreadyConformant,
+            CoveredByOpenEndedLeaf,
             LeafIndexRepaired,
             LeafMaintenanceBusy,
             RetentionClassAbsent,

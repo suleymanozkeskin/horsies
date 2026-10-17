@@ -72,7 +72,12 @@ from ..names import (
     TASK_HISTORY_PARENT,
     UUID7_BIRTH_FUNCTION,
 )
-from ..outcomes import LeafAlreadyConformant, LeafCreated, LeafIndexRepaired
+from ..outcomes import (
+    CoveredByOpenEndedLeaf,
+    LeafAlreadyConformant,
+    LeafCreated,
+    LeafIndexRepaired,
+)
 from ..partitions.catalog import (
     CatalogPartitionBound,
     LeafIndexKind,
@@ -502,7 +507,12 @@ async def _ensure_batch_leaf_coverage(
         match outcome:
             case LeafCreated():
                 created = True
-            case LeafAlreadyConformant() | LeafIndexRepaired():
+            case (
+                LeafAlreadyConformant()
+                | LeafIndexRepaired()
+                | CoveredByOpenEndedLeaf()
+            ):
+                # A covered `forever` day lands in the open-ended leaf.
                 pass
             case _:
                 raise RuntimeError(

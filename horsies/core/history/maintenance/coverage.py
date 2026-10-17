@@ -27,13 +27,15 @@ import json
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from ..commands import (
+    OPEN_END_ANCHOR,
     CreateDailyHistoryLeaf,
+    CreateOpenEndedHistoryLeaf,
     EnsureLeafCoverage,
     LeafBounds,
     LeafRef,
@@ -70,6 +72,7 @@ from ..names import (
     TASK_LOOKUP_MANIFEST,
 )
 from ..outcomes import (
+    CoveredByOpenEndedLeaf,
     LeafAlreadyConformant,
     LeafCreated,
     LeafCreation,
@@ -77,7 +80,11 @@ from ..outcomes import (
     LeafMaintenanceBusy,
 )
 from ..partitions.catalog import INDEX_SCHEMA_VERSION, database_now
-from ..partitions.manager import create_daily_leaf, ensure_leaf_coverage
+from ..partitions.manager import (
+    create_daily_leaf,
+    create_open_ended_leaf,
+    ensure_leaf_coverage,
+)
 from ..partitions.locks import (
     LeafLockAttempt,
     try_lock_coverage_for_transaction,
@@ -190,6 +197,49 @@ expected_history AS (
             ) + day_offset * interval '1 day' AS lower_anchor
         FROM generate_series(0, :history_horizon) AS day_offset
     ) AS day_bounds
+    WHERE classes.class_key <> :forever_class
+),
+-- One open-ended leaf covers every future day of `forever`: the attached
+-- one with its stored bounds, or a new one from the later of today and the
+-- largest attached `forever` upper anchor.
+expected_forever AS (
+    SELECT
+        'history'::text AS leaf_kind,
+        classes.class_key,
+        classes.parent_name,
+        COALESCE(
+            attached.leaf_name,
+            classes.parent_name || '_open_' ||
+                to_char(start.lower_anchor AT TIME ZONE 'UTC', 'YYYY_MM_DD')
+        ) AS leaf_name,
+        COALESCE(attached.lower_anchor, start.lower_anchor) AS lower_anchor,
+        CAST(:open_end AS timestamptz) AS upper_anchor
+    FROM history_classes AS classes
+    CROSS JOIN clock
+    CROSS JOIN LATERAL (
+        SELECT GREATEST(
+            date_trunc('day', clock.checked_at AT TIME ZONE 'UTC')
+                AT TIME ZONE 'UTC',
+            (
+                SELECT max(forever_leaf.upper_anchor)
+                FROM {LEAF_CATALOG} AS forever_leaf
+                WHERE forever_leaf.class_key = :forever_class
+                  AND forever_leaf.detached_at IS NULL
+                  AND forever_leaf.dropped_at IS NULL
+            )
+        ) AS lower_anchor
+    ) AS start
+    LEFT JOIN LATERAL (
+        SELECT open_leaf.leaf_name, open_leaf.lower_anchor
+        FROM {LEAF_CATALOG} AS open_leaf
+        WHERE open_leaf.class_key = :forever_class
+          AND open_leaf.upper_anchor = CAST(:open_end AS timestamptz)
+          AND open_leaf.detached_at IS NULL
+          AND open_leaf.dropped_at IS NULL
+        ORDER BY open_leaf.lower_anchor
+        LIMIT 1
+    ) AS attached ON TRUE
+    WHERE classes.class_key = :forever_class
 ),
 expected_heartbeats AS (
     SELECT
@@ -216,6 +266,8 @@ expected_heartbeats AS (
 ),
 expected_leaves AS (
     SELECT * FROM expected_history
+    UNION ALL
+    SELECT * FROM expected_forever
     UNION ALL
     SELECT * FROM expected_heartbeats
 ),
@@ -628,6 +680,7 @@ async def _probe_complete_coverage(
                 'heartbeat_parent': HEARTBEATS_TABLE,
                 'forever_class': FOREVER_CLASS_KEY,
                 'forever_parent': TASK_HISTORY_FOREVER,
+                'open_end': OPEN_END_ANCHOR,
                 'detail_function': f'{TASK_DETAIL_FUNCTION}(uuid)',
                 'guard_function': f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
                 'guard_marker': TASK_DUPLICATE_GUARD_RENDERED_MARKER,
@@ -874,7 +927,12 @@ async def ensure_partition_coverage(
             for creation in creations
             if not isinstance(
                 creation,
-                (LeafCreated, LeafAlreadyConformant, LeafIndexRepaired),
+                (
+                    LeafCreated,
+                    LeafAlreadyConformant,
+                    LeafIndexRepaired,
+                    CoveredByOpenEndedLeaf,
+                ),
             )
         ]
         if refusals:
@@ -1084,7 +1142,11 @@ async def _repair_partition_coverage(
         match outcome:
             case LeafCreated():
                 created_history += 1
-            case LeafAlreadyConformant() | LeafIndexRepaired():
+            case (
+                LeafAlreadyConformant()
+                | LeafIndexRepaired()
+                | CoveredByOpenEndedLeaf()
+            ):
                 pass
             case _:
                 failures.append(f'{leaf.class_key}: {outcome!r}')
@@ -1200,6 +1262,26 @@ async def _register_required_classes(
     return None
 
 
+async def _create_history_leaf(
+    connection: AsyncConnection,
+    leaf: LeafRef,
+) -> LeafCreation:
+    """Create one expected history leaf: daily, or the open-ended one."""
+    match leaf.bounds.upper.astimezone(timezone.utc) == OPEN_END_ANCHOR:
+        case True:
+            return await create_open_ended_leaf(
+                connection,
+                CreateOpenEndedHistoryLeaf(lower=leaf.bounds.lower),
+                UnpublishedLoader(),
+            )
+        case False:
+            return await create_daily_leaf(
+                connection,
+                CreateDailyHistoryLeaf(leaf=leaf),
+                UnpublishedLoader(),
+            )
+
+
 async def _maintain_history_leaf(
     database: PartitionMaintenanceDatabase,
     leaf: LeafRef,
@@ -1207,11 +1289,7 @@ async def _maintain_history_leaf(
     outcome = LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
     for attempt in range(_LEAF_MAINTENANCE_ATTEMPTS):
         async with database.begin() as connection:
-            outcome = await create_daily_leaf(
-                connection,
-                CreateDailyHistoryLeaf(leaf=leaf),
-                UnpublishedLoader(),
-            )
+            outcome = await _create_history_leaf(connection, leaf)
         match outcome:
             case LeafMaintenanceBusy() if (attempt + 1 < _LEAF_MAINTENANCE_ATTEMPTS):
                 await asyncio.sleep(

@@ -965,6 +965,101 @@ class TestUpgradePaths:
         finally:
             await engine.dispose()
 
+    async def test_v34_conversion_relocates_todays_forever_row_into_the_open_ended_leaf(
+        self,
+        scratch_database: str,
+    ) -> None:
+        """After the v35 conversion, a forever row of today lands in the open-ended leaf."""
+        from datetime import datetime, timedelta, timezone
+
+        from horsies.core.history.cutover.identity import (
+            normalize_attempt_identity,
+        )
+        from horsies.core.history.cutover.program import install_programs
+        from horsies.core.history.cutover.state import CUTOVER_STATE_TABLE
+        from horsies.core.history.cutover.relocation import RelocationComplete
+        from horsies.core.history.partitions.catalog import open_ended_leaf_name
+        from horsies.core.history.partitions.forever import FOREVER_LEGACY_LEAF
+        from tests.integration.test_task_history_preparation import (
+            run_preparation_to_complete,
+        )
+        from tests.integration.test_task_history_relocation import (
+            demote_to_upgraded_world,
+            insert_legacy_task,
+            relocate_all,
+        )
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        try:
+            async with engine.begin() as connection:
+                await demote_to_upgraded_world(connection)
+                await _restore_v34_forever_shape(connection)
+                task_id = await insert_legacy_task(
+                    connection,
+                    status='COMPLETED',
+                    kind=None,
+                    class_key=None,
+                    disposition=None,
+                    retain=None,
+                    fingerprinted=False,
+                )
+                await connection.execute(
+                    text(f'DELETE FROM {CUTOVER_STATE_TABLE}')
+                )
+                await connection.execute(
+                    text(
+                        'DELETE FROM horsies_schema_version WHERE version > 34'
+                    )
+                )
+                await connection.execute(
+                    text(
+                        'INSERT INTO horsies_schema_version (version) '
+                        'VALUES (34) ON CONFLICT DO NOTHING'
+                    )
+                )
+
+            await _migrate_pre_cutover(scratch_database)
+
+            async with engine.begin() as connection:
+                await normalize_attempt_identity(connection)
+                installed = await install_programs(connection)
+                assert isinstance(installed, int), installed
+                await run_preparation_to_complete(
+                    connection, retain_default=True
+                )
+                relocated = await relocate_all(connection)
+                assert isinstance(relocated, RelocationComplete)
+                assert relocated.rows_relocated == 1
+                relation = (
+                    await connection.execute(
+                        text(
+                            'SELECT tableoid::regclass::text '
+                            'FROM horsies_task_history '
+                            'WHERE task_id = CAST(:task_id AS uuid)'
+                        ),
+                        {'task_id': task_id},
+                    )
+                ).scalar_one()
+                today = datetime.now(timezone.utc).replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                )
+                assert relation == open_ended_leaf_name(
+                    'horsies_task_history_forever', today
+                )
+                forever_leaves = (
+                    await connection.execute(
+                        text(
+                            'SELECT leaf_name FROM '
+                            'horsies_task_history_leaf_catalog '
+                            "WHERE class_key = 'forever' ORDER BY leaf_name"
+                        )
+                    )
+                ).scalars().all()
+                assert forever_leaves == [FOREVER_LEGACY_LEAF, relation]
+        finally:
+            await engine.dispose()
+
     async def test_reapplication_changes_nothing(
         self,
         scratch_database: str,

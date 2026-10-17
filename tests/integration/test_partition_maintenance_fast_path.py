@@ -949,3 +949,51 @@ async def test_busy_coverage_gate_refuses_startup_without_current_heartbeat(
     finally:
         await transaction.rollback()
         await holder.close()
+
+
+async def test_pool_coverage_creates_one_open_ended_forever_leaf(
+    partition_schema: HistorySchema,
+) -> None:
+    """The pool path expects one open-ended forever leaf, not daily ones."""
+    from horsies.core.history.commands import OPEN_END_ANCHOR
+
+    open_leaves_sql = text(
+        f"SELECT leaf_name FROM {LEAF_CATALOG} "
+        "WHERE class_key = 'forever' AND upper_anchor = :open_end"
+    )
+    async with partition_schema.engine.begin() as connection:
+        for name in (await connection.execute(
+            open_leaves_sql, {'open_end': OPEN_END_ANCHOR},
+        )).scalars().all():
+            await connection.execute(text(f'DROP TABLE {name}'))
+            await connection.execute(
+                text(f'DELETE FROM {LEAF_CATALOG} WHERE leaf_name = :name'),
+                {'name': name},
+            )
+        daily_before = (await connection.execute(text(
+            f"SELECT count(*) FROM {LEAF_CATALOG} WHERE class_key = 'forever'"
+        ))).scalar_one()
+
+    database = PartitionMaintenanceDatabase(
+        partition_schema.engine, connection_capacity=2,
+    )
+    repaired = await maintain_partition_coverage(
+        database, history_horizon_days=3, heartbeat_horizon_hours=2,
+    )
+    assert isinstance(repaired, CoverageEnsured), repaired
+    again = await maintain_partition_coverage(
+        database, history_horizon_days=3, heartbeat_horizon_hours=2,
+    )
+    assert isinstance(again, CoverageEnsured), again
+    assert again.created_history_leaves == 0
+
+    async with partition_schema.engine.connect() as connection:
+        open_leaves = (await connection.execute(
+            open_leaves_sql, {'open_end': OPEN_END_ANCHOR},
+        )).scalars().all()
+        daily_after = (await connection.execute(text(
+            f"SELECT count(*) FROM {LEAF_CATALOG} "
+            "WHERE class_key = 'forever' AND upper_anchor <> :open_end"
+        ), {'open_end': OPEN_END_ANCHOR})).scalar_one()
+    assert len(open_leaves) == 1
+    assert daily_after == daily_before

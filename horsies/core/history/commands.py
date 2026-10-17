@@ -17,7 +17,7 @@ from typing import Final
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 _IDENTIFIER = re.compile(r'^[a-z][a-z0-9_]{0,62}$')
@@ -97,6 +97,30 @@ class CreateDailyHistoryLeaf:
     def __post_init__(self) -> None:
         if not self.leaf.bounds.spans_one_day:
             raise ValueError('daily leaf bounds must span exactly one day')
+
+
+OPEN_END_ANCHOR: Final = datetime(9999, 1, 1, tzinfo=timezone.utc)
+"""The upper anchor of the open-ended `forever` leaf."""
+
+
+@dataclass(frozen=True, slots=True)
+class CreateOpenEndedHistoryLeaf:
+    """Create the open-ended `forever` leaf, or verify and repair it.
+
+    The leaf covers `[lower, OPEN_END_ANCHOR)`, so `forever` history needs
+    no new leaf per day. `lower` must be a UTC midnight.
+    """
+
+    lower: datetime
+
+    def __post_init__(self) -> None:
+        if self.lower.tzinfo is None:
+            raise ValueError('open-ended leaf lower bound must be timezone-aware')
+        utc_lower = self.lower.astimezone(timezone.utc)
+        if utc_lower != utc_lower.replace(hour=0, minute=0, second=0, microsecond=0):
+            raise ValueError('open-ended leaf lower bound must be a UTC midnight')
+        if utc_lower >= OPEN_END_ANCHOR:
+            raise ValueError('open-ended leaf lower bound must precede the open end')
 
 
 @dataclass(frozen=True, slots=True)
