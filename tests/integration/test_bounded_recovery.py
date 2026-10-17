@@ -170,6 +170,9 @@ async def test_global_cursor_reaches_a_candidate_after_three_pages(
         report.metrics['case_2_3'].rows_selected for report in reports
     ] == [200, 200, 50]
     assert reports[-1].recovered == 1
+    assert [
+        report.health()['completion_candidate_yield'] for report in reports
+    ] == [0.0, 0.0, 1 / 50]
     async with engine.connect() as connection:
         cursor = (
             await connection.execute(text('''

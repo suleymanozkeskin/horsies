@@ -430,6 +430,42 @@ class RecoveryCaseMetrics:
     errors: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class AuditPage:
+    """The global audit returned a page.
+
+    `completion_candidates` counts the page's completion candidates as the
+    audit returned them, before any is processed.
+    """
+
+    scanned: int
+    completion_candidates: int
+
+
+@dataclass(frozen=True, slots=True)
+class NoAuditPage:
+    """The global audit returned no page: it failed, or another worker
+    holds the audit cursor."""
+
+
+type AuditResult = AuditPage | NoAuditPage
+
+
+def completion_candidate_yield(audit: AuditResult) -> float | None:
+    """Completion candidates per scanned workflow, or None when undefined.
+
+    Undefined when the audit returned no page or an empty page. A
+    populated page without completion candidates yields 0.0.
+    """
+    match audit:
+        case NoAuditPage():
+            return None
+        case AuditPage(scanned=0):
+            return None
+        case AuditPage(scanned=scanned, completion_candidates=candidates):
+            return candidates / scanned
+
+
 @dataclass
 class RecoveryReport:
     """Health result for one global recovery pass."""
@@ -440,11 +476,13 @@ class RecoveryReport:
         name: RecoveryCaseMetrics()
         for name in ('case_0', 'case_1', 'case_1_5', 'case_1_6', 'case_2_3', 'case_4')
     })
+    audit: AuditResult = field(default_factory=NoAuditPage)
 
     def health(self) -> dict[str, object]:
         return {
             'recovered': self.recovered,
             'errors': self.errors,
+            'completion_candidate_yield': completion_candidate_yield(self.audit),
             'cases': {
                 name: asdict(metrics)
                 for name, metrics in self.metrics.items()
@@ -1055,6 +1093,10 @@ async def _recover_stuck_workflows_global(
     orphan_ids = [str(value) for value in audit.orphan_ids]
     orphan_names = [str(value) for value in audit.orphan_names]
     scanned_count = int(audit.scanned_count)
+    report.audit = AuditPage(
+        scanned=scanned_count,
+        completion_candidates=len(completion_ids),
+    )
     case_2_3.rows_selected = scanned_count
     case_2_3.candidates_returned = len(completion_ids)
     case_4.rows_selected = scanned_count
