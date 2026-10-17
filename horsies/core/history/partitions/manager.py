@@ -703,7 +703,7 @@ async def detach_expired_leaf(
                     return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
                 raise
             await _record_detached(connection, leaf.leaf_name)
-            await publisher.republish(connection)
+            await _republish_if_stale(connection, publisher)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
         except asyncio.CancelledError:
             cancelled = True
@@ -751,7 +751,7 @@ async def finalize_interrupted_detach(
             match inspection:
                 case LeafDetached():
                     await _record_detached(connection, leaf.leaf_name)
-                    await publisher.republish(connection)
+                    await _republish_if_stale(connection, publisher)
                     return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
                 case LeafDetachInterrupted():
                     pass
@@ -781,7 +781,7 @@ async def finalize_interrupted_detach(
                     return LeafMaintenanceBusy(leaf_name=leaf.leaf_name)
                 raise
             await _record_detached(connection, leaf.leaf_name)
-            await publisher.republish(connection)
+            await _republish_if_stale(connection, publisher)
             return await inspect_leaf(connection, InspectHistoryLeaf(leaf=leaf))
         except asyncio.CancelledError:
             cancelled = True
@@ -921,6 +921,20 @@ async def _try_session_leaf_lock(
     except BaseException as error:
         await connection.invalidate(error)
         raise
+
+
+async def _republish_if_stale(
+    connection: AsyncConnection,
+    publisher: LoaderPublication,
+) -> None:
+    """Republish the readers only when the recorded detach changed them.
+
+    A detached history leaf leaves the attached set, so its readers are
+    republished; a heartbeat leaf, or a detach the catalog had already
+    recorded, leaves a current publication unchanged.
+    """
+    if not await publisher.is_current(connection):
+        await publisher.republish(connection)
 
 
 async def _record_detached(connection: AsyncConnection, leaf_name: str) -> None:

@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ..names import HEARTBEAT_CLASS_KEY, LEAF_CATALOG, TASK_LOOKUP_MANIFEST
 from ..partitions.catalog import read_manifest_leaf_rows
 from ..partitions.publication import LoaderRepublished
+from .detail import staged_detail_published
 from .lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
@@ -85,6 +86,18 @@ class StagedLoaderPublisher:
         await _rewrite_manifest_table(connection, manifest)
         return LoaderRepublished(
             absent_leaves=tuple(sorted(selection.absent_relations))
+        )
+
+    async def is_current(self, connection: AsyncConnection) -> bool:
+        """Whether the published readers already match the catalog.
+
+        The same two checks the coverage pass uses: the published manifest
+        equals the attached history leaves and their probe bounds, and the
+        staged detail function exists.
+        """
+        return (
+            await published_manifest_matches_catalog(connection)
+            and await staged_detail_published(connection)
         )
 
     async def references_leaf(
