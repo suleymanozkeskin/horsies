@@ -426,12 +426,16 @@ def _psycopg_dsn(db_url: str) -> str:
         'kind_expected',
         'stale_node_status',
         'stale_node_detached',
+        'fresh_node_status',
+        'fresh_node_detached',
     ),
     [
         (
             'PAUSED',
             'CANCELLED',
             'PAUSE_ABANDON_CLAIM',
+            'ENQUEUED',
+            False,
             'READY',
             True,
         ),
@@ -439,6 +443,8 @@ def _psycopg_dsn(db_url: str) -> str:
             'CANCELLED',
             'CANCELLED',
             'WORKFLOW_CANCEL_CLAIM',
+            'SKIPPED',
+            False,
             'SKIPPED',
             False,
         ),
@@ -454,8 +460,14 @@ async def test_child_prestart_fences_on_claim_generation(
     kind_expected: str,
     stale_node_status: str,
     stale_node_detached: bool,
+    fresh_node_status: str,
+    fresh_node_detached: bool,
 ) -> None:
-    """T10/T11 refuse a generation the child was not dispatched from."""
+    """T10/T11 refuse a generation the child was not dispatched from.
+
+    The coupled node write follows the outcome: the stale generation's node
+    keeps its row, the dispatched generation's node takes the stop.
+    """
     dispatched, reclaimed = _generations()
     stale_id = await _insert_claimed_task(session, claimed_at=reclaimed)
     fresh_id = await _insert_claimed_task(session, claimed_at=dispatched)
@@ -464,7 +476,11 @@ async def test_child_prestart_fences_on_claim_generation(
         stale_id,
         wf_status=wf_status,
     )
-    await _link_to_workflow(session, fresh_id, wf_status=wf_status)
+    fresh_workflow_id = await _link_to_workflow(
+        session,
+        fresh_id,
+        wf_status=wf_status,
+    )
     await session.commit()
 
     with psycopg.connect(_psycopg_dsn(db_url)) as conn:
@@ -487,6 +503,12 @@ async def test_child_prestart_fences_on_claim_generation(
     )
     assert observed_node_status == stale_node_status
     assert (observed_node_task_id is None) is stale_node_detached
+    fresh_node_status_seen, fresh_node_task_id = await _workflow_node_state(
+        session,
+        fresh_workflow_id,
+    )
+    assert fresh_node_status_seen == fresh_node_status
+    assert (fresh_node_task_id is None) is fresh_node_detached
 
 
 @pytest.mark.asyncio(loop_scope='function')

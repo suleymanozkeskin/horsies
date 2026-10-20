@@ -580,8 +580,9 @@ def _handle_workflow_stop_before_start(
 
     PAUSED: the abandon re-checks the pause under the workflow lock. A refusal
     because the workflow was resumed returns ``_WorkflowResumedBeforeStart``
-    with nothing written; every other outcome keeps the unconditional node
-    reset.
+    with nothing written. The node is reset to READY only when the abandon
+    applied (or was already applied): a lost claim, another state conflict,
+    or an absent row leaves the node to the claim generation that owns it.
 
     Raises:
         Exception: DB errors propagate to the wrapped caller,
@@ -621,27 +622,22 @@ def _handle_workflow_stop_before_start(
                     return _WorkflowResumedBeforeStart(
                         workflow_status=resumed_status,
                     )
-                case (
-                    Applied()
-                    | AlreadyApplied()
-                    | LostClaim()
-                    | SourceStateConflict()
-                    | TaskAbsent()
-                ):
+                case Applied() | AlreadyApplied():
+                    cursor.execute(
+                        """
+                        UPDATE horsies_workflow_tasks
+                        SET status = 'READY',
+                            task_id = NULL,
+                            started_at = NULL
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'RUNNING')
+                        """,
+                        (task_id,),
+                    )
+                case LostClaim() | SourceStateConflict() | TaskAbsent():
                     pass
                 case _ as unreachable:
                     assert_never(unreachable)
-            cursor.execute(
-                """
-                UPDATE horsies_workflow_tasks
-                SET status = 'READY',
-                    task_id = NULL,
-                    started_at = NULL
-                WHERE task_id = %s
-                  AND status IN ('ENQUEUED', 'RUNNING')
-                """,
-                (task_id,),
-            )
             conn.commit()
             return (False, '', 'WORKFLOW_STOPPED')
         case 'CANCELLED':
