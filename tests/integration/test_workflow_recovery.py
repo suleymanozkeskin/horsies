@@ -323,7 +323,7 @@ class TestWorkflowRecovery:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """All done, has failures -> FAILED with result and error persisted."""
+        """All done, has failures -> FAILED with error persisted, no result."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'recover_failed_a')
 
@@ -365,14 +365,14 @@ class TestWorkflowRecovery:
 
         assert recovered == 1
 
-        # Workflow should be FAILED with result and error
+        # Workflow should be FAILED with an error and no result
         result = await session.execute(
             text('SELECT status, result, error FROM horsies_workflows WHERE id = :wf_id'),
             {'wf_id': handle.workflow_id},
         )
         row = result.fetchone()
         assert row[0] == 'FAILED'
-        assert row[1] is not None  # result persisted
+        assert row[1] is None  # a FAILED workflow stores no result
         assert row[2] is not None  # error derived from failed task
         assert 'TEST_ERROR' in row[2]  # error contains task error
 
@@ -454,7 +454,7 @@ class TestWorkflowRecovery:
         )
         row = result.fetchone()
         assert row[0] == 'FAILED'
-        assert row[1] is not None  # result persisted
+        assert row[1] is None  # a FAILED workflow stores no result
         assert row[2] is not None
         assert 'FIRST_ERROR' in row[2]
         assert 'SECOND_ERROR' not in row[2]

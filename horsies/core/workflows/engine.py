@@ -86,7 +86,6 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_DEPTH_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
-    GET_WORKFLOW_OUTPUT_INDEX_SQL,
     GET_WORKFLOW_STATUS_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_TASK_FOR_WORKFLOW_SQL,
@@ -2593,6 +2592,7 @@ async def check_workflow_completion(
     has_error = row.error is not None
     success_policy_data = row.success_policy  # JSONB, may be None
     workflow_name = row.name
+    output_task_index = row.output_task_index
     incomplete = row.incomplete or 0
     failed = row.failed or 0
     completed = row.completed or 0
@@ -2611,15 +2611,16 @@ async def check_workflow_completion(
     if already_completed:
         return  # Already finalized
 
-    # All tasks done - determine final result
-    final_result = await get_workflow_final_result(session, workflow_id)
-
     # Determine final status using success policy or default behavior
     workflow_succeeded = await evaluate_workflow_success(
         session, workflow_id, success_policy_data, has_error, failed
     )
 
     if workflow_succeeded:
+        # Only a COMPLETED workflow stores an output; FAILED stores NULL.
+        final_result = await get_workflow_final_result(
+            session, workflow_id, output_task_index,
+        )
         await session.execute(
             MARK_WORKFLOW_COMPLETED_SQL,
             {'wf_id': workflow_id, 'result': final_result},
@@ -2637,18 +2638,15 @@ async def check_workflow_completion(
 
         await session.execute(
             MARK_WORKFLOW_FAILED_SQL,
-            {'wf_id': workflow_id, 'result': final_result, 'error': error_json},
+            {'wf_id': workflow_id, 'error': error_json},
         )
         logger.info(
             f"Workflow '{workflow_name}' ({workflow_id[:8]}) FAILED: "
             f'{completed}/{total} tasks succeeded, {failed} failed'
         )
 
-    # Send NOTIFY for workflow completion
-    await session.execute(
-        NOTIFY_WORKFLOW_DONE_SQL,
-        {'wf_id': workflow_id},
-    )
+    # The status trigger (horsies_notify_workflow_changes) sends
+    # workflow_done for COMPLETED and FAILED in this transaction.
 
     # If this is a child workflow, queue parent advancement instead of
     # recursing in-transaction: the old recursion held this workflow's
@@ -3166,6 +3164,7 @@ def _compute_terminal_indexes(edge_rows: Sequence[Any]) -> list[int]:
 async def get_workflow_final_result(
     session: AsyncSession,
     workflow_id: str,
+    output_task_index: int | None,
 ) -> str:
     """
     Get the final workflow result.
@@ -3176,18 +3175,11 @@ async def get_workflow_final_result(
     If output_task_index is set: return that task's result
     Otherwise: return dict of terminal task results (tasks with no dependents)
     """
-    # Check for explicit output task
-    wf_result = await session.execute(
-        GET_WORKFLOW_OUTPUT_INDEX_SQL,
-        {'wf_id': workflow_id},
-    )
-    wf_row = wf_result.fetchone()
-
-    if wf_row and wf_row.output_task_index is not None:
+    if output_task_index is not None:
         # Return explicit output task's result
         output_result = await session.execute(
             GET_OUTPUT_TASK_RESULT_SQL,
-            {'wf_id': workflow_id, 'idx': wf_row.output_task_index},
+            {'wf_id': workflow_id, 'idx': output_task_index},
         )
         output_row = output_result.fetchone()
         return output_row.result if output_row and output_row.result else 'null'
@@ -3322,9 +3314,10 @@ async def _handle_workflow_task_failure(
 
     match on_error:
         case 'fail':
-            # Store error but keep status RUNNING until DAG fully resolves
-            # This allows allow_failed_deps tasks to run and produce meaningful final result
-            # Status will be set to FAILED in check_workflow_completion when all tasks are terminal
+            # Store error but keep status RUNNING until DAG fully resolves.
+            # allow_failed_deps tasks still run and store their own results;
+            # check_workflow_completion sets FAILED, with no workflow result,
+            # when all tasks are terminal.
             first_failure_payload = await get_workflow_failure_error(
                 session, workflow_id, None
             )

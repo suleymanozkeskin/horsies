@@ -49,12 +49,15 @@ from horsies.core.workflows.sql import (
     GET_TASK_STATUSES_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_WORKFLOW_DAG_EDGES_SQL,
+    GET_PARENT_WORKFLOW_INFO_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
-    GET_WORKFLOW_OUTPUT_INDEX_SQL,
     GET_WORKFLOW_STATUS_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+    MARK_WORKFLOW_COMPLETED_SQL,
+    MARK_WORKFLOW_FAILED_SQL,
+    NOTIFY_WORKFLOW_DONE_SQL,
     MARK_TASK_READY_SQL,
     SET_WORKFLOW_ERROR_SQL,
 )
@@ -1589,8 +1592,6 @@ class TestGetWorkflowFinalResult:
     @pytest.mark.asyncio
     async def test_non_string_node_id_skipped(self) -> None:
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is GET_WORKFLOW_OUTPUT_INDEX_SQL:
-                return _one_result(SimpleNamespace(output_task_index=None))
             if stmt is GET_WORKFLOW_DAG_EDGES_SQL:
                 return _rows_result([
                     SimpleNamespace(task_index=0, dependencies=[]),
@@ -1603,7 +1604,7 @@ class TestGetWorkflowFinalResult:
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
-        result = await get_workflow_final_result(session, 'wf-1')
+        result = await get_workflow_final_result(session, 'wf-1', None)
         # int node_id → skipped, result dict should be empty
         assert result is not None
 
@@ -1619,8 +1620,6 @@ class TestGetWorkflowFinalResult:
         outer aggregation still completes.
         """
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            if stmt is GET_WORKFLOW_OUTPUT_INDEX_SQL:
-                return _one_result(SimpleNamespace(output_task_index=None))
             if stmt is GET_WORKFLOW_DAG_EDGES_SQL:
                 return _rows_result([
                     SimpleNamespace(task_index=0, dependencies=[]),
@@ -1642,7 +1641,7 @@ class TestGetWorkflowFinalResult:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        result = await get_workflow_final_result(session, 'wf-1')
+        result = await get_workflow_final_result(session, 'wf-1', None)
         assert result is not None
 
 
@@ -1756,6 +1755,79 @@ class TestCheckWorkflowCompletion:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
         await check_workflow_completion(session, 'wf-1')
+
+
+    @staticmethod
+    def _finalizable_session(executed: list[Any]) -> AsyncMock:
+        """A session whose workflow is RUNNING with every node terminal."""
+
+        async def _dispatch(stmt: Any, params: Any) -> MagicMock:
+            executed.append(stmt)
+            if stmt is LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL:
+                return _one_result(SimpleNamespace(id='wf-1'))
+            if stmt is GET_WORKFLOW_COMPLETION_STATUS_SQL:
+                return _one_result(SimpleNamespace(
+                    status='RUNNING', completed_at=None, error=None,
+                    success_policy=None, name='wf', output_task_index=None,
+                    incomplete=0, failed=1, completed=1, total=2,
+                ))
+            if stmt is GET_PARENT_WORKFLOW_INFO_SQL:
+                return _one_result(SimpleNamespace(
+                    parent_workflow_id=None, parent_task_index=None,
+                ))
+            return _one_result(SimpleNamespace())
+
+        session = AsyncMock()
+        session.execute = AsyncMock(side_effect=_dispatch)
+        return session
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('succeeded', [True, False])
+    async def test_finalization_sends_no_explicit_workflow_done(
+        self, succeeded: bool, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The status trigger owns the workflow_done notification."""
+        executed: list[Any] = []
+        session = self._finalizable_session(executed)
+        monkeypatch.setattr(
+            engine, 'evaluate_workflow_success',
+            AsyncMock(return_value=succeeded),
+        )
+        monkeypatch.setattr(
+            engine, 'get_workflow_final_result', AsyncMock(return_value='null'),
+        )
+        monkeypatch.setattr(
+            engine, 'get_workflow_failure_error', AsyncMock(return_value=None),
+        )
+        await check_workflow_completion(session, 'wf-1')
+        expected_mark = (
+            MARK_WORKFLOW_COMPLETED_SQL if succeeded else MARK_WORKFLOW_FAILED_SQL
+        )
+        assert expected_mark in executed
+        assert NOTIFY_WORKFLOW_DONE_SQL not in executed
+
+    @pytest.mark.asyncio
+    async def test_failed_finalization_builds_no_final_result(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A FAILED workflow stores NULL, so its output is never read."""
+        executed: list[Any] = []
+        session = self._finalizable_session(executed)
+        final_result = AsyncMock(return_value='null')
+        monkeypatch.setattr(
+            engine, 'evaluate_workflow_success', AsyncMock(return_value=False),
+        )
+        monkeypatch.setattr(engine, 'get_workflow_final_result', final_result)
+        monkeypatch.setattr(
+            engine, 'get_workflow_failure_error', AsyncMock(return_value=None),
+        )
+        await check_workflow_completion(session, 'wf-1')
+        final_result.assert_not_awaited()
+        mark_params = [
+            call.args[1] for call in session.execute.await_args_list
+            if call.args[0] is MARK_WORKFLOW_FAILED_SQL
+        ]
+        assert mark_params == [{'wf_id': 'wf-1', 'error': None}]
 
 
 # ── 14. on_subworkflow_complete ──────────────────────────────────────

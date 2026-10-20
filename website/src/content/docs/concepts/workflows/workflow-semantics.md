@@ -171,6 +171,7 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 **Result access is separate:**
 
 - `WorkflowHandle.get()` returns the workflow-level `TaskResult` (output value or error, not a status enum).
+- A FAILED workflow stores no output. This is also true when its output node ran with `allow_failed_deps=True` and succeeded. Read that node's result with `WorkflowHandle.result_for()`.
 - `WorkflowHandle.result_for()` is non-blocking and may return `RESULT_NOT_READY` if the task has not completed.
 
 ### Upstream Failure and args_from
@@ -647,7 +648,7 @@ recovery = TaskNode(
 
 ### 2. Design for Failure Visibility
 
-Structure DAGs so failures are visible in the final result:
+Structure DAGs so failures are visible in one node's result. The workflow is still FAILED, so read the aggregator with `result_for(final)`:
 
 ```python
 # Final aggregator that reports all branch outcomes

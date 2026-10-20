@@ -122,6 +122,36 @@ async def _get_workflow_error(
     return None
 
 
+async def _get_workflow_result(
+    session: AsyncSession,
+    workflow_id: str,
+) -> str | None:
+    """The workflow row's stored result text."""
+    result = await session.execute(
+        text('SELECT result FROM horsies_workflows WHERE id = :wf_id'),
+        {'wf_id': workflow_id},
+    )
+    return result.scalar_one()
+
+
+async def _get_node_ok(
+    session: AsyncSession,
+    workflow_id: str,
+    task_index: int,
+) -> Any:
+    """The ok slot of one workflow node's stored result."""
+    result = await session.execute(
+        text("""
+            SELECT result FROM horsies_workflow_tasks
+            WHERE workflow_id = :wf_id AND task_index = :idx
+        """),
+        {'wf_id': workflow_id, 'idx': task_index},
+    )
+    envelope = loads_json(result.scalar_one()).unwrap()
+    assert isinstance(envelope, dict), envelope
+    return envelope.get('ok')
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestOnErrorFail:
@@ -697,7 +727,8 @@ class TestOnErrorFail:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """A fails, B (allow_failed_deps=True) recovers, output=B returns B's result."""
+        """A fails, B (allow_failed_deps=True) recovers: the workflow is FAILED
+        and stores no result; B keeps its own result."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'output_fail_a')
         task_b = make_recovery_task(app, 'output_fail_b')
@@ -732,17 +763,10 @@ class TestOnErrorFail:
         # B runs and recovers
         await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=999))
 
-        # Workflow should be FAILED (A failed) but have result from B
+        # A failed, so the workflow is FAILED and stores no result
         assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
-
-        # Check result is from B
-        result = await session.execute(
-            text('SELECT result FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        result_json = result.fetchone()[0]
-        result_data = loads_json(result_json).unwrap()
-        assert result_data.get('ok') == 999
+        assert await _get_workflow_result(session, handle.workflow_id) is None
+        assert await _get_node_ok(session, handle.workflow_id, 1) == 999
 
     async def test_skip_propagates_through_chain(
         self,
@@ -1804,7 +1828,8 @@ class TestAllowFailedDeps:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Recovery task can produce successful result."""
+        """Recovery task can produce successful result; the FAILED workflow
+        stores no result."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'afd_recover_a')
         task_b = make_recovery_task(app, 'afd_recover_b')
@@ -1839,13 +1864,9 @@ class TestAllowFailedDeps:
         # B recovers with success
         await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=999))
 
-        # Check result
-        wf_result = await session.execute(
-            text('SELECT result FROM horsies_workflows WHERE id = :wf_id'),
-            {'wf_id': handle.workflow_id},
-        )
-        result_data = loads_json(wf_result.fetchone()[0]).unwrap()
-        assert result_data.get('ok') == 999
+        assert await _get_workflow_status(session, handle.workflow_id) == 'FAILED'
+        assert await _get_workflow_result(session, handle.workflow_id) is None
+        assert await _get_node_ok(session, handle.workflow_id, 1) == 999
 
     async def test_allow_failed_deps_chain(
         self,
