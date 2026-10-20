@@ -10,9 +10,10 @@ from __future__ import annotations
 import gc
 import os
 import random
-import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
+from multiprocessing.synchronize import Barrier
 from typing import Any, Optional
 
 from horsies.core.codec.json_io import loads_json
@@ -37,6 +38,9 @@ __all__ = [
     '_FINALIZE_RETRY_MAX_DELAY_S',
     '_EXECUTOR_WARMUP_ATTEMPTS',
     '_EXECUTOR_WARMUP_RETRY_DELAY_S',
+    'CHILD_WARMUP_BARRIER_TIMEOUT_S',
+    'WarmablePool',
+    '_set_child_warmup_barrier',
     '_REAPER_MAX_PERMANENT_FAILURES',
     'ChildHookFailedError',
     'ExecutorRestartFailedError',
@@ -285,13 +289,14 @@ class ExecutorRestartFailedError(RuntimeError):
 class WarmupIncompleteError(RuntimeError):
     """Executor warmup finished with fewer live children than configured.
 
-    Transient by classification: warmup counts distinct child pids over
-    bounded rounds, and a shortfall means children died or never came up
-    during the window — on the restart path this is usually the worker's own
-    timeout enforcement killing a child mid-warmup (a self-inflicted,
-    kill-shaped interruption), not a host failure. Callers retry the
-    create+warm cycle with a bounded budget; a persistent shortfall
-    escalates to ``ExecutorRestartFailedError``.
+    Transient by classification: every child must reach the warmup barrier
+    within ``CHILD_WARMUP_BARRIER_TIMEOUT_S`` of the first one, and a
+    shortfall means a child died, never came up, or finished its
+    initializer later than that bound — on the restart path this is usually
+    the worker's own timeout enforcement killing a child mid-warmup (a
+    self-inflicted, kill-shaped interruption), not a host failure. Callers
+    retry the create+warm cycle with a bounded budget; a persistent
+    shortfall escalates to ``ExecutorRestartFailedError``.
 
     A dedicated type (not a bare ``RuntimeError``) so restart classification
     can match on types alone — ``ChildHookFailedError`` and
@@ -325,27 +330,77 @@ class MemoryBaselineExceedsThresholdError(RuntimeError):
     """
 
 
-def _warm_child_process(delay_seconds: float = 0.1) -> int:
-    """No-op child task used to force process startup before parent DB sockets open."""
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
+CHILD_WARMUP_BARRIER_TIMEOUT_S: float = 20.0
+"""How long a warmed child waits at the warmup barrier for the others.
+
+Below the 30 s bound of one start attempt, so a slow child surfaces as a
+``WarmupIncompleteError`` that names the barrier, not as a start timeout.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class WarmablePool:
+    """A child process pool and the barrier its warmup calls meet at.
+
+    The barrier has one party per configured child and comes from the
+    pool's own multiprocessing context; the children receive it through the
+    initializer arguments, since a multiprocessing barrier cannot travel
+    through the call queue.
+    """
+
+    executor: ProcessPoolExecutor
+    warmup_barrier: Barrier
+
+
+_child_warmup_barrier: Barrier | None = None
+
+
+def _set_child_warmup_barrier(barrier: Barrier | None) -> None:
+    """Keep the pool's warmup barrier in this child process (initializer)."""
+    global _child_warmup_barrier
+    _child_warmup_barrier = barrier
+
+
+def _wait_at_warmup_barrier(timeout_seconds: float) -> None:
+    """Hold this child until every child of the pool is ready.
+
+    A child waiting here cannot take another call, so one call per child
+    reaches every child exactly once.
+
+    Raises:
+        threading.BrokenBarrierError: not every child arrived within
+            ``timeout_seconds``, or the parent aborted the warmup.
+    """
+    barrier = _child_warmup_barrier
+    assert barrier is not None, (
+        'warmup call ran in a child without a warmup barrier; '
+        '_child_initializer did not receive one'
+    )
+    barrier.wait(timeout=timeout_seconds)
+
+
+def _warm_child_process(timeout_seconds: float) -> int:
+    """Child warmup call: meet every other child, then return this pid.
+
+    Forces process startup before the parent opens database sockets.
+    """
+    _wait_at_warmup_barrier(timeout_seconds)
     return os.getpid()
 
 
 def _warm_child_process_probe(
-    delay_seconds: float = 0.1,
+    timeout_seconds: float,
 ) -> tuple[int, Optional[float]]:
     """Warmup call that also returns the child's settled baseline RSS.
 
     Used in place of ``_warm_child_process`` when ``max_memory_per_child_mb``
-    is set: after the same startup delay it runs ``gc.collect()`` to drop
+    is set: after the warmup barrier it runs ``gc.collect()`` to drop
     import-time cyclic garbage, then samples current RSS so the parent's
     baseline guard compares a settled figure (not a transient import peak)
     against the threshold. The memory-recycle predicate skips this call by
     identity, exactly like ``_warm_child_process``, so it never triggers a
     recycle of its own.
     """
-    if delay_seconds > 0:
-        time.sleep(delay_seconds)
+    _wait_at_warmup_barrier(timeout_seconds)
     gc.collect()
     return os.getpid(), _read_current_rss_mb()

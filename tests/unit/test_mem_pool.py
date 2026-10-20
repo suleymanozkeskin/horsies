@@ -243,7 +243,7 @@ def _create_executor(**cfg_overrides: object) -> ProcessPoolExecutor:
     no child processes; callers must shut it down.
     """
     cfg = _make_config(**cfg_overrides)
-    return worker_mod.Worker._create_executor(SimpleNamespace(cfg=cfg))
+    return worker_mod.Worker._create_executor(SimpleNamespace(cfg=cfg)).executor
 
 
 class TestExecutor:
