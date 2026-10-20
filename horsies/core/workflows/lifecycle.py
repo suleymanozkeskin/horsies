@@ -32,6 +32,7 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
@@ -172,7 +173,7 @@ def root_retry_and_deadline(
 
     Raises:
         SerializationError: task_options_json does not parse to an object,
-            or retry_policy.max_retries is not an int.
+            or its retry limit is not an integer in 0..MAX_RETRY_ATTEMPTS.
     """
     max_retries = 0
     good_until_str: str | None = None
@@ -186,18 +187,13 @@ def root_retry_and_deadline(
             f'Corrupt task_options for root node {node_name}',
         )
     options = parsed_r.ok_value
-    retry_policy = options.get('retry_policy')
-    if isinstance(retry_policy, dict):
-        # Default 3 mirrors RetryPolicy.max_retries (same as the engine).
-        max_retries_raw = retry_policy.get('max_retries', 3)
-        if isinstance(max_retries_raw, bool) or not isinstance(
-            max_retries_raw, int
-        ):
-            raise SerializationError(
-                f'Invalid max_retries in retry_policy for root node '
-                f'{node_name}: {max_retries_raw!r}',
-            )
-        max_retries = max_retries_raw
+    retry_limit_r = stored_max_retries(options)
+    if _is_err(retry_limit_r):
+        raise SerializationError(
+            f'Invalid retry_policy for root node {node_name}: '
+            f'{retry_limit_r.err_value.detail}',
+        )
+    max_retries = retry_limit_r.ok_value
     good_until_raw = options.get('good_until')
     if good_until_raw is not None:
         good_until_str = str(good_until_raw)
