@@ -636,8 +636,9 @@ async def _build_enqueued_task_params(
                 f'Invalid task_options payload for task {task_index}: expected object',
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
-        # A retry limit that cannot be stored (corrupt row) would otherwise
-        # surface as an INSERT error and loop the finalize retries.
+        # A retry_policy that does not validate (corrupt row) is refused
+        # here; a limit that cannot be stored would otherwise surface as an
+        # INSERT error and loop the finalize retries.
         retry_limit_r = stored_max_retries(options_data)
         if is_err(retry_limit_r):
             return Err(_EnqueueBuildError(
