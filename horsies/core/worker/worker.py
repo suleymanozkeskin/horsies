@@ -51,7 +51,6 @@ from horsies.core.worker.child_runner import (  # noqa: F401
     _derive_sys_path_roots_from_file as _derive_sys_path_roots_from_file,
     _debug_imports_enabled as _debug_imports_enabled,
     _debug_imports_log as _debug_imports_log,
-    _is_retryable_db_error as _is_retryable_db_error,
     _heartbeat_worker as _heartbeat_worker,
 )
 from horsies.core.worker.sql import (  # noqa: F401

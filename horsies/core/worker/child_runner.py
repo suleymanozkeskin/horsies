@@ -15,9 +15,8 @@ from datetime import datetime
 from importlib import import_module
 from typing import Any, Optional, Tuple, assert_never, cast
 
-from psycopg import Connection, Cursor, InterfaceError, OperationalError
+from psycopg import Connection, Cursor
 from psycopg.rows import namedtuple_row
-from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
@@ -491,19 +490,6 @@ def _heartbeat_worker(
 
         # Use pooled connection for heartbeat
         send_heartbeat()
-
-
-def _is_retryable_db_error(exc: BaseException) -> bool:
-    match exc:
-        case (
-            OperationalError()
-            | InterfaceError()
-            | SerializationFailure()
-            | DeadlockDetected()
-        ):
-            return True
-        case _:
-            return False
 
 
 def _get_workflow_status_for_task(cursor: Cursor[Any], task_id: str) -> str | None:
