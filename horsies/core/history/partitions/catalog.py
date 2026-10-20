@@ -156,6 +156,8 @@ type LeafPartitionBoundExpectation = RequestedPartitionBounds | CatalogPartition
 
 def daily_leaf_name(parent_name: str, lower: datetime) -> str:
     """The canonical relation name for a daily leaf of `parent_name`."""
+    if lower.tzinfo is not timezone.utc:
+        raise ValueError('leaf name anchors must be in UTC')
     name = f'{parent_name}_{lower:%Y_%m_%d}'
     if not is_safe_identifier(name):
         raise ValueError(f'derived leaf name is not a safe identifier: {name!r}')
@@ -164,6 +166,8 @@ def daily_leaf_name(parent_name: str, lower: datetime) -> str:
 
 def open_ended_leaf_name(parent_name: str, lower: datetime) -> str:
     """The canonical relation name for the open-ended leaf of `parent_name`."""
+    if lower.tzinfo is not timezone.utc:
+        raise ValueError('leaf name anchors must be in UTC')
     name = f'{parent_name}_open_{lower:%Y_%m_%d}'
     if not is_safe_identifier(name):
         raise ValueError(f'derived leaf name is not a safe identifier: {name!r}')
@@ -334,7 +338,7 @@ async def read_largest_attached_forever_upper(
             {'forever_class': FOREVER_CLASS_KEY},
         )
     ).scalar_one()
-    return _optional_datetime(value, 'upper_anchor')
+    return optional_utc_timestamp(value, 'upper_anchor')
 
 
 async def read_leaf_catalog_row(
@@ -368,18 +372,18 @@ async def read_leaf_catalog_row(
         leaf_name=_required_str(row.leaf_name, 'leaf_name'),
         parent_name=_required_str(row.parent_name, 'parent_name'),
         class_key=_required_str(row.class_key, 'class_key'),
-        lower_anchor=_required_datetime(row.lower_anchor, 'lower_anchor'),
-        upper_anchor=_required_datetime(row.upper_anchor, 'upper_anchor'),
+        lower_anchor=required_utc_timestamp(row.lower_anchor, 'lower_anchor'),
+        upper_anchor=required_utc_timestamp(row.upper_anchor, 'upper_anchor'),
         index_schema_version=_required_int(
             row.index_schema_version, 'index_schema_version'
         ),
         id_index_name=id_index_name,
         partition_bound=_required_str(row.partition_bound, 'partition_bound'),
-        min_birth_at=_optional_datetime(row.min_birth_at, 'min_birth_at'),
+        min_birth_at=optional_utc_timestamp(row.min_birth_at, 'min_birth_at'),
         min_birth_verified=_required_bool(row.min_birth_verified, 'min_birth_verified'),
-        created_at=_required_datetime(row.created_at, 'created_at'),
-        detached_at=_optional_datetime(row.detached_at, 'detached_at'),
-        dropped_at=_optional_datetime(row.dropped_at, 'dropped_at'),
+        created_at=required_utc_timestamp(row.created_at, 'created_at'),
+        detached_at=optional_utc_timestamp(row.detached_at, 'detached_at'),
+        dropped_at=optional_utc_timestamp(row.dropped_at, 'dropped_at'),
     )
 
 
@@ -541,7 +545,7 @@ async def read_attached_birth_floor(
             {'excluded_class_key': excluded_class_key},
         )
     ).scalar_one_or_none()
-    return _optional_datetime(value, 'min_birth_at')
+    return optional_utc_timestamp(value, 'min_birth_at')
 
 
 async def _read_attached(
@@ -848,9 +852,7 @@ async def database_now(connection: AsyncConnection) -> datetime:
     value = (
         await connection.execute(text('SELECT statement_timestamp()'))
     ).scalar_one()
-    return _required_datetime(value, 'statement_timestamp').astimezone(
-        timezone.utc
-    )
+    return required_utc_timestamp(value, 'statement_timestamp')
 
 
 # ---------------------------------------------------------------------------
@@ -882,18 +884,34 @@ def _required_int(value: Any, column: str) -> int:
     return value
 
 
-def _required_datetime(value: Any, column: str) -> datetime:
+def required_utc_timestamp(value: Any, column: str) -> datetime:
+    """A decoded timestamptz value as the same instant in UTC.
+
+    The driver decodes timestamptz into the session's zone. Under a zone
+    with DST, PEP 495 makes a value inside the repeated hour compare
+    unequal to every other zone's value at the same instant, and a
+    difference of two values in that zone is wall-clock time. UTC values
+    compare and subtract by instant, and render UTC dates in leaf names.
+    """
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise HistoryContractError(
             f'{column} did not decode as a timezone-aware timestamp'
         )
-    return value
+    return value.astimezone(timezone.utc)
 
 
-def _optional_datetime(value: Any, column: str) -> datetime | None:
+def optional_utc_timestamp(value: Any, column: str) -> datetime | None:
     if value is None:
         return None
-    return _required_datetime(value, column)
+    return required_utc_timestamp(value, column)
+
+
+def decode_leaf_bounds(lower: Any, upper: Any) -> LeafBounds:
+    """The UTC `LeafBounds` of decoded catalog anchor values."""
+    return LeafBounds(
+        lower=required_utc_timestamp(lower, 'lower_anchor'),
+        upper=required_utc_timestamp(upper, 'upper_anchor'),
+    )
 
 
 def _optional_timedelta(value: Any, column: str) -> timedelta | None:
