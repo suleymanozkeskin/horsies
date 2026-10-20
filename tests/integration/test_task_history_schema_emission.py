@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.ddl.column_rules import HISTORY_COLUMN_RULES
 from horsies.core.history.ddl.conditional import (
     RESERVATION_REGISTRY_EXPIRY_INDEX,
     GatedFragment,
@@ -131,6 +132,12 @@ async def _install_fixture_shape(
             )
             for statement in statements:
                 await connection.execute(text(statement))
+            # Schema v49: the end state has no single-column rule CHECK.
+            for rule in HISTORY_COLUMN_RULES:
+                await connection.execute(text(
+                    f'ALTER TABLE {TASK_HISTORY_PARENT} '
+                    f'DROP CONSTRAINT IF EXISTS {rule.constraint_name}'
+                ))
     finally:
         await engine.dispose()
 

@@ -1635,6 +1635,67 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_single_column_history_checks_upgrade_from_48(
+        self, scratch_database: str,
+    ) -> None:
+        """A v48 database with the 24 single-column history CHECKs loses
+        them at v49 and keeps the cross-column CHECKs."""
+        from horsies.core.history.ddl.column_rules import HISTORY_COLUMN_RULES
+
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(scratch_database))
+        )
+        checks_sql = text("""
+            SELECT count(*) FILTER (WHERE array_length(conkey, 1) = 1),
+                   count(*) FILTER (WHERE array_length(conkey, 1) > 1)
+            FROM pg_constraint
+            WHERE conrelid = 'horsies_task_history'::regclass
+              AND contype = 'c'
+        """)
+        tree_single_checks_sql = text("""
+            SELECT count(*)
+            FROM pg_partition_tree('horsies_task_history') AS tree
+            JOIN pg_constraint AS c ON c.conrelid = tree.relid
+            WHERE c.contype = 'c' AND array_length(c.conkey, 1) = 1
+              AND tree.relid <> 'horsies_task_history'::regclass
+        """)
+        tree_size_sql = text(
+            "SELECT count(*) FROM pg_partition_tree('horsies_task_history') "
+            "WHERE relid <> 'horsies_task_history'::regclass"
+        )
+        try:
+            async with engine.begin() as conn:
+                for rule in HISTORY_COLUMN_RULES:
+                    await conn.execute(text(
+                        f'ALTER TABLE horsies_task_history ADD CONSTRAINT '
+                        f'{rule.constraint_name} CHECK ({rule.predicate})'
+                    ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 49'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (48) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+                assert tuple((await conn.execute(checks_sql)).one()) == (
+                    len(HISTORY_COLUMN_RULES), 8,
+                )
+                partitions = (await conn.execute(tree_size_sql)).scalar_one()
+                assert partitions > 0
+                assert (
+                    await conn.execute(tree_single_checks_sql)
+                ).scalar_one() == partitions * len(HISTORY_COLUMN_RULES)
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert tuple((await conn.execute(checks_sql)).one()) == (0, 8)
+                assert (await conn.execute(tree_single_checks_sql)).scalar_one() == 0
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_pre_cutover_program_upgrade_restores_a_replaced_function_body(
         self,
         scratch_database: str,

@@ -8,8 +8,15 @@ failing on the constraint.
 
 A rule fails only when its predicate is FALSE; NULL passes, as it does for
 a CHECK constraint. The predicates match the constraints that the frozen
-and gated history DDL install; a test compares each one with its
-installed constraint.
+and gated history DDL install; a test compares each one with the
+constraint that DDL creates.
+
+Schema v49 drops these constraints from the history parent
+(`DROP_SINGLE_COLUMN_CHECKS_DDL`). The writers hold the rules instead: the
+move family copies values that the live table and the enqueue path have
+already checked, relocation refuses a violating row with these
+predicates, and transcode refuses a target outside the version and codec
+bounds.
 """
 
 from __future__ import annotations
@@ -133,3 +140,60 @@ CROSS JOIN LATERAL (
 WHERE rule.holds IS FALSE
 ORDER BY projected.task_id, rule.constraint_name
 LIMIT 1"""
+
+
+def _single_column_checks_sql() -> str:
+    return f"""
+        SELECT conname::text
+        FROM pg_constraint
+        WHERE conrelid = to_regclass('{TASK_HISTORY_PARENT}')
+          AND contype = 'c'
+          AND array_length(conkey, 1) = 1"""
+
+
+def _drop_single_column_checks_ddl() -> str:
+    expected = ', '.join(
+        f"'{rule.constraint_name}'" for rule in HISTORY_COLUMN_RULES
+    )
+    drops = ',\n            '.join(
+        f'DROP CONSTRAINT {rule.constraint_name}' for rule in HISTORY_COLUMN_RULES
+    )
+    return f"""
+DO $drop$
+DECLARE
+    v_expected text[] := ARRAY[{expected}];
+    v_installed text[];
+BEGIN
+    IF to_regclass('{TASK_HISTORY_PARENT}') IS NULL THEN
+        RETURN;
+    END IF;
+    SELECT coalesce(array_agg(name ORDER BY name), ARRAY[]::text[])
+    INTO v_installed
+    FROM ({_single_column_checks_sql()}) AS installed(name);
+    IF cardinality(v_installed) = 0 THEN
+        RETURN;
+    END IF;
+    IF v_installed IS DISTINCT FROM (
+        SELECT array_agg(name ORDER BY name) FROM unnest(v_expected) AS name
+    ) THEN
+        RAISE EXCEPTION
+            '{TASK_HISTORY_PARENT} single-column CHECKs differ from the '
+            'expected set: installed %, expected %',
+            v_installed, v_expected;
+    END IF;
+    ALTER TABLE {TASK_HISTORY_PARENT}
+            {drops};
+END
+$drop$
+"""
+
+
+DROP_SINGLE_COLUMN_CHECKS_DDL: Final = _drop_single_column_checks_ddl()
+"""Drop the history parent's single-column CHECKs (schema v49).
+
+No history parent, or no single-column CHECK: no change. Exactly the
+`HISTORY_COLUMN_RULES` names: one `ALTER TABLE` drops them all; the
+cross-column CHECKs stay. Any other set: raises with both sets and drops
+nothing. The `ALTER TABLE` takes ACCESS EXCLUSIVE on the parent and its
+leaves and scans no rows.
+"""

@@ -347,7 +347,11 @@ from sqlalchemy import text
 #      that can hold an id born at its time; ids moved with a terminal time
 #      before their birth minus the clock bound are recorded as exceptions.
 
-SCHEMA_VERSION = 48
+# v49: the history parent's 24 single-column CHECKs are dropped; the
+#      writers hold those rules (see horsies.core.history.ddl.column_rules).
+#      The 8 cross-column CHECKs stay.
+
+SCHEMA_VERSION = 49
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
