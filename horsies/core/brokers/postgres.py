@@ -247,6 +247,7 @@ from horsies.core.schemas.recovery import (
 _SCHEMA_INIT_MAX_ATTEMPTS = 5
 _SCHEMA_INIT_DEADLOCK_SQLSTATE = '40P01'
 _SCHEMA_VERSION_MISSING_SQLSTATE = '42P01'
+_UNDEFINED_FUNCTION_SQLSTATE = '42883'
 _PRE_CONCURRENT_SCHEMA_VERSION = 35
 _SCHEMA_LOCK_POLL_INTERVAL_SECONDS = 0.025
 
@@ -648,6 +649,10 @@ class PostgresBroker:
             self._listener = PostgresListener(psycopg_url)
 
         self._initialized = assume_initialized
+        # True once this broker saw the staged result function. Only a
+        # positive answer is kept: until a worker publishes the readers,
+        # each result probe checks again.
+        self._staged_result_reader_published = False
         self._loop_runner = LoopRunner()  # for sync facades
 
         # Each worker child builds its own broker, so this fires on every
@@ -2104,8 +2109,6 @@ class PostgresBroker:
         ``_STILL_WAITING`` when the row is reported live (it appeared
         after the live probe missed it).
         """
-        from hashlib import sha256
-
         from horsies.core.history.reads.detail import (
             HistoryTaskDetail,
             TaskDetailAbsent,
@@ -2126,20 +2129,38 @@ class PostgresBroker:
                 # Reported live: it appeared after the live probe
                 # missed it — keep polling.
                 return _STILL_WAITING
-        if detail.result_payload is None:
+        return self._history_raw_result_record(
+            task_id,
+            detail.task_name,
+            TaskStatus(detail.status),
+            detail.result_payload,
+            detail.result_digest,
+        )
+
+    def _history_raw_result_record(
+        self,
+        task_id: str,
+        task_name: str,
+        status: TaskStatus,
+        payload: bytes | None,
+        digest: bytes | None,
+    ) -> BrokerResult[RawResultRecord | None]:
+        """Verify and decode a stored history result payload.
+
+        No payload gives a record without a result. A digest that is
+        absent or differs from the SHA-256 of the payload, or a payload
+        that is not UTF-8, gives ``Err(INVALID_JSON_PAYLOAD)``.
+        """
+        if payload is None:
             return Ok(RawResultRecord(
                 task_id=task_id,
-                task_name=detail.task_name,
-                status=TaskStatus(detail.status),
+                task_name=task_name,
+                status=status,
                 raw_result=None,
             ))
         # Digest over the exact stored bytes BEFORE parsing — the
         # envelope discipline; a mismatch is corruption, not a payload.
-        if (
-            detail.result_digest is None
-            or sha256(detail.result_payload).digest()
-            != detail.result_digest
-        ):
+        if digest is None or hashlib.sha256(payload).digest() != digest:
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                 message=(
@@ -2148,7 +2169,7 @@ class PostgresBroker:
                 retryable=False,
             ))
         try:
-            result_text = detail.result_payload.decode('utf-8')
+            result_text = payload.decode('utf-8')
         except UnicodeDecodeError as decode_error:
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
@@ -2160,12 +2181,99 @@ class PostgresBroker:
             ))
         return self._build_raw_result_record(
             task_id,
-            detail.task_name,
-            TaskStatus(detail.status),
+            task_name,
+            status,
             result_text,
         )
 
     async def _probe_result_row(
+        self,
+        session: AsyncSession,
+        task_id: str,
+        *,
+        non_terminal_snapshot: bool = False,
+    ) -> 'BrokerResult[RawResultRecord | None] | object':
+        """Result probe for the result-wait loop.
+
+        One statement through the staged result function. While that
+        function is not published, the live probe and the staged detail
+        read run instead. An absence from the function is confirmed
+        through the detail reader: a publisher of an earlier release can
+        add a leaf that this function does not probe yet.
+
+        Returns the loop's final ``BrokerResult`` when the wait is over,
+        or the ``_STILL_WAITING`` sentinel to keep polling. With
+        ``non_terminal_snapshot=True`` (timeout path) a non-terminal row is
+        returned as a payload-less record instead of the sentinel.
+        """
+        from horsies.core.history.reads.result import (
+            HistoryResultAbsent,
+            HistoryResultStored,
+            HistoryTaskResult,
+            LiveTaskResult,
+            TaskResultAbsent,
+            read_task_result,
+            staged_result_published,
+        )
+
+        connection = await session.connection()
+        if not self._staged_result_reader_published:
+            if not await staged_result_published(connection):
+                return await self._probe_live_result_row(
+                    session,
+                    task_id,
+                    non_terminal_snapshot=non_terminal_snapshot,
+                )
+            self._staged_result_reader_published = True
+        try:
+            read = await read_task_result(connection, task_id=task_id)
+        except DBAPIError as error:
+            if _dbapi_sqlstate(error) == _UNDEFINED_FUNCTION_SQLSTATE:
+                # Dropped after this broker saw it: check again next time.
+                self._staged_result_reader_published = False
+            raise
+        match read:
+            case LiveTaskResult(task_name=task_name, result=result):
+                status = TaskStatus(read.status)
+                match status:
+                    case (
+                        TaskStatus.COMPLETED
+                        | TaskStatus.FAILED
+                        | TaskStatus.EXPIRED
+                    ):
+                        return self._build_raw_result_record(
+                            task_id, task_name, status, result,
+                        )
+                    case _ if (
+                        status is TaskStatus.CANCELLED or non_terminal_snapshot
+                    ):
+                        return Ok(RawResultRecord(
+                            task_id=task_id,
+                            task_name=task_name,
+                            status=status,
+                            raw_result=None,
+                        ))
+                    case _:
+                        return _STILL_WAITING
+            case HistoryTaskResult(task_name=task_name, payload=payload):
+                status = TaskStatus(read.status)
+                match payload:
+                    case HistoryResultAbsent():
+                        return self._history_raw_result_record(
+                            task_id, task_name, status, None, None,
+                        )
+                    case HistoryResultStored(payload=stored, digest=digest):
+                        return self._history_raw_result_record(
+                            task_id, task_name, status, stored, digest,
+                        )
+                    case _:
+                        assert_never(payload)
+            case TaskResultAbsent():
+                return await self._history_result_record(session, task_id)
+            case _:
+                assert_never(read)
+
+    async def _probe_live_result_row(
         self,
         session: AsyncSession,
         task_id: str,

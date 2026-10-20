@@ -50,6 +50,7 @@ from ..names import (
     TASK_LOOKUP_FUNCTION,
     TASK_LOOKUP_MANIFEST,
     TASK_PROVENANCE_FUNCTION,
+    TASK_RESULT_FUNCTION,
 )
 from ..partitions.catalog import read_manifest_leaf_rows
 from ..partitions.publication import LoaderRepublished
@@ -60,6 +61,7 @@ from .lookup_generation import (
     render_staged_duplicate_guard_function,
     render_staged_lookup_function,
     render_staged_provenance_function,
+    render_staged_result_function,
 )
 
 # Every function that `republish` renders from the manifest.
@@ -67,6 +69,7 @@ RENDERED_READER_SIGNATURES: Final = (
     f'{TASK_LOOKUP_FUNCTION}(uuid)',
     f'{TASK_PROVENANCE_FUNCTION}(uuid, boolean)',
     f'{TASK_DETAIL_FUNCTION}(uuid)',
+    f'{TASK_RESULT_FUNCTION}(uuid)',
     f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
 )
 _SIGNATURE_ARRAY = (
@@ -159,6 +162,9 @@ class StagedLoaderPublisher:
         )
         await connection.execute(
             text(render_staged_detail_function(manifest))
+        )
+        await connection.execute(
+            text(render_staged_result_function(manifest))
         )
         await connection.execute(
             text(render_staged_duplicate_guard_function(manifest))

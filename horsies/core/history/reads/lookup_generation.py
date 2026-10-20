@@ -43,6 +43,7 @@ from ..names import (
     TASK_LOOKUP_TYPE,
     TASK_PROVENANCE_FUNCTION,
     TASK_PROVENANCE_TYPE,
+    TASK_RESULT_FUNCTION,
 )
 from ..partitions.catalog import LeafCatalogRow
 
@@ -286,6 +287,61 @@ def render_staged_detail_function(manifest: LookupManifest) -> str:
             f'TABLE (location text, task_row {TASK_HISTORY_PARENT})'
         ),
         declares=(f'v_row {TASK_HISTORY_PARENT}%ROWTYPE;',),
+        absence_statement='RETURN;',
+        live_probe=live_probe,
+        history_probe=history_probe,
+        manifest=manifest,
+    )
+
+
+def render_staged_result_function(manifest: LookupManifest) -> str:
+    """Render the result lookup: the result columns of one task, as flat
+    output columns.
+
+    A live hit returns the live status, result and failed reason; a history
+    hit returns the stored result envelope columns. Both carry the task
+    name, which the caller needs to decode a typed result. Absence returns
+    no rows. Every column reference is qualified: the output column names
+    are PL/pgSQL variables inside the body.
+    """
+
+    def history_probe(relation: str) -> str:
+        if not is_safe_identifier(relation):
+            raise ValueError(
+                f'relation name is not a safe identifier: {relation!r}'
+            )
+        return f"""
+        RETURN QUERY SELECT
+            'HISTORY'::text, h.status::text, NULL::text,
+            h.final_failed_reason::text, h.result_envelope_version,
+            h.result_codec::text, h.result_content_type::text,
+            h.result_payload, h.result_digest, h.task_name::text
+        FROM {relation} h WHERE h.task_id = p_task_id;
+        IF FOUND THEN
+            RETURN;
+        END IF;
+"""
+
+    live_probe = f"""
+        RETURN QUERY SELECT
+            'LIVE'::text, t.status::text, t.result::text,
+            t.failed_reason::text, NULL::smallint, NULL::text, NULL::text,
+            NULL::bytea, NULL::bytea, t.task_name::text
+        FROM {LIVE_TASKS} t WHERE t.id = p_task_id;
+        IF FOUND THEN
+            RETURN;
+        END IF;
+"""
+    return _staged_function(
+        function_name=TASK_RESULT_FUNCTION,
+        fallback_probes=FallbackProbes.INCLUDED,
+        return_type=(
+            'TABLE (location text, status text, live_result text, '
+            'failed_reason text, result_envelope_version smallint, '
+            'result_codec text, result_content_type text, '
+            'result_payload bytea, result_digest bytea, task_name text)'
+        ),
+        declares=(),
         absence_statement='RETURN;',
         live_probe=live_probe,
         history_probe=history_probe,
