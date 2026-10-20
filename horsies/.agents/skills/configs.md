@@ -163,6 +163,7 @@ config = PostgresConfig(
 | `tcp_keepalives_idle` | `int` | `30` | Idle seconds before the first keepalive probe (libpq `keepalives_idle`) |
 | `tcp_keepalives_interval` | `int` | `10` | Seconds between keepalive probes (libpq `keepalives_interval`) |
 | `tcp_keepalives_count` | `int` | `3` | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
+| `tcp_user_timeout_ms` | `int` | `30000` | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the OS default |
 | `echo` | `bool` | `False` | Echo SQL (debug only) |
 
 Driver must be psycopg3 (async). `postgresql+psycopg2://` is rejected.
@@ -176,6 +177,14 @@ LISTEN/NOTIFY listener sets its own keepalives independently. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.
 PlanetScale's PgBouncer reaps idle connections within ~1–2h. Disabling is rarely
 needed; lower `tcp_keepalives_idle` only for poolers that reap faster than 30s.
+
+`tcp_user_timeout_ms` (default 30000) bounds a write to a dead connection.
+Keepalives do not probe while sent data is unacknowledged, so without it a
+pool health check on a connection that died without a reset blocks for the
+kernel retransmission limit (about 15 minutes on Linux). It applies to the
+broker engines, each child-process pool, and the LISTEN/NOTIFY listener. A
+long query is not affected: the sent query is acknowledged while the client
+waits for the result.
 
 Worker processes use a separate connection profile by default. The worker
 coordinator uses `worker_pool_size + worker_max_overflow`; each child process

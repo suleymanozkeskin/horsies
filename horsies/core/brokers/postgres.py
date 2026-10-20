@@ -646,7 +646,10 @@ class PostgresBroker:
             self._listener = None
         else:
             psycopg_url = to_psycopg_url(self.config.effective_session_database_url)
-            self._listener = PostgresListener(psycopg_url)
+            self._listener = PostgresListener(
+                psycopg_url,
+                tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
+            )
 
         self._initialized = assume_initialized
         # True once this broker saw the staged result function. Only a
@@ -677,9 +680,9 @@ class PostgresBroker:
         engine_cfg = self._base_engine_config()
         connect_args = self.config.pooled_connect_args
         if connect_args:
-            # TCP keepalives (keep idle pooled sockets warm) plus the
-            # PgBouncer prepared-statement knob, built from the typed
-            # keepalive fields on PostgresConfig.
+            # TCP keepalives, tcp_user_timeout, and the PgBouncer
+            # prepared-statement knob, built from the typed fields on
+            # PostgresConfig.
             engine_cfg['connect_args'] = connect_args
         return engine_cfg
 
@@ -688,9 +691,7 @@ class PostgresBroker:
 
     def _session_engine_config(self) -> dict[str, Any]:
         engine_cfg = self._base_engine_config()
-        connect_args = self.config.keepalive_connect_args()
-        if connect_args:
-            engine_cfg['connect_args'] = connect_args
+        engine_cfg['connect_args'] = self.config.tcp_connect_args()
         return engine_cfg
 
     def create_single_connection_engine(self) -> AsyncEngine:

@@ -174,6 +174,30 @@ config = AppConfig(
 )
 ```
 
+## TCP User Timeout for Dead Connections
+
+Keepalives probe only an idle connection. When a connection dies without a
+reset from the server side and horsies then writes to it (for example, the
+child pool's health check on checkout), the sent data stays unacknowledged.
+Keepalives do not probe in that state, so the kernel retransmission limit
+decides: about 15 minutes on Linux with the default `tcp_retries2=15`. The
+worker process is blocked for that time, and the pool's 30-second checkout
+timeout applies only after the write fails.
+
+`tcp_user_timeout_ms` (default `30000`) sets libpq `tcp_user_timeout`. Data
+that stays unacknowledged for that time closes the connection, so the check
+fails within 30 seconds and the pool opens a new connection. The setting
+applies to the broker engines, each child-process pool, and the
+LISTEN/NOTIFY listener. It has an effect only on systems that support
+`TCP_USER_TIMEOUT` (Linux).
+
+- A long query is not affected: the server acknowledges the sent query
+  while the client waits for the result.
+- With keepalives on, an idle dead connection is closed after about 40
+  seconds instead of 60, because the user timeout also bounds unanswered
+  keepalive probes.
+- Set `0` to use the operating system default.
+
 ## Things to Avoid
 
 **Don't run multiple direct-connection workers against a small `max_connections`.**

@@ -37,6 +37,7 @@ from horsies.core.brokers.result_types import (
     BrokerOperationError,
     BrokerResult,
 )
+from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Ok, Err, is_err
 from horsies.core.utils.db import is_retryable_connection_error
@@ -49,13 +50,16 @@ _SUBSCRIBER_QUEUE_MAXSIZE: int = 4096
 # dispatcher blocks indefinitely in conn.notifies(), so a silently
 # dropped connection (NAT/firewall idle timeout, no FIN) would otherwise
 # hang it forever with only the poll fallback masking the stall.
-def _keepalive_conninfo(database_url: str) -> str:
+# tcp_user_timeout bounds a write to a dead connection, which keepalives
+# do not probe.
+def _keepalive_conninfo(database_url: str, tcp_user_timeout_ms: int) -> str:
     return make_conninfo(
         database_url,
         keepalives=1,
         keepalives_idle=30,
         keepalives_interval=10,
         keepalives_count=3,
+        tcp_user_timeout=tcp_user_timeout_ms,
     )
 
 
@@ -103,8 +107,14 @@ class PostgresListener:
     * Channel names are PostgreSQL identifiers, automatically quoted for safety
     """
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(
+        self,
+        database_url: str,
+        *,
+        tcp_user_timeout_ms: int = DEFAULT_TCP_USER_TIMEOUT_MS,
+    ) -> None:
         self.database_url = database_url
+        self._tcp_user_timeout_ms = tcp_user_timeout_ms
 
         # Two separate connections to avoid blocking issues:
         # 1. Dispatcher connection: exclusively for conn.notifies() consumption
@@ -230,7 +240,9 @@ class PostgresListener:
                 async with self._dispatcher_lock:
                     if self._dispatcher_conn is None or self._dispatcher_conn.closed:
                         self._dispatcher_conn = await psycopg.AsyncConnection.connect(
-                            _keepalive_conninfo(self.database_url),
+                            _keepalive_conninfo(
+                                self.database_url, self._tcp_user_timeout_ms,
+                            ),
                             autocommit=True,
                         )
                         created_dispatcher = True
@@ -241,7 +253,9 @@ class PostgresListener:
                 async with self._command_lock:
                     if self._command_conn is None or self._command_conn.closed:
                         self._command_conn = await psycopg.AsyncConnection.connect(
-                            _keepalive_conninfo(self.database_url),
+                            _keepalive_conninfo(
+                                self.database_url, self._tcp_user_timeout_ms,
+                            ),
                             autocommit=True,
                         )
                         created_command = True
