@@ -1696,6 +1696,61 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def _statistics_on(self, conn: AsyncConnection) -> set[tuple[str, str]]:
+        return set((await conn.execute(text("""
+            SELECT stxname::text, stxrelid::regclass::text
+            FROM pg_statistic_ext
+            WHERE stxname LIKE 'stx_horsies_%'
+        """))).tuples().all())
+
+    @pytest.mark.parametrize('foreign', [False, True])
+    async def test_task_retention_statistics_upgrade_from_50(
+        self, scratch_database: str, foreign: bool,
+    ) -> None:
+        """A v50 database loses the task statistics; a same-named object on
+        another table is not touched."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(scratch_database)),
+        )
+        source = (
+            'ON (COALESCE(completed_at, updated_at, created_at)) '
+            'FROM horsies_workflows'
+            if foreign
+            else 'ON (COALESCE(completed_at, failed_at, updated_at, created_at)) '
+            'FROM horsies_tasks'
+        )
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    f'CREATE STATISTICS stx_horsies_tasks_retention {source}'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 51'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (50) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                expected = {
+                    ('stx_horsies_workflows_retention', 'horsies_workflows'),
+                }
+                if foreign:
+                    expected.add(
+                        ('stx_horsies_tasks_retention', 'horsies_workflows'),
+                    )
+                assert await self._statistics_on(conn) == expected
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_single_column_history_checks_upgrade_from_48(
         self, scratch_database: str,
     ) -> None:

@@ -167,7 +167,7 @@ from horsies.core.schemas.migrations import (
     CREATE_CLAIM_FUNCTION_SQL,
     CREATE_OUTCOME_TYPE_SQL,
     CREATE_TERMINALIZATION_FUNCTIONS_SQL,
-    CREATE_TASKS_RETENTION_STATISTICS_SQL,
+    DROP_TASKS_RETENTION_STATISTICS_SQL,
     CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL,
     DROP_CLAIM_FUNCTION_SQL,
     DROP_TERMINALIZATION_FUNCTIONS_SQL,
@@ -1031,6 +1031,8 @@ class PostgresBroker:
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
             # v49: the writers hold the single-column history rules.
             await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
+            # v51: the task retention statistics have no reader.
+            await conn.execute(DROP_TASKS_RETENTION_STATISTICS_SQL)
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
@@ -1206,12 +1208,12 @@ class PostgresBroker:
             await conn.execute(CREATE_WORKFLOWS_RETENTION_INDEX_SQL)
 
             # Migration (v14): whole-table expression statistics for the
-            # retention predicates. Partial-index statistics are never
-            # used for whole-table selectivity, so without these objects
-            # the planner costs the retention cutoff at default
-            # selectivity and may keep a full-table walk despite the
-            # v11/v13 indexes. ANALYZE populates them in this transaction.
-            await conn.execute(CREATE_TASKS_RETENTION_STATISTICS_SQL)
+            # workflow retention predicate. Partial-index statistics are
+            # never used for whole-table selectivity, so without this
+            # object the planner costs the retention cutoff at default
+            # selectivity and may keep a full-table walk despite the v13
+            # index. ANALYZE populates it in this transaction. The task
+            # statistics of v14 are dropped at v51.
             await conn.execute(CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL)
             await conn.execute(ANALYZE_EXPRESSION_INDEXED_TABLES_SQL)
 

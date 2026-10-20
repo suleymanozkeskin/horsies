@@ -351,8 +351,11 @@ from sqlalchemy import text
 #      writers hold those rules (see horsies.core.history.ddl.column_rules).
 #      The 8 cross-column CHECKs stay.
 # v50: the six batch moves hash the batch result once, not once per row.
+# v51: stx_horsies_tasks_retention is dropped. Its expression has no reader
+#      since the task retention indexes and DELETEs left (v43); fresh
+#      databases no longer build it.
 
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,
@@ -500,20 +503,31 @@ from .terminalization import (  # noqa: E402
     VALIDATE_TERMINALIZATION_KIND_CHECK_SQL,
 )
 
+# v51: drops the task retention statistics only where they are the object
+# v14 built: on horsies_tasks in the current schema.
+DROP_TASKS_RETENTION_STATISTICS_SQL = text("""
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_statistic_ext
+        WHERE stxname = 'stx_horsies_tasks_retention'
+          AND stxnamespace = current_schema()::regnamespace
+          AND stxrelid = 'horsies_tasks'::regclass
+    ) THEN
+        DROP STATISTICS stx_horsies_tasks_retention;
+    END IF;
+END
+$$
+""")
+
 SCHEMA_ADVISORY_LOCK_SQL = text("""
     SELECT pg_advisory_xact_lock(CAST(:key AS BIGINT))
 """)
 
-# The COALESCE expressions must stay structurally identical (same columns,
-# same order) to the retention indexes in schemas/indexes.py and the
-# retention DELETEs in worker/sql.py — the planner matches parsed
+# The COALESCE expression must stay structurally identical (same columns,
+# same order) to the workflow retention index in schemas/indexes.py and the
+# workflow retention DELETE in worker/sql.py — the planner matches parsed
 # expressions, and a drifted column list silently loses the statistics.
-CREATE_TASKS_RETENTION_STATISTICS_SQL = text("""
-    CREATE STATISTICS IF NOT EXISTS stx_horsies_tasks_retention
-    ON (COALESCE(completed_at, failed_at, updated_at, created_at))
-    FROM horsies_tasks;
-""")
-
 CREATE_WORKFLOWS_RETENTION_STATISTICS_SQL = text("""
     CREATE STATISTICS IF NOT EXISTS stx_horsies_workflows_retention
     ON (COALESCE(completed_at, updated_at, created_at))
