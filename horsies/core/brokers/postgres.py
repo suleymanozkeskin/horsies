@@ -977,6 +977,9 @@ class PostgresBroker:
             pause_abandon_replacement_ddl,
             terminal_snapshot_replacement_ddl,
         )
+        from horsies.core.history.ddl.column_rules import (
+            DROP_SINGLE_COLUMN_CHECKS_DDL,
+        )
         from horsies.core.history.terminalization.duplicate_guard import (
             duplicate_guard_fragments,
         )
@@ -1019,6 +1022,8 @@ class PostgresBroker:
                     await conn.execute(text(statement))
                 # v46: the update trigger cannot send task_done here.
                 await conn.execute(text(DROP_TASK_NOTIFY_UPDATE_TRIGGER_SQL))
+            # v49: the writers hold the single-column history rules.
+            await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},
