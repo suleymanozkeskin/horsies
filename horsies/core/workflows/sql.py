@@ -468,6 +468,7 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
         w.error,
         w.success_policy,
         w.name,
+        w.output_task_index,
         COUNT(wt.id) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
         COUNT(wt.id) FILTER (WHERE wt.status = 'FAILED') as failed,
         COUNT(wt.id) FILTER (WHERE wt.status = 'COMPLETED') as completed,
@@ -475,7 +476,8 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
     FROM horsies_workflows w
     LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.id = :wf_id
-    GROUP BY w.id, w.status, w.completed_at, w.error, w.success_policy, w.name
+    GROUP BY w.id, w.status, w.completed_at, w.error, w.success_policy, w.name,
+             w.output_task_index
 """)
 MARK_WORKFLOW_COMPLETED_SQL = text("""
     UPDATE horsies_workflows
@@ -484,7 +486,7 @@ MARK_WORKFLOW_COMPLETED_SQL = text("""
 """)
 MARK_WORKFLOW_FAILED_SQL = text("""
     UPDATE horsies_workflows
-    SET status = 'FAILED', result = :result,
+    SET status = 'FAILED', result = NULL,
         error = COALESCE(:error, error),
         completed_at = NOW(), updated_at = NOW()
     WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
@@ -541,9 +543,6 @@ GET_FIRST_FAILED_REQUIRED_TASK_SQL = text("""
 """)
 # -- SQL constants for get_workflow_final_result --
 
-GET_WORKFLOW_OUTPUT_INDEX_SQL = text(
-    """SELECT output_task_index FROM horsies_workflows WHERE id = :wf_id"""
-)
 GET_OUTPUT_TASK_RESULT_SQL = text("""
     SELECT task_name, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id AND task_index = :idx
