@@ -562,29 +562,26 @@ async def test_index_name_reuse_after_ownership_read_does_not_drop_foreign_index
     assert isinstance(outcome, CoverageEnsureFailed), outcome
     assert 'belongs to another relation' in outcome.refusal
 
+    # to_regclass resolves each name in this test's schema; other schemas
+    # in the database can hold indexes with the same names.
+    owner_sql = text(
+        'SELECT index_state.indrelid::regclass::text '
+        'FROM pg_index AS index_state '
+        'WHERE index_state.indexrelid = to_regclass(:index_name)'
+    )
     async with partition_schema.engine.connect() as connection:
-        owners = {
-            str(row.index_name): str(row.owner)
-            for row in (
-                await connection.execute(
-                    text(
-                        'SELECT index_relation.relname AS index_name, '
-                        'index_state.indrelid::regclass::text AS owner '
-                        'FROM pg_index AS index_state '
-                        'JOIN pg_class AS index_relation '
-                        'ON index_relation.oid = index_state.indexrelid '
-                        'WHERE index_relation.relname IN ('
-                        ':canonical_name, :original_name)'
-                    ),
-                    {
-                        'canonical_name': history.id_index_name,
-                        'original_name': 'horsies_index_race_original',
-                    },
-                )
-            ).all()
-        }
-    assert owners[str(history.id_index_name)] == 'horsies_index_race_foreign'
-    assert owners['horsies_index_race_original'] == str(history.leaf_name)
+        canonical_owner = (
+            await connection.execute(
+                owner_sql, {'index_name': history.id_index_name}
+            )
+        ).scalar_one()
+        original_owner = (
+            await connection.execute(
+                owner_sql, {'index_name': 'horsies_index_race_original'}
+            )
+        ).scalar_one()
+    assert canonical_owner == 'horsies_index_race_foreign'
+    assert original_owner == str(history.leaf_name)
 
 
 async def test_index_relation_lock_wait_is_bounded_and_restores_timeout(
