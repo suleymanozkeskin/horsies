@@ -85,6 +85,7 @@ from ..partitions.catalog import (
     read_leaf_catalog_row,
     read_leaf_physical_state,
     read_retention_class,
+    required_utc_timestamp,
 )
 from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import create_daily_leaf
@@ -473,7 +474,7 @@ async def _ensure_batch_leaf_coverage(
     legacy_forever_upper = await _attached_legacy_forever_upper(connection)
     for destination in destinations:
         class_key = str(destination.class_key)
-        lower = destination.lower_anchor
+        lower = required_utc_timestamp(destination.lower_anchor, 'lower_anchor')
         retention_class = await read_retention_class(connection, class_key)
         if retention_class is None:
             raise RuntimeError(

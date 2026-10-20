@@ -40,7 +40,6 @@ from ..commands import (
     FinalizeInterruptedLeafDetach,
     InspectHistoryLeaf,
     LeafLifecycle,
-    LeafBounds,
     LeafRef,
 )
 from ..cutover.state import cutover_complete
@@ -62,6 +61,7 @@ from ..outcomes import (
     LeafKeptNonEmpty,
     LeafMaintenanceBusy,
 )
+from ..partitions.catalog import decode_leaf_bounds
 from ..partitions.forever import FOREVER_LEGACY_LEAF
 from ..partitions.manager import (
     detach_empty_forever_leaf,
@@ -274,7 +274,7 @@ async def _expired_candidates(
         LeafRef(
             leaf_name=row.leaf_name,
             class_key=row.class_key,
-            bounds=LeafBounds(lower=row.lower_anchor, upper=row.upper_anchor),
+            bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
         )
         for row in rows
     )
@@ -472,7 +472,7 @@ async def _plan_forever_sweep(connection: AsyncConnection) -> _ForeverPlan:
         leaf = LeafRef(
             leaf_name=row.leaf_name,
             class_key=FOREVER_CLASS_KEY,
-            bounds=LeafBounds(lower=row.lower_anchor, upper=row.upper_anchor),
+            bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
         )
         inspection = await inspect_leaf(
             connection,

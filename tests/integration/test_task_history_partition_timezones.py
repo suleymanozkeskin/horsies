@@ -39,7 +39,10 @@ from horsies.core.history.outcomes import (
     LeafDetachable,
     LeafNotExpired,
 )
-from horsies.core.history.partitions.catalog import daily_leaf_name
+from horsies.core.history.partitions.catalog import (
+    daily_leaf_name,
+    database_now,
+)
 from horsies.core.history.partitions.health import (
     collect_partition_health,
 )
@@ -203,9 +206,8 @@ class TestConformanceIsSessionIndependent:
                 await connection.execute(text(HEARTBEATS_PARTITIONED_DDL))
             await set_session_timezone(connection, creating_timezone)
             await register_heartbeat_class(connection, horizon=horizon)
-            hour = (await connection.execute(
-                text('SELECT date_trunc(\'hour\', statement_timestamp())')
-            )).scalar_one()
+            now = await database_now(connection)
+            hour = now.replace(minute=0, second=0, microsecond=0)
             leaf = hourly_leaf_ref(hour)
             created = await create_hourly(connection, leaf)
             assert isinstance(created, LeafCreated)

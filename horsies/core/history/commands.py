@@ -35,8 +35,9 @@ def is_safe_identifier(name: str) -> bool:
 class LeafBounds:
     """Half-open `[lower, upper)` anchor bounds of one finite leaf.
 
-    Construction rejects naive or non-increasing bounds; a `LeafBounds` that
-    exists is well-formed everywhere it travels.
+    Construction rejects naive, non-UTC, or non-increasing bounds; a
+    `LeafBounds` that exists is well-formed everywhere it travels. UTC
+    bounds compare and subtract by instant under every session timezone.
     """
 
     lower: datetime
@@ -45,6 +46,9 @@ class LeafBounds:
     def __post_init__(self) -> None:
         if self.lower.tzinfo is None or self.upper.tzinfo is None:
             raise ValueError('leaf bounds must be timezone-aware')
+        utc = timezone.utc
+        if self.lower.tzinfo is not utc or self.upper.tzinfo is not utc:
+            raise ValueError('leaf bounds must be in UTC')
         if self.lower >= self.upper:
             raise ValueError('leaf bounds must be increasing')
 

@@ -10,8 +10,10 @@ has to be accounted for here before it can ship.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import get_args
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -32,9 +34,14 @@ from horsies.core.history.commands import (
     PartitionMaintenanceCommand,
     is_safe_identifier,
 )
+from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.heartbeats.partitioning import hourly_leaf_name
 from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
+    decode_leaf_bounds,
     leaf_id_index_name,
+    open_ended_leaf_name,
+    required_utc_timestamp,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -43,6 +50,9 @@ pytestmark = [pytest.mark.unit]
 UTC = timezone.utc
 LOWER = datetime(2026, 8, 6, tzinfo=UTC)
 UPPER = datetime(2026, 8, 7, tzinfo=UTC)
+BERLIN = ZoneInfo('Europe/Berlin')
+# 2026-10-25 00:00 UTC is 02:00 CEST, the first pass of the repeated hour.
+FOLD_INSTANT = datetime(2026, 10, 25, tzinfo=UTC)
 
 
 def make_leaf_ref(**overrides: object) -> LeafRef:
@@ -103,6 +113,55 @@ class TestLeafBounds:
     def test_two_day_span_is_not_daily(self) -> None:
         bounds = LeafBounds(lower=LOWER, upper=LOWER + timedelta(days=2))
         assert not bounds.spans_one_day
+
+    def test_rejects_bounds_in_another_zone(self) -> None:
+        with pytest.raises(ValueError, match='in UTC'):
+            LeafBounds(
+                lower=FOLD_INSTANT.astimezone(BERLIN),
+                upper=(FOLD_INSTANT + timedelta(days=1)).astimezone(BERLIN),
+            )
+
+
+def _forever_daily_name(lower: datetime) -> str:
+    return daily_leaf_name('horsies_task_history_forever', lower)
+
+
+def _forever_open_ended_name(lower: datetime) -> str:
+    return open_ended_leaf_name('horsies_task_history_forever', lower)
+
+
+class TestUtcDecoding:
+    def test_a_repeated_hour_value_decodes_to_the_equal_utc_instant(self) -> None:
+        session_value = FOLD_INSTANT.astimezone(BERLIN)
+        assert session_value != FOLD_INSTANT
+        decoded = required_utc_timestamp(session_value, 'upper_anchor')
+        assert decoded.tzinfo is UTC
+        assert decoded == FOLD_INSTANT
+
+    def test_naive_values_are_refused(self) -> None:
+        with pytest.raises(HistoryContractError, match='upper_anchor'):
+            required_utc_timestamp(datetime(2026, 10, 25), 'upper_anchor')
+
+    def test_decoded_bounds_across_the_fold_span_one_day(self) -> None:
+        bounds = decode_leaf_bounds(
+            FOLD_INSTANT.astimezone(BERLIN),
+            (FOLD_INSTANT + timedelta(days=1)).astimezone(BERLIN),
+        )
+        assert bounds == LeafBounds(
+            lower=FOLD_INSTANT, upper=FOLD_INSTANT + timedelta(days=1)
+        )
+        assert bounds.spans_one_day
+
+    @pytest.mark.parametrize(
+        'name_of',
+        [_forever_daily_name, _forever_open_ended_name, hourly_leaf_name],
+        ids=['daily', 'open_ended', 'hourly'],
+    )
+    def test_leaf_names_refuse_a_non_utc_anchor(
+        self, name_of: Callable[[datetime], str]
+    ) -> None:
+        with pytest.raises(ValueError, match='in UTC'):
+            name_of(datetime(2026, 10, 20, tzinfo=ZoneInfo('Etc/GMT+12')))
 
 
 class TestLeafRef:

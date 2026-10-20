@@ -29,7 +29,7 @@ the unpartitioned table is a typed refusal, not hidden DDL.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -74,6 +74,7 @@ from ..partitions.catalog import (
     RetentionClassRow,
     capture_partition_bound_utc,
     database_now,
+    decode_leaf_bounds,
     read_leaf_catalog_row,
     read_leaf_physical_state,
     read_retention_class,
@@ -118,6 +119,8 @@ carry over; retention is leaf drop."""
 
 def hourly_leaf_name(lower: datetime) -> str:
     """The leaf relation name for the hour starting at `lower`."""
+    if lower.tzinfo is not timezone.utc:
+        raise ValueError('leaf name anchors must be in UTC')
     name = f'{HEARTBEATS_TABLE}_{lower:%Y_%m_%d_%H}'
     if not is_safe_identifier(name):
         raise ValueError(f'{name!r} is not a safe identifier')
@@ -609,7 +612,7 @@ async def sweep_expired_heartbeat_leaves(
         ref = LeafRef(
             leaf_name=row.leaf_name,
             class_key=HEARTBEAT_CLASS_KEY,
-            bounds=LeafBounds(lower=row.lower_anchor, upper=row.upper_anchor),
+            bounds=decode_leaf_bounds(row.lower_anchor, row.upper_anchor),
         )
         detach_outcome = await detach_expired_leaf(
             database,
