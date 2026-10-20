@@ -27,9 +27,17 @@ else. `references_leaf` answers from it, and `drop_detached_leaf` refuses
 a drop while it answers True — so an unprobed row written here would
 block a legitimate drop on behalf of a reader that never looks at the
 relation.
+
+Each rendered function carries the stamp of the manifest it was rendered
+from as its comment. A publisher of an earlier release renders fewer
+functions but rewrites the same manifest table, so a function it did not
+render keeps an older stamp. The freshness checks compare every stamp
+with the published manifest, and a mismatch causes a republication.
 """
 
 from __future__ import annotations
+
+from typing import Final
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -37,13 +45,14 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from ..names import (
     HEARTBEAT_CLASS_KEY,
     LEAF_CATALOG,
+    TASK_DETAIL_FUNCTION,
     TASK_DUPLICATE_GUARD_FUNCTION,
-    TASK_DUPLICATE_GUARD_RENDERED_MARKER,
+    TASK_LOOKUP_FUNCTION,
     TASK_LOOKUP_MANIFEST,
+    TASK_PROVENANCE_FUNCTION,
 )
 from ..partitions.catalog import read_manifest_leaf_rows
 from ..partitions.publication import LoaderRepublished
-from .detail import staged_detail_published
 from .lookup_generation import (
     LookupManifest,
     manifest_from_catalog,
@@ -52,6 +61,67 @@ from .lookup_generation import (
     render_staged_lookup_function,
     render_staged_provenance_function,
 )
+
+# Every function that `republish` renders from the manifest.
+RENDERED_READER_SIGNATURES: Final = (
+    f'{TASK_LOOKUP_FUNCTION}(uuid)',
+    f'{TASK_PROVENANCE_FUNCTION}(uuid, boolean)',
+    f'{TASK_DETAIL_FUNCTION}(uuid)',
+    f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
+)
+_SIGNATURE_ARRAY = (
+    'CAST(ARRAY['
+    + ', '.join(f"'{signature}'" for signature in RENDERED_READER_SIGNATURES)
+    + '] AS text[])'
+)
+
+# The stamp of the published manifest table: a SHA-256 over the probe
+# metadata of every row, in probe order. The anchors enter as epoch seconds,
+# so the stamp does not depend on the session time zone. An empty manifest
+# has a stamp too.
+MANIFEST_STAMP_SQL: Final = f"""(
+    SELECT 'horsies:manifest:' || encode(sha256(convert_to(COALESCE(
+        string_agg(
+            concat_ws(
+                '|',
+                manifest.leaf_name,
+                manifest.probe_position,
+                extract(epoch FROM manifest.lower_anchor),
+                extract(epoch FROM manifest.upper_anchor),
+                COALESCE(extract(epoch FROM manifest.min_birth_at)::text, '-')
+            ),
+            ',' ORDER BY manifest.probe_position
+        ),
+        ''
+    ), 'UTF8')), 'hex')
+    FROM {TASK_LOOKUP_MANIFEST} AS manifest
+)"""
+
+# True when every rendered function exists and carries the stamp of the
+# published manifest. A missing function has no comment, so it fails too.
+READERS_STAMPED_SQL: Final = f"""NOT EXISTS (
+    SELECT 1
+    FROM unnest({_SIGNATURE_ARRAY}) AS reader(signature)
+    WHERE obj_description(to_regprocedure(reader.signature), 'pg_proc')
+        IS DISTINCT FROM {MANIFEST_STAMP_SQL}
+)"""
+
+# Writes the stamp of the published manifest on every rendered function.
+# Run it after the manifest table is rewritten, in the same transaction.
+_STAMP_RENDERED_READERS_DDL: Final = f"""
+DO $stamp$
+DECLARE
+    manifest_stamp text := {MANIFEST_STAMP_SQL};
+    signature text;
+BEGIN
+    FOREACH signature IN ARRAY {_SIGNATURE_ARRAY} LOOP
+        EXECUTE format(
+            'COMMENT ON FUNCTION %s IS %L', signature, manifest_stamp
+        );
+    END LOOP;
+END
+$stamp$
+"""
 
 
 class StagedLoaderPublisher:
@@ -93,11 +163,8 @@ class StagedLoaderPublisher:
         await connection.execute(
             text(render_staged_duplicate_guard_function(manifest))
         )
-        await connection.execute(text(
-            f'COMMENT ON FUNCTION {TASK_DUPLICATE_GUARD_FUNCTION}(uuid) '
-            f"IS '{TASK_DUPLICATE_GUARD_RENDERED_MARKER}'"
-        ))
         await _rewrite_manifest_table(connection, manifest)
+        await connection.execute(text(_STAMP_RENDERED_READERS_DDL))
         return LoaderRepublished(
             absent_leaves=tuple(sorted(selection.absent_relations))
         )
@@ -106,13 +173,12 @@ class StagedLoaderPublisher:
         """Whether the published readers already match the catalog.
 
         The same two checks the coverage pass uses: the published manifest
-        equals the attached history leaves and their probe bounds, and the
-        staged detail function exists.
+        equals the attached history leaves and their probe bounds, and
+        every rendered function carries the stamp of that manifest.
         """
         return (
             await published_manifest_matches_catalog(connection)
-            and await staged_detail_published(connection)
-            and await staged_duplicate_guard_rendered(connection)
+            and await published_readers_stamped(connection)
         )
 
     async def references_leaf(
@@ -137,24 +203,17 @@ class StagedLoaderPublisher:
         return bool(referenced)
 
 
-async def staged_duplicate_guard_rendered(connection: AsyncConnection) -> bool:
-    """Whether the duplicate guard is the version rendered from a manifest.
+async def published_readers_stamped(connection: AsyncConnection) -> bool:
+    """Whether every rendered function carries the stamp of the published
+    manifest.
 
-    The first version installed with the move program keeps the full probe
-    and carries no marker; the next publication replaces it.
+    False when a function is missing, when it is the first version that
+    the schema installs, or when a publisher that does not render it
+    rewrote the manifest after the last full publication.
     """
     return bool(
         (
-            await connection.execute(
-                text(
-                    'SELECT obj_description('
-                    "to_regprocedure(:name), 'pg_proc') = :marker"
-                ),
-                {
-                    'name': f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
-                    'marker': TASK_DUPLICATE_GUARD_RENDERED_MARKER,
-                },
-            )
+            await connection.execute(text(f'SELECT {READERS_STAMPED_SQL}'))
         ).scalar_one()
     )
 

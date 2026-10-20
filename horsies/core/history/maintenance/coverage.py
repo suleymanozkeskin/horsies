@@ -65,9 +65,6 @@ from ..names import (
     HEARTBEATS_TABLE,
     LEAF_CATALOG,
     RETENTION_CLASSES,
-    TASK_DETAIL_FUNCTION,
-    TASK_DUPLICATE_GUARD_FUNCTION,
-    TASK_DUPLICATE_GUARD_RENDERED_MARKER,
     TASK_HISTORY_FOREVER,
     TASK_LOOKUP_MANIFEST,
 )
@@ -90,11 +87,11 @@ from ..partitions.locks import (
     try_lock_coverage_for_transaction,
 )
 from ..partitions.publication import UnpublishedLoader
-from ..reads.detail import staged_detail_published
 from ..reads.publisher import (
+    READERS_STAMPED_SQL,
     StagedLoaderPublisher,
     published_manifest_matches_catalog,
-    staged_duplicate_guard_rendered,
+    published_readers_stamped,
 )
 from .database import PartitionMaintenanceDatabase
 
@@ -461,9 +458,7 @@ attached_history AS (
 ),
 publication_health AS (
     SELECT
-        to_regprocedure(:detail_function) IS NOT NULL
-        AND obj_description(to_regprocedure(:guard_function), 'pg_proc')
-            = :guard_marker
+        {READERS_STAMPED_SQL}
         AND NOT EXISTS (
             SELECT 1
             FROM {TASK_LOOKUP_MANIFEST} AS manifest
@@ -681,9 +676,6 @@ async def _probe_complete_coverage(
                 'forever_class': FOREVER_CLASS_KEY,
                 'forever_parent': TASK_HISTORY_FOREVER,
                 'open_end': OPEN_END_ANCHOR,
-                'detail_function': f'{TASK_DETAIL_FUNCTION}(uuid)',
-                'guard_function': f'{TASK_DUPLICATE_GUARD_FUNCTION}(uuid)',
-                'guard_marker': TASK_DUPLICATE_GUARD_RENDERED_MARKER,
             },
         )
     ).all()
@@ -962,9 +954,8 @@ async def ensure_partition_coverage(
                     absent_leaves=(),
                 )
 
-    # One probe stands in for all three staged readers because
-    # republication is atomic across the triple; the dependency is
-    # pinned by a test beside this logic.
+    # The stamp check covers every rendered reader: each one carries the
+    # stamp of the manifest it was rendered from.
     #
     # The third trigger is a leaf that vanished behind the manager's
     # back. It creates nothing and publishes nothing, so neither of the
@@ -979,8 +970,7 @@ async def ensure_partition_coverage(
     if (
         created_history > 0
         or not await published_manifest_matches_catalog(connection)
-        or not await staged_detail_published(connection)
-        or not await staged_duplicate_guard_rendered(connection)
+        or not await published_readers_stamped(connection)
     ):
         republication = await publisher.republish(connection)
         republished = True

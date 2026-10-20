@@ -65,7 +65,7 @@ $function$
 
 # Installed only when no guard exists, so it never replaces a rendered one.
 # It keeps the full probe until the first publication renders the pruned
-# guard; the rendered guard carries the marker comment.
+# guard. It carries no manifest stamp, so the first coverage pass renders it.
 DUPLICATE_GUARD_FIRST_VERSION_DDL: Final = f"""
 DO $guard$
 BEGIN
