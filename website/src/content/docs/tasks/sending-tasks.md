@@ -49,7 +49,9 @@ the original arguments.
 
 ### Set a Task Deadline
 
-Use `.with_options(good_until=...)` to set a per-send expiry deadline. If the task is not executed before the deadline, it transitions to `EXPIRED`.
+Use `.with_options(good_until=...)` to set a per-send start deadline. If no worker starts the task before the deadline, the task transitions to `EXPIRED` and never runs. A task that has started is not stopped by the deadline.
+
+Set a deadline when a task loses its value after a known time, such as a ride request, a one-time login code, or a price quote. After an outage or a backlog, workers skip expired tasks, so worker capacity goes to tasks that are still useful. See [Task Expiry](/horsies/concepts/task-lifecycle/#task-expiry).
 
 ```python
 from datetime import datetime, timedelta, timezone

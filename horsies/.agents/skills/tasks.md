@@ -30,7 +30,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from dispatch. On expiry the child process is SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. The kill restarts the worker's process pool — sibling tasks recover through crash recovery. A deadline that fires before user code starts requeues the task instead. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms (>= 1000), measured from dispatch. On expiry the child process is SIGKILLed and the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`. The kill breaks the worker's process pool and interrupts every other task on that worker: a task that has not started returns to PENDING; a started task fails with `WORKER_CRASHED` and is retried only if `WORKER_CRASHED` is in its `auto_retry_for`, otherwise it is marked FAILED. A deadline that fires before user code starts requeues the task instead. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -225,7 +225,7 @@ def node(
 Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, and `.schedule()` with overridden options applied to this specific send.
 
 ```python
-# Set a per-send expiry deadline
+# Set a per-send start deadline: a task not started by then becomes EXPIRED and never runs
 deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
 opts = my_task.with_options(good_until=deadline)
 

@@ -163,7 +163,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-Killing the child restarts the worker's process pool: sibling tasks running on the same worker are interrupted and recovered through crash recovery (requeued, or retried per their own policies). Size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
+Killing the child breaks the worker's process pool, which interrupts every other task on the same worker. A task that has not started returns to PENDING. A started task fails with `WORKER_CRASHED` and is retried only if `WORKER_CRASHED` is in its `auto_retry_for`; otherwise it is marked FAILED. See [Child Process Crash](/horsies/workers/heartbeats-recovery/#child-process-crash). Size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
 
 ### Register Tasks for Workers
 
