@@ -32,6 +32,7 @@ from horsies.core.codec.kwargs import (
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
 from horsies.core.codec.payload_guard import enforce_payload_policy
+from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
@@ -636,23 +637,18 @@ async def _build_enqueued_task_params(
                 f'Invalid task_options payload for task {task_index}: expected object',
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
-        retry_policy = options_data.get('retry_policy')
-        if isinstance(retry_policy, dict):
-            # Default 3 mirrors RetryPolicy.max_retries; a non-int value
-            # (corrupt row) would otherwise surface as an INSERT error and
-            # loop the finalize retries.
-            max_retries_raw = retry_policy.get('max_retries', 3)
-            if isinstance(max_retries_raw, bool) or not isinstance(
-                max_retries_raw, int
-            ):
-                return Err(_EnqueueBuildError(
+        # A retry limit that cannot be stored (corrupt row) would otherwise
+        # surface as an INSERT error and loop the finalize retries.
+        retry_limit_r = stored_max_retries(options_data)
+        if is_err(retry_limit_r):
+            return Err(_EnqueueBuildError(
                 (
-                        f'Invalid max_retries in retry_policy for task '
-                        f'{task_index}: {max_retries_raw!r}'
-                    ),
+                    f'Invalid retry_policy for task {task_index}: '
+                    f'{retry_limit_r.err_value.detail}'
+                ),
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
             ))
-            max_retries = max_retries_raw
+        max_retries = retry_limit_r.ok_value
         good_until_raw = options_data.get('good_until')
         if good_until_raw is not None:
             good_until_str = str(good_until_raw)
