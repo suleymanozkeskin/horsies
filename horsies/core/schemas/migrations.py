@@ -350,8 +350,9 @@ from sqlalchemy import text
 # v49: the history parent's 24 single-column CHECKs are dropped; the
 #      writers hold those rules (see horsies.core.history.ddl.column_rules).
 #      The 8 cross-column CHECKs stay.
+# v50: the six batch moves hash the batch result once, not once per row.
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

@@ -1022,6 +1022,7 @@ class PostgresBroker:
                 # pending expiry whose outcomes follow ascending deadlines.
                 # v48: the duplicate guard prunes its probes by birth time;
                 # skewed ids go to the clock-skew exception table.
+                # v50: the batch moves hash the batch result once.
                 for statement in duplicate_guard_fragments():
                     await conn.execute(text(statement))
                 for statement in terminal_snapshot_replacement_ddl():
