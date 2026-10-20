@@ -471,6 +471,43 @@ class TestRelocation:
             await engine.dispose()
 
     @pytest.mark.asyncio
+    async def test_a_west_of_utc_session_names_the_leaf_by_its_utc_day(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """The destination leaf carries the UTC day of the row's terminal
+        time. A session at UTC-12 decodes that UTC midnight as noon of the
+        previous day."""
+        url = await make_database()
+        await _prepare(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                task_id = await insert_legacy_task(
+                    connection, status='COMPLETED', kind='COMPLETE_LOCKED'
+                )
+                await connection.execute(
+                    text("SELECT set_config('timezone', 'Etc/GMT+12', true)")
+                )
+                outcome = await relocate_all(connection)
+                assert outcome.rows_relocated == 1
+                landed = (
+                    await connection.execute(
+                        text(
+                            'SELECT tableoid::regclass::text AS leaf_name, '
+                            "to_char(terminal_at AT TIME ZONE 'UTC', "
+                            "'YYYY_MM_DD') AS utc_day "
+                            'FROM horsies_task_history '
+                            'WHERE task_id = CAST(:t AS uuid)'
+                        ),
+                        {'t': task_id},
+                    )
+                ).one()
+                assert landed.leaf_name.endswith(f'_{landed.utc_day}'), landed
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
     async def test_a_row_outside_a_column_rule_is_refused_without_writing(
         self, make_database: MakeDatabase
     ) -> None:
