@@ -443,7 +443,7 @@ def _psycopg_dsn(db_url: str) -> str:
             'CANCELLED',
             'CANCELLED',
             'WORKFLOW_CANCEL_CLAIM',
-            'SKIPPED',
+            'ENQUEUED',
             False,
             'SKIPPED',
             False,
@@ -527,7 +527,9 @@ async def test_child_prestart_still_cancels_requeued_pending_row(
     task_id = await _insert_claimed_task(
         session, claimed_at=None, worker_id=None, status='PENDING',
     )
-    await _link_to_workflow(session, task_id, wf_status='CANCELLED')
+    workflow_id = await _link_to_workflow(
+        session, task_id, wf_status='CANCELLED',
+    )
     await session.commit()
 
     with psycopg.connect(_psycopg_dsn(db_url)) as conn:
@@ -538,6 +540,9 @@ async def test_child_prestart_still_cancels_requeued_pending_row(
 
     await session.commit()
     assert await _status_of(session, task_id) == 'CANCELLED'
+    node_status, node_task_id = await _workflow_node_state(session, workflow_id)
+    assert node_status == 'SKIPPED'
+    assert node_task_id == task_id
 
 
 # ---------------------------------------------------------------------------

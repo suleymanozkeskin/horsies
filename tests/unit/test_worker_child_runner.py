@@ -671,14 +671,13 @@ class TestHandleWorkflowStopBeforeStart:
         cursor = _FakeCursor()
         conn = _FakeConn(cursor)
 
-        def _after_node_update(*_args: Any) -> MagicMock:
-            assert len(cursor.queries) == 1
-            assert "SET status = 'SKIPPED'" in cursor.queries[0][0]
+        def _before_node_update(*_args: Any) -> MagicMock:
+            assert cursor.queries == []
             return MagicMock(spec=Applied)
 
         with patch(
             'horsies.core.worker.child_runner.apply_sync',
-            side_effect=_after_node_update,
+            side_effect=_before_node_update,
         ) as apply:
             result = _handle_workflow_stop_before_start(
                 cursor, conn, 'task-1', 'CANCELLED', 'worker-1',  # type: ignore[arg-type]

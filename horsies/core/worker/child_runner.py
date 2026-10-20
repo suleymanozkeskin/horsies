@@ -63,7 +63,6 @@ from horsies.core.lifecycle.outcomes import (
     ObservedWorkflowState,
     SourceStateConflict,
     TaskAbsent,
-    TerminalizationOutcome,
 )
 from horsies.core.lifecycle.persistence import apply_sync
 from horsies.core.types.result import is_err
@@ -577,6 +576,10 @@ def _handle_workflow_stop_before_start(
     applied (or was already applied): a lost claim, another state conflict,
     or an absent row leaves the node to the claim generation that owns it.
 
+    CANCELLED: the node is marked SKIPPED only when the cancel applied (or
+    was already applied); any other outcome leaves the node to the writer of
+    the row's actual transition.
+
     Raises:
         Exception: DB errors propagate to the wrapped caller,
             _confirm_ownership_and_set_running, which folds them into
@@ -634,17 +637,9 @@ def _handle_workflow_stop_before_start(
             conn.commit()
             return (False, '', 'WORKFLOW_STOPPED')
         case 'CANCELLED':
-            # Cancellation is terminal: mark both task and workflow_task terminal.
-            cursor.execute(
-                """
-                UPDATE horsies_workflow_tasks
-                SET status = 'SKIPPED',
-                    completed_at = NOW()
-                WHERE task_id = %s
-                  AND status IN ('ENQUEUED', 'READY')
-                """,
-                (task_id,),
-            )
+            # Cancellation is terminal: cancel the task row, then mark the
+            # node SKIPPED in the same transaction, only when the cancel
+            # applied (or was already applied).
             outcome = apply_sync(
                 cursor,
                 CancelOwnedNode(
@@ -656,28 +651,26 @@ def _handle_workflow_stop_before_start(
                     accepts_requeued_pending=True,
                 ),
             )
-            _require_known_workflow_stop_outcome(outcome)
+            match outcome:
+                case Applied() | AlreadyApplied():
+                    cursor.execute(
+                        """
+                        UPDATE horsies_workflow_tasks
+                        SET status = 'SKIPPED',
+                            completed_at = NOW()
+                        WHERE task_id = %s
+                          AND status IN ('ENQUEUED', 'READY')
+                        """,
+                        (task_id,),
+                    )
+                case LostClaim() | SourceStateConflict() | TaskAbsent():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
             conn.commit()
             return (False, '', 'WORKFLOW_STOPPED')
         case _:
             return (False, '', 'WORKFLOW_CHECK_FAILED')
-
-
-def _require_known_workflow_stop_outcome(
-    outcome: TerminalizationOutcome,
-) -> None:
-    """Keep the legacy unconditional coupled writes while handling the union."""
-    match outcome:
-        case (
-            Applied()
-            | AlreadyApplied()
-            | LostClaim()
-            | SourceStateConflict()
-            | TaskAbsent()
-        ):
-            return
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 def _expire_claimed_task_before_start(
