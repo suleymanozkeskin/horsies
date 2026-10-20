@@ -85,6 +85,7 @@ TASK_LOOKUP_MANIFEST: Final = 'horsies_task_lookup_manifest'
 TASK_PROVENANCE_FUNCTION: Final = 'horsies_task_provenance_staged'
 TASK_PROVENANCE_TYPE: Final = 'horsies_task_provenance'
 TASK_DETAIL_FUNCTION: Final = 'horsies_task_detail_staged'
+TASK_RESULT_FUNCTION: Final = 'horsies_task_result_staged'
 TASK_DUPLICATE_GUARD_FUNCTION: Final = 'horsies_task_history_duplicate_staged'
 
 # Owned by the terminalization move program: ids moved to history with a
