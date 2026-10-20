@@ -1,9 +1,9 @@
 ---
 title: Changelog
 summary: >-
-  Notable changes per release. 0.5.3 uses the session-capable database path for partition maintenance, bounds its lock waits, reduces healthy coverage to at most three statements, verifies exact partition and index conformance, bounds global recovery work with durable cursors and schema v36 indexes, and reduces fresh unkeyed enqueue to one SQL round trip; 0.5.2 requires an OFFLINE schema v35 upgrade for existing 0.5.0/0.5.1 databases (stop every unit; `forever` converts from an unbounded LIST leaf to a RANGE-partitioned parent, and the cutover attestation must commit before restart) — it also sets retention per queue (`AppConfig.retention.queue_retention`, resolved on every enqueue path and snapshotted at send), stops one missing history leaf from failing every finalize, bounds partition detach and finalize, and fixes monitoring pagination, facet totals and nullable sorting; 0.5.1 lets a deployment declare its own finite retention classes (`RecoveryConfig.retention_classes`, key plus duration, registered by the worker maintenance pass, immutable once registered, duration a minimum at daily partition granularity) and widens send-time retention validation to the declared set; 0.5.0 is the live/history split (schema v34) — terminal task records move to a partitioned history archive at terminalization, the live table holds only live rows, retention drops whole partitions driven by the worker maintenance pass, task and workflow identity become native UUIDv7, `retention_class_key` at enqueue chooses the retention class (30-day default; explicit None for forever), manual terminal retry is replaced by the rerun API with recorded lineage, monitoring reads resolve across live and history behind a bounded terminal window, `WorkflowStatus.EXPIRED` and opt-in paused-workflow auto-cancel land, and existing deployments require an offline cutover (or a fresh database); 0.4.7 makes terminal writers own the complete final-attempt summary (schema v26) — a stale `failed_reason` left by automatic retry is no longer carried onto completed, failed, or expired rows, effective fleet-wide once the first upgraded process migrates the schema; 0.4.6 consolidates terminal task transitions behind fifteen typed database functions (schema v25), records the operation that ended each task, enforces terminal timestamps after the required per-deployment 0.4.5 rolling rollout, and honors sub-second staleness thresholds exactly; 0.4.5 is a task lifecycle release (schema v17, additive) — workflow pause and cancellation stop terminalizing a task whose claim has been replaced (the abandon or cancel now applies only to the claim generation it was issued against, fenced per task on batches), and `horsies_tasks.terminal_at` records the canonical terminal instant on every terminal transition from this release forward, with the CHECK constraint tying it to terminal status deferred to 0.4.6 so a rolling restart cannot fail a pre-0.4.5 worker's finalize; 0.4.4 is a workflow-retention performance release — workflow-batched retention deletes with a once-per-statement live-task guard (a full backlog drain drops ~24x), clearer finalize logs, and a typed-path fix in the agent skill; 0.4.3 is a monitoring read-path performance release (schema v16) — task-list sort and facet indexes (`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`), list pages stop fetching task payload columns, the unfiltered list total becomes a planner estimate, and the web UI refreshes aggregates on timers instead of per task event; 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
+  Notable changes per release. 0.5.4 advances the schema from v36 to v51 (stop every process before the first 0.5.4 start; v37 refuses unknown workflow node statuses) — a FAILED workflow stores no result, enqueue validates the whole `retry_policy`, `tcp_user_timeout_ms` (default 30 s) bounds writes to a dead connection, partition maintenance works under any session time zone, a pause that races a resume no longer strands a node, worker start no longer fails on uneven child start times, and the claim, recovery, result-read, finalize and history-move paths run fewer and cheaper statements; 0.5.3 uses the session-capable database path for partition maintenance, bounds its lock waits, reduces healthy coverage to at most three statements, verifies exact partition and index conformance, bounds global recovery work with durable cursors and schema v36 indexes, and reduces fresh unkeyed enqueue to one SQL round trip; 0.5.2 requires an OFFLINE schema v35 upgrade for existing 0.5.0/0.5.1 databases (stop every unit; `forever` converts from an unbounded LIST leaf to a RANGE-partitioned parent, and the cutover attestation must commit before restart) — it also sets retention per queue (`AppConfig.retention.queue_retention`, resolved on every enqueue path and snapshotted at send), stops one missing history leaf from failing every finalize, bounds partition detach and finalize, and fixes monitoring pagination, facet totals and nullable sorting; 0.5.1 lets a deployment declare its own finite retention classes (`RecoveryConfig.retention_classes`, key plus duration, registered by the worker maintenance pass, immutable once registered, duration a minimum at daily partition granularity) and widens send-time retention validation to the declared set; 0.5.0 is the live/history split (schema v34) — terminal task records move to a partitioned history archive at terminalization, the live table holds only live rows, retention drops whole partitions driven by the worker maintenance pass, task and workflow identity become native UUIDv7, `retention_class_key` at enqueue chooses the retention class (30-day default; explicit None for forever), manual terminal retry is replaced by the rerun API with recorded lineage, monitoring reads resolve across live and history behind a bounded terminal window, `WorkflowStatus.EXPIRED` and opt-in paused-workflow auto-cancel land, and existing deployments require an offline cutover (or a fresh database); 0.4.7 makes terminal writers own the complete final-attempt summary (schema v26) — a stale `failed_reason` left by automatic retry is no longer carried onto completed, failed, or expired rows, effective fleet-wide once the first upgraded process migrates the schema; 0.4.6 consolidates terminal task transitions behind fifteen typed database functions (schema v25), records the operation that ended each task, enforces terminal timestamps after the required per-deployment 0.4.5 rolling rollout, and honors sub-second staleness thresholds exactly; 0.4.5 is a task lifecycle release (schema v17, additive) — workflow pause and cancellation stop terminalizing a task whose claim has been replaced (the abandon or cancel now applies only to the claim generation it was issued against, fenced per task on batches), and `horsies_tasks.terminal_at` records the canonical terminal instant on every terminal transition from this release forward, with the CHECK constraint tying it to terminal status deferred to 0.4.6 so a rolling restart cannot fail a pre-0.4.5 worker's finalize; 0.4.4 is a workflow-retention performance release — workflow-batched retention deletes with a once-per-statement live-task guard (a full backlog drain drops ~24x), clearer finalize logs, and a typed-path fix in the agent skill; 0.4.3 is a monitoring read-path performance release (schema v16) — task-list sort and facet indexes (`idx_horsies_tasks_enqueued_at`, `idx_horsies_tasks_task_name`), list pages stop fetching task payload columns, the unfiltered list total becomes a planner estimate, and the web UI refreshes aggregates on timers instead of per task event; 0.4.2 is a retention and payload-path performance release (schema v15) — per-queue terminal retention windows (`queue_terminal_record_retention_hours`, validated against declared queues), a payload-size guardrail (`AppConfig.payload`: warn at 1 MiB by default, optional enqueue reject with `PAYLOAD_TOO_LARGE`), configurable retention sweep cadence and batch size (defaults change from hourly/5,000-row to 5-minute/500-row), set-wise `task_attempts` purge replacing the per-row FK cascade in retention, a narrowed result-wait terminal fetch that stops shipping args/kwargs with result polls, and a ~60 s cadence for the scheduler's missing-row existence check; 0.4.1 stops a timeout kill during process-pool warmup from failing the executor restart and exiting the worker (a backlog of timeout-prone tasks could crash-loop it), publishes replacement pools only after they are fully warm, splits ensure-vs-replace so a dispatch request can no longer destroy a freshly built pool, and bounds kill-shaped warmup interruptions with a typed retry; 0.4.0 ships the web monitoring dashboard — the `horsies[web]` extra with a mountable FastAPI app and `horsies web` CLI (bundled SPA, fail-closed auth, no-DDL schema probing, SSE live updates), the typed `horsies.monitoring` query API with registry-free task cancel/retry, the Acme Clothing showcase application, and a codec fix so `args_from` envelopes decode for `TaskResult | None` targets under any/quorum joins; 0.3.1 makes the workflow retention deletes plan onto their index via whole-table expression statistics (schema v14) and raises the documented PostgreSQL floor to 14+; 0.3.0 fails sync send/schedule closed inside a running event loop (`ASYNC_CONTEXT`, payload-carrying, completable via `retry_*_async`), adds `schedule_async`/`retry_schedule_async`, makes service-loop death process-fatal, fixes the TASK_EXPIRED workflow finalize gap and the recycle spawn-failure pool wedge, and adds the workflows retention index (schema v13); 0.2.9 fixes the cancel/completion lock-order deadlock (40P01 under concurrent cancel) and fences finalize/recovery/ownership-confirm statements to the claim generation so a stale attempt cannot clobber a re-claimed one, schema v12 (`horsies_claim` returns `claimed_at`, heartbeat retention index); 0.2.8 replaces the latest-per-worker `DISTINCT ON` scan with a recursive skip-scan, adds retention eligibility indexes (schema v11), batches retention deletes, makes the worker-state snapshot cadence configurable (`worker_state_snapshot_interval_ms`, default 30s, was hardcoded 5s), enforces per-queue `max_concurrency` without `queue_priorities`, and accepts EXPIRED rows in workflow finalization phase-2 replay; 0.2.7 collapses the worker claim critical section into one server-side statement (the `horsies_claim` function, schema v10) so the cap-serialization advisory lock is held only across a single statement plus commit, removing the client-stall-while-holding-lock freeze, and changes the equal-queue-priority tie-break from configured queue order to a priority-then-FIFO band; 0.2.6 binds subworkflow tasks to their queue's configured priority so a parameterized child no longer claims at the default priority 100 on a CUSTOM queue; 0.2.5 adds default-on TCP keepalives for remote/pooled Postgres and gives the workflow reaper a grace window so it stops racing in-flight finalizers; 0.2.4 adds per-child memory recycling (`--max-memory-per-child-mb`, off by default), fixes a latent count-recycle hang (CPython gh-115634), and gates worker log color to TTYs; 0.2.3 recycles worker child processes (`--max-tasks-per-child`, default 100) to bound memory and adds per-child `children_memory_mb` telemetry, schema v9; 0.2.2 enforces keyword-only task parameters and validates producer values before serializing, makes schedules kwargs-only with app.check validation, and self-heals orphaned workflow tasks; 0.2.1 stops a failed outputless subworkflow from wedging its parent and isolates workflow recovery per candidate; 0.2.0 halves the worker hot-path statement budget and fixes the reaper-breaker misclassification; 0.1.10 eliminates round trips across the workflow completion, promotion, and child-start hot paths; 0.1.9 batches workflow start and scopes the claim lock per queue; 0.1.8 brings the workflow-completion performance redesign, supervisor-contract fixes, and scheduler state self-healing.
 related: [./migrations/migration-to-0-5-0, ./monitoring/worker-health, ./migrations/migration-to-0-1-2, ./internals/serialization]
-tags: [changelog, releases, breaking-changes, 0.5.3, 0.5.2, 0.5.1, 0.5.0, 0.4.7, 0.4.6, 0.4.5, 0.4.4, 0.4.3, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
+tags: [changelog, releases, breaking-changes, 0.5.4, 0.5.3, 0.5.2, 0.5.1, 0.5.0, 0.4.7, 0.4.6, 0.4.5, 0.4.4, 0.4.3, 0.4.2, 0.4.1, 0.4.0, 0.3.1, 0.3.0, 0.2.9, 0.2.8, 0.2.7, 0.2.6, 0.2.5, 0.2.4, 0.2.3, 0.2.2, 0.2.1, 0.2.0, 0.1.10, 0.1.9, 0.1.8, 0.1.7, 0.1.6, 0.1.5, 0.1.4, 0.1.3, 0.1.2]
 ---
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
@@ -11,6 +11,145 @@ horsies is pre-1.0: breaking changes may land in minor or patch releases, and
 there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
+
+## 0.5.4 — 2026-10-20
+
+### Upgrade notes
+
+- **The schema advances from v36 to v51** when the first 0.5.4 process starts.
+  Mixed 0.5.3 and 0.5.4 fleets are not tested: stop every horsies process
+  (workers, schedulers, web), then start 0.5.4.
+- **Schema v37 refuses unknown workflow node statuses.** Before it adds a
+  CHECK for the seven `WorkflowTaskStatus` values, activation reads every
+  node. A node with another status (for example `CANCELLED`, which the
+  phase-two function accepted before) stops the upgrade with
+  `WorkflowNodeStatusMigrationError` and changes nothing. Correct those rows,
+  then start again.
+- Index removals (`DROP INDEX CONCURRENTLY`) and index builds
+  (`CREATE INDEX CONCURRENTLY`) do not block claims, enqueues or finalizes.
+
+### Changed
+
+- **A FAILED workflow stores no result.** `MARK_WORKFLOW_FAILED_SQL` writes
+  `result = NULL`, and the final result is built only for a COMPLETED
+  workflow. For a FAILED sub-workflow, `SubWorkflowSummary.output` is `None`.
+  The Rust runtime stores `NULL` in the same case.
+- **Enqueue validates the whole `retry_policy`.** `enqueue_async`, workflow
+  node promotion and the workflow fast-path root validate the policy as
+  `RetryPolicy` in strict mode (no type coercion, no unknown fields, the
+  model's strategy rules). A malformed policy is refused with
+  `INVALID_TASK_OPTIONS` before any write; the message names each failing
+  field. Refused now, accepted before: a partial policy such as
+  `{"max_retries": 3}`, which stored 3 retries but never retried because
+  `auto_retry_for` was missing; `max_retries` outside 1..20 inside a policy
+  (no policy still means 0 retries); and a policy that is not an object.
+  Options built from `RetryPolicy` (every `.send()`, workflow and scheduler
+  path) always pass.
+- **`PostgresConfig.tcp_user_timeout_ms`, default 30 000.** Sets libpq
+  `tcp_user_timeout` on the broker pools, the child-process pools, the
+  `LISTEN` connections and the monitoring listener. A write to a connection
+  that died without a reset now fails after 30 s instead of the kernel
+  retransmission limit (about 924 s on Linux with `tcp_retries2=15`); the
+  pool then opens a new connection. A long query is not affected. With
+  keepalives on, an idle dead connection is closed at about 40 s instead of
+  60 s. `0` uses the operating system default. Applies on Linux only.
+- **Broker connections run with `jit = off`** where the session keeps the
+  setting: the runtime pool (not in PgBouncer transaction mode), the session
+  pool, and the single-connection engine. On a fresh database the partition
+  coverage probe costs 123,447, above the default `jit_above_cost` (100,000).
+- **The monitoring status cards are cached for 10 seconds per scope.**
+  `/api/tasks/stats` counts can be up to 10 seconds old.
+- **Worker health reports `completion_candidate_yield`**: completion
+  candidates per workflow scanned by the global recovery audit.
+- **`forever` history uses one open-ended leaf.** Partition coverage stops
+  creating one daily `forever` leaf per day. Closed, empty daily `forever`
+  leaves are detached and dropped by the prune pass, at most 32 per pass.
+
+### Fixed
+
+- **Partition maintenance under a session time zone other than UTC.**
+  Catalog anchors are decoded to UTC. Before, under `Europe/Berlin`, the
+  leaves whose bound is in the repeated hour of 2026-10-25 failed with
+  `METADATA_MISMATCH` on every pass; the heartbeat and `forever` sweeps
+  failed on the fold day; and relocation west of UTC named leaves for the
+  wrong day. Leaf bounds and names now refuse a value that is not in UTC.
+- **A pause that races a resume no longer strands a node.** The abandon
+  functions lock the workflow row and apply only while the workflow is still
+  `PAUSED`. Before, a resume that committed between the status read and the
+  abandon left the node `READY` with no task while the workflow was
+  `RUNNING`, until workflow recovery ran (30 s by default).
+- **The child pre-start stop writes the node only when its transition
+  applied.** For a PAUSED workflow, the node is reset to `READY` only when the
+  abandon applied; for a CANCELLED workflow, the node is marked `SKIPPED` only
+  when the cancel applied, and after it. Before, a lost claim or a row that
+  ended another way still had its node rewritten.
+- **Worker start no longer fails when its children start at different
+  times.** Each warmup call waits at a barrier with one party per child, so
+  one round of calls reaches every child. Before, a child that finished its
+  initializer more than about 0.6 s after the others failed the start with
+  `worker child warmup started 1/2 process(es)`, and the start path does not
+  retry that error. A child later than 20 s now fails with a
+  `WarmupIncompleteError` that names the barrier.
+- **Schema lock waits do not hold a snapshot.** A broker that waits for the
+  schema lock polls `pg_try_advisory_lock` every 25 ms, so it cannot block
+  the lock holder's `CREATE INDEX CONCURRENTLY`.
+- **The finalizing marker is fenced to the claim generation**, so a stale
+  attempt cannot stamp a re-claimed row.
+- **A retried task keeps its node's first `started_at`.** The node handoff
+  writes the node only when it is not already `RUNNING`.
+- **The scheduler runs with a one-connection runtime pool.** Its lock
+  transactions use a private single-connection engine.
+- **The claim loop wakes when a finalizer ends**, so a requeue to `PENDING`
+  or an expiry before start does not wait for the next poll.
+- **Workflow node status is constrained to the seven `WorkflowTaskStatus`
+  values**, and the phase-two function no longer accepts `CANCELLED`.
+- **Pending-expiry outcomes come back in deadline order.**
+- **A transcode target must be a version this build can decode.**
+- **History writers that take outside values check the history column
+  rules first.** Cutover relocation refuses a legacy row that breaks a rule
+  with `RelocationRuleViolation`; transcode refuses a target version below 1,
+  a codec outside 1..64 bytes, and a forward rerun-input frame that would not
+  fit.
+- **Rendered staged readers carry the manifest stamp they were rendered
+  from.** Publication health and the coverage pass compare it, so a reader
+  rendered by an older release is republished.
+
+### Performance
+
+- **Claim.** Each eligibility arm and the merge are limited to the smallest
+  of the claim budget, the queue's remaining cap and the batch limit, and the
+  claimed rows come back in order. The candidate selection runs as a
+  generic-plan helper. The paused or cancelled workflow lookup reads each
+  workflow by primary key.
+- **Recovery.** A partial index on nonterminal workflow nodes serves the
+  recovery probes: a workflow with 1,001 terminal nodes no longer scans its
+  terminal entries. The global audit probes for any node only when no
+  nonterminal node exists (a page of 200 workflows examines 200 node rows
+  instead of 400).
+- **Phase two** plans its history lookup once per connection.
+- **Result reads.** `get_result` and `TaskHandle.get` read a task result
+  through one staged reader statement (`horsies_task_result_staged`): a
+  terminal live task takes 1 statement instead of 2, a task in history 1
+  instead of 3.
+- **Workflow finalize** reads its inputs once and the parent link with the
+  status. The pause paths and finalize leave the `workflow_done` NOTIFY to
+  the status trigger.
+- **History moves** encode each attempt snapshot once and hash a result once.
+  A batch move hashes its result once per batch instead of once per row.
+  Cutover relocation encodes each snapshot once.
+- **The duplicate-identity guard** probes only the leaves that can hold the
+  id (by UUIDv7 birth time); ids from a producer clock ahead of the terminal
+  time are recorded in an exception table.
+- **Reader publication.** The manifest is written in one statement; a
+  coverage pass publishes once instead of once per created leaf (2 new
+  classes × 61 leaves: 241 publications and 53.7 s became 1 publication and
+  6.1 s); a detach republishes only when the readers changed. A partial index
+  serves the leaf catalog's active records.
+- **Removed objects with no reader:** 2 task retention indexes, 3 redundant
+  workflow-node indexes, the task update notify trigger on cut-over
+  databases, the 24 single-column CHECKs of the history table (the writers
+  hold those rules; the 8 cross-column CHECKs stay), and the task retention
+  statistics.
 
 ## 0.5.3 — 2026-08-26
 
