@@ -80,6 +80,9 @@ class BrokerErrorCode(str, Enum):
     # this surfaces at the Result-returning app/broker layer.
     NO_TYPE_AVAILABLE = 'NO_TYPE_AVAILABLE'
     INVALID_JSON_PAYLOAD = 'INVALID_JSON_PAYLOAD'
+    # The task options passed to enqueue carry a retry limit that cannot
+    # be stored; nothing was written.
+    INVALID_TASK_OPTIONS = 'INVALID_TASK_OPTIONS'
 
 
 @dataclass(slots=True, frozen=True)

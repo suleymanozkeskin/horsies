@@ -12,6 +12,7 @@ from typing import (
     Literal,
     Self,
     Annotated,
+    Final,
     Union,
     overload,
 )
@@ -465,6 +466,10 @@ class TaskInfo:
     attempts: list[TaskAttemptInfo] | None = None
 
 
+MAX_RETRY_ATTEMPTS: Final = 20
+"""The largest `RetryPolicy.max_retries`."""
+
+
 class RetryPolicy(BaseModel):
     """
     Retry policy configuration for tasks.
@@ -485,7 +490,12 @@ class RetryPolicy(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     max_retries: Annotated[
-        int, Field(ge=1, le=20, description='Number of retry attempts (1-20)')
+        int,
+        Field(
+            ge=1,
+            le=MAX_RETRY_ATTEMPTS,
+            description='Number of retry attempts (1-20)',
+        ),
     ] = 3
     intervals: Annotated[
         list[

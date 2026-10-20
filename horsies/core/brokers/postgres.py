@@ -32,6 +32,7 @@ from horsies.core.models.workflow_pg import (
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
+from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
@@ -1727,10 +1728,15 @@ class PostgresBroker:
                         opts_r.err_value,
                     )
                 task_options_value = opts_r.ok_value
-                if isinstance(task_options_value, dict):
-                    retry_policy = task_options_value.get('retry_policy')
-                    if isinstance(retry_policy, dict):
-                        max_retries = retry_policy.get('max_retries', 3)
+                retry_limit_r = stored_max_retries(task_options_value)
+                if is_err(retry_limit_r):
+                    detail = retry_limit_r.err_value.detail
+                    return _broker_err(
+                        BrokerErrorCode.INVALID_TASK_OPTIONS,
+                        f'task_options refused for {task_name}: {detail}',
+                        ValueError(detail),
+                    )
+                max_retries = retry_limit_r.ok_value
 
             # The cutover payload: command fingerprint, retention
             # snapshot, and the prepared rerun-input envelope, computed
