@@ -36,7 +36,7 @@ from horsies.core.history.partitions.manager import (
 )
 from horsies.core.history.reads.publisher import (
     StagedLoaderPublisher,
-    staged_duplicate_guard_rendered,
+    published_readers_stamped,
 )
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -99,13 +99,13 @@ async def exception_ids(connection: AsyncConnection) -> set[str]:
     return {str(row) for row in rows}
 
 
-async def test_publication_renders_the_marked_guard_over_a_first_version(
+async def test_publication_renders_the_stamped_guard_over_a_first_version(
     terminalization_schema: HistorySchema,
 ) -> None:
     async with terminalization_schema.engine.begin() as connection:
-        assert not await staged_duplicate_guard_rendered(connection)
+        assert not await published_readers_stamped(connection)
         await prepare_move_storage(connection, CLASS_KEY)
-        assert await staged_duplicate_guard_rendered(connection)
+        assert await published_readers_stamped(connection)
 
 
 async def test_a_clock_ahead_move_is_recorded_and_the_guard_finds_it(

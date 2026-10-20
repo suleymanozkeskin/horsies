@@ -4,20 +4,25 @@ The runtime behavior (leaves land, workers start or refuse, one gate
 holder) is proven by integration suites; these pins hold the structural
 facts those suites assume: the config bounds refuse out-of-range
 horizons by name, the ensure pass runs its stages in dependency order,
-and the single publication probe is valid only while republication is
-atomic across all three staged readers.
+and the stamp check names every function that republication renders.
 """
 
 from __future__ import annotations
 
 import inspect
+import re
 from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
 from horsies.core.history.maintenance.coverage import ensure_partition_coverage
-from horsies.core.history.reads.publisher import StagedLoaderPublisher
+from horsies.core.history.reads import lookup_generation
+from horsies.core.history.reads.lookup_generation import LookupManifest
+from horsies.core.history.reads.publisher import (
+    RENDERED_READER_SIGNATURES,
+    StagedLoaderPublisher,
+)
 from horsies.core.models.retention import RetentionConfig
 
 pytestmark = [pytest.mark.unit]
@@ -75,23 +80,28 @@ class TestEnsureSequence:
         assert positions == sorted(positions)
 
 
-class TestPublicationAtomicityDependency:
-    def test_one_probe_stands_for_three_readers(self) -> None:
-        """The single to_regprocedure probe is valid ONLY because
-        republication is atomic across the triple: one republish body
-        renders the lookup, provenance, and detail functions together.
-        If publication ever splits, this pin goes red instead of the
-        probe going silently wrong.
-        """
+class TestRenderedReadersAreStamped:
+    def test_the_stamped_signatures_are_the_rendered_functions(self) -> None:
+        """A function that republication renders but does not stamp would
+        never count as stale, so the two lists must name the same set."""
         republish_source = inspect.getsource(StagedLoaderPublisher.republish)
-        for renderer in (
-            'render_staged_lookup_function',
-            'render_staged_provenance_function',
-            'render_staged_detail_function',
-        ):
-            assert renderer in republish_source, renderer
-        ensure_source = inspect.getsource(ensure_partition_coverage)
-        assert 'staged_detail_published' in ensure_source
+        renderers = set(
+            re.findall(r'render_staged_\w+_function', republish_source)
+        )
+        empty = LookupManifest(leaves=(), birth_floor=None)
+        rendered: set[str] = set()
+        for renderer in renderers:
+            source = getattr(lookup_generation, renderer)(empty)
+            match = re.search(
+                r'CREATE OR REPLACE FUNCTION (\w+)\(p_task_id uuid'
+                r'(, p_include_live boolean)?',
+                source,
+            )
+            assert match is not None, renderer
+            parameters = 'uuid, boolean' if match.group(2) else 'uuid'
+            rendered.add(f'{match.group(1)}({parameters})')
+        assert len(renderers) == len(RENDERED_READER_SIGNATURES)
+        assert rendered == set(RENDERED_READER_SIGNATURES)
 
 
 class TestPruningWiring:
