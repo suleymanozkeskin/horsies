@@ -76,7 +76,6 @@ from horsies.core.workflows.sql import (
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_OUTPUT_TASK_RESULT_SQL,
-    GET_PARENT_WORKFLOW_INFO_SQL,
     GET_SUBWORKFLOW_SUMMARIES_SQL,
     COMPLETE_WORKFLOW_TASK_SQL,
     GET_TASK_CONFIG_SQL,
@@ -97,7 +96,6 @@ from horsies.core.workflows.sql import (
     MARK_WORKFLOW_COMPLETED_SQL,
     MARK_WORKFLOW_FAILED_SQL,
     MARK_WORKFLOW_TASK_FAILED_SQL,
-    NOTIFY_WORKFLOW_DONE_SQL,
     PAUSE_WORKFLOW_ON_ERROR_SQL,
     REVERT_PRELINKED_FAST_ROOTS_SQL,
     SET_WORKFLOW_ERROR_SQL,
@@ -2593,6 +2591,7 @@ async def check_workflow_completion(
     success_policy_data = row.success_policy  # JSONB, may be None
     workflow_name = row.name
     output_task_index = row.output_task_index
+    parent_workflow_id = row.parent_workflow_id
     incomplete = row.incomplete or 0
     failed = row.failed or 0
     completed = row.completed or 0
@@ -2655,12 +2654,7 @@ async def check_workflow_completion(
     # driver runs each level in its own transaction; a crash between
     # levels is healed by recovery case 1.6 (child terminal, parent node
     # not updated).
-    parent_result = await session.execute(
-        GET_PARENT_WORKFLOW_INFO_SQL,
-        {'wf_id': workflow_id},
-    )
-    parent_row = parent_result.fetchone()
-    if parent_row and parent_row.parent_workflow_id is not None:
+    if parent_workflow_id is not None:
         _queue_parent_propagation(session, workflow_id)
 
 
@@ -3336,13 +3330,9 @@ async def _handle_workflow_task_failure(
             if pause_result.fetchone() is None:
                 return False
 
+            # The status trigger (horsies_notify_workflow_changes) sends
+            # workflow_done for this workflow and each paused child.
             await cascade_pause_to_children(session, workflow_id)
-
-            # Notify of pause (so clients can react via get())
-            await session.execute(
-                NOTIFY_WORKFLOW_DONE_SQL,
-                {'wf_id': workflow_id},
-            )
 
             return (
                 False  # Stop dependency propagation - pending tasks stay pending for resume

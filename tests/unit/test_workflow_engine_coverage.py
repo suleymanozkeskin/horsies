@@ -49,7 +49,6 @@ from horsies.core.workflows.sql import (
     GET_TASK_STATUSES_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_WORKFLOW_DAG_EDGES_SQL,
-    GET_PARENT_WORKFLOW_INFO_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_NAME_SQL,
     GET_WORKFLOW_ON_ERROR_SQL,
@@ -57,7 +56,6 @@ from horsies.core.workflows.sql import (
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_WORKFLOW_COMPLETED_SQL,
     MARK_WORKFLOW_FAILED_SQL,
-    NOTIFY_WORKFLOW_DONE_SQL,
     MARK_TASK_READY_SQL,
     SET_WORKFLOW_ERROR_SQL,
 )
@@ -1758,7 +1756,10 @@ class TestCheckWorkflowCompletion:
 
 
     @staticmethod
-    def _finalizable_session(executed: list[Any]) -> AsyncMock:
+    def _finalizable_session(
+        executed: list[Any],
+        parent_workflow_id: str | None = None,
+    ) -> AsyncMock:
         """A session whose workflow is RUNNING with every node terminal."""
 
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
@@ -1769,16 +1770,14 @@ class TestCheckWorkflowCompletion:
                 return _one_result(SimpleNamespace(
                     status='RUNNING', completed_at=None, error=None,
                     success_policy=None, name='wf', output_task_index=None,
+                    parent_workflow_id=parent_workflow_id,
                     incomplete=0, failed=1, completed=1, total=2,
-                ))
-            if stmt is GET_PARENT_WORKFLOW_INFO_SQL:
-                return _one_result(SimpleNamespace(
-                    parent_workflow_id=None, parent_task_index=None,
                 ))
             return _one_result(SimpleNamespace())
 
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
+        session.info = {}
         return session
 
     @pytest.mark.asyncio
@@ -1804,7 +1803,32 @@ class TestCheckWorkflowCompletion:
             MARK_WORKFLOW_COMPLETED_SQL if succeeded else MARK_WORKFLOW_FAILED_SQL
         )
         assert expected_mark in executed
-        assert NOTIFY_WORKFLOW_DONE_SQL not in executed
+        assert not any('pg_notify' in str(stmt) for stmt in executed)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('parent_workflow_id', [None, 'wf-parent'])
+    async def test_finalization_reads_the_parent_in_the_status_read(
+        self,
+        parent_workflow_id: str | None,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Lock, status read, mark: the parent link comes with the status."""
+        executed: list[Any] = []
+        session = self._finalizable_session(executed, parent_workflow_id)
+        monkeypatch.setattr(
+            engine, 'evaluate_workflow_success', AsyncMock(return_value=True),
+        )
+        monkeypatch.setattr(
+            engine, 'get_workflow_final_result', AsyncMock(return_value='null'),
+        )
+        await check_workflow_completion(session, 'wf-1')
+        assert executed == [
+            LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+            GET_WORKFLOW_COMPLETION_STATUS_SQL,
+            MARK_WORKFLOW_COMPLETED_SQL,
+        ]
+        queued = engine.pop_pending_parent_propagations(session)
+        assert queued == ([] if parent_workflow_id is None else ['wf-1'])
 
     @pytest.mark.asyncio
     async def test_failed_finalization_builds_no_final_result(

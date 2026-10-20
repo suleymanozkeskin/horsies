@@ -20,7 +20,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.utils.url import to_psycopg_url
-from horsies.core.workflows.engine import check_workflow_completion
+from horsies.core.workflows.engine import (
+    check_workflow_completion,
+    pop_pending_parent_propagations,
+)
 from tests.integration.conftest import DB_URL
 from tests.integration.test_workflow_denest_propagation import (
     _insert_subworkflow_node,
@@ -223,3 +226,30 @@ async def test_a_failed_child_gives_its_parent_a_summary_without_output(
     summary = json.loads(summary_text)
     assert summary['status'] == 'FAILED'
     assert summary['output'] is None
+
+
+@pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize('is_child', [False, True])
+async def test_finalization_queues_the_parent_of_a_child_only(
+    clean_workflow_tables: None,
+    session: AsyncSession,
+    is_child: bool,
+) -> None:
+    """The finalize reads the parent link with the status and queues the
+    parent advancement for a child workflow, never for a root."""
+    _ = clean_workflow_tables
+    parent_id = (
+        await _insert_workflow(session, status='RUNNING') if is_child else None
+    )
+    workflow_id = await _seed_finished_workflow(
+        session,
+        succeeded=True,
+        output_task_index=None,
+        parent_workflow_id=parent_id,
+    )
+
+    await check_workflow_completion(session, workflow_id)
+    queued = pop_pending_parent_propagations(session)
+    await session.commit()
+
+    assert queued == ([workflow_id] if is_child else [])

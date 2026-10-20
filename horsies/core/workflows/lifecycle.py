@@ -68,7 +68,6 @@ from horsies.core.workflows.sql import (
     GET_WORKFLOW_NAME_SQL,
     INSERT_WORKFLOW_SQL,
     PAUSE_WORKFLOW_SQL,
-    NOTIFY_WORKFLOW_DONE_SQL,
     GET_RUNNING_CHILD_WORKFLOWS_SQL,
     PAUSE_CHILD_WORKFLOW_SQL,
     RESET_ABANDONED_WORKFLOW_TASKS_SQL,
@@ -926,12 +925,9 @@ async def pause_workflow(
                     {'task_ids': abandoned_task_ids},
                 )
 
-            # Notify clients of pause (so get() returns immediately with WORKFLOW_PAUSED)
-            await session.execute(
-                NOTIFY_WORKFLOW_DONE_SQL,
-                {'wf_id': workflow_id},
-            )
-
+            # The status trigger (horsies_notify_workflow_changes) sends
+            # workflow_done for each paused workflow at commit, so get()
+            # returns WORKFLOW_PAUSED without waiting for a poll.
             await session.commit()
             return Ok(True)
     except SQLAlchemyError as exc:
@@ -979,15 +975,9 @@ async def cascade_pause_to_children(
             child_id = child_row.id
             paused_child_ids.append(child_id)
 
-            # Pause child
+            # Pause child; the status trigger sends its workflow_done.
             await session.execute(
                 PAUSE_CHILD_WORKFLOW_SQL,
-                {'wf_id': child_id},
-            )
-
-            # Notify of child pause
-            await session.execute(
-                NOTIFY_WORKFLOW_DONE_SQL,
                 {'wf_id': child_id},
             )
 

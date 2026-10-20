@@ -61,7 +61,6 @@ PAUSE_WORKFLOW_SQL = text("""
     WHERE id = :wf_id AND status = 'RUNNING'
     RETURNING id
 """)
-NOTIFY_WORKFLOW_DONE_SQL = text("""SELECT pg_notify('workflow_done', :wf_id)""")
 # -- SQL constants for _cascade_pause_to_children --
 
 GET_RUNNING_CHILD_WORKFLOWS_SQL = text("""
@@ -469,6 +468,7 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
         w.success_policy,
         w.name,
         w.output_task_index,
+        w.parent_workflow_id,
         COUNT(wt.id) FILTER (WHERE NOT (wt.status = ANY(:wf_task_terminal_states))) as incomplete,
         COUNT(wt.id) FILTER (WHERE wt.status = 'FAILED') as failed,
         COUNT(wt.id) FILTER (WHERE wt.status = 'COMPLETED') as completed,
@@ -477,7 +477,7 @@ GET_WORKFLOW_COMPLETION_STATUS_SQL = text("""
     LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
     WHERE w.id = :wf_id
     GROUP BY w.id, w.status, w.completed_at, w.error, w.success_policy, w.name,
-             w.output_task_index
+             w.output_task_index, w.parent_workflow_id
 """)
 MARK_WORKFLOW_COMPLETED_SQL = text("""
     UPDATE horsies_workflows
@@ -490,10 +490,6 @@ MARK_WORKFLOW_FAILED_SQL = text("""
         error = COALESCE(:error, error),
         completed_at = NOW(), updated_at = NOW()
     WHERE id = :wf_id AND status = 'RUNNING' AND completed_at IS NULL
-""")
-GET_PARENT_WORKFLOW_INFO_SQL = text("""
-    SELECT parent_workflow_id, parent_task_index
-    FROM horsies_workflows WHERE id = :wf_id
 """)
 # -- SQL constants for on_subworkflow_complete --
 
