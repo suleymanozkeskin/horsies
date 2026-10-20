@@ -107,6 +107,10 @@ RetryPolicy(
 )
 ```
 
+## When a Retry Starts
+
+The computed delay is the earliest time a retry can start, not the exact time. When the delay ends, the retry joins its queue in the same order as a task sent at that moment: tasks that became ready earlier are claimed first.
+
 ## Auto-Retry Triggers
 
 Retries only happen when specific conditions are met. Configure via `auto_retry_for` on `RetryPolicy`:
