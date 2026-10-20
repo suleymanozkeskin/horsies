@@ -663,7 +663,7 @@ async def test_retry_blocked_by_good_until_expiry(
     task_options = json.dumps({
         'retry_policy': {
             'max_retries': 3,
-            'intervals': [60],
+            'intervals': [60, 60, 60],
             'backoff_strategy': 'fixed',
             'jitter': False,
             'auto_retry_for': ['TRANSIENT'],

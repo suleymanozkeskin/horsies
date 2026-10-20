@@ -36,7 +36,6 @@ from horsies.core.worker.child_runner import (
     _get_workflow_status_for_task,
     _handle_workflow_stop_before_start,
     _heartbeat_worker,
-    _is_retryable_db_error,
     _run_task_entry,
     _serialization_error_response,
 )

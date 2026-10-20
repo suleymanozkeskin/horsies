@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import ValidationError
+
 from horsies.core.codec.json_io import Json, SerdeResult, dumps_json
-from horsies.core.models.tasks import MAX_RETRY_ATTEMPTS, RetryPolicy, TaskOptions
+from horsies.core.models.tasks import RetryPolicy, TaskOptions
 from horsies.core.types.result import Err, Ok, Result
 
 
@@ -32,37 +34,42 @@ def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
 
 
 @dataclass(frozen=True, slots=True)
-class InvalidRetryLimit:
-    """A `retry_policy.max_retries` that is not an integer in
-    0..MAX_RETRY_ATTEMPTS. `detail` names the value."""
+class InvalidRetryPolicy:
+    """A `retry_policy` that does not validate as `RetryPolicy`. `detail`
+    names each failing field and its cause."""
 
     detail: str
 
 
-def stored_max_retries(options: Json) -> Result[int, InvalidRetryLimit]:
+def _validation_detail(error: ValidationError) -> str:
+    return '; '.join(
+        f"{'.'.join(str(part) for part in item['loc']) or 'retry_policy'}: "
+        f"{item['msg']}"
+        for item in error.errors()
+    )
+
+
+def stored_max_retries(options: Json) -> Result[int, InvalidRetryPolicy]:
     """The `max_retries` value that enqueue stores for decoded task options.
 
-    Options without a `retry_policy` object store 0 retries: options that
-    are not an object, and a `retry_policy` that is absent, null, or not an
-    object. A policy without `max_retries` has the `RetryPolicy` default.
-    Other option fields are not checked.
+    Options that are not an object, and a `retry_policy` that is absent or
+    null, store 0 retries. Any other `retry_policy` must validate as
+    `RetryPolicy` in strict mode (no type coercion); its `max_retries` is
+    stored. Other option fields are not checked.
     """
     if not isinstance(options, dict):
         return Ok(0)
     policy = options.get('retry_policy')
-    if not isinstance(policy, dict):
+    if policy is None:
         return Ok(0)
-    if 'max_retries' not in policy:
-        return Ok(RetryPolicy.model_fields['max_retries'].default)
-    match policy['max_retries']:
-        case bool() as flag:
-            return Err(InvalidRetryLimit(f'max_retries is not an integer: {flag!r}'))
-        case int() as limit if 0 <= limit <= MAX_RETRY_ATTEMPTS:
-            return Ok(limit)
-        case other:
-            return Err(
-                InvalidRetryLimit(
-                    f'max_retries is not an integer in 0..{MAX_RETRY_ATTEMPTS}: '
-                    f'{other!r}'
-                )
+    if not isinstance(policy, dict):
+        return Err(
+            InvalidRetryPolicy(
+                f'retry_policy is not an object: {type(policy).__name__}'
             )
+        )
+    try:
+        validated = RetryPolicy.model_validate(policy, strict=True)
+    except ValidationError as error:
+        return Err(InvalidRetryPolicy(_validation_detail(error)))
+    return Ok(validated.max_retries)

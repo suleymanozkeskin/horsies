@@ -104,7 +104,7 @@ Terminal outcome codes for tasks and workflows.
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
-| `INVALID_TASK_OPTIONS` | `enqueue_async` received a `retry_policy.max_retries` that is not an integer in 0..20. Nothing was written | No |
+| `INVALID_TASK_OPTIONS` | `enqueue_async` received a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
 
 Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVAILABLE` only fires for the success path. Reading failed tasks across processes that don't import the user code still works.
 
