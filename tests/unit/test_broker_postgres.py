@@ -843,7 +843,10 @@ class TestEnqueueAsync:
         engine, conn = _make_enqueue_engine()
         broker.async_engine = engine
 
-        task_options = '{"retry_policy": {"max_retries": 5}}'
+        task_options = (
+            '{"retry_policy": {"max_retries": 5, "intervals": [5], '
+            '"backoff_strategy": "exponential", "auto_retry_for": ["TRANSIENT"]}}'
+        )
         result = await broker.enqueue_async(
             'my_task',
             task_id='test-task-id',
@@ -897,12 +900,8 @@ class TestEnqueueAsync:
         conn.execute.assert_awaited()
 
     @pytest.mark.asyncio
-    async def test_task_options_with_non_dict_retry_policy_keeps_zero(self) -> None:
-        """retry_policy that is not a dict should still produce a successful enqueue.
-
-        max_retries defaults to 0 when retry_policy is not a dict. The broker
-        embeds this into the Core INSERT; we verify the enqueue succeeds.
-        """
+    async def test_task_options_with_non_dict_retry_policy_is_refused(self) -> None:
+        """A retry_policy that is not an object is refused before any write."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
         broker.async_engine = engine
@@ -915,9 +914,10 @@ class TestEnqueueAsync:
             task_options=task_options,
         )
 
-        assert is_ok(result)
-        conn.execute.assert_awaited()
-        assert conn.execute.await_args.args[1]['max_retries'] == 0
+        assert is_err(result)
+        assert result.err_value.code == BrokerErrorCode.INVALID_TASK_OPTIONS
+        assert 'retry_policy is not an object: str' in result.err_value.message
+        conn.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_task_options_without_retry_policy_keeps_zero(self) -> None:

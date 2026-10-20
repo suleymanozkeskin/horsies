@@ -843,7 +843,10 @@ class TestEnqueueSubworkflowTask:
         child_task.node_id = 'child-0'
         child_task.good_until = datetime(2030, 1, 1, tzinfo=timezone.utc)
         child_task.fn = MagicMock()
-        child_task.fn.task_options_json = '{"retry_policy": {"max_retries": 2}}'
+        child_task.fn.task_options_json = (
+            '{"retry_policy": {"max_retries": 2, "intervals": [1, 2], '
+            '"auto_retry_for": ["TRANSIENT"]}}'
+        )
         child_task.fn.task_queue_name = 'default'
         child_task.allow_failed_deps = False
         child_task.join = 'all'

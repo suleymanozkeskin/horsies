@@ -172,7 +172,7 @@ def root_retry_and_deadline(
 
     Raises:
         SerializationError: task_options_json does not parse to an object,
-            or its retry limit is not an integer in 0..MAX_RETRY_ATTEMPTS.
+            or its retry_policy does not validate as RetryPolicy.
     """
     max_retries = 0
     good_until_str: str | None = None
