@@ -622,6 +622,7 @@ class TestLiveBrokerConnectivityCheck:
             "keepalives_idle": 30,
             "keepalives_interval": 10,
             "keepalives_count": 3,
+            "tcp_user_timeout": 30_000,
             "prepare_threshold": None,
         }
         assert mock_create_engine.call_args_list[1].args[0] == (

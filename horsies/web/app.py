@@ -157,7 +157,8 @@ def create_monitoring_app(
     ui_config = config or MonitoringUIConfig()
     schema_probe = SchemaProbe(broker)
     broadcaster = EventBroadcaster(
-        to_psycopg_url(broker.config.effective_session_database_url)
+        to_psycopg_url(broker.config.effective_session_database_url),
+        tcp_user_timeout_ms=broker.config.tcp_user_timeout_ms,
     )
     index_html = _read_index()
 

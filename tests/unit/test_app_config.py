@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from horsies.core.errors import (
     ConfigurationError,
@@ -156,6 +156,7 @@ class TestPostgresConfigPgBouncer:
             'keepalives_idle': 30,
             'keepalives_interval': 10,
             'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
             'prepare_threshold': None,
         }
 
@@ -238,6 +239,46 @@ class TestPostgresConfigPgBouncer:
 
 
 @pytest.mark.unit
+class TestPostgresConfigTcpUserTimeout:
+    """libpq tcp_user_timeout on broker, child and listener connections.
+
+    Keepalives do not probe while sent data is unacknowledged, so without
+    this a write to a dead connection blocks for the kernel retransmission
+    limit (about 15 minutes on Linux).
+    """
+
+    _LOCAL_URL = 'postgresql+psycopg://user:pass@localhost/db'
+
+    def test_default_is_30_seconds_in_every_connect_args(self) -> None:
+        config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
+
+        assert config.tcp_user_timeout_ms == 30_000
+        assert config.tcp_connect_args()['tcp_user_timeout'] == 30_000
+        assert config.pooled_connect_args['tcp_user_timeout'] == 30_000
+
+    def test_zero_passes_through_as_the_system_default(self) -> None:
+        config = PostgresConfig(
+            database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=0,
+        )
+
+        assert config.pooled_connect_args['tcp_user_timeout'] == 0
+
+    def test_negative_value_is_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=-1,
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
+        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+
+    def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
+        config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
+
+        assert 'tcp_user_timeout_ms' not in config.sqlalchemy_engine_kwargs()
+
+
+@pytest.mark.unit
 class TestPostgresConfigKeepalives:
     """TCP keepalive configuration on broker/child connections.
 
@@ -271,6 +312,7 @@ class TestPostgresConfigKeepalives:
             'keepalives_idle': 30,
             'keepalives_interval': 10,
             'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
         }
 
     def test_keepalives_disabled_yields_empty_connect_args(self) -> None:
@@ -280,7 +322,7 @@ class TestPostgresConfigKeepalives:
         )
 
         assert config.keepalive_connect_args() == {}
-        assert config.pooled_connect_args == {}
+        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
 
     def test_custom_keepalive_values_flow_through(self) -> None:
         config = PostgresConfig(
@@ -295,6 +337,7 @@ class TestPostgresConfigKeepalives:
             'keepalives_idle': 15,
             'keepalives_interval': 5,
             'keepalives_count': 2,
+            'tcp_user_timeout': 30_000,
         }
 
     @pytest.mark.parametrize(
@@ -324,7 +367,8 @@ class TestPostgresConfigKeepalives:
             tcp_keepalives_idle=0,
         )
 
-        assert config.pooled_connect_args == {}
+        # tcp_user_timeout does not depend on keepalives.
+        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
 
     def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)

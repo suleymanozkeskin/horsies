@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from psycopg import Notify
 
 from horsies.core.brokers.listener import PostgresListener
+from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.logging import get_logger
 from horsies.core.types.result import is_err
 
@@ -117,8 +118,10 @@ class EventBroadcaster:
         database_url: str,
         *,
         debounce_seconds: float = DEBOUNCE_SECONDS,
+        tcp_user_timeout_ms: int = DEFAULT_TCP_USER_TIMEOUT_MS,
     ) -> None:
         self._database_url = database_url
+        self._tcp_user_timeout_ms = tcp_user_timeout_ms
         self._debounce_seconds = debounce_seconds
         self._listener: PostgresListener | None = None
         self._coalescer = EventCoalescer()
@@ -134,7 +137,10 @@ class EventBroadcaster:
 
     def _build_listener(self) -> PostgresListener:
         """Construct the listener. Seam for tests that inject a failing one."""
-        return PostgresListener(self._database_url)
+        return PostgresListener(
+            self._database_url,
+            tcp_user_timeout_ms=self._tcp_user_timeout_ms,
+        )
 
     async def _start(self) -> bool:
         """Bring up the listener and pumps once. Returns False if degraded."""

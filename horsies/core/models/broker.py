@@ -1,6 +1,7 @@
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.errors import ConfigurationError, ErrorCode
 
 
@@ -19,6 +20,7 @@ class PostgresConfig(BaseModel):
         'tcp_keepalives_idle',
         'tcp_keepalives_interval',
         'tcp_keepalives_count',
+        'tcp_user_timeout_ms',
     }
 
     # SecretStr: repr()/model_dump() of the config must never expose
@@ -109,6 +111,20 @@ class PostgresConfig(BaseModel):
     tcp_keepalives_count: int = Field(
         default=3,
         description='Unacknowledged probes before the connection is dropped (libpq keepalives_count)',
+    )
+    # Keepalives probe only an idle connection. While sent data waits for
+    # an acknowledgement, the kernel retransmission limit decides instead,
+    # and a write to a dead connection (no reset from the server side)
+    # blocks for about 15 minutes on Linux. tcp_user_timeout bounds that
+    # wait. It does not affect a long query: the client's sent data is
+    # acknowledged while it waits for the result.
+    tcp_user_timeout_ms: int = Field(
+        default=DEFAULT_TCP_USER_TIMEOUT_MS,
+        description=(
+            'Milliseconds that sent data may stay unacknowledged before the '
+            'connection is closed (libpq tcp_user_timeout); 0 uses the '
+            'operating system default'
+        ),
     )
     echo: bool = Field(default=False, description='Whether to echo the SQL statements')
 
@@ -218,6 +234,16 @@ class PostgresConfig(BaseModel):
                         notes=[f'{name}={value}', f'{name} must be >= 1 when tcp_keepalives is True'],
                         help_text='use positive second/count values, or set tcp_keepalives=False to disable',
                     )
+        if self.tcp_user_timeout_ms < 0:
+            raise ConfigurationError(
+                message='invalid tcp_user_timeout_ms',
+                code=ErrorCode.CONFIG_INVALID_KEEPALIVE,
+                notes=[
+                    f'tcp_user_timeout_ms={self.tcp_user_timeout_ms}',
+                    'tcp_user_timeout_ms must be >= 0',
+                ],
+                help_text='use a positive millisecond value, or 0 for the operating system default',
+            )
         return self
 
     @property
@@ -236,15 +262,23 @@ class PostgresConfig(BaseModel):
             'keepalives_count': self.tcp_keepalives_count,
         }
 
+    def tcp_connect_args(self) -> dict[str, int]:
+        """libpq TCP params for psycopg connections: the keepalive params
+        and tcp_user_timeout."""
+        return {
+            **self.keepalive_connect_args(),
+            'tcp_user_timeout': self.tcp_user_timeout_ms,
+        }
+
     @property
     def pooled_connect_args(self) -> dict[str, object]:
         """psycopg connect_args for pooled broker/child connections.
 
-        Merges TCP keepalives with the PgBouncer transaction-mode knob
+        Merges the TCP params with the PgBouncer transaction-mode knob
         (prepared statements disabled). Both are valid psycopg connect
         kwargs and coexist.
         """
-        args: dict[str, object] = dict(self.keepalive_connect_args())
+        args: dict[str, object] = dict(self.tcp_connect_args())
         if self.pgbouncer_transaction_mode:
             args['prepare_threshold'] = None
         return args

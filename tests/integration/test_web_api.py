@@ -281,8 +281,9 @@ async def read_status(session: AsyncSession, workflow_id: str) -> str:
 class FailingListener:
     """A listener that cannot connect, for the degraded-stream path."""
 
-    def __init__(self, database_url: str) -> None:
+    def __init__(self, database_url: str, *, tcp_user_timeout_ms: int) -> None:
         self.database_url = database_url
+        self.tcp_user_timeout_ms = tcp_user_timeout_ms
 
     async def start(self) -> Err[BrokerOperationError]:
         return Err(

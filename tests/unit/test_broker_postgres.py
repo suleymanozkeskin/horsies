@@ -408,6 +408,7 @@ class TestPostgresBrokerPgBouncerWiring:
             'keepalives_idle': 30,
             'keepalives_interval': 10,
             'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
             'prepare_threshold': None,
         }
         assert mock_engine.call_args_list[1].args[0] == session_url
@@ -416,8 +417,11 @@ class TestPostgresBrokerPgBouncerWiring:
             'keepalives_idle': 30,
             'keepalives_interval': 10,
             'keepalives_count': 3,
+            'tcp_user_timeout': 30_000,
         }
-        mock_listener_cls.assert_called_once_with('postgresql://u:p@direct:5432/db')
+        mock_listener_cls.assert_called_once_with(
+            'postgresql://u:p@direct:5432/db', tcp_user_timeout_ms=30_000,
+        )
 
     @pytest.mark.asyncio
     async def test_schema_initialization_uses_session_url_when_split(self) -> None:
