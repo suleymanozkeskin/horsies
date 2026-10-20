@@ -1004,7 +1004,8 @@ def _batch_history_insert(
     """The batch families' projection, over the shared column authority.
 
     The materialized CTE encodes each task's attempt snapshot once; the
-    snapshot column and its digest both read that one encoding.
+    snapshot column and its digest both read that one encoding. The result
+    digest is the batch's `v_result_digest`, computed once.
     """
     attempt_data_sql = (
         'WITH attempt_data AS MATERIALIZED (\n'
@@ -1037,10 +1038,7 @@ def _batch_history_insert(
             'result_content_type': "'application/json'",
             'result_payload': 'v_result_payload',
             'prior_result_payload': 'NULL',
-            'result_digest': (
-                'CASE WHEN v_result_payload IS NULL THEN NULL\n'
-                '             ELSE sha256(v_result_payload) END'
-            ),
+            'result_digest': 'v_result_digest',
             'error_code': error_expression,
             'final_failed_reason': reason_expression,
             'retry_count': 't.retry_count',
@@ -1167,7 +1165,7 @@ def _move_stage_core(
         t.id, n.workflow_id, n.id,
         '{status}', v_terminal_at, '{kind.value}',
         'HISTORY', t.retention_class_key, v_terminal_at,
-        1, sha256(v_result_payload),
+        1, v_result_digest,
         gen_random_uuid(), statement_timestamp(), 0
     FROM {LIVE_TASKS} t
     JOIN horsies_workflow_tasks n ON n.task_id = t.id
@@ -1187,6 +1185,12 @@ def _move_stage_core(
     v_result_payload := CASE
         WHEN ({result_expression}) IS NULL THEN NULL
         ELSE convert_to(({result_expression}), 'UTF8')
+    END;
+    -- The payload is one value for the whole batch: hash it once for the
+    -- history rows and the deferred records.
+    v_result_digest := CASE
+        WHEN v_result_payload IS NULL THEN NULL
+        ELSE sha256(v_result_payload)
     END;
 
     {_batch_history_insert(
@@ -1313,6 +1317,7 @@ DECLARE
     v_moved bigint;
     v_deleted bigint;
     v_result_payload bytea;
+    v_result_digest bytea;
 BEGIN
 {size_stage}    PERFORM {ARCHIVE_AVAILABILITY_FUNCTION}();
 
@@ -1421,6 +1426,7 @@ DECLARE
     v_moved bigint;
     v_deleted bigint;
     v_result_payload bytea;
+    v_result_digest bytea;
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION
@@ -1801,6 +1807,7 @@ DECLARE
     v_moved bigint;
     v_deleted bigint;
     v_result_payload bytea;
+    v_result_digest bytea;
 BEGIN
     IF p_ids IS NULL OR p_claimed_ats IS NULL THEN
         RAISE EXCEPTION 'batch arrays must be non-NULL'
@@ -2052,7 +2059,8 @@ def terminal_snapshot_replacement_ddl() -> tuple[str, ...]:
     Schema v42 installs them on a uuid database whose move program encodes
     each batch attempt snapshot twice and hashes a deferred result twice.
     Schema v44 relies on the same statements to install the pending expiry
-    whose outcomes follow ascending deadlines. Signatures and return types
+    whose outcomes follow ascending deadlines, and schema v50 to install the
+    batch moves that hash the batch result once. Signatures and return types
     are unchanged.
     """
     return tuple(

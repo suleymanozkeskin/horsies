@@ -46,6 +46,10 @@ from horsies.core.history.cutover.relocation import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.history.terminalization.move import ATTEMPT_ENCODER_DDL
 from tests.integration.task_history_harness import prepare_move_storage
+from tests.integration.test_terminal_snapshot_reuse import (
+    count_encoder_calls,
+    encoder_call_count,
+)
 from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
@@ -293,6 +297,49 @@ class TestStructuralOmissions:
         assert 'pg_advisory' not in rendered
         assert 'horsies_workflow_phase2_pending' not in rendered
         assert 'key_reservation' not in rendered
+
+
+class TestRelocationEncodesOnce:
+    @pytest.mark.asyncio
+    async def test_the_insert_encodes_each_snapshot_once(
+        self, make_database: MakeDatabase
+    ) -> None:
+        """The snapshot column and its digest read one encoding per row."""
+        url = await make_database()
+        await _prepare(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                task_ids = [
+                    await insert_legacy_task(
+                        connection,
+                        status='FAILED',
+                        kind=None,
+                        result='{"error": {"code": "BOOM"}}',
+                        error_code='BOOM',
+                        attempts=(('FAILED', 'reason'),) * attempt_count,
+                    )
+                    for attempt_count in (0, 1, 2)
+                ]
+                await count_encoder_calls(connection)
+                inserted = (await connection.execute(
+                    text(relocation_insert_sql() + ' RETURNING task_id'),
+                    {'task_ids': task_ids},
+                )).scalars().all()
+                assert sorted(str(task_id) for task_id in inserted) == sorted(
+                    task_ids,
+                )
+                assert await encoder_call_count(connection) == len(task_ids)
+                mismatched = (await connection.execute(text(
+                    'SELECT count(*) FROM horsies_task_history '
+                    'WHERE attempt_snapshot_digest <> sha256(attempt_snapshot) '
+                    '   OR result_digest IS DISTINCT FROM '
+                    '      sha256(COALESCE(result_payload, prior_result_payload))'
+                ))).scalar_one()
+                assert mismatched == 0
+        finally:
+            await engine.dispose()
 
 
 class TestRelocation:

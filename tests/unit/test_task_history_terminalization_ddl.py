@@ -417,6 +417,19 @@ class TestSnapshotAndDigestReuse:
         assert 'JOIN attempt_data ON attempt_data.id = t.id' in batch
         assert 'sha256(attempt_data.snapshot)' in batch
 
+    @pytest.mark.parametrize('batch', _BATCH_MOVES, ids=_BATCH_MOVE_IDS)
+    def test_batch_hashes_the_batch_result_once(self, batch: str) -> None:
+        """The payload is one value per batch, so its digest is computed
+        once, not once per moved row or per deferred record."""
+        assert batch.count('sha256(v_result_payload)') == 1
+        assert 'v_result_digest bytea;' in batch
+        assert 'v_result_digest := CASE' in batch
+        if 'INSERT INTO horsies_workflow_phase2_pending' in batch:
+            pending = batch[
+                batch.index('INSERT INTO horsies_workflow_phase2_pending'):
+            ]
+            assert '1, v_result_digest,' in pending
+
     def test_move_hashes_the_result_once(self) -> None:
         assert MOVE_BODY.count('sha256(v_result_payload)') == 1
         assert MOVE_BODY.count('sha256(v_prior_result_payload)') == 1
@@ -562,7 +575,7 @@ class TestWorkflowNodeFamily:
         cancel_single = workflow_node_family_fragments()[1]
         assert 'NULL, NULL, NULL' in cancel_single
         # Batch projection order pins error_code and final_failed_reason
-        # (the two expressions after result_digest's CASE) to NULL;
+        # (the two expressions after result_digest) to NULL;
         # whitespace-independent because the projection renders from the
         # shared column authority, one expression per line.
         for fragment in (
@@ -570,7 +583,7 @@ class TestWorkflowNodeFamily:
             workflow_node_family_fragments()[5],
         ):
             assert re.search(
-                r'sha256\(v_result_payload\) END,\s*NULL,\s*NULL,',
+                r'v_result_digest,\s*NULL,\s*NULL,',
                 fragment,
             )
 

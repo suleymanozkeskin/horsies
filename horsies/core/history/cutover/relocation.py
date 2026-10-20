@@ -171,10 +171,7 @@ def relocation_rule_check_sql() -> str:
 
 
 def _relocation_values() -> dict[str, str]:
-    result_bytes = (
-        "CASE WHEN t.result IS NULL THEN NULL "
-        "ELSE convert_to(t.result, 'UTF8') END"
-    )
+    result_bytes = 'relocated.result_bytes'
     swap_is_admin = "t.terminalization_kind = 'CANCEL_ADMIN'"
     return {
             'task_id': 'CAST(t.id AS uuid)',
@@ -208,13 +205,8 @@ def _relocation_values() -> dict[str, str]:
             'prior_result_payload': (
                 f'CASE WHEN {swap_is_admin} THEN ({result_bytes}) END'
             ),
-            'result_digest': (
-                f'CASE WHEN {swap_is_admin} '
-                f'THEN CASE WHEN t.result IS NULL THEN NULL '
-                f"ELSE sha256(convert_to(t.result, 'UTF8')) END "
-                f'WHEN t.result IS NULL THEN NULL '
-                f"ELSE sha256(convert_to(t.result, 'UTF8')) END"
-            ),
+            # Both the result and the prior result hash the same bytes.
+            'result_digest': f'sha256({result_bytes})',
             'error_code': 't.error_code',
             'final_failed_reason': (
                 "CASE WHEN t.status IN ('FAILED', 'EXPIRED') "
@@ -238,10 +230,8 @@ def _relocation_values() -> dict[str, str]:
             'attempt_archive_version': '1',
             'attempt_snapshot_codec': "'json-utf8'",
             'attempt_snapshot_content_type': "'application/json'",
-            'attempt_snapshot': f'{ATTEMPT_ENCODER_FUNCTION}(CAST(t.id AS uuid))',
-            'attempt_snapshot_digest': (
-                f'sha256({ATTEMPT_ENCODER_FUNCTION}(CAST(t.id AS uuid)))'
-            ),
+            'attempt_snapshot': 'relocated.snapshot',
+            'attempt_snapshot_digest': 'sha256(relocated.snapshot)',
             'rerun_input_disposition': 'd.disposition',
             'rerun_input_version': rerun_carriage_expression('version'),
             'rerun_input_codec': rerun_carriage_expression('codec'),
@@ -272,6 +262,14 @@ _RELOCATION_SELECT_TAIL: Final = f"""FROM {LIVE_TASKS} t
     CROSS JOIN LATERAL (
         SELECT {disposition_case_expression('t', 't.status')} AS disposition
     ) d
+    -- OFFSET 0 keeps the subquery from being inlined, so the encoder runs
+    -- once per row for the snapshot and its digest.
+    CROSS JOIN LATERAL (
+        SELECT {ATTEMPT_ENCODER_FUNCTION}(CAST(t.id AS uuid)) AS snapshot,
+               CASE WHEN t.result IS NULL THEN NULL
+                    ELSE convert_to(t.result, 'UTF8') END AS result_bytes
+        OFFSET 0
+    ) relocated
     WHERE t.id::text = ANY(CAST(:task_ids AS text[]))"""
 
 

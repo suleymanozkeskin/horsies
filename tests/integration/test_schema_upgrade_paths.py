@@ -1635,6 +1635,67 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_batch_result_digest_upgrade_from_49(
+        self, scratch_database: str,
+    ) -> None:
+        """A v49 database receives the batch moves that hash the result once."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        broker = PostgresBroker(
+            PostgresConfig(database_url=SecretStr(scratch_database)),
+        )
+        batch_moves = (
+            'horsies_expire_pending_tasks',
+            'horsies_cancel_orphaned_tasks',
+            'horsies_abandon_owned_nodes',
+            'horsies_cancel_owned_nodes',
+            'horsies_abandon_nodes_of_paused_workflows',
+            'horsies_cancel_nodes_of_cancelled_workflow',
+        )
+        try:
+            async with engine.begin() as conn:
+                for name in batch_moves:
+                    signature, result = (await conn.execute(
+                        text(
+                            'SELECT pg_get_function_arguments(oid), '
+                            'pg_get_function_result(oid) '
+                            'FROM pg_proc WHERE proname = :name'
+                        ),
+                        {'name': name},
+                    )).one()
+                    await conn.execute(text(
+                        f'CREATE OR REPLACE FUNCTION {name}({signature}) '
+                        f'RETURNS {result} LANGUAGE plpgsql '
+                        'AS $$ BEGIN RETURN; END $$'
+                    ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 50'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (49) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            applied = await broker.ensure_schema_initialized()
+            assert applied.is_ok(), applied
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    'SELECT max(version) FROM horsies_schema_version'
+                ))).scalar_one() == SCHEMA_VERSION
+                bodies = dict((await conn.execute(
+                    text("""
+                        SELECT proname::text, prosrc
+                        FROM pg_proc WHERE proname = ANY(:moves)
+                    """),
+                    {'moves': list(batch_moves)},
+                )).tuples().all())
+            assert set(bodies) == set(batch_moves)
+            for name in batch_moves:
+                assert bodies[name].count('sha256(v_result_payload)') == 1, name
+                assert 'v_result_digest := CASE' in bodies[name], name
+        finally:
+            await broker.close_async()
+            await engine.dispose()
+
     async def test_single_column_history_checks_upgrade_from_48(
         self, scratch_database: str,
     ) -> None:
