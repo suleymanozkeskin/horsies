@@ -8,6 +8,145 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-10-20
+
+### Upgrade notes
+
+- **The schema advances from v36 to v51** when the first 0.5.4 process starts.
+  Mixed 0.5.3 and 0.5.4 fleets are not tested: stop every horsies process
+  (workers, schedulers, web), then start 0.5.4.
+- **Schema v37 refuses unknown workflow node statuses.** Before it adds a
+  CHECK for the seven `WorkflowTaskStatus` values, activation reads every
+  node. A node with another status (for example `CANCELLED`, which the
+  phase-two function accepted before) stops the upgrade with
+  `WorkflowNodeStatusMigrationError` and changes nothing. Correct those rows,
+  then start again.
+- Index removals (`DROP INDEX CONCURRENTLY`) and index builds
+  (`CREATE INDEX CONCURRENTLY`) do not block claims, enqueues or finalizes.
+
+### Changed
+
+- **A FAILED workflow stores no result.** `MARK_WORKFLOW_FAILED_SQL` writes
+  `result = NULL`, and the final result is built only for a COMPLETED
+  workflow. For a FAILED sub-workflow, `SubWorkflowSummary.output` is `None`.
+  The Rust runtime stores `NULL` in the same case.
+- **Enqueue validates the whole `retry_policy`.** `enqueue_async`, workflow
+  node promotion and the workflow fast-path root validate the policy as
+  `RetryPolicy` in strict mode (no type coercion, no unknown fields, the
+  model's strategy rules). A malformed policy is refused with
+  `INVALID_TASK_OPTIONS` before any write; the message names each failing
+  field. Refused now, accepted before: a partial policy such as
+  `{"max_retries": 3}`, which stored 3 retries but never retried because
+  `auto_retry_for` was missing; `max_retries` outside 1..20 inside a policy
+  (no policy still means 0 retries); and a policy that is not an object.
+  Options built from `RetryPolicy` (every `.send()`, workflow and scheduler
+  path) always pass.
+- **`PostgresConfig.tcp_user_timeout_ms`, default 30 000.** Sets libpq
+  `tcp_user_timeout` on the broker pools, the child-process pools, the
+  `LISTEN` connections and the monitoring listener. A write to a connection
+  that died without a reset now fails after 30 s instead of the kernel
+  retransmission limit (about 924 s on Linux with `tcp_retries2=15`); the
+  pool then opens a new connection. A long query is not affected. With
+  keepalives on, an idle dead connection is closed at about 40 s instead of
+  60 s. `0` uses the operating system default. Applies on Linux only.
+- **Broker connections run with `jit = off`** where the session keeps the
+  setting: the runtime pool (not in PgBouncer transaction mode), the session
+  pool, and the single-connection engine. On a fresh database the partition
+  coverage probe costs 123,447, above the default `jit_above_cost` (100,000).
+- **The monitoring status cards are cached for 10 seconds per scope.**
+  `/api/tasks/stats` counts can be up to 10 seconds old.
+- **Worker health reports `completion_candidate_yield`**: completion
+  candidates per workflow scanned by the global recovery audit.
+- **`forever` history uses one open-ended leaf.** Partition coverage stops
+  creating one daily `forever` leaf per day. Closed, empty daily `forever`
+  leaves are detached and dropped by the prune pass, at most 32 per pass.
+
+### Fixed
+
+- **Partition maintenance under a session time zone other than UTC.**
+  Catalog anchors are decoded to UTC. Before, under `Europe/Berlin`, the
+  leaves whose bound is in the repeated hour of 2026-10-25 failed with
+  `METADATA_MISMATCH` on every pass; the heartbeat and `forever` sweeps
+  failed on the fold day; and relocation west of UTC named leaves for the
+  wrong day. Leaf bounds and names now refuse a value that is not in UTC.
+- **A pause that races a resume no longer strands a node.** The abandon
+  functions lock the workflow row and apply only while the workflow is still
+  `PAUSED`. Before, a resume that committed between the status read and the
+  abandon left the node `READY` with no task while the workflow was
+  `RUNNING`, until workflow recovery ran (30 s by default).
+- **The child pre-start stop writes the node only when its transition
+  applied.** For a PAUSED workflow, the node is reset to `READY` only when the
+  abandon applied; for a CANCELLED workflow, the node is marked `SKIPPED` only
+  when the cancel applied, and after it. Before, a lost claim or a row that
+  ended another way still had its node rewritten.
+- **Worker start no longer fails when its children start at different
+  times.** Each warmup call waits at a barrier with one party per child, so
+  one round of calls reaches every child. Before, a child that finished its
+  initializer more than about 0.6 s after the others failed the start with
+  `worker child warmup started 1/2 process(es)`, and the start path does not
+  retry that error. A child later than 20 s now fails with a
+  `WarmupIncompleteError` that names the barrier.
+- **Schema lock waits do not hold a snapshot.** A broker that waits for the
+  schema lock polls `pg_try_advisory_lock` every 25 ms, so it cannot block
+  the lock holder's `CREATE INDEX CONCURRENTLY`.
+- **The finalizing marker is fenced to the claim generation**, so a stale
+  attempt cannot stamp a re-claimed row.
+- **A retried task keeps its node's first `started_at`.** The node handoff
+  writes the node only when it is not already `RUNNING`.
+- **The scheduler runs with a one-connection runtime pool.** Its lock
+  transactions use a private single-connection engine.
+- **The claim loop wakes when a finalizer ends**, so a requeue to `PENDING`
+  or an expiry before start does not wait for the next poll.
+- **Workflow node status is constrained to the seven `WorkflowTaskStatus`
+  values**, and the phase-two function no longer accepts `CANCELLED`.
+- **Pending-expiry outcomes come back in deadline order.**
+- **A transcode target must be a version this build can decode.**
+- **History writers that take outside values check the history column
+  rules first.** Cutover relocation refuses a legacy row that breaks a rule
+  with `RelocationRuleViolation`; transcode refuses a target version below 1,
+  a codec outside 1..64 bytes, and a forward rerun-input frame that would not
+  fit.
+- **Rendered staged readers carry the manifest stamp they were rendered
+  from.** Publication health and the coverage pass compare it, so a reader
+  rendered by an older release is republished.
+
+### Performance
+
+- **Claim.** Each eligibility arm and the merge are limited to the smallest
+  of the claim budget, the queue's remaining cap and the batch limit, and the
+  claimed rows come back in order. The candidate selection runs as a
+  generic-plan helper. The paused or cancelled workflow lookup reads each
+  workflow by primary key.
+- **Recovery.** A partial index on nonterminal workflow nodes serves the
+  recovery probes: a workflow with 1,001 terminal nodes no longer scans its
+  terminal entries. The global audit probes for any node only when no
+  nonterminal node exists (a page of 200 workflows examines 200 node rows
+  instead of 400).
+- **Phase two** plans its history lookup once per connection.
+- **Result reads.** `get_result` and `TaskHandle.get` read a task result
+  through one staged reader statement (`horsies_task_result_staged`): a
+  terminal live task takes 1 statement instead of 2, a task in history 1
+  instead of 3.
+- **Workflow finalize** reads its inputs once and the parent link with the
+  status. The pause paths and finalize leave the `workflow_done` NOTIFY to
+  the status trigger.
+- **History moves** encode each attempt snapshot once and hash a result once.
+  A batch move hashes its result once per batch instead of once per row.
+  Cutover relocation encodes each snapshot once.
+- **The duplicate-identity guard** probes only the leaves that can hold the
+  id (by UUIDv7 birth time); ids from a producer clock ahead of the terminal
+  time are recorded in an exception table.
+- **Reader publication.** The manifest is written in one statement; a
+  coverage pass publishes once instead of once per created leaf (2 new
+  classes × 61 leaves: 241 publications and 53.7 s became 1 publication and
+  6.1 s); a detach republishes only when the readers changed. A partial index
+  serves the leaf catalog's active records.
+- **Removed objects with no reader:** 2 task retention indexes, 3 redundant
+  workflow-node indexes, the task update notify trigger on cut-over
+  databases, the 24 single-column CHECKs of the history table (the writers
+  hold those rules; the 8 cross-column CHECKs stay), and the task retention
+  statistics.
+
 ## [0.5.3] - 2026-08-26
 
 ### Fixed
