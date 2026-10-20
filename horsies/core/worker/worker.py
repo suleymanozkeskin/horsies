@@ -7,6 +7,7 @@ import uuid
 import os
 import signal
 import multiprocessing
+import threading
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
@@ -126,6 +127,8 @@ from horsies.core.worker.runtime import (  # noqa: F401,E402
     _parse_timeout_ms as _parse_timeout_ms,
     _warm_child_process as _warm_child_process,
     _warm_child_process_probe as _warm_child_process_probe,
+    CHILD_WARMUP_BARRIER_TIMEOUT_S as CHILD_WARMUP_BARRIER_TIMEOUT_S,
+    WarmablePool as WarmablePool,
 )
 
 
@@ -278,8 +281,11 @@ class Worker(
         self,
         *,
         avoid_parent_fd_inheritance: bool = False,
-    ) -> ProcessPoolExecutor:
-        """Construct the child process pool (children spawn lazily on submit).
+    ) -> WarmablePool:
+        """Construct the child process pool and its warmup barrier.
+
+        Children spawn lazily on submit. The barrier has one party per
+        configured child and comes from the pool's multiprocessing context.
 
         Raises:
             OSError: pool resource allocation failed (fd/semaphore
@@ -299,8 +305,13 @@ class Worker(
         # initializer/hook machinery is exercised either way.
         recycle = self.cfg.max_tasks_per_child > 0
         mem_recycle = self.cfg.max_memory_per_child_mb is not None
-        if avoid_parent_fd_inheritance or recycle or mem_recycle:
-            kwargs['mp_context'] = multiprocessing.get_context('spawn')
+        mp_context = (
+            multiprocessing.get_context('spawn')
+            if avoid_parent_fd_inheritance or recycle or mem_recycle
+            else multiprocessing.get_context()
+        )
+        kwargs['mp_context'] = mp_context
+        warmup_barrier = mp_context.Barrier(self.cfg.processes)
         if recycle:
             kwargs['max_tasks_per_child'] = self.cfg.max_tasks_per_child
         initargs = (
@@ -313,17 +324,21 @@ class Worker(
             self.cfg.child_pool_min_size,
             self.cfg.child_pool_max_size,
             self.cfg.child_pool_check,
+            warmup_barrier,
         )
         if mem_recycle:
             # Refuse to enable on an unverified interpreter (non-CPython or an
             # untested minor) before constructing the private-internals pool.
             verify_cpython_internals()
-            return HorsiesProcessPoolExecutor(
-                max_workers=self.cfg.processes,
-                initializer=_child_initializer,
-                initargs=initargs,
-                max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
-                **kwargs,
+            return WarmablePool(
+                executor=HorsiesProcessPoolExecutor(
+                    max_workers=self.cfg.processes,
+                    initializer=_child_initializer,
+                    initargs=initargs,
+                    max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
+                    **kwargs,
+                ),
+                warmup_barrier=warmup_barrier,
             )
         if recycle and recycle_replacement_supported():
             # Count recycling on the stock pool can hang (CPython gh-115634): a
@@ -331,30 +346,42 @@ class Worker(
             # The override carries no pinned-worker-loop dependency, so the
             # count path uses it ungated, falling back to the stock pool only if
             # the required internals are absent.
-            return _RecycleProcessPoolExecutor(
+            return WarmablePool(
+                executor=_RecycleProcessPoolExecutor(
+                    max_workers=self.cfg.processes,
+                    initializer=_child_initializer,
+                    initargs=initargs,
+                    **kwargs,
+                ),
+                warmup_barrier=warmup_barrier,
+            )
+        return WarmablePool(
+            executor=ProcessPoolExecutor(
                 max_workers=self.cfg.processes,
                 initializer=_child_initializer,
                 initargs=initargs,
                 **kwargs,
-            )
-        return ProcessPoolExecutor(
-            max_workers=self.cfg.processes,
-            initializer=_child_initializer,
-            initargs=initargs,
-            **kwargs,
+            ),
+            warmup_barrier=warmup_barrier,
         )
 
-    async def _warm_executor(self, executor: ProcessPoolExecutor) -> None:
+    async def _warm_executor(self, pool: WarmablePool) -> None:
         """Start child processes while the parent has not opened listener sockets.
 
-        Takes the executor as a parameter — it is deliberately NOT published
+        Takes the pool as a parameter — it is deliberately NOT published
         to ``self._executor`` yet, so dispatch and the timeout kill path never
         see a pool that is still warming.
 
-        When ``max_tasks_per_child`` is set, each warmup call counts against a
-        child's recycle budget: the first generation runs one warmup +
-        (max_tasks_per_child - 1) real tasks before recycling. Warmup is kept
-        as-is — its pre-socket-open invariant matters more than the one slot —
+        One round of ``cfg.processes`` warmup calls. Each call waits at the
+        pool's warmup barrier until every child has finished its
+        initializer, so a waiting child cannot take a second call: the calls
+        land on ``cfg.processes`` distinct children, whatever the spread of
+        their start times within ``CHILD_WARMUP_BARRIER_TIMEOUT_S``.
+
+        When ``max_tasks_per_child`` is set, the warmup call counts against a
+        child's recycle budget: the first generation runs exactly one warmup
+        + (max_tasks_per_child - 1) real tasks before recycling. Warmup is
+        kept — its pre-socket-open invariant matters more than the one slot —
         which is why ``max_tasks_per_child`` must be >= 2.
 
         When ``max_memory_per_child_mb`` is set, the warmup call is the
@@ -364,8 +391,8 @@ class Worker(
         by the baseline guard before any real work is dispatched.
 
         Raises:
-            WarmupIncompleteError: fewer distinct children than
-                ``cfg.processes`` came up within the bounded rounds.
+            WarmupIncompleteError: not every child reached the warmup
+                barrier within ``CHILD_WARMUP_BARRIER_TIMEOUT_S``.
                 Kill-shaped/transient; the restart path retries it.
             MemoryBaselineExceedsThresholdError: warmed child baseline RSS is
                 at or above ``max_memory_per_child_mb`` (the app does not fit
@@ -373,12 +400,15 @@ class Worker(
         """
         loop = asyncio.get_running_loop()
         mem_recycle = self.cfg.max_memory_per_child_mb is not None
+        timeout_seconds = CHILD_WARMUP_BARRIER_TIMEOUT_S
         pids: set[int] = set()
         baseline_by_pid: dict[int, float | None] = {}
-        for _ in range(3):
+        try:
             if mem_recycle:
                 probe_futures = [
-                    loop.run_in_executor(executor, _warm_child_process_probe)
+                    loop.run_in_executor(
+                        pool.executor, _warm_child_process_probe, timeout_seconds,
+                    )
                     for _ in range(self.cfg.processes)
                 ]
                 for pid, rss_mb in await asyncio.gather(*probe_futures):
@@ -386,12 +416,18 @@ class Worker(
                     self._record_child_baseline(baseline_by_pid, pid, rss_mb)
             else:
                 warm_futures = [
-                    loop.run_in_executor(executor, _warm_child_process)
+                    loop.run_in_executor(
+                        pool.executor, _warm_child_process, timeout_seconds,
+                    )
                     for _ in range(self.cfg.processes)
                 ]
                 pids.update(await asyncio.gather(*warm_futures))
-            if len(pids) >= self.cfg.processes:
-                break
+        except threading.BrokenBarrierError as exc:
+            raise WarmupIncompleteError(
+                f'worker child warmup: not all {self.cfg.processes} child '
+                f'process(es) reached the warmup barrier within '
+                f'{timeout_seconds:g}s of each other'
+            ) from exc
         if len(pids) < self.cfg.processes:
             raise WarmupIncompleteError(
                 'worker child warmup started '
@@ -486,19 +522,23 @@ class Worker(
                 is torn down first. Cancellation (start timeout, shutdown)
                 also tears the pool down, then re-raises.
         """
-        executor = self._create_executor(
+        pool = self._create_executor(
             avoid_parent_fd_inheritance=avoid_parent_fd_inheritance,
         )
+        executor = pool.executor
         try:
-            await self._warm_executor(executor)
+            await self._warm_executor(pool)
         except asyncio.CancelledError:
             # Start-attempt timeout or shutdown cancelled the warm: nothing
             # else references this pool, so tear it down here. Synchronous
             # non-waiting shutdown — awaiting inside cancellation can be
-            # interrupted by a second cancel, leaking the children.
+            # interrupted by a second cancel, leaking the children. The
+            # barrier abort releases children still waiting at it.
+            pool.warmup_barrier.abort()
             executor.shutdown(wait=False, cancel_futures=True)
             raise
         except Exception as warm_exc:
+            pool.warmup_barrier.abort()
             # Snapshot child processes before shutdown clears the mapping;
             # joined Process objects keep their exitcode afterwards.
             from multiprocessing.process import BaseProcess

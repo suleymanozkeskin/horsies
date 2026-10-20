@@ -13,6 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from importlib import import_module
+from multiprocessing.synchronize import Barrier
 from typing import Any, Optional, Tuple, assert_never, cast
 
 from psycopg import Connection, Cursor
@@ -22,6 +23,7 @@ from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
 from horsies.core.app import Horsies
+from horsies.core.worker.runtime import _set_child_warmup_barrier
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, underlying_task_fn
 from horsies.core.codec.json_io import (
@@ -312,8 +314,12 @@ def _child_initializer(
     child_pool_min_size: int = 0,
     child_pool_max_size: int = 2,
     child_pool_check: bool = True,
+    warmup_barrier: Barrier | None = None,
 ) -> None:
     """Child-process bootstrap: locate the app, import tasks, open the pool.
+
+    ``warmup_barrier`` is the pool's warmup barrier; the warmup call waits
+    at it (``_warm_child_process``). The worker always passes one.
 
     Raises:
         Exception: any bootstrap failure propagates out of the initializer,
@@ -324,6 +330,7 @@ def _child_initializer(
     """
     # Ignore SIGINT in child processes - let the parent handle shutdown gracefully
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _set_child_warmup_barrier(warmup_barrier)
 
     # Configure logging for this child process before any logging
     from horsies.core.logging import configure_logging

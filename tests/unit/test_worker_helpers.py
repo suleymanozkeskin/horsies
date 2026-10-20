@@ -7,7 +7,9 @@ import os
 import time
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta, timezone
+from multiprocessing.synchronize import Barrier
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,6 +54,7 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.worker.runtime import WarmablePool
 
 
 def _empty_workflow_recovery_report() -> SimpleNamespace:
@@ -70,6 +73,14 @@ def _orphan_task_audit_report(cancelled: int = 0) -> OrphanTaskAuditReport:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _warmable(executor: Any) -> WarmablePool:
+    """A pool around a mock executor, with a mock warmup barrier."""
+    return WarmablePool(
+        executor=executor,
+        warmup_barrier=cast('Barrier', MagicMock()),
+    )
 
 
 def _make_worker(
@@ -1422,7 +1433,6 @@ def _make_finalize_error(
     )
 
 
-from typing import Any
 
 
 @pytest.mark.unit
@@ -2327,7 +2337,7 @@ class TestRestartExecutor:
         old_executor = MagicMock()
         new_executor = MagicMock()
         worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=_warmable(new_executor))  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool', failed_executor=old_executor)
@@ -2349,7 +2359,7 @@ class TestRestartExecutor:
         old_executor = MagicMock()
         worker._executor = old_executor
         mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=_warmable(mock_executor))  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool', failed_executor=old_executor)
@@ -2370,7 +2380,7 @@ class TestRestartExecutor:
         old_executor.shutdown.side_effect = RuntimeError('shutdown boom')
         new_executor = MagicMock()
         worker._executor = old_executor
-        worker._create_executor = MagicMock(return_value=new_executor)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=_warmable(new_executor))  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._restart_executor('broken pool', failed_executor=old_executor)
@@ -2384,7 +2394,9 @@ class TestRestartExecutor:
         old_executor = MagicMock()
         worker._executor = old_executor
         replacements = [MagicMock(name=f'executor-{idx}') for idx in range(12)]
-        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=[_warmable(pool) for pool in replacements],
+        )  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await asyncio.gather(
@@ -2413,7 +2425,10 @@ class TestRestartExecutor:
         first_replacement = MagicMock(name='first-replacement')
         second_replacement = MagicMock(name='second-replacement')
         worker._create_executor = MagicMock(  # type: ignore[assignment]
-            side_effect=[first_replacement, second_replacement]
+            side_effect=[
+                _warmable(first_replacement),
+                _warmable(second_replacement),
+            ]
         )
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
@@ -2541,7 +2556,7 @@ class TestEnsureExecutor:
         worker = _make_worker()
         worker._executor = None
         mock_executor = MagicMock()
-        worker._create_executor = MagicMock(return_value=mock_executor)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=_warmable(mock_executor))  # type: ignore[assignment]
         worker._warm_executor = AsyncMock()  # type: ignore[assignment]
 
         await worker._ensure_executor('Executor missing before dispatch')
@@ -2650,7 +2665,10 @@ class TestExecutorPublicationOrder:
         worker = _make_worker()
         worker._executor = None
         created = MagicMock()
-        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+        barrier = MagicMock()
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            return_value=WarmablePool(executor=created, warmup_barrier=barrier),
+        )
         worker._warm_executor = AsyncMock(  # type: ignore[assignment]
             side_effect=WarmupIncompleteError(
                 'worker child warmup started 5/6 process(es)'
@@ -2661,6 +2679,7 @@ class TestExecutorPublicationOrder:
             await worker._create_warmed_executor()
 
         assert worker._executor is None
+        barrier.abort.assert_called_once_with()
         created.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
 
     @pytest.mark.asyncio
@@ -2673,7 +2692,7 @@ class TestExecutorPublicationOrder:
         worker = _make_worker()
         worker._executor = None
         created = MagicMock()
-        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(return_value=_warmable(created))  # type: ignore[assignment]
 
         async def _warm(_executor: Any) -> None:
             worker._stop.set()
@@ -2697,7 +2716,10 @@ class TestExecutorPublicationOrder:
         worker = _make_worker()
         worker._executor = None
         created = MagicMock()
-        worker._create_executor = MagicMock(return_value=created)  # type: ignore[assignment]
+        barrier = MagicMock()
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            return_value=WarmablePool(executor=created, warmup_barrier=barrier),
+        )
         worker._warm_executor = AsyncMock(  # type: ignore[assignment]
             side_effect=asyncio.CancelledError(),
         )
@@ -2706,6 +2728,7 @@ class TestExecutorPublicationOrder:
             await worker._create_warmed_executor()
 
         assert worker._executor is None
+        barrier.abort.assert_called_once_with()
         created.shutdown.assert_called_once_with(wait=False, cancel_futures=True)
 
 
@@ -2720,7 +2743,9 @@ class TestWarmupRetry:
         old_executor = MagicMock()
         worker._executor = old_executor
         replacements = [MagicMock(name='first'), MagicMock(name='second')]
-        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=[_warmable(pool) for pool in replacements],
+        )  # type: ignore[assignment]
         worker._warm_executor = AsyncMock(  # type: ignore[assignment]
             side_effect=[
                 WarmupIncompleteError('worker child warmup started 5/6 process(es)'),
@@ -2743,7 +2768,9 @@ class TestWarmupRetry:
         old_executor = MagicMock()
         worker._executor = old_executor
         replacements = [MagicMock(name='first'), MagicMock(name='second')]
-        worker._create_executor = MagicMock(side_effect=replacements)  # type: ignore[assignment]
+        worker._create_executor = MagicMock(  # type: ignore[assignment]
+            side_effect=[_warmable(pool) for pool in replacements],
+        )  # type: ignore[assignment]
         worker._warm_executor = AsyncMock(  # type: ignore[assignment]
             side_effect=[BrokenProcessPool('child SIGKILLed during warmup'), None],
         )
@@ -4173,10 +4200,19 @@ class TestWorkerConfigRecycleValidation:
 class TestCreateExecutorRecycle:
     """Tests for Worker._create_executor recycle wiring."""
 
+    def test_the_barrier_has_one_party_per_child(self) -> None:
+        worker = _make_worker()
+        worker.cfg.processes = 3
+        pool = worker._create_executor()
+        try:
+            assert pool.warmup_barrier.parties == 3
+        finally:
+            pool.executor.shutdown(wait=False)
+
     def test_default_recycles_and_forces_spawn(self) -> None:
         """Default config (100): budget passed through, spawn forced."""
         worker = _make_worker()
-        executor = worker._create_executor()
+        executor = worker._create_executor().executor
         try:
             assert executor._max_tasks_per_child == 100
             assert executor._mp_context.get_start_method() == 'spawn'
@@ -4187,7 +4223,7 @@ class TestCreateExecutorRecycle:
         """max_tasks_per_child=0: executor created without a per-child budget."""
         worker = _make_worker()
         worker.cfg.max_tasks_per_child = 0
-        executor = worker._create_executor()
+        executor = worker._create_executor().executor
         try:
             assert executor._max_tasks_per_child is None
         finally:
@@ -4198,7 +4234,9 @@ class TestCreateExecutorRecycle:
         avoid_parent_fd_inheritance (fork is incompatible)."""
         worker = _make_worker()
         worker.cfg.max_tasks_per_child = 5
-        executor = worker._create_executor(avoid_parent_fd_inheritance=False)
+        executor = worker._create_executor(
+            avoid_parent_fd_inheritance=False,
+        ).executor
         try:
             assert executor._max_tasks_per_child == 5
             assert executor._mp_context.get_start_method() == 'spawn'
