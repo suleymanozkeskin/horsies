@@ -11,10 +11,9 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from psycopg import InterfaceError, OperationalError
+from psycopg import OperationalError
 
 from horsies.core.types.result import Ok, Err
-from psycopg.errors import DeadlockDetected, SerializationFailure
 
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
@@ -42,7 +41,6 @@ from horsies.core.worker.worker import (
     _FINALIZE_STAGE_FUTURE,
     _FINALIZE_STAGE_PHASE1,
     _FINALIZE_STAGE_PHASE2,
-    _is_retryable_db_error,
     _RequeueOutcome,
     _RetryError,
     ChildHookFailedError,
@@ -123,37 +121,6 @@ class TestDedupePaths:
 
     def test_single_element(self) -> None:
         assert _dedupe_paths(['x']) == ['x']
-
-
-# ---------------------------------------------------------------------------
-# 2. _is_retryable_db_error
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.unit
-class TestIsRetryableDbError:
-    """Tests for _is_retryable_db_error: match-case on psycopg types."""
-
-    def test_operational_error_returns_true(self) -> None:
-        assert _is_retryable_db_error(OperationalError()) is True
-
-    def test_interface_error_returns_true(self) -> None:
-        assert _is_retryable_db_error(InterfaceError()) is True
-
-    def test_serialization_failure_returns_true(self) -> None:
-        assert _is_retryable_db_error(SerializationFailure()) is True
-
-    def test_deadlock_detected_returns_true(self) -> None:
-        assert _is_retryable_db_error(DeadlockDetected()) is True
-
-    def test_value_error_returns_false(self) -> None:
-        assert _is_retryable_db_error(ValueError()) is False
-
-    def test_runtime_error_returns_false(self) -> None:
-        assert _is_retryable_db_error(RuntimeError()) is False
-
-    def test_generic_exception_returns_false(self) -> None:
-        assert _is_retryable_db_error(Exception()) is False
 
 
 # ---------------------------------------------------------------------------
