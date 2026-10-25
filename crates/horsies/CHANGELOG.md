@@ -5,7 +5,7 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
-## [Unreleased]
+## [0.1.0-alpha.36] - 2026-10-25
 
 ### Fixed
 
