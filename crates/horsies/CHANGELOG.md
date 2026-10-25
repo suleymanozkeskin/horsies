@@ -5,6 +5,19 @@ All notable changes to horsies-rust are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 The project is pre-1.0. Breaking changes may ship in alpha releases.
 
+## [Unreleased]
+
+### Fixed
+
+- The runtime pool in PgBouncer transaction mode keeps the SQLx statement
+  cache. With a cache capacity of zero, SQLx still prepares every query under
+  a statement name, but it uses a new name for each execution and never closes
+  it: N executions of one query leave N statement names on the connection,
+  and a pooler that tracks prepared statements holds one entry per execution
+  until the client disconnects. With the cache, a connection prepares each
+  query once and holds at most 100 names. PgBouncer transaction mode still
+  requires `max_prepared_statements > 0`.
+
 ## [0.1.0-alpha.35] - 2026-09-29
 
 ### Work reductions
