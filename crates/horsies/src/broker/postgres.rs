@@ -534,11 +534,17 @@ const HEALTH_CHECK_SQL: &str = "SELECT 1";
 // number of long-lived LISTEN connections.
 const SESSION_POOL_MAX_CONNECTIONS: u32 = 4;
 
-fn pg_connect_options(
-    database_url: &str,
-    echo: bool,
-    pgbouncer_transaction_mode: bool,
-) -> Result<PgConnectOptions, BrokerError> {
+/// Connect options for every broker pool, including the runtime pool in
+/// PgBouncer transaction mode.
+///
+/// The SQLx statement cache keeps its default capacity in every mode. SQLx
+/// prepares each query under a statement name whether or not the cache is
+/// enabled; with a capacity of zero it uses a new name for every execution and
+/// never closes it, so a pooler that tracks prepared statements holds one entry
+/// per execution until the client disconnects. With the cache, a connection
+/// holds at most the cache capacity and closes the oldest name on eviction.
+/// PgBouncer transaction mode therefore requires `max_prepared_statements > 0`.
+fn pg_connect_options(database_url: &str, echo: bool) -> Result<PgConnectOptions, BrokerError> {
     let mut connect_options = PgConnectOptions::from_str(database_url)
         .map_err(|e| BrokerError::ConnectionFailed(e.to_string()))?;
 
@@ -546,10 +552,6 @@ fn pg_connect_options(
         connect_options = connect_options.log_statements(log::LevelFilter::Debug);
     } else {
         connect_options = connect_options.log_statements(log::LevelFilter::Off);
-    }
-
-    if pgbouncer_transaction_mode {
-        connect_options = connect_options.statement_cache_capacity(0);
     }
 
     Ok(connect_options)
@@ -785,11 +787,7 @@ impl PostgresBroker {
         config
             .validate()
             .map_err(|err| BrokerError::ConnectionFailed(err.to_string()))?;
-        let connect_options = pg_connect_options(
-            &config.database_url,
-            config.echo,
-            config.pgbouncer_transaction_mode,
-        )?;
+        let connect_options = pg_connect_options(&config.database_url, config.echo)?;
         let pool = pg_pool_options(config)
             .connect_with(connect_options)
             .await
@@ -799,7 +797,7 @@ impl PostgresBroker {
             pool.clone()
         } else {
             let session_options =
-                pg_connect_options(config.effective_session_database_url(), config.echo, false)?;
+                pg_connect_options(config.effective_session_database_url(), config.echo)?;
             pg_session_pool_options(config)
                 .connect_with(session_options)
                 .await
@@ -5762,5 +5760,57 @@ mod session_settings_tests {
         assert_eq!(jit(&not_kept).await, jit(&plain).await);
         plain.close().await;
         not_kept.close().await;
+    }
+}
+
+#[cfg(test)]
+mod connect_options_tests {
+    use super::*;
+    use serial_test::serial;
+    use sqlx::PgConnection;
+
+    const REPEATED_EXECUTIONS: i64 = 20;
+
+    async fn prepared_statement_count(connection: &mut PgConnection) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM pg_prepared_statements")
+            .fetch_one(&mut *connection)
+            .await
+            .expect("count prepared statements")
+    }
+
+    /// Runs against PostgreSQL directly, so every statement name the runtime
+    /// pool prepares is visible in `pg_prepared_statements` on its connection.
+    #[tokio::test]
+    #[serial]
+    async fn transaction_mode_runtime_pool_prepares_a_repeated_query_once() {
+        let url = crate::broker::terminalization_matrix::migrated_database_url().await;
+        let config = PostgresConfig::from_pgbouncer_urls(url.clone(), url);
+        let broker = PostgresBroker::connect_with(&config)
+            .await
+            .expect("connect broker");
+        let mut connection = broker
+            .pool()
+            .acquire()
+            .await
+            .expect("acquire runtime connection");
+
+        let before = prepared_statement_count(&mut connection).await;
+        for execution in 0..REPEATED_EXECUTIONS {
+            let echoed: i64 = sqlx::query_scalar("SELECT $1::bigint")
+                .bind(execution)
+                .fetch_one(&mut *connection)
+                .await
+                .expect("run repeated query");
+            assert_eq!(echoed, execution);
+        }
+        let after = prepared_statement_count(&mut connection).await;
+
+        assert_eq!(
+            after - before,
+            1,
+            "{REPEATED_EXECUTIONS} executions of one query must leave one prepared statement"
+        );
+        drop(connection);
+        broker.pool().close().await;
     }
 }

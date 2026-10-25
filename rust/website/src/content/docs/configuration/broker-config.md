@@ -117,7 +117,7 @@ let broker = PostgresConfig::from_pgbouncer_urls(
 );
 ```
 
-With `pgbouncer_transaction_mode=true`, Horsies disables SQLx's named prepared-statement cache for the runtime pool. Schema initialization, workers, result listeners, and workflow listeners use `session_database_url`. When `session_database_url` is different from `database_url`, Horsies caps that direct/session-capable pool at 4 connections instead of inheriting the runtime pool size.
+With `pgbouncer_transaction_mode=true`, the runtime pool keeps SQLx's statement cache: each connection prepares a query once and holds at most 100 statement names, which PgBouncer tracks (`max_prepared_statements > 0`). Schema initialization, workers, result listeners, and workflow listeners use `session_database_url`. When `session_database_url` is different from `database_url`, Horsies caps that direct/session-capable pool at 4 connections instead of inheriting the runtime pool size.
 
 Different providers expose direct and pooled Postgres endpoints differently. Some publish separate ports, some publish separate hostnames, and those details can change; check your provider's current connection documentation instead of copying an example port.
 

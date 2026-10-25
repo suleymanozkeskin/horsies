@@ -56,7 +56,7 @@ let config = PostgresConfig::from_url("postgresql://user:pass@localhost:5432/myd
 |---|---|---|---|
 | `database_url` | `String` | required | Runtime PostgreSQL connection URL. May point at a PgBouncer transaction-pool endpoint when `pgbouncer_transaction_mode = true`. |
 | `session_database_url` | `Option<String>` | `None` | Direct or session-pooled URL used for schema initialization and `LISTEN/NOTIFY`. Required when `pgbouncer_transaction_mode = true`. |
-| `pgbouncer_transaction_mode` | `bool` | `false` | Configure the runtime pool for PgBouncer transaction pooling. Disables SQLx's local prepared-statement cache; the pooler must have protocol-level prepared-statement tracking enabled (`max_prepared_statements > 0`). |
+| `pgbouncer_transaction_mode` | `bool` | `false` | Configure the runtime pool for PgBouncer transaction pooling. The runtime pool keeps SQLx's statement cache (at most 100 named statements per connection, reused across executions); the pooler must have protocol-level prepared-statement tracking enabled (`max_prepared_statements > 0`). |
 | `pool_pre_ping` | `bool` | `true` | Pre-ping each connection before use. |
 | `pool_size` | `u32` | `30` | Runtime connection pool size. |
 | `max_overflow` | `u32` | `30` | Additional runtime connections beyond `pool_size`. |
@@ -82,7 +82,9 @@ let broker = PostgresConfig::from_pgbouncer_urls(
 `session_database_url`, and `pgbouncer_transaction_mode = true` in one call.
 
 - The runtime pool uses `database_url` (the transaction-pool endpoint) and
-  disables SQLx's local prepared-statement cache. The pooler must have
+  keeps SQLx's statement cache. SQLx prepares every query under a statement
+  name; with the cache, a connection prepares each query once and holds at
+  most 100 names. The pooler must have
   `max_prepared_statements > 0`; if prepared-statement tracking is off, the
   broker returns a clear `PgBouncer transaction mode requires protocol prepared-statement tracking`
   error during connect.
