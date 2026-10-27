@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, assert_never
 from unittest.mock import AsyncMock, MagicMock
 
 from horsies.core.brokers.listener import PostgresListener
@@ -83,6 +83,8 @@ def listener_of(broker: PostgresBroker) -> PostgresListener:
             return listener
         case ListenerDisabled():
             raise AssertionError('this broker was built without a listener')
+        case _ as unexpected:
+            assert_never(unexpected)
 
 
 @contextmanager

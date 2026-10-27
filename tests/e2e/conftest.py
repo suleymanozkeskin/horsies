@@ -201,12 +201,12 @@ async def clean_db(request: pytest.FixtureRequest) -> AsyncGenerator[None, None]
 
     schema = await default_instance.broker.ensure_schema_initialized()
     assert schema.is_ok(), schema
-    async with default_instance.broker.session_factory() as session:
+    async with current_resources(default_instance.broker).session_factory() as session:
         await cleanup_tables(session)
     try:
         yield
     finally:
-        async with default_instance.broker.session_factory() as session:
+        async with current_resources(default_instance.broker).session_factory() as session:
             await cleanup_tables(session)
 
 

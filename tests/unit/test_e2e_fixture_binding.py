@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.brokers.resources import ListenerEnabled
+from tests.broker_resources_support import fake_resources
 from tests.e2e.conftest import (
     _initialize_session_broker,  # pyright: ignore[reportPrivateUsage]
 )
@@ -19,9 +21,11 @@ async def test_pgbouncer_lane_does_not_initialize_default_brokers(
     monkeypatch.setenv('HORSIES_PGBOUNCER_TEST', '1')
     broker = MagicMock()
     broker.ensure_schema_initialized = AsyncMock()
-    broker.listener.start = AsyncMock()
+    listener = MagicMock()
+    listener.start = AsyncMock()
+    broker._resources = fake_resources(listener=ListenerEnabled(listener=listener))
 
     await _initialize_session_broker(broker, seed_history=True)
 
     broker.ensure_schema_initialized.assert_not_awaited()
-    broker.listener.start.assert_not_awaited()
+    listener.start.assert_not_awaited()
