@@ -21,6 +21,32 @@ there is no migration contract between pre-1.0 versions.
   and `WorkflowHandle.get()` / `result_for()` return a `BROKER_ERROR`
   result. Sync task calls already behaved this way. Before, sync workflow
   calls continued on a process-wide event loop.
+- **A broker keeps one resource set per open event loop.** A set is a
+  runtime engine with its pool, a session engine when `session_database_url`
+  differs, and a listener. Sync calls use the set of the broker's own sync
+  runner loop. A set is built on the first call from its loop, the set of a
+  loop that closed is released at the next broker call, and `close_async()` /
+  `close()` close every set. A process that makes broker calls from two loops
+  can open twice the connections of one loop; Broker Config → Event Loops
+  gives the ceiling.
+- **`EVENT_LOOP_LIMIT` is a new member of `BrokerErrorCode`,
+  `TaskSendErrorCode`, `WorkflowStartErrorCode`, `HandleErrorCode`,
+  `MonitoringQueryErrorCode`, `TaskActionErrorCode` and `RetrievalCode`.** A
+  broker serves at most 5 open event loops besides its sync runner loop. A
+  call from one more open loop returns this code and runs nothing; repeating
+  it on that loop returns the same code until one of those loops closes.
+  `send()` keeps the code instead of folding it into `ENQUEUE_FAILED`, `get()`
+  does not cache it, and the web task actions return HTTP 503.
+- **`PostgresBroker.session_factory`, `.async_engine` and `.listener` are
+  removed.** `await broker.select_resources()` returns the running loop's
+  `BrokerResources` (engine, session factory, session engine, partition
+  maintenance database, and `ListenerEnabled` or `ListenerDisabled`), or
+  `Err(EventLoopLimit)`.
+- **A `PostgresListener` call from a loop other than its owner loop fails an
+  assertion** instead of raising `RuntimeError`. `listen()`,
+  `listen_payload()` and `listen_many()` return
+  `Err(LISTENER_SUBSCRIBE_FAILED)` when a concurrent reset tears down the
+  dispatcher connection during the call; before, they raised `RuntimeError`.
 
 ### Fixed
 
@@ -37,6 +63,20 @@ there is no migration contract between pre-1.0 versions.
   listener bound to the first loop that used it: after a sync workflow
   `get()`, `app.ping_workers()` returned `WORKER_PING_FAILED` for the rest of
   the process, and result waits from the other loop fell back to polling.
+- **Sync and async calls in one process no longer share a pool or a
+  listener.** Before, an async call that held the only free pool connection
+  made a sync call wait until `pool_timeout` (30 s by default); after that,
+  pool waits from the other loop failed at once with "bound to a different
+  event loop". The listener bound to the first loop that used it: result
+  waits from the other loop fell back to polling, and `ping_workers()` from
+  the other loop returned `WORKER_PING_FAILED`.
+- **A broker used from successive event loops**, such as repeated
+  `asyncio.run()` calls or function-scoped pytest loops, gets a new pool and
+  listener on each loop. Before, after one pool wait on an earlier loop, every
+  pool wait from a later loop failed with "bound to a different event loop".
+- **`PostgresListener.close()` from another loop after the owner loop closed
+  closes both listener connections.** Before, it logged a warning and left
+  them open.
 
 ## 0.5.4 — 2026-10-20
 

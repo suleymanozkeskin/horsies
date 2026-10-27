@@ -86,7 +86,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
 - ContractCode: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR, WORKFLOW_CTX_MISSING_ID
-- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, EVENT_LOOP_LIMIT
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
@@ -108,7 +108,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Err(BrokerOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, EVENT_LOOP_LIMIT
+- EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
   ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
@@ -184,6 +185,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - VALIDATION_FAILED: argument serialization or validation failed
 - ENQUEUE_FAILED: broker/database failure during enqueue (transient, retryable)
 - PAYLOAD_MISMATCH: retry payload SHA does not match (payload altered)
+- EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int
@@ -350,7 +352,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed with categorized error
 - WorkflowStartError fields: code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str), exception (BaseException | None)
-- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, INTERNAL_FAILED
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, INTERNAL_FAILED, EVENT_LOOP_LIMIT
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
 - Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
 

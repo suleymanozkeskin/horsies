@@ -176,6 +176,68 @@ multiplexed onto fewer server backends. Connections are still not safe to share
 between OS processes; Horsies creates child pools after worker processes start
 and uses a non-inheriting start method for replacement executors after startup.
 
+## Event Loops
+
+A broker keeps one resource set per open event loop that calls it. A set is a
+runtime engine with its own pool, a session engine when `session_database_url`
+differs from `database_url`, and a LISTEN/NOTIFY listener. Sync calls
+(`send()`, `TaskHandle.get()`, `spec.start()`, the sync `WorkflowHandle`
+methods, `app.ping_workers()`) run on the broker's own sync runner loop, which
+has its own set.
+
+- A set is built on the first call from its loop. Its pools open connections
+  on demand, so a set that makes no database call opens none.
+- When a loop closes, the next broker call from any loop releases that loop's
+  set: its idle connections and its listener connections close. A connection
+  that a task of the closed loop still held is closed by garbage collection.
+- A broker serves at most 5 open loops other than its sync runner loop. A call
+  from one more open loop returns `EVENT_LOOP_LIMIT` in the error type of that
+  call, and nothing runs. The error clears when one of those loops closes.
+  The limit covers pytest-asyncio, which keeps one loop open per fixture scope
+  (session, package, module, class, function).
+- `close_async()` and `close()` close every set: the calling loop's set
+  directly, the set of a closed loop by release, and the set of another open
+  loop on that loop. When that loop does not run the close within 5 s, the
+  result is `CLOSE_FAILED` with the loop's thread in the message, and the
+  close stays scheduled on that loop. A later call builds a new set.
+
+### Connection Ceiling
+
+Each set can open:
+
+```text
+pool_size + max_overflow
++ pool_size + max_overflow    # only when session_database_url differs
++ 2                           # listener connections
+```
+
+A process can open this once per set:
+
+| Process | Sets |
+|---|---|
+| Sync calls only, or async calls from one loop only | 1 |
+| ASGI app with async endpoints and sync calls in a thread pool | 2 |
+| pytest run with a session-scoped broker and function-scoped async tests | 2 (session loop, current test loop), plus 1 when tests make sync calls |
+
+### Things to Avoid
+
+**Don't leave event loops open after their work is done.** Each open loop
+keeps its set and its idle connections, and the sixth open loop gets
+`EVENT_LOOP_LIMIT`.
+
+```python
+# Wrong: each call leaves one more open loop
+loop = asyncio.new_event_loop()
+loop.run_until_complete(broker.ping_database_async())
+
+# Correct: asyncio.run() closes its loop
+asyncio.run(broker.ping_database_async())
+```
+
+**Don't call sync `close()` inside a coroutine whose loop made broker calls.**
+That loop's set cannot close while the coroutine blocks the loop, so the
+result is `CLOSE_FAILED` after 5 s. Use `await broker.close_async()`.
+
 ## Multiple Components
 
 The broker creates three connection types:

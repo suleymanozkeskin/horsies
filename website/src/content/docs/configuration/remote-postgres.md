@@ -32,7 +32,8 @@ At defaults (`worker_pool_size=3`, `worker_max_overflow=2`,
 ```
 
 Producers hold their own engine pool (`pool_size + max_overflow`, default
-5 + 10) per process.
+5 + 10) per resource set: one set for each event loop that makes broker calls,
+plus one for sync calls (see [Broker Config](broker-config#event-loops)).
 
 Size against the server's effective capacity, not its nominal
 `max_connections`: subtract superuser-reserved slots and any connections

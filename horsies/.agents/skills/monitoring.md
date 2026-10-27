@@ -158,8 +158,10 @@ cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, 
 - There is no manual retry action: a terminal record is immutable, and
   re-execution is a new request through the rerun contract.
 - `TaskActionErrorCode`: `TASK_NOT_FOUND`, `TASK_NOT_CANCELLABLE`,
-  `TASK_IS_WORKFLOW_TASK`, `DB_OPERATION_FAILED`. State-conflict errors
-  carry `current_status`.
+  `TASK_IS_WORKFLOW_TASK`, `DB_OPERATION_FAILED`, `EVENT_LOOP_LIMIT`.
+  State-conflict errors carry `current_status`. `EVENT_LOOP_LIMIT` (also in
+  `MonitoringQueryErrorCode`): the broker serves its limit of open event
+  loops and this call ran on a new one; nothing ran; HTTP 503.
 
 ## Live Updates
 

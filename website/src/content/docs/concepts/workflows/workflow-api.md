@@ -77,6 +77,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
 | `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
 | `INTERNAL_FAILED` | No | Sync bridge or unexpected exception |
+| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 
 **Usage:**
 
