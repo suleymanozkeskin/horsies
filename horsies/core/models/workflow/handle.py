@@ -21,7 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from horsies.core.logging import get_logger
-from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
+from horsies.core.utils.loop_runner import LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
 from pydantic import ValidationError
 from horsies.core.codec.json_value import StrictJsonError
@@ -551,7 +551,7 @@ class WorkflowHandle(Generic[OutT]):
     ) -> HandleResult[_T]:
         """Sync bridge for wrap-strategy async methods."""
         try:
-            return get_shared_runner().call(coro_fn, *args)
+            return self.broker._loop_runner.call(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:
@@ -580,7 +580,7 @@ class WorkflowHandle(Generic[OutT]):
     ) -> TaskResult[_T, TaskError]:
         """Sync bridge for fold-strategy async methods."""
         try:
-            return get_shared_runner().call(coro_fn, *args)
+            return self.broker._loop_runner.call(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:

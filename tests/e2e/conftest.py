@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.app import Horsies
+from horsies.core.types.result import is_ok
 
 from tests.e2e.helpers.db import cleanup_tables
 from tests.e2e.helpers.worker import kill_stale_workers
@@ -65,12 +66,8 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = default_instance.broker
     await _initialize_session_broker(brk, seed_history=True)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        # May fail if broker was used from sync context (LoopRunner)
-        # which creates tasks in a different event loop
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -79,11 +76,8 @@ async def custom_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_custom.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        # May fail if broker was used from sync context (LoopRunner)
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -92,10 +86,8 @@ async def priority_binding_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_priority_binding.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -104,11 +96,8 @@ async def cluster_cap_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_cluster_cap.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        # May fail if broker was used from sync context (LoopRunner)
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -117,10 +106,8 @@ async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_recovery.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -129,10 +116,8 @@ async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_softcap.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -141,10 +126,8 @@ async def requeue_guard_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_requeue_guard.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -153,10 +136,8 @@ async def scheduler_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_scheduler.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session')
@@ -165,10 +146,8 @@ async def retry_precedence_broker() -> AsyncGenerator[PostgresBroker, None]:
     brk = instance_retry_precedence.broker
     await _initialize_session_broker(brk)
     yield brk
-    try:
-        await brk.close_async()
-    except RuntimeError:
-        pass
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
 
 
 @pytest_asyncio.fixture(scope='session', loop_scope='session', autouse=True)

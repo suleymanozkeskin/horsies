@@ -37,10 +37,10 @@ class TestSyncCallWrapStrategy:
         """status() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.status()
@@ -54,10 +54,10 @@ class TestSyncCallWrapStrategy:
         """cancel() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.cancel()
@@ -70,10 +70,10 @@ class TestSyncCallWrapStrategy:
         """pause() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.pause()
@@ -86,10 +86,10 @@ class TestSyncCallWrapStrategy:
         """resume() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.resume()
@@ -102,10 +102,10 @@ class TestSyncCallWrapStrategy:
         """results() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.results()
@@ -118,10 +118,10 @@ class TestSyncCallWrapStrategy:
         """tasks() returns Err(LOOP_RUNNER_FAILED) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.tasks()
@@ -134,10 +134,10 @@ class TestSyncCallWrapStrategy:
         """status() returns Err(INTERNAL_FAILED) on unexpected exception."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = RuntimeError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = RuntimeError(
                 'something unexpected',
             )
             result = handle.status()
@@ -152,10 +152,10 @@ class TestSyncCallWrapStrategy:
 
         from horsies.core.types.result import Ok
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.return_value = Ok('RUNNING')
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.return_value = Ok('RUNNING')
             result = handle.status()
 
         assert is_ok(result)
@@ -175,10 +175,10 @@ class TestSyncTaskResultCallFoldStrategy:
         """get() returns TaskResult(err=BROKER_ERROR) when LoopRunner fails."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.get(timeout_ms=100)
@@ -195,10 +195,10 @@ class TestSyncTaskResultCallFoldStrategy:
         mock_node = MagicMock()
         mock_node.node_id = 'test-node'
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = LoopRunnerError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
             )
             result = handle.result_for(mock_node)
@@ -210,10 +210,10 @@ class TestSyncTaskResultCallFoldStrategy:
         """get() returns TaskResult(err=BROKER_ERROR) on unexpected exception."""
         handle = _make_handle()
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.side_effect = RuntimeError(
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = RuntimeError(
                 'something unexpected',
             )
             result = handle.get(timeout_ms=100)
@@ -228,10 +228,10 @@ class TestSyncTaskResultCallFoldStrategy:
 
         expected = TaskResult(ok=42)
 
-        with patch(
-            'horsies.core.models.workflow.handle.get_shared_runner',
-        ) as mock_runner:
-            mock_runner.return_value.call.return_value = expected
+        with patch.object(
+            handle.broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.return_value = expected
             result = handle.get(timeout_ms=100)
 
         assert result.is_ok()

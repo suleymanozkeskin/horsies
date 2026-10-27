@@ -803,12 +803,12 @@ def start_workflow(
     Returns:
         ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
+    from horsies.core.utils.loop_runner import LoopRunnerError
 
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     try:
-        return get_shared_runner().call(
+        return broker._loop_runner.call(
             start_workflow_async,
             spec,
             broker,
@@ -1008,10 +1008,10 @@ def pause_workflow_sync(
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(...)`` on failure — see ``HandleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
+    from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return get_shared_runner().call(pause_workflow, broker, workflow_id)
+        return broker._loop_runner.call(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
@@ -1320,10 +1320,10 @@ def resume_workflow_sync(
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
         ``Err(...)`` on failure — see ``HandleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import get_shared_runner, LoopRunnerError
+    from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return get_shared_runner().call(resume_workflow, broker, workflow_id)
+        return broker._loop_runner.call(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
