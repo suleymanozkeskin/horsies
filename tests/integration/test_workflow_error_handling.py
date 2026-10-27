@@ -44,6 +44,7 @@ from .conftest import (
 )
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.conftest import task_name_for
+from tests.broker_resources_support import current_resources, replaced_resources
 
 
 # =============================================================================
@@ -2560,7 +2561,7 @@ class TestWorkflowStartErrors:
         setup: _SetupTuple,
     ) -> None:
         """DB transient error returns Err(DB_OPERATION_FAILED, retryable=True)."""
-        from unittest.mock import AsyncMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         from sqlalchemy.exc import OperationalError
 
@@ -2570,7 +2571,7 @@ class TestWorkflowStartErrors:
         spec = make_workflow_spec('db_err_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
 
         # Mock session_factory to raise a retryable error
-        original_factory = broker.session_factory
+        original_factory = current_resources(broker).session_factory
 
         class _FailingFactory:
             async def __aenter__(self) -> Any:
@@ -2579,7 +2580,7 @@ class TestWorkflowStartErrors:
             async def __aexit__(self, *args: Any) -> None:
                 pass
 
-        with patch.object(broker, 'session_factory', return_value=_FailingFactory()):
+        with replaced_resources(broker, session_factory=MagicMock(return_value=_FailingFactory())):
             r = await start_workflow_async(spec, broker)
 
         assert is_err(r)
@@ -2592,7 +2593,7 @@ class TestWorkflowStartErrors:
         setup: _SetupTuple,
     ) -> None:
         """Mid-insert failure leaves no workflow rows persisted."""
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock
 
         session, broker, app = setup
         task_a = make_simple_task(app, 'rollback_test')
@@ -2604,7 +2605,7 @@ class TestWorkflowStartErrors:
         )
 
         # Induce failure after workflow INSERT but before commit
-        original_factory = broker.session_factory
+        original_factory = current_resources(broker).session_factory
 
         def _failing_session_factory() -> Any:
             ctx = original_factory()
@@ -2632,7 +2633,7 @@ class TestWorkflowStartErrors:
 
             return _Ctx()
 
-        with patch.object(broker, 'session_factory', side_effect=_failing_session_factory):
+        with replaced_resources(broker, session_factory=MagicMock(side_effect=_failing_session_factory)):
             r = await start_workflow_async(spec, broker)
 
         assert is_err(r)

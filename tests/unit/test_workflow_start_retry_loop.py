@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.broker_resources_support import attach_resources, fake_resources
+
 from horsies.core.types.result import Ok, Err, is_ok, is_err
 from horsies.core.workflows.lifecycle import (
     start_workflow_async,
@@ -64,6 +66,7 @@ def _make_broker(
         schema_err.exception = None
         broker.ensure_schema_initialized = AsyncMock(return_value=Err(schema_err))
 
+    attach_resources(broker, fake_resources())
     return broker
 
 
@@ -86,8 +89,7 @@ class TestRetryDisabled:
         db_exc = Exception('connection refused')
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(side_effect=db_exc)
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         result = await start_workflow_async(
             spec, broker, WORKFLOW_ID, resend_on_transient_err=False,
         )
@@ -147,8 +149,7 @@ class TestRetryOnTransientErrors:
 
         session_ctx.__aenter__ = session_enter
         session_ctx.__aexit__ = AsyncMock(return_value=False)
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
@@ -183,8 +184,7 @@ class TestRetryOnTransientErrors:
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         session_ctx.__aexit__ = AsyncMock(return_value=False)
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(schema_err), Err(schema_err), Ok(True)],
         )
@@ -207,8 +207,7 @@ class TestRetryOnTransientErrors:
         # All session opens fail
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(side_effect=Exception('connection refused'))
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
@@ -239,8 +238,7 @@ class TestNonRetryableErrorsNoRetry:
 
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(side_effect=Exception('auth failed'))
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=False):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 result = await start_workflow_async(
@@ -318,8 +316,7 @@ class TestBackoffValues:
 
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(side_effect=Exception('timeout'))
-        broker.session_factory.return_value = session_ctx
-
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
                 await start_workflow_async(
@@ -351,7 +348,7 @@ class TestSyncWrapperForwarding:
         broker = MagicMock()
         mock_handle = MagicMock()
 
-        with patch.object(broker._loop_runner, 'call') as mock_call:
+        with patch.object(broker, 'run_sync') as mock_call:
             mock_call.return_value = Ok(mock_handle)
 
             result = start_workflow(

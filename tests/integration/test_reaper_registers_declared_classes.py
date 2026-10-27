@@ -28,6 +28,7 @@ from horsies.core.models.retention import (
 )
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.broker_resources_support import current_resources
 
 DECLARED_KEY = 'it_reaper_declared'
 DECLARED_DURATION = timedelta(days=11)
@@ -66,7 +67,7 @@ def _config_declaring(key: str, duration: timedelta) -> RetentionConfig:
 async def _registered_duration(
     broker: PostgresBroker, key: str
 ) -> timedelta | None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -85,7 +86,7 @@ async def _forget_class(broker: PostgresBroker, key: str) -> None:
     and a registered class gets leaves created for it on the same pass,
     so the class row cannot go first.
     """
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         leaves = (
             await connection.execute(
                 text(
@@ -130,6 +131,7 @@ class TestReaperRegistersDeclaredClasses:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                current_resources(broker),
                 RecoveryConfig(),
                 _config_declaring(DECLARED_KEY, DECLARED_DURATION),
                 _maintenance_state(),
@@ -152,7 +154,11 @@ class TestReaperRegistersDeclaredClasses:
         try:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), RetentionConfig(), _maintenance_state()
+                broker,
+                current_resources(broker),
+                RecoveryConfig(),
+                RetentionConfig(),
+                _maintenance_state(),
             )
             assert await _registered_duration(broker, DECLARED_KEY) is None
         finally:
@@ -185,7 +191,11 @@ class TestReaperRegistersDeclaredClasses:
                 'declaration cannot reach the registrar'
             )
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
-                broker, RecoveryConfig(), carried, _maintenance_state()
+                broker,
+                current_resources(broker),
+                RecoveryConfig(),
+                carried,
+                _maintenance_state(),
             )
             assert await _registered_duration(broker, DECLARED_KEY) == (
                 DECLARED_DURATION

@@ -30,6 +30,7 @@ from horsies.web.schema import (
     SchemaStatus,
     schema_guard,
 )
+from tests.broker_resources_support import resources_of
 
 pytestmark = [pytest.mark.unit]
 
@@ -241,4 +242,4 @@ class TestNoDdlConstructionFlag:
         )
 
         with pytest.raises(OperationalError):
-            await broker._run_schema_migrations(broker.async_engine)
+            await broker._run_schema_migrations((await resources_of(broker)).engine)

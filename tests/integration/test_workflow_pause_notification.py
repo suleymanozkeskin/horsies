@@ -29,6 +29,7 @@ from horsies.core.workflows.engine import (
 )
 from horsies.core.workflows.lifecycle import pause_workflow
 from tests.integration.conftest import DB_URL
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -135,7 +136,7 @@ async def test_handle_pause_notifies_each_paused_workflow_through_the_trigger(
         session, on_error='fail',
     )
 
-    with _captured_statements(broker.async_engine) as statements:
+    with _captured_statements(current_resources(broker).engine) as statements:
         paused = await pause_workflow(broker, parent_id)
 
     assert is_ok(paused) and paused.ok_value is True, paused

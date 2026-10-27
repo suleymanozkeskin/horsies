@@ -26,6 +26,7 @@ from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 from tests.integration.conftest import complete_task
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -99,7 +100,7 @@ class TestCompletionStatementBudget:
         def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
             counts['n'] += 1
 
-        event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         try:
             # A has no still-pending dependent gate here: B waits only on A,
             # so this completion PROMOTES B (the 7-statement promote branch).
@@ -110,7 +111,7 @@ class TestCompletionStatementBudget:
             await complete_task(session, broker, wf_id, 1, TaskResult(ok=2))
             finalize_stmts = counts['n']
         finally:
-            event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             await session.commit()
 
         # complete_task adds 2 lookups of its own (task_id + task_name).
@@ -140,12 +141,12 @@ class TestCompletionStatementBudget:
         failed: TaskResult[int, TaskError] = TaskResult(
             err=TaskError(error_code='BENCH_FAIL', message='forced'),
         )
-        event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         try:
             await complete_task(session, broker, wf_id, 0, failed)
             stmts = counts['n']
         finally:
-            event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             await session.commit()
 
         # Includes the failure handler's two writes plus B's skip cascade

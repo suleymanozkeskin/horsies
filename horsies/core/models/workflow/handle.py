@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
+    Coroutine,
     Generic,
     TypeVar,
     assert_never,
@@ -23,6 +23,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from horsies.core.logging import get_logger
 from horsies.core.utils.loop_runner import LoopRunnerError
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.resources import (
+    BrokerResources,
+    EventLoopConflict,
+    ListenerDisabled,
+    ListenerEnabled,
+)
 from pydantic import ValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.lifecycle.commands import CancelNodesOfCancelledWorkflow
@@ -234,6 +241,18 @@ def _broker_task_error(message: str) -> TaskResult[Any, TaskError]:
         err=TaskError(
             error_code=OperationalErrorCode.BROKER_ERROR,
             message=message,
+        ),
+    )
+
+
+def _event_loop_conflict_task_result(
+    workflow_id: str, conflict: EventLoopConflict,
+) -> TaskResult[Any, TaskError]:
+    """Build a TaskResult with EVENT_LOOP_CONFLICT for fold-strategy methods."""
+    return TaskResult(
+        err=TaskError(
+            error_code=RetrievalCode.EVENT_LOOP_CONFLICT,
+            message=f'workflow {workflow_id}: {conflict.describe()}',
         ),
     )
 
@@ -541,17 +560,28 @@ class WorkflowHandle(Generic[OutT]):
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
     out_type: TypeAnnotation | None = None
 
+    def _event_loop_conflict(
+        self, conflict: EventLoopConflict, operation: str,
+    ) -> Err[HandleOperationError]:
+        """Build the wrap-strategy error for an event loop conflict."""
+        return Err(HandleOperationError(
+            code=HandleErrorCode.EVENT_LOOP_CONFLICT,
+            message=f'{operation} for workflow {self.workflow_id}: {conflict.describe()}',
+            retryable=False,
+            workflow_id=self.workflow_id,
+        ))
+
     # ─── wrap-strategy sync helpers ──────────────────────────────────
 
     def _sync_call(
         self,
-        coro_fn: Callable[..., Awaitable[HandleResult[_T]]],
+        coro_fn: Callable[..., Coroutine[Any, Any, HandleResult[_T]]],
         operation: str,
         *args: Any,
     ) -> HandleResult[_T]:
         """Sync bridge for wrap-strategy async methods."""
         try:
-            return self.broker._loop_runner.call(coro_fn, *args)
+            return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:
@@ -575,12 +605,12 @@ class WorkflowHandle(Generic[OutT]):
 
     def _sync_task_result_call(
         self,
-        coro_fn: Callable[..., Awaitable[TaskResult[_T, TaskError]]],
+        coro_fn: Callable[..., Coroutine[Any, Any, TaskResult[_T, TaskError]]],
         *args: Any,
     ) -> TaskResult[_T, TaskError]:
         """Sync bridge for fold-strategy async methods."""
         try:
-            return self.broker._loop_runner.call(coro_fn, *args)
+            return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:
@@ -602,8 +632,17 @@ class WorkflowHandle(Generic[OutT]):
 
     async def status_async(self) -> HandleResult[WorkflowStatus]:
         """Async version of status()."""
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return self._event_loop_conflict(conflict, 'status')
+            case Ok(resources):
+                pass
+        return await self._status(resources)
+
+    async def _status(self, resources: BrokerResources) -> HandleResult[WorkflowStatus]:
+        """Read the workflow status with already-selected resources."""
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_STATUS_SQL,
                     {'wf_id': self.workflow_id},
@@ -649,38 +688,53 @@ class WorkflowHandle(Generic[OutT]):
         # timeout. Matches PostgresBroker.get_result_async.
         timeout_sec = timeout_ms / 1000 if timeout_ms is not None else None
 
-        # Subscribe to workflow_done once before the loop.
-        # Cross-loop RuntimeError (programming error) or infrastructure Err
-        # both fall back to sleep-based polling.
-        q: asyncio.Queue[Any] | None = None
-        try:
-            listen_r = await self.broker.listener.listen('workflow_done')
-        except RuntimeError:
-            # Cross-loop access (sync handle.get() via LoopRunner).
-            pass
-        else:
-            match listen_r:
-                case Ok(queue):
-                    q = queue
-                case Err(listen_err):
-                    logger.debug(
-                        'LISTEN unavailable; falling back to polling for workflow_done. '
-                        'If using PgBouncer transaction pooling, configure '
-                        'PostgresConfig.session_database_url with a direct/session-capable '
-                        'Postgres URL. Original error: %s',
-                        listen_err.message,
-                    )
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return cast(
+                    'TaskResult[OutT, TaskError]',
+                    _event_loop_conflict_task_result(self.workflow_id, conflict),
+                )
+            case Ok(resources):
+                pass
+
+        # Subscribe to workflow_done once before the loop. A broker without a
+        # listener, a cross-loop RuntimeError (programming error) or an
+        # infrastructure Err all fall back to sleep-based polling.
+        subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
+        match resources.listener:
+            case ListenerEnabled(listener=listener):
+                try:
+                    listen_r = await listener.listen('workflow_done')
+                except RuntimeError:
+                    # Cross-loop access (sync handle.get() via LoopRunner).
+                    pass
+                else:
+                    match listen_r:
+                        case Ok(queue):
+                            subscription = (listener, queue)
+                        case Err(listen_err):
+                            logger.debug(
+                                'LISTEN unavailable; falling back to polling for workflow_done. '
+                                'If using PgBouncer transaction pooling, configure '
+                                'PostgresConfig.session_database_url with a direct/session-capable '
+                                'Postgres URL. Original error: %s',
+                                listen_err.message,
+                            )
+            case ListenerDisabled():
+                pass
 
         try:
             while True:
                 # Check current status (now returns HandleResult)
-                status_r = await self.status_async()
+                status_r = await self._status(resources)
 
                 if is_err(status_r):
                     handle_err = status_r.err_value
                     match handle_err.code:
                         case HandleErrorCode.WORKFLOW_NOT_FOUND:
                             error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
+                        case HandleErrorCode.EVENT_LOOP_CONFLICT:
+                            error_code = RetrievalCode.EVENT_LOOP_CONFLICT
                         case _:
                             error_code = OperationalErrorCode.BROKER_ERROR
                     return cast(
@@ -697,13 +751,13 @@ class WorkflowHandle(Generic[OutT]):
 
                 match status:
                     case WorkflowStatus.COMPLETED:
-                        return await self._get_result()
+                        return await self._get_result(resources)
                     case (
                         WorkflowStatus.FAILED
                         | WorkflowStatus.CANCELLED
                         | WorkflowStatus.EXPIRED
                     ):
-                        return await self._get_error()
+                        return await self._get_error(resources)
                     case WorkflowStatus.PAUSED:
                         return cast(
                             'TaskResult[OutT, TaskError]',
@@ -738,24 +792,30 @@ class WorkflowHandle(Generic[OutT]):
                 remaining = (timeout_sec - elapsed) if timeout_sec is not None else 5.0
                 wait_time = min(remaining, 5.0)
 
-                if q is not None:
-                    # Drain queue looking for our workflow_id
-                    try:
-                        await asyncio.wait_for(
-                            self._drain_queue_for_workflow(q), timeout=wait_time,
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-                else:
-                    await asyncio.sleep(min(wait_time, 1.0))
+                match subscription:
+                    case (_, queue):
+                        # Drain queue looking for our workflow_id
+                        try:
+                            await asyncio.wait_for(
+                                self._drain_queue_for_workflow(queue), timeout=wait_time,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
+                    case None:
+                        await asyncio.sleep(min(wait_time, 1.0))
         finally:
-            if q is not None:
-                await self._unsubscribe_workflow_done_safely(q)
+            match subscription:
+                case (listener, queue):
+                    await self._unsubscribe_workflow_done_safely(listener, queue)
+                case None:
+                    pass
 
-    async def _unsubscribe_workflow_done_safely(self, q: asyncio.Queue[Any]) -> None:
+    async def _unsubscribe_workflow_done_safely(
+        self, listener: PostgresListener, q: asyncio.Queue[Any],
+    ) -> None:
         """Ensure unsubscribe cleanup completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            self.broker.listener.unsubscribe('workflow_done', q)
+            listener.unsubscribe('workflow_done', q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
@@ -779,10 +839,10 @@ class WorkflowHandle(Generic[OutT]):
             if note.payload == self.workflow_id:
                 return
 
-    async def _get_result(self) -> TaskResult[OutT, TaskError]:
+    async def _get_result(self, resources: BrokerResources) -> TaskResult[OutT, TaskError]:
         """Fetch completed workflow result."""
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_RESULT_SQL,
                     {'wf_id': self.workflow_id},
@@ -813,10 +873,10 @@ class WorkflowHandle(Generic[OutT]):
                 ),
             )
 
-    async def _get_error(self) -> TaskResult[OutT, TaskError]:
+    async def _get_error(self, resources: BrokerResources) -> TaskResult[OutT, TaskError]:
         """Fetch failed workflow error."""
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_ERROR_SQL,
                     {'wf_id': self.workflow_id},
@@ -971,8 +1031,17 @@ class WorkflowHandle(Generic[OutT]):
                 ),
             )
 
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return cast(
+                    'TaskResult[OkT, TaskError]',
+                    _event_loop_conflict_task_result(self.workflow_id, conflict),
+                )
+            case Ok(resources):
+                pass
+
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL,
                     {'wf_id': self.workflow_id, 'node_id': node_id},
@@ -1037,8 +1106,14 @@ class WorkflowHandle(Generic[OutT]):
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
         """
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return self._event_loop_conflict(conflict, 'results')
+            case Ok(resources):
+                pass
+
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_TASK_RESULTS_SQL,
                     {'wf_id': self.workflow_id},
@@ -1082,8 +1157,14 @@ class WorkflowHandle(Generic[OutT]):
 
     async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
         """Async version of tasks()."""
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return self._event_loop_conflict(conflict, 'tasks')
+            case Ok(resources):
+                pass
+
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKFLOW_TASKS_SQL,
                     {'wf_id': self.workflow_id},
@@ -1170,8 +1251,14 @@ class WorkflowHandle(Generic[OutT]):
 
     async def cancel_async(self) -> HandleResult[None]:
         """Async version of cancel()."""
+        match await self.broker.select_resources():
+            case Err(conflict):
+                return self._event_loop_conflict(conflict, 'cancel')
+            case Ok(resources):
+                pass
+
         try:
-            async with self.broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 lock_params = {
                     'wf_id': self.workflow_id,
                     'wf_task_terminal_states': WF_TASK_TERMINAL_VALUES,

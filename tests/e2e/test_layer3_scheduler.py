@@ -21,6 +21,7 @@ from horsies.core.models.schedule import (
 )
 
 from tests.e2e.helpers.worker import run_worker, run_scheduler
+from tests.broker_resources_support import current_resources
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,7 +43,7 @@ async def test_schedule_persistence(scheduler_broker: PostgresBroker) -> None:
         deadline = time.time() + 5.0
         state: ScheduleStateModel | None = None
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
@@ -82,7 +83,7 @@ async def test_schedule_executes_after_due_time(
             task_created = False
 
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     result = await session.execute(
                         text(
                             """
@@ -130,7 +131,7 @@ async def test_schedule_does_not_execute_early(
         init_deadline = time.time() + 5.0
         scheduler_ready = False
         while time.time() < init_deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
@@ -142,7 +143,7 @@ async def test_schedule_does_not_execute_early(
         assert scheduler_ready, 'Scheduler should have initialized state'
 
         # Now check that no tasks were created yet (next_run_at is ~2s in the future)
-        async with scheduler_broker.session_factory() as session:
+        async with current_resources(scheduler_broker).session_factory() as session:
             result = await session.execute(
                 text(
                     """
@@ -177,7 +178,7 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
             deadline = time.time() + 15.0
             state: ScheduleStateModel | None = None
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     state = await session.get(
                         ScheduleStateModel, 'e2e_scheduled_simple_interval'
                     )
@@ -191,7 +192,7 @@ async def test_repeating_schedule(scheduler_broker: PostgresBroker) -> None:
             assert state.last_run_at is not None, 'last_run_at should be set'
 
             # Step 2: Verify tasks were created with increasing timestamps.
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 result = await session.execute(
                     text(
                         """
@@ -314,7 +315,7 @@ async def test_disabled_schedule_does_not_fire(
         deadline = time.time() + 5.0
         scheduler_ready = False
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
@@ -326,7 +327,7 @@ async def test_disabled_schedule_does_not_fire(
         assert scheduler_ready, 'Scheduler should be running (enabled schedule has state)'
 
         # Disabled schedule should have no state row
-        async with scheduler_broker.session_factory() as session:
+        async with current_resources(scheduler_broker).session_factory() as session:
             disabled_state = await session.get(
                 ScheduleStateModel, 'e2e_disabled_schedule'
             )
@@ -353,7 +354,7 @@ async def test_schedule_with_args_passes_arguments(
             state: ScheduleStateModel | None = None
             deadline = time.time() + 15.0
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     state = await session.get(
                         ScheduleStateModel, 'e2e_schedule_with_args'
                     )
@@ -370,7 +371,7 @@ async def test_schedule_with_args_passes_arguments(
             found_result = False
 
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     result = await session.execute(
                         text(
                             """
@@ -411,7 +412,7 @@ async def test_config_hash_change_recalculates_next_run(
         deadline = time.time() + 5.0
         original_state: ScheduleStateModel | None = None
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 original_state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
@@ -423,7 +424,7 @@ async def test_config_hash_change_recalculates_next_run(
         original_hash = original_state.config_hash
 
     # Phase 2: Corrupt the config_hash in DB
-    async with scheduler_broker.session_factory() as session:
+    async with current_resources(scheduler_broker).session_factory() as session:
         await session.execute(
             text(
                 """
@@ -440,7 +441,7 @@ async def test_config_hash_change_recalculates_next_run(
         deadline = time.time() + 5.0
         corrected = False
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(
                     ScheduleStateModel, 'e2e_scheduled_simple_interval'
                 )
@@ -472,7 +473,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
     with run_scheduler(SCHEDULER_INSTANCE, timeout=10.0):
         deadline = time.time() + 5.0
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(
                     ScheduleStateModel, 'e2e_schedule_catch_up'
                 )
@@ -486,7 +487,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
     from datetime import timedelta
 
     past_time = datetime.now(timezone.utc) - timedelta(seconds=5)
-    async with scheduler_broker.session_factory() as session:
+    async with current_resources(scheduler_broker).session_factory() as session:
         await session.execute(
             text(
                 """
@@ -500,7 +501,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
         await session.commit()
 
     # Count existing catch_up tasks before restart
-    async with scheduler_broker.session_factory() as session:
+    async with current_resources(scheduler_broker).session_factory() as session:
         result = await session.execute(
             text(
                 """
@@ -520,7 +521,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
             deadline = time.time() + 15.0
             scheduler_processed = False
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     state = await session.get(
                         ScheduleStateModel, 'e2e_schedule_catch_up'
                     )
@@ -538,7 +539,7 @@ async def test_catch_up_missed_enqueues_missed_runs(
             )
 
             # Step 2: Verify catch-up enqueued the expected tasks.
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 result = await session.execute(
                     text(
                         """
@@ -573,7 +574,7 @@ async def test_scheduler_restart_reuses_existing_state(
         with run_worker(SCHEDULER_INSTANCE, timeout=10.0):
             deadline = time.time() + 8.0
             while time.time() < deadline:
-                async with scheduler_broker.session_factory() as session:
+                async with current_resources(scheduler_broker).session_factory() as session:
                     state = await session.get(
                         ScheduleStateModel, 'e2e_scheduled_simple_interval'
                     )
@@ -593,7 +594,7 @@ async def test_scheduler_restart_reuses_existing_state(
         # Wait for scheduler to re-initialize
         await asyncio.sleep(1.0)
 
-        async with scheduler_broker.session_factory() as session:
+        async with current_resources(scheduler_broker).session_factory() as session:
             state_after = await session.get(
                 ScheduleStateModel, 'e2e_scheduled_simple_interval'
             )
@@ -632,7 +633,7 @@ async def test_cron_schedule_fires_on_due_minute(
         deadline = time.time() + 5.0
         state: ScheduleStateModel | None = None
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(ScheduleStateModel, cron_name)
             if state is not None:
                 break
@@ -643,7 +644,7 @@ async def test_cron_schedule_fires_on_due_minute(
 
     # Phase 2: Backdate next_run_at to the current minute slot so it is due.
     due_slot = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    async with scheduler_broker.session_factory() as session:
+    async with current_resources(scheduler_broker).session_factory() as session:
         await session.execute(
             text(
                 """
@@ -662,7 +663,7 @@ async def test_cron_schedule_fires_on_due_minute(
         fired = False
         state = None
         while time.time() < deadline:
-            async with scheduler_broker.session_factory() as session:
+            async with current_resources(scheduler_broker).session_factory() as session:
                 state = await session.get(ScheduleStateModel, cron_name)
             if (
                 state is not None
@@ -681,7 +682,7 @@ async def test_cron_schedule_fires_on_due_minute(
         )
 
         # The scheduler enqueued the cron task (observable without a worker).
-        async with scheduler_broker.session_factory() as session:
+        async with current_resources(scheduler_broker).session_factory() as session:
             result = await session.execute(
                 text(
                     """

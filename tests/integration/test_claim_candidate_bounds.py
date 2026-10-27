@@ -25,6 +25,7 @@ from horsies.core.worker.sql import (
     GET_NONRUNNABLE_WORKFLOW_TASK_IDS_SQL,
     HORSIES_CLAIM_SQL,
 )
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -129,7 +130,7 @@ async def _open_claim(
     params: dict[str, object],
 ) -> AsyncGenerator[list[str], None]:
     """Run horsies_claim and keep its transaction open while the caller looks."""
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         transaction = await connection.begin()
         try:
             rows = (await connection.execute(HORSIES_CLAIM_SQL, params)).all()
@@ -179,7 +180,7 @@ async def test_claim_locks_only_the_rows_it_returns(
 
     async with _open_claim(broker, params) as claimed_ids:
         assert len(claimed_ids) == returned
-        async with broker.async_engine.connect() as other_worker:
+        async with current_resources(broker).engine.connect() as other_worker:
             async with other_worker.begin():
                 assert (
                     await _claimable_by_another_worker(other_worker)
@@ -240,7 +241,7 @@ async def test_claim_returns_rows_in_dispatch_order(
 async def test_only_candidate_selection_forces_a_generic_plan(
     broker: PostgresBroker,
 ) -> None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         settings = dict(
             (
                 await connection.execute(

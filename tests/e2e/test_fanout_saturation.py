@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.listener import PostgresListener
+from tests.broker_resources_support import listener_of
 
 
 async def _listen_unwrap(
@@ -67,7 +68,7 @@ class TestTaskDoneFanout:
 
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         try:
@@ -78,7 +79,7 @@ class TestTaskDoneFanout:
             )
         finally:
             for q in queues:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_single_notify_fans_out_to_all_subscriber_queues(
@@ -97,7 +98,7 @@ class TestTaskDoneFanout:
         # Subscribe N raw queues — no consumer reads from them
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         # Enqueue one task so the UPDATE trigger has a row to fire on
@@ -137,7 +138,7 @@ class TestTaskDoneFanout:
             )
         finally:
             for q in queues:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_wasted_dispatches_per_completion(
@@ -153,7 +154,7 @@ class TestTaskDoneFanout:
 
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         task_id = (await broker.enqueue_async(
@@ -207,7 +208,7 @@ class TestTaskDoneFanout:
         finally:
             for q in queues:
                 q.put_nowait = originals[id(q)]  # type: ignore[assignment]
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_unconsumed_notifications_accumulate_memory(
@@ -229,7 +230,7 @@ class TestTaskDoneFanout:
         # Subscribe N queues — none will be consumed
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N_SUBSCRIBERS):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         # Measure baseline: memory of the empty queues
@@ -296,7 +297,7 @@ class TestTaskDoneFanout:
             )
         finally:
             for q in queues:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
             await session.execute(
                 text("DELETE FROM horsies_tasks WHERE id = ANY(:ids)"),
                 {'ids': task_ids},
@@ -322,7 +323,7 @@ class TestTaskDoneFanout:
         for n in (10, 50, 200):
             queues: list[asyncio.Queue[Notify]] = []
             for _ in range(n):
-                q = await _listen_unwrap(broker.listener, 'task_done')
+                q = await _listen_unwrap(listener_of(broker), 'task_done')
                 queues.append(q)
 
             # Enqueue M tasks
@@ -371,7 +372,7 @@ class TestTaskDoneFanout:
                     )
             finally:
                 for q in queues:
-                    await broker.listener.unsubscribe('task_done', q)
+                    await listener_of(broker).unsubscribe('task_done', q)
                 await session.execute(
                     text("DELETE FROM horsies_tasks WHERE id = ANY(:ids)"),
                     {'ids': task_ids},
@@ -401,8 +402,8 @@ class TestFanoutBoundary:
         """NOTIFY with 0 subscribers does not break later delivery on that channel."""
         # Ensure task_done channel has active LISTEN but no subscriber queues.
         # listen() then immediately unsubscribe to set up the LISTEN without subs.
-        q = await _listen_unwrap(broker.listener, 'task_done')
-        await broker.listener.unsubscribe('task_done', q)
+        q = await _listen_unwrap(listener_of(broker), 'task_done')
+        await listener_of(broker).unsubscribe('task_done', q)
 
         # Fire a completion with zero subscribers; should be a safe no-op.
         task_id = (await broker.enqueue_async(
@@ -422,7 +423,7 @@ class TestFanoutBoundary:
         await session.commit()
 
         # Verify delivery still works by subscribing and firing a new completion.
-        probe_q = await _listen_unwrap(broker.listener, 'task_done')
+        probe_q = await _listen_unwrap(listener_of(broker), 'task_done')
         try:
             task_id_2 = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -439,7 +440,7 @@ class TestFanoutBoundary:
             got_probe = await _wait_until(lambda: probe_q.qsize() >= 1, timeout_s=3.0)
             assert got_probe, 'Expected delivery after zero-subscriber completion'
         finally:
-            await broker.listener.unsubscribe('task_done', probe_q)
+            await listener_of(broker).unsubscribe('task_done', probe_q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_single_subscriber_receives_notification(
@@ -448,7 +449,7 @@ class TestFanoutBoundary:
         session: AsyncSession,
     ) -> None:
         """Degenerate case: 1 subscriber, 1 NOTIFY, queue receives exactly 1 item."""
-        q = await _listen_unwrap(broker.listener, 'task_done')
+        q = await _listen_unwrap(listener_of(broker), 'task_done')
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -471,7 +472,7 @@ class TestFanoutBoundary:
                 f'Single subscriber expected at least 1 notification, got {q.qsize()}'
             )
         finally:
-            await broker.listener.unsubscribe('task_done', q)
+            await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_unsubscribe_during_active_notifications(
@@ -488,7 +489,7 @@ class TestFanoutBoundary:
         N = 10
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         removed = queues[:N // 2]
@@ -533,7 +534,7 @@ class TestFanoutBoundary:
             assert started, 'Expected notifications to start before unsubscribe'
 
             for q in removed:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
 
             await inflight
             removed_sizes_after_unsub = [q.qsize() for q in removed]
@@ -567,7 +568,7 @@ class TestFanoutBoundary:
                 )
         finally:
             for q in queues:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_double_unsubscribe_is_safe_noop(
@@ -575,13 +576,13 @@ class TestFanoutBoundary:
         broker: PostgresBroker,
     ) -> None:
         """Calling unsubscribe() twice with the same queue does not raise."""
-        q = await _listen_unwrap(broker.listener, 'task_done')
+        q = await _listen_unwrap(listener_of(broker), 'task_done')
 
         # First unsubscribe — removes the queue
-        await broker.listener.unsubscribe('task_done', q)
+        await listener_of(broker).unsubscribe('task_done', q)
 
         # Second unsubscribe — should be a safe no-op (uses set.discard internally)
-        await broker.listener.unsubscribe('task_done', q)
+        await listener_of(broker).unsubscribe('task_done', q)
 
         # No exception means success
 
@@ -599,7 +600,7 @@ class TestFanoutErrorPaths:
         random_queue: asyncio.Queue[Notify] = asyncio.Queue()
 
         # Should not raise — discard on a set is a no-op for missing items
-        await broker.listener.unsubscribe('task_done', random_queue)
+        await listener_of(broker).unsubscribe('task_done', random_queue)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_unlisten_removes_server_side_listen(
@@ -611,13 +612,13 @@ class TestFanoutErrorPaths:
         unlisten() removes the local subscription and channel can be cleanly re-listened.
         """
         channel = 'test_unlisten_channel'
-        q = await _listen_unwrap(broker.listener, channel)
+        q = await _listen_unwrap(listener_of(broker), channel)
 
         try:
-            await broker.listener.unlisten(channel, q)
+            await listener_of(broker).unlisten(channel, q)
 
             # Re-listen and verify notifications flow again.
-            q2 = await _listen_unwrap(broker.listener, channel)
+            q2 = await _listen_unwrap(listener_of(broker), channel)
             try:
                 await session.execute(
                     text("SELECT pg_notify(:channel, 'ping')"),
@@ -627,9 +628,9 @@ class TestFanoutErrorPaths:
                 got_ping = await _wait_until(lambda: q2.qsize() >= 1, timeout_s=3.0)
                 assert got_ping, f'Expected notification on re-listened channel {channel!r}'
             finally:
-                await broker.listener.unlisten(channel, q2)
+                await listener_of(broker).unlisten(channel, q2)
         finally:
-            await broker.listener.unlisten(channel, q)
+            await listener_of(broker).unlisten(channel, q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_bounded_queue_drops_on_full(
@@ -644,12 +645,12 @@ class TestFanoutErrorPaths:
         1 item after multiple notifications fire.
         """
         bounded_q: asyncio.Queue[Notify] = asyncio.Queue(maxsize=1)
-        control_q = await _listen_unwrap(broker.listener, 'task_done')
+        control_q = await _listen_unwrap(listener_of(broker), 'task_done')
 
         # Manually insert the bounded queue into _subs.
         # This is intentional: listen() always returns unbounded queues.
-        async with broker.listener._lock:
-            broker.listener._subs['task_done'].add(bounded_q)
+        async with listener_of(broker)._lock:
+            listener_of(broker)._subs['task_done'].add(bounded_q)
 
         try:
             # Fire 3 notifications to exceed maxsize
@@ -684,9 +685,9 @@ class TestFanoutErrorPaths:
                 f'Bounded queue expected exactly 1 item, got {bounded_q.qsize()}'
             )
         finally:
-            async with broker.listener._lock:
-                broker.listener._subs['task_done'].discard(bounded_q)
-            await broker.listener.unsubscribe('task_done', control_q)
+            async with listener_of(broker)._lock:
+                listener_of(broker)._subs['task_done'].discard(bounded_q)
+            await listener_of(broker).unsubscribe('task_done', control_q)
 
 
 @pytest.mark.e2e
@@ -700,7 +701,7 @@ class TestFanoutContracts:
         session: AsyncSession,
     ) -> None:
         """The Notify.payload on subscriber queues contains the completed task_id."""
-        q = await _listen_unwrap(broker.listener, 'task_done')
+        q = await _listen_unwrap(listener_of(broker), 'task_done')
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
@@ -726,7 +727,7 @@ class TestFanoutContracts:
                 f'Expected payload {task_id!r}, got {notification.payload!r}'
             )
         finally:
-            await broker.listener.unsubscribe('task_done', q)
+            await listener_of(broker).unsubscribe('task_done', q)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_channel_isolation_no_cross_delivery(
@@ -735,8 +736,8 @@ class TestFanoutContracts:
         session: AsyncSession,
     ) -> None:
         """NOTIFY on task_done must NOT deliver to task_new subscribers."""
-        q_done = await _listen_unwrap(broker.listener, 'task_done')
-        q_new = await _listen_unwrap(broker.listener, 'task_new')
+        q_done = await _listen_unwrap(listener_of(broker), 'task_done')
+        q_new = await _listen_unwrap(listener_of(broker), 'task_new')
 
         try:
             task_id = (await broker.enqueue_async(
@@ -771,8 +772,8 @@ class TestFanoutContracts:
                 f'task_new queue should be empty after completion, got {q_new.qsize()}'
             )
         finally:
-            await broker.listener.unsubscribe('task_done', q_done)
-            await broker.listener.unsubscribe('task_new', q_new)
+            await listener_of(broker).unsubscribe('task_done', q_done)
+            await listener_of(broker).unsubscribe('task_new', q_new)
 
     @pytest.mark.asyncio(loop_scope='session')
     async def test_consuming_one_queue_does_not_affect_others(
@@ -784,7 +785,7 @@ class TestFanoutContracts:
         N = 3
         queues: list[asyncio.Queue[Notify]] = []
         for _ in range(N):
-            q = await _listen_unwrap(broker.listener, 'task_done')
+            q = await _listen_unwrap(listener_of(broker), 'task_done')
             queues.append(q)
 
         try:
@@ -818,4 +819,4 @@ class TestFanoutContracts:
                 )
         finally:
             for q in queues:
-                await broker.listener.unsubscribe('task_done', q)
+                await listener_of(broker).unsubscribe('task_done', q)

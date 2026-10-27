@@ -27,6 +27,7 @@ from horsies.core.history.rerun.input_envelope import (
 )
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.utils.fingerprint import enqueue_fingerprint
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -77,7 +78,7 @@ class TestConvertedStatement:
         result = await enqueue(broker, send)
         assert is_ok(result)
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text(
@@ -125,7 +126,7 @@ class TestConvertedStatement:
         assert is_ok(resend)
         assert resend.ok_value == send.task_id
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             count = (
                 await session.execute(
                     text(
@@ -185,7 +186,7 @@ class TestKeyedEnqueue:
         key = f'order-batch-{uuid4()}'
         result = await enqueue_keyed(broker, send, key)
         assert is_ok(result)
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text(
@@ -222,7 +223,7 @@ class TestKeyedEnqueue:
         replayed = await enqueue_keyed(broker, resend, key)
         assert is_ok(replayed)
         assert replayed.ok_value == first.task_id
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             count = (
                 await session.execute(
                     text(
@@ -245,7 +246,7 @@ class TestKeyedEnqueue:
 
         assert is_ok(conflicted_insert)
         assert conflicted_insert.ok_value == existing.task_id
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             binding = (
                 await session.execute(
                     text(
@@ -271,7 +272,7 @@ class TestKeyedEnqueue:
         retried = await enqueue_keyed(broker, fresh, key)
         assert is_ok(retried)
         assert retried.ok_value == existing.task_id
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task_count = int(
                 (
                     await session.execute(
@@ -301,7 +302,7 @@ class TestKeyedEnqueue:
             second_binding.err_value.code
             is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
         )
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             reservations = int(
                 (
                     await session.execute(
@@ -332,7 +333,7 @@ class TestKeyedEnqueue:
 
         assert is_err(binding)
         assert binding.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             reservation_count, bound_digest = (
                 await session.execute(
                     text(
@@ -363,7 +364,7 @@ class TestKeyedEnqueue:
             conflicted.err_value.code
             is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
         )
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             orphan = (
                 await session.execute(
                     text(
@@ -386,7 +387,7 @@ class TestKeyedEnqueue:
             RESERVATION_REGISTRY_EXPIRY_INDEX,
         )
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             index_names = {
                 row.indexname
                 for row in (

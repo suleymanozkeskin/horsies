@@ -74,6 +74,7 @@ from horsies.core.lifecycle.persistence import (
     apply_sync,
 )
 from horsies.core.types.status import TaskStatus
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -1585,7 +1586,7 @@ class TestExpirePendingTasks:
         free = await _seed(session, status='PENDING')
         await _deadline(session, free, seconds_ago=60)
 
-        async with broker.async_engine.connect() as holder:
+        async with current_resources(broker).engine.connect() as holder:
             await holder.execute(
                 text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},
@@ -2132,7 +2133,7 @@ class TestCancelOrphanedTasks:
             is_workflow_task=True,
         )
 
-        async with broker.async_engine.connect() as holder:
+        async with current_resources(broker).engine.connect() as holder:
             await holder.execute(
                 text('SELECT id FROM horsies_tasks WHERE id = CAST(:id AS uuid) FOR UPDATE'),
                 {'id': held},

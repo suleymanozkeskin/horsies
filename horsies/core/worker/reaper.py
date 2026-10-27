@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
     from horsies.core.app import Horsies
     from horsies.core.brokers.postgres import PostgresBroker
+    from horsies.core.brokers.resources import BrokerResources
     from horsies.core.models.recovery import RecoveryConfig
     from horsies.core.models.retention import RetentionConfig
     from horsies.core.worker.config import WorkerConfig
@@ -107,13 +108,18 @@ class ReaperMixin:
     async def _run_reaper_pass(
         self,
         temp_broker: 'PostgresBroker',
+        resources: 'BrokerResources',
         recovery_cfg: 'RecoveryConfig',
         retention_cfg: 'RetentionConfig',
         state: _ReaperPassState,
     ) -> None:
         """One reaper pass: stale-task recovery, pending expiry, workflow
         recovery, retention cleanup. Runs under the cluster-wide reaper
-        gate (one executing worker per interval)."""
+        gate (one executing worker per interval).
+
+        ``resources`` is the set selected from ``temp_broker`` when the
+        reaper loop started.
+        """
         # Auto-requeue stale CLAIMED tasks
         if recovery_cfg.auto_requeue_stale_claimed and not state.requeue_disabled:
             match await temp_broker.requeue_stale_claimed(
@@ -303,7 +309,7 @@ class ReaperMixin:
             )
 
             recovery_report = await recover_stuck_workflows_global(
-                temp_broker.session_factory,
+                resources.session_factory,
                 temp_broker,
             )
             self._workflow_recovery_health = recovery_report.health()
@@ -335,7 +341,7 @@ class ReaperMixin:
             from horsies.core.workflows.recovery import GLOBAL_SCAN_ROW_CAP
 
             phase2 = await drive_phase2_recovery(
-                temp_broker.session_factory,
+                resources.session_factory,
                 temp_broker,
                 grace_ms=recovery_cfg.crashed_worker_recovery_grace_ms,
                 max_rows=GLOBAL_SCAN_ROW_CAP,
@@ -387,7 +393,7 @@ class ReaperMixin:
 
                 if retention_cfg.worker_state_retention_hours is not None:
                     deleted_worker_states = await self._delete_expired_in_batches(
-                        temp_broker,
+                        resources.session_factory,
                         DELETE_EXPIRED_WORKER_STATES_SQL,
                         {
                             'retention_hours': retention_cfg.worker_state_retention_hours,
@@ -405,7 +411,7 @@ class ReaperMixin:
                     # :batch_size while backlog remains — hence
                     # drained_when='empty_batch'.
                     deleted_workflows = await self._delete_expired_in_batches(
-                        temp_broker,
+                        resources.session_factory,
                         DELETE_EXPIRED_WORKFLOWS_SQL,
                         {
                             'retention_hours': retention_cfg.terminal_record_retention_hours,
@@ -441,7 +447,7 @@ class ReaperMixin:
 
             try:
                 expired = await expire_paused_workflows(
-                    temp_broker.session_factory,
+                    resources.session_factory,
                     older_than=(
                         retention_cfg.paused_workflow_auto_cancel_after
                     ),
@@ -478,7 +484,7 @@ class ReaperMixin:
 
             try:
                 coverage = await maintain_partition_coverage(
-                    temp_broker.partition_maintenance,
+                    resources.partition_maintenance,
                     history_horizon_days=(
                         retention_cfg.history_leaf_horizon_days
                     ),
@@ -564,7 +570,7 @@ class ReaperMixin:
             # dict; the skipped leaf is the next pass's candidate.
             try:
                 prune = await prune_expired_partitions(
-                    temp_broker.partition_maintenance,
+                    resources.partition_maintenance,
                     StagedLoaderPublisher(),
                 )
                 if prune.acted:
@@ -597,7 +603,7 @@ class ReaperMixin:
 
     async def _delete_expired_in_batches(
         self,
-        temp_broker: 'PostgresBroker',
+        session_factory: 'async_sessionmaker[AsyncSession]',
         statement: 'TextClause',
         params: dict[str, Any],
         deadline_monotonic: float,
@@ -622,7 +628,7 @@ class ReaperMixin:
         """
         total_deleted = 0
         while True:
-            async with temp_broker.session_factory() as s:
+            async with session_factory() as s:
                 result = await s.execute(
                     statement,
                     {**params, 'batch_size': batch_size},
@@ -657,6 +663,11 @@ class ReaperMixin:
         After _REAPER_MAX_PERMANENT_FAILURES consecutive permanent failures, the
         failing operation is disabled for the process lifetime to avoid spamming
         logs every check_interval_ms forever.
+
+        Raises:
+            AssertionError: the broker's resources are in use by another
+                event loop. This is a programmer error. The loop ends, and
+                the worker treats a dead service loop as fatal.
         """
         if not self.cfg.recovery_config:
             return
@@ -705,6 +716,18 @@ class ReaperMixin:
                 if self._app is not None:
                     temp_broker.app = self._app
 
+            # Selected once for the life of this loop. Either broker above
+            # lives on this event loop, so a conflict is a programmer error.
+            # It is raised before the pass loop: that loop's handler logs
+            # and continues.
+            match await temp_broker.select_resources():
+                case Err(conflict):
+                    raise AssertionError(
+                        f'reaper loop broker resources: {conflict.describe()}',
+                    )
+                case Ok(resources):
+                    pass
+
             # The gate session holds a pool connection (and the xact lock)
             # for the duration of the pass, while the pass body checks out
             # its own session from the same pool — peak two connections.
@@ -737,7 +760,11 @@ class ReaperMixin:
                     # holder dies mid-pass.
                     if not gate_enabled:
                         await self._run_reaper_pass(
-                            temp_broker, recovery_cfg, retention_cfg, state,
+                            temp_broker,
+                            resources,
+                            recovery_cfg,
+                            retention_cfg,
+                            state,
                         )
                     else:
                         async with self.sf() as gate_session:
@@ -748,6 +775,7 @@ class ReaperMixin:
                             if bool(gate_result.scalar()):
                                 await self._run_reaper_pass(
                                     temp_broker,
+                                    resources,
                                     recovery_cfg,
                                     retention_cfg,
                                     state,

@@ -38,6 +38,7 @@ from .conftest import make_simple_task, make_failing_task, make_workflow_spec, s
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
 from tests.integration.history_seeding import force_terminal
 from tests.integration.conftest import task_name_for
+from tests.broker_resources_support import current_resources
 
 
 async def _run_phase2_recovery(
@@ -58,7 +59,7 @@ async def _run_phase2_recovery(
     """
     await session.commit()
     summary = await drive_phase2_recovery(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         broker,
         grace_ms=grace_ms,
         max_rows=GLOBAL_SCAN_ROW_CAP,
@@ -1670,7 +1671,7 @@ class TestQuarantineAfterAttempts:
         summary = None
         for expected_attempts in (1, 2, 3):
             summary = await drive_phase2_recovery(
-                broker.session_factory,
+                current_resources(broker).session_factory,
                 broker,
                 grace_ms=0,
                 max_rows=GLOBAL_SCAN_ROW_CAP,
@@ -1713,7 +1714,7 @@ class TestQuarantineAfterAttempts:
         # Discovery no longer selects the row; the standing population
         # is a count, not silence.
         after = await drive_phase2_recovery(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             broker,
             grace_ms=0,
             max_rows=GLOBAL_SCAN_ROW_CAP,

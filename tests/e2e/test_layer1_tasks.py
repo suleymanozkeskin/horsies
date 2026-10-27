@@ -42,6 +42,7 @@ from tests.e2e.tasks import instance as default_instance
 from tests.e2e.tasks import instance_retry_precedence
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import queues_custom
+from tests.broker_resources_support import current_resources
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -89,7 +90,7 @@ async def test_status_transitions(broker: PostgresBroker) -> None:
         result = handle.get(timeout_ms=5000)
         assert_ok(result)
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
@@ -220,7 +221,7 @@ async def test_retry_exhausted(broker: PostgresBroker) -> None:
         result = handle.get(timeout_ms=15000)
         assert_err(result, expected_code='TRANSIENT')
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 3
@@ -259,7 +260,7 @@ async def test_exponential_backoff_state(broker: PostgresBroker) -> None:
         # Wait for at least one retry to be scheduled
         deadline = time.time() + 5.0
         while time.time() < deadline:
-            async with broker.session_factory() as session:
+            async with current_resources(broker).session_factory() as session:
                 task = await read_task(session, handle.task_id)
                 if task and task.retry_count >= 1 and task.next_retry_at is not None:
                     break
@@ -278,7 +279,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
         handle = unwrap_send(await retry_tasks.exponential_task.send_async())
 
         # Capture original enqueued_at before worker processes the task
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None and task.enqueued_at is not None
             original_sent_at = task.sent_at
@@ -287,7 +288,7 @@ async def test_exponential_backoff_intervals(broker: PostgresBroker) -> None:
         # Poll until retry_count reaches 2
         deadline = time.time() + 15.0
         while time.time() < deadline:
-            async with broker.session_factory() as session:
+            async with current_resources(broker).session_factory() as session:
                 task = await read_task(session, handle.task_id)
                 if task is not None and task.enqueued_at is not None:
                     rc = task.retry_count
@@ -328,7 +329,7 @@ async def test_auto_retry_by_error_code(broker: PostgresBroker) -> None:
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
@@ -344,7 +345,7 @@ async def test_auto_retry_by_mapped_exception(broker: PostgresBroker) -> None:
         result = handle.get(timeout_ms=10000)
         assert result.is_err()
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
@@ -360,7 +361,7 @@ async def test_no_retry_for_non_matching(broker: PostgresBroker) -> None:
         result = handle.get(timeout_ms=5000)
         assert_err(result, expected_code='PERMANENT')
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
@@ -381,7 +382,7 @@ async def test_retry_precedence_task_mapper_wins_over_global_no_retry(
         assert result.err is not None
         assert result.err.error_code == 'TASK_VALUE_ERROR'
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
@@ -403,7 +404,7 @@ async def test_retry_precedence_task_mapper_wins_and_retries(
         assert result.err is not None
         assert result.err.error_code == 'TASK_VALUE_ERROR'
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
@@ -425,7 +426,7 @@ async def test_retry_precedence_global_mapper_triggers_retry(
         assert result.err is not None
         assert result.err.error_code == 'GLOBAL_VALUE_ERROR'
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 1
@@ -447,7 +448,7 @@ async def test_retry_precedence_exception_name_collision_no_retry(
         assert result.err is not None
         assert result.err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.retry_count == 0
@@ -488,7 +489,7 @@ async def test_custom_mode_queue_names_stored(custom_broker: PostgresBroker) -> 
         result = handle.get(timeout_ms=5000)
         assert_ok(result, 'high')
 
-        async with custom_broker.session_factory() as session:
+        async with current_resources(custom_broker).session_factory() as session:
             task = await read_task(session, handle.task_id)
             assert task is not None
             assert task.queue_name == 'high'
@@ -537,7 +538,7 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
 
         # Verify high started before low (started_at is set when task runs, more deterministic
         # than claimed_at which can be identical if both claimed in same transaction)
-        async with custom_broker.session_factory() as session:
+        async with current_resources(custom_broker).session_factory() as session:
             t_high = await read_task(session, task_id_high)
             t_low = await read_task(session, task_id_low)
             assert t_high is not None
@@ -592,7 +593,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
         # The reaper may transition it to EXPIRED — both PENDING and EXPIRED are valid.
         deadline = time.time() + 2.0
         while time.time() < deadline:
-            async with broker.session_factory() as session:
+            async with current_resources(broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status in (TaskStatus.PENDING, TaskStatus.EXPIRED)
@@ -621,7 +622,7 @@ async def test_task_completes_before_expiry(
         result = unwrap_get_result(app.get_result(task_id, timeout_ms=5000))
         assert_ok(result, expected_value=10)
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, task_id)
             assert task is not None
             assert task.status == TaskStatus.COMPLETED
@@ -646,7 +647,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
     ):
         await asyncio.sleep(2.0)  # Give worker time to potentially claim
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, task_id)
             assert task is not None
             # Dead on arrival — never claimed; reaper may have transitioned to EXPIRED
@@ -685,7 +686,7 @@ async def test_retry_blocked_by_good_until_expiry(
         result = unwrap_get_result(app.get_result(task_id, timeout_ms=15000))
         assert_err(result, expected_code='TRANSIENT')
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             task = await read_task(session, task_id)
             assert task is not None
             assert task.status == TaskStatus.FAILED
@@ -730,7 +731,7 @@ async def test_retry_succeeds_within_good_until(
             result = unwrap_get_result(app.get_result(task_id, timeout_ms=20000))
             assert_ok(result, expected_value='succeeded_on_attempt_3')
 
-            async with broker.session_factory() as session:
+            async with current_resources(broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED
@@ -835,7 +836,7 @@ async def test_argument_deserialization_error(
     sent_at, sha = compute_test_enqueue_sha(
         task_name='e2e_simple', args_json='"not_a_list"',
     )
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
@@ -879,7 +880,7 @@ async def test_malformed_pydantic_args(
     sent_at, sha = compute_test_enqueue_sha(
         task_name='e2e_pydantic', args_json=corrupted_args,
     )
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks
@@ -919,7 +920,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
     ).unwrap()
 
     # Cancel directly in DB (no cancel API exists)
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         await force_terminal(session, task_id, status='CANCELLED')
         await session.commit()
 
@@ -954,7 +955,7 @@ async def test_multiple_tasks_concurrent(broker: PostgresBroker) -> None:
 
         # Observe runtime concurrency directly from DB instead of wall-clock timing.
         max_running = await poll_max_during(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'",
             duration_s=3.0,
             poll_interval=0.05,
@@ -1031,7 +1032,7 @@ async def test_max_claim_batch(broker: PostgresBroker) -> None:
         all_done = False
 
         while time.time() < deadline and not all_done:
-            async with broker.session_factory() as session:
+            async with current_resources(broker).session_factory() as session:
                 # Count CLAIMED tasks (not yet RUNNING)
                 result = await session.execute(
                     text("SELECT COUNT(*) FROM horsies_tasks WHERE status = 'CLAIMED'")
@@ -1165,7 +1166,7 @@ async def test_legacy_pydantic_result_envelope_rejected(
         'err': None,
     })
     sent_at, sha = compute_test_enqueue_sha(task_name='e2e_simple')
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         await session.execute(
             text("""
                 INSERT INTO horsies_tasks

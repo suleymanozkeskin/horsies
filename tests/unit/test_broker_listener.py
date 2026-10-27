@@ -14,6 +14,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 
 import pytest
+
+from tests.broker_resources_support import attach_resources, fake_resources
 from psycopg import Notify, OperationalError
 
 from horsies.core.brokers.listener import PostgresListener
@@ -1417,7 +1419,7 @@ def _stub_startup_coverage(worker: Any, monkeypatch: pytest.MonkeyPatch) -> None
     )
     broker = MagicMock()
     broker.validate_worker_database_paths = AsyncMock()
-    broker.partition_maintenance = MagicMock()
+    attach_resources(broker, fake_resources())
     worker.broker = broker
     session = AsyncMock()
     factory = MagicMock()

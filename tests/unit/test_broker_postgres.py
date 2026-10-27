@@ -8,6 +8,7 @@ error handling, and delegation patterns.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -80,6 +82,20 @@ def _orphan_scan_stats(rows: int, candidates: int) -> MagicMock:
         last_candidate_rows=candidates,
     )
     return result
+
+
+def _set_resources(broker: Any, **parts: Any) -> None:
+    """Replace parts of the broker's resource set (white-box test helper)."""
+    broker._resources = dataclasses.replace(broker._resources, **parts)
+
+
+def _listener_of(broker: Any) -> Any:
+    """The listener inside the broker's resource set."""
+    match broker._resources.listener:
+        case ListenerEnabled(listener=listener):
+            return listener
+        case ListenerDisabled():
+            raise AssertionError('broker has no listener')
 
 
 def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') -> Any:
@@ -302,9 +318,9 @@ class TestPostgresBrokerPgBouncerWiring:
         context = MagicMock()
         context.__aenter__ = AsyncMock(return_value=connection)
         context.__aexit__ = AsyncMock(return_value=None)
-        broker.async_engine.connect.return_value = context
-        broker.partition_maintenance = MagicMock()
-        broker.partition_maintenance.connect.return_value = context
+        broker._resources.engine.connect.return_value = context
+        _set_resources(broker, partition_maintenance=MagicMock())
+        broker._resources.partition_maintenance.connect.return_value = context
 
         with (
             patch(
@@ -481,7 +497,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized()
+            await broker._ensure_initialized(broker._resources)
 
         assert mock_engine.call_args_list[0].args[0] == database_url
         assert mock_engine.call_args_list[1].args[0] == session_url
@@ -541,7 +557,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 database_url='postgresql+psycopg://u:p@localhost/db',
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized()
+            await broker._ensure_initialized(broker._resources)
 
         lock_calls = [
             call for call in lock_connection.execute.await_args_list
@@ -610,7 +626,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized()
+            await broker._ensure_initialized(broker._resources)
 
         lock_keys = [
             call.args[1][0]
@@ -731,9 +747,7 @@ class TestPostgresBrokerPgBouncerWiring:
             )
 
         assert broker._initialized is True
-        assert broker._listener is None
-        with pytest.raises(RuntimeError, match='listener is disabled'):
-            _ = broker.listener
+        assert isinstance(broker._resources.listener, ListenerDisabled)
         mock_listener_cls.assert_not_called()
 
 
@@ -766,7 +780,7 @@ def _make_enqueue_engine(*, inserted: bool = True) -> tuple[MagicMock, AsyncMock
     """Mock async engine for the unkeyed autocommit enqueue path.
 
     Unkeyed enqueues execute one INSERT on an AUTOCOMMIT connection from
-    ``broker.async_engine`` — no session, no commit. Returns
+    the broker's runtime engine — no session, no commit. Returns
     ``(engine, connection)``; ``inserted=False`` simulates the
     ON CONFLICT DO NOTHING miss (fetchone() -> None).
     """
@@ -794,7 +808,7 @@ class TestEnqueueAsync:
         """Unkeyed enqueue_async returns Ok(task_id) via one AUTOCOMMIT insert."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         result = await broker.enqueue_async(
             'my_task',
@@ -817,7 +831,7 @@ class TestEnqueueAsync:
         """When sent_at is provided, it should be accepted and enqueue should succeed."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         custom_ts = datetime(2025, 1, 1, tzinfo=timezone.utc)
         result = await broker.enqueue_async(
@@ -841,7 +855,7 @@ class TestEnqueueAsync:
         """
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         task_options = (
             '{"retry_policy": {"max_retries": 5, "intervals": [5], '
@@ -868,7 +882,7 @@ class TestEnqueueAsync:
         """
         broker = _make_broker()
         session = _make_enqueue_session()
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -886,7 +900,7 @@ class TestEnqueueAsync:
         """good_until should be accepted and enqueue should succeed."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         expiry = datetime(2099, 12, 31, tzinfo=timezone.utc)
         result = await broker.enqueue_async(
@@ -904,7 +918,7 @@ class TestEnqueueAsync:
         """A retry_policy that is not an object is refused before any write."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         task_options = '{"retry_policy": "not_a_dict"}'
         result = await broker.enqueue_async(
@@ -928,7 +942,7 @@ class TestEnqueueAsync:
         """
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         task_options = '{"some_other_key": "value"}'
         result = await broker.enqueue_async(
@@ -953,7 +967,7 @@ class TestEnqueueAsync:
         """
         broker = _make_broker()
         session = _make_enqueue_session()
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
@@ -973,7 +987,7 @@ class TestEnqueueAsync:
         """Future sent_at is allowed when enqueued_at is explicitly provided."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
@@ -992,7 +1006,7 @@ class TestEnqueueAsync:
         """Future sent_at is allowed when enqueue_delay_seconds is provided."""
         broker = _make_broker()
         engine, conn = _make_enqueue_engine()
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         future = datetime.now(timezone.utc) + timedelta(minutes=10)
         result = await broker.enqueue_async(
@@ -1056,9 +1070,9 @@ class TestEnqueueIdempotency:
         """INSERT conflicts, SELECT finds matching SHA -> Ok(task_id)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
         session = _make_conflict_session(existing_sha='test-sha')
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -1074,9 +1088,9 @@ class TestEnqueueIdempotency:
         """INSERT conflicts, SELECT finds mismatched SHA -> Err(non-retryable)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
         session = _make_conflict_session(existing_sha='different-sha')
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -1097,9 +1111,9 @@ class TestEnqueueIdempotency:
         """
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
         session = _make_conflict_session(existing_sha=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -1118,9 +1132,9 @@ class TestEnqueueIdempotency:
         """INSERT conflicts, SELECT returns no row -> cannot verify payload identity."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
         session = _make_conflict_session(row_exists=False)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -1138,11 +1152,11 @@ class TestEnqueueIdempotency:
         """INSERT conflicts, SELECT raises -> Err(retryable=True)."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
         session = _make_conflict_session(
             select_raises=ConnectionError('db gone'),
         )
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
             'my_task',
@@ -1228,7 +1242,7 @@ class TestGetRawResultRecordAsync:
         """Row absent → Ok(None); no INVALID_JSON_PAYLOAD."""
         broker = _make_broker()
         session = _make_result_session(None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('missing-id')
 
@@ -1246,7 +1260,7 @@ class TestGetRawResultRecordAsync:
             result='{"__h_task_result__":true,"ok":42,"err":null}',
         )
         session = _make_result_session(row)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
 
@@ -1270,7 +1284,7 @@ class TestGetRawResultRecordAsync:
         broker = _make_broker()
         row = _make_task_row(status=TaskStatus.CANCELLED, result=None)
         session = _make_result_session(row)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
 
@@ -1291,12 +1305,12 @@ class TestGetRawResultRecordAsync:
         from horsies.core.brokers.result_types import RawResultRecord
 
         broker = _make_broker()
-        broker.listener.listen = AsyncMock(
+        _listener_of(broker).listen = AsyncMock(
             side_effect=RuntimeError('listener down; force polling'),
         )
         running_row = _make_task_row(status=TaskStatus.RUNNING, result=None)
         session = _make_result_session(running_row)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.asyncio.sleep', new=AsyncMock(),
@@ -1320,7 +1334,7 @@ class TestGetRawResultRecordAsync:
             result='{not valid json',
         )
         session = _make_result_session(row)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
 
@@ -1341,7 +1355,7 @@ class TestGetRawResultRecordAsync:
         broker = _make_broker()
         row = _make_task_row(status=TaskStatus.COMPLETED, result='42')
         session = _make_result_session(row)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_raw_result_record_async('task-123')
 
@@ -1356,7 +1370,7 @@ class TestGetRawResultRecordAsync:
         broker = _make_broker()
         session = _make_result_session(None)
         session.execute = AsyncMock(side_effect=asyncio.CancelledError)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with pytest.raises(asyncio.CancelledError):
             await broker.get_raw_result_record_async('task-123')
@@ -1371,12 +1385,12 @@ class TestGetRawResultRecordAsync:
         """
         broker = _make_broker()
         q: asyncio.Queue[Any] = asyncio.Queue()
-        broker.listener.listen_payload = AsyncMock(return_value=Ok(q))
+        _listener_of(broker).listen_payload = AsyncMock(return_value=Ok(q))
 
         session = _make_result_session(
             _make_task_row(status=TaskStatus.RUNNING),
         )
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -1389,7 +1403,7 @@ class TestGetRawResultRecordAsync:
             await release.wait()
             finished.set()
 
-        broker.listener.unsubscribe_payload = AsyncMock(
+        _listener_of(broker).unsubscribe_payload = AsyncMock(
             side_effect=_unsubscribe,
         )
 
@@ -1400,7 +1414,7 @@ class TestGetRawResultRecordAsync:
         )
 
         for _ in range(50):
-            if broker.listener.listen_payload.await_count > 0:
+            if _listener_of(broker).listen_payload.await_count > 0:
                 break
             await asyncio.sleep(0)
 
@@ -1416,7 +1430,7 @@ class TestGetRawResultRecordAsync:
             await task
 
         assert finished.is_set() is True
-        broker.listener.unsubscribe_payload.assert_awaited_once_with(
+        _listener_of(broker).unsubscribe_payload.assert_awaited_once_with(
             'task_done', 'task-123', q,
         )
 
@@ -1445,7 +1459,7 @@ class TestMonitoringQueries:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
     @pytest.mark.asyncio
     async def test_get_stale_tasks_returns_list_of_dicts(self) -> None:
@@ -1547,7 +1561,7 @@ def _setup_session_returning(
     fetchall: list[Any] | None = None,
     fetchone: Any = None,
 ) -> AsyncMock:
-    """Configure broker.session_factory to return a result with given rows."""
+    """Configure broker._resources.session_factory to return a result with given rows."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = fetchall if fetchall is not None else []
     mock_result.fetchone.return_value = fetchone
@@ -1557,7 +1571,7 @@ def _setup_session_returning(
     session.__aexit__ = AsyncMock(return_value=None)
     session.execute = AsyncMock(return_value=mock_result)
     session.commit = AsyncMock()
-    broker.session_factory = MagicMock(return_value=session)
+    _set_resources(broker, session_factory=MagicMock(return_value=session))
     return session
 
 
@@ -1582,7 +1596,7 @@ class TestPingDatabase:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(side_effect=RuntimeError('connection refused'))
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.ping_database_async()
 
@@ -1680,7 +1694,7 @@ class TestPingWorkers:
             database_url='postgresql+psycopg://u:p@localhost/db'
         )
         broker = PostgresBroker(config, assume_initialized=True)
-        assert broker._listener is None
+        assert isinstance(broker._resources.listener, ListenerDisabled)
 
         result = await broker.ping_workers_async(timeout_seconds=1.0)
 
@@ -1753,8 +1767,8 @@ class TestPingWorkers:
         ).ok_value
         reply_queue.put_nowait(SimpleNamespace(payload=pong_json, channel='reply'))
 
-        broker.listener.listen = AsyncMock(return_value=Ok(reply_queue))
-        broker.listener.unsubscribe = AsyncMock()
+        _listener_of(broker).listen = AsyncMock(return_value=Ok(reply_queue))
+        _listener_of(broker).unsubscribe = AsyncMock()
         _setup_session_returning(broker)  # NOTIFY send is a no-op
 
         loop = asyncio.get_running_loop()
@@ -1791,7 +1805,7 @@ class TestMarkStaleTasksAsFailed:
         scan_session.__aenter__ = AsyncMock(return_value=scan_session)
         scan_session.__aexit__ = AsyncMock(return_value=None)
         scan_session.execute = AsyncMock(return_value=scan_result)
-        broker.session_factory = MagicMock(return_value=scan_session)
+        _set_resources(broker, session_factory=MagicMock(return_value=scan_session))
 
         result = await broker.mark_stale_tasks_as_failed(
             stale_threshold_ms=1_500,
@@ -1814,7 +1828,7 @@ class TestMarkStaleTasksAsFailed:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.mark_stale_tasks_as_failed()
 
@@ -1870,7 +1884,7 @@ class TestMarkStaleTasksAsFailed:
             _make_task_session('task-1'),
             _make_task_session('task-2', retry_count=2),
         ]
-        broker.session_factory = MagicMock(side_effect=[scan_session, *task_sessions])
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, *task_sessions]))
 
         with patch(
             'horsies.core.brokers.postgres.apply_async',
@@ -1924,7 +1938,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
 
-        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
         apply_mock = AsyncMock(return_value=_stale_applied('task-1', db_now))
         with patch('horsies.core.brokers.postgres.apply_async', new=apply_mock):
@@ -1980,9 +1994,9 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aenter__ = AsyncMock(return_value=task_session)
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
-        broker.session_factory = MagicMock(
+        _set_resources(broker, session_factory=MagicMock(
             side_effect=[scan_session, task_session],
-        )
+        ))
 
         refusal = SourceStateConflict(
             task_id='task-raced',
@@ -2072,9 +2086,9 @@ class TestMarkStaleTasksAsFailed:
         notify_session.__aenter__ = AsyncMock(return_value=notify_session)
         notify_session.__aexit__ = AsyncMock(return_value=None)
 
-        broker.session_factory = MagicMock(
+        _set_resources(broker, session_factory=MagicMock(
             side_effect=[scan_session, task_session, notify_session]
-        )
+        ))
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 
@@ -2138,7 +2152,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(side_effect=[ctx_result, MagicMock()])
 
-        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
         with patch(
             'horsies.core.brokers.postgres.apply_async',
@@ -2179,7 +2193,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(return_value=ctx_result)
 
-        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 
@@ -2207,7 +2221,7 @@ class TestMarkStaleTasksAsFailed:
         task_session.__aexit__ = AsyncMock(return_value=None)
         task_session.execute = AsyncMock(return_value=ctx_result)
 
-        broker.session_factory = MagicMock(side_effect=[scan_session, task_session])
+        _set_resources(broker, session_factory=MagicMock(side_effect=[scan_session, task_session]))
 
         result = await broker.mark_stale_tasks_as_failed(stale_threshold_ms=300_000)
 
@@ -2235,7 +2249,7 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2258,7 +2272,7 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         outcomes = [MagicMock(spec=Applied) for _ in range(3)]
         with patch(
@@ -2285,7 +2299,7 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
         full = [MagicMock(spec=Applied) for _ in range(500)]
         final = [MagicMock(spec=Applied) for _ in range(2)]
 
@@ -2309,7 +2323,7 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2327,7 +2341,7 @@ class TestExpirePendingTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2355,7 +2369,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute.return_value = _orphan_scan_stats(0, 0)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2380,7 +2394,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute.return_value = _orphan_scan_stats(3, 3)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
         outcomes = [MagicMock(spec=Applied) for _ in range(3)]
 
         with patch(
@@ -2402,7 +2416,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute.return_value = _orphan_scan_stats(500, 2)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
         outcomes = [MagicMock(spec=Applied) for _ in range(2)]
 
         with patch(
@@ -2428,7 +2442,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute.return_value = _orphan_scan_stats(10, 2)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2448,7 +2462,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute.return_value = _orphan_scan_stats(500, 500)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
         full = [MagicMock(spec=Applied) for _ in range(500)]
         final = [MagicMock(spec=Applied) for _ in range(2)]
 
@@ -2471,7 +2485,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2488,7 +2502,7 @@ class TestTerminateOrphanedWorkflowTasks:
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         with patch(
             'horsies.core.brokers.postgres.apply_batch_async',
@@ -2520,7 +2534,7 @@ class TestRequeueStaleClaimed:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed(stale_threshold_ms=120_000)
 
@@ -2538,7 +2552,7 @@ class TestRequeueStaleClaimed:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.requeue_stale_claimed()
 
@@ -2556,7 +2570,7 @@ class TestRequeueStaleClaimed:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         await broker.requeue_stale_claimed(stale_threshold_ms=60_000)
 
@@ -2667,7 +2681,7 @@ class TestGetTaskInfoAsync:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(return_value=mock_result)
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
     @pytest.mark.asyncio
     async def test_task_not_found_returns_none(self) -> None:
@@ -2935,8 +2949,8 @@ class TestCloseAsync:
         async def mock_engine_dispose() -> None:
             call_order.append('engine_dispose')
 
-        broker.listener.close = mock_listener_close
-        broker.async_engine.dispose = mock_engine_dispose
+        _listener_of(broker).close = mock_listener_close
+        broker._resources.engine.dispose = mock_engine_dispose
 
         result = await broker.close_async()
 
@@ -3049,7 +3063,7 @@ class TestEnqueueAsyncErrorPaths:
         conn.execute = AsyncMock(
             side_effect=OperationalError('insert failed', None, Exception('conn lost'))
         )
-        broker.async_engine = engine
+        _set_resources(broker, engine=engine)
 
         result = await broker.enqueue_async(
             'my_task',
@@ -3077,7 +3091,7 @@ class TestGetTaskInfoAsyncErrorPaths:
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
         session.execute = AsyncMock(side_effect=RuntimeError('db exploded'))
-        broker.session_factory = MagicMock(return_value=session)
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.get_task_info_async('task-abc')
 
@@ -3147,7 +3161,7 @@ class TestSchemaVersionInitialization:
             broker = PostgresBroker(
                 PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
             )
-            await broker._ensure_initialized()
+            await broker._ensure_initialized(broker._resources)
 
         assert len(conn.execute.await_args_list) == 2
         assert conn.execute.await_args_list[0].args == (
@@ -3331,8 +3345,8 @@ class TestCloseAsyncErrorPaths:
             nonlocal dispose_called
             dispose_called = True
 
-        broker.listener.close = failing_listener_close
-        broker.async_engine.dispose = tracking_engine_dispose
+        _listener_of(broker).close = failing_listener_close
+        broker._resources.engine.dispose = tracking_engine_dispose
 
         result = await broker.close_async()
 

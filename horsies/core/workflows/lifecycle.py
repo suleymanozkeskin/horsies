@@ -36,6 +36,7 @@ from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
+from horsies.core.brokers.resources import EventLoopConflict
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     TaskNode,
@@ -317,6 +318,18 @@ async def start_workflow_async(
     # ── Zone 2: Schema init + DB transaction (retried when transient) ─
     from horsies.core.types.result import is_err
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return Err(WorkflowStartError(
+                code=WorkflowStartErrorCode.EVENT_LOOP_CONFLICT,
+                message=f'start of workflow {spec.name!r}: {conflict.describe()}',
+                retryable=False,
+                workflow_name=spec.name,
+                workflow_id=wf_id,
+            ))
+        case Ok(resources):
+            pass
+
     max_attempts = 1 + (_START_RETRY_COUNT if resend_on_transient_err else 0)
     last_err: WorkflowStartError | None = None
 
@@ -346,7 +359,7 @@ async def start_workflow_async(
 
         # ── DB transaction ───────────────────────────────────────────
         try:
-            async with broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 # 1. Insert workflow record atomically (idempotent on workflow ID)
                 output_index = spec.output.index if spec.output else None
 
@@ -808,7 +821,7 @@ def start_workflow(
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     try:
-        return broker._loop_runner.call(
+        return broker.run_sync(
             start_workflow_async,
             spec,
             broker,
@@ -839,6 +852,18 @@ def start_workflow(
 
 
 
+def _event_loop_conflict(
+    workflow_id: str, operation: str, conflict: EventLoopConflict,
+) -> Err[HandleOperationError]:
+    """Build the lifecycle error for an event loop conflict. Nothing ran."""
+    return Err(HandleOperationError(
+        code=HandleErrorCode.EVENT_LOOP_CONFLICT,
+        message=f'{operation} of workflow {workflow_id}: {conflict.describe()}',
+        retryable=False,
+        workflow_id=workflow_id,
+    ))
+
+
 async def pause_workflow(
     broker: 'PostgresBroker',
     workflow_id: str,
@@ -864,9 +889,16 @@ async def pause_workflow(
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
         ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
+        ``Err(EVENT_LOOP_CONFLICT)`` if another open event loop holds the
+        broker's async resources; nothing ran.
     """
+    match await broker.select_resources():
+        case Err(conflict):
+            return _event_loop_conflict(workflow_id, 'pause', conflict)
+        case Ok(resources):
+            pass
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             result = await session.execute(
                 PAUSE_WORKFLOW_SQL,
                 {'wf_id': workflow_id},
@@ -1011,7 +1043,7 @@ def pause_workflow_sync(
     from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return broker._loop_runner.call(pause_workflow, broker, workflow_id)
+        return broker.run_sync(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
@@ -1054,6 +1086,8 @@ async def resume_workflow(
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
         ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
         ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
+        ``Err(EVENT_LOOP_CONFLICT)`` if another open event loop holds the
+        broker's async resources; nothing ran.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -1065,8 +1099,14 @@ async def resume_workflow(
         drain_parent_propagations_in_session,
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _event_loop_conflict(workflow_id, 'resume', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             # 1. Transition PAUSED → RUNNING (only if currently PAUSED)
             result = await session.execute(
                 RESUME_WORKFLOW_SQL,
@@ -1164,7 +1204,7 @@ async def resume_workflow(
         # close that race through the same canonical engine paths. Scope it to
         # the resumed workflow's tree (self + descendants) so resume does not
         # trigger a full-DB recovery sweep over unrelated workflows.
-        async with broker.session_factory() as recovery_session:
+        async with resources.session_factory() as recovery_session:
             from horsies.core.workflows.recovery import (
                 GET_WORKFLOW_TREE_IDS_SQL,
                 recover_stuck_workflow_tree,
@@ -1323,7 +1363,7 @@ def resume_workflow_sync(
     from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return broker._loop_runner.call(resume_workflow, broker, workflow_id)
+        return broker.run_sync(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,

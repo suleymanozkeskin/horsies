@@ -47,6 +47,7 @@ from horsies.core.history.partitions.catalog import (
     daily_leaf_name,
     database_now,
 )
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -60,7 +61,7 @@ _RETURN_SURVIVOR_KEY = 'z_return_survivor_7d'
 
 
 async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -74,7 +75,7 @@ async def _leaf_count(broker: PostgresBroker, class_key: str) -> int:
 
 async def _register_owned_class(broker: PostgresBroker, class_key: str) -> None:
     await _forget_owned_class(broker, class_key)
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         registration = await register_finite_retention_class(
             connection,
             class_key=class_key,
@@ -85,7 +86,7 @@ async def _register_owned_class(broker: PostgresBroker, class_key: str) -> None:
 
 async def _forget_owned_class(broker: PostgresBroker, class_key: str) -> None:
     parent = finite_class_parent_name(class_key)
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(text(f'DROP TABLE IF EXISTS {parent} CASCADE'))
         await connection.execute(
             text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
@@ -98,7 +99,7 @@ async def _forget_owned_class(broker: PostgresBroker, class_key: str) -> None:
 
 
 async def _plant_unusable_class(broker: PostgresBroker) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(
                 f"""
@@ -122,7 +123,7 @@ async def _plant_unusable_class(broker: PostgresBroker) -> None:
 
 
 async def _forget_unusable_class(broker: PostgresBroker) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
             {'key': _UNUSABLE_KEY},
@@ -144,7 +145,7 @@ async def test_a_class_that_cannot_be_named_does_not_deny_the_others() -> None:
 async def test_coverage_contains_the_failure_and_keeps_going(
     broker: PostgresBroker,
 ) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         baseline = await ensure_partition_coverage(
             connection, history_horizon_days=2, heartbeat_horizon_hours=3
         )
@@ -160,7 +161,7 @@ async def test_coverage_contains_the_failure_and_keeps_going(
         # The owned class is OWED leaves and can only receive them if the
         # loop survived the class sorting ahead of it, so the count is
         # the containment evidence.
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             outcome = await ensure_partition_coverage(
                 connection,
                 history_horizon_days=horizon,
@@ -224,12 +225,12 @@ async def _plant_class_without_relation(broker: PostgresBroker) -> None:
     to the transaction-poisoning test. It is the failure kind that aborts
     the caller's transaction.
     """
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await _plant_class_row(connection)
 
 
 async def _forget_refusing_class(broker: PostgresBroker) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(f'DELETE FROM {LEAF_CATALOG} WHERE class_key = :key'),
             {'key': _REFUSING_KEY},
@@ -241,7 +242,7 @@ async def _forget_refusing_class(broker: PostgresBroker) -> None:
 
 
 async def _heartbeat_leaf_count(broker: PostgresBroker) -> int:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -272,7 +273,7 @@ async def _plant_class_with_squatted_leaf(broker: PostgresBroker) -> str:
 
     Returns the squatter's relation name so the caller can drop it.
     """
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         registration = await register_finite_retention_class(
             connection, class_key=_REFUSING_KEY, duration=timedelta(days=7)
         )
@@ -306,7 +307,7 @@ async def test_a_returned_refusal_is_contained_like_a_raise(
 
     squatter = await _plant_class_with_squatted_leaf(broker)
     try:
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             outcome = await ensure_partition_coverage(
                 connection,
                 history_horizon_days=horizon,
@@ -340,7 +341,7 @@ async def test_heartbeat_coverage_survives_a_failing_history_class(
     """
     await _plant_class_without_relation(broker)
     try:
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             outcome = await ensure_partition_coverage(
                 connection, history_horizon_days=3, heartbeat_horizon_hours=6
             )
@@ -374,7 +375,7 @@ async def test_a_database_error_does_not_poison_the_pass(
     await _plant_class_without_relation(broker)
 
     try:
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             outcome = await ensure_partition_coverage(
                 connection, history_horizon_days=3, heartbeat_horizon_hours=3
             )
@@ -401,7 +402,7 @@ _SURVIVOR_KEY = 'q_survivor_7d'
 
 
 async def _drop_if_present(broker: PostgresBroker, relation: str) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(f'DROP TABLE IF EXISTS {relation} CASCADE')
         )
@@ -409,7 +410,7 @@ async def _drop_if_present(broker: PostgresBroker, relation: str) -> None:
 
 async def _forget_survivor_class(broker: PostgresBroker) -> None:
     parent = finite_class_parent_name(_SURVIVOR_KEY)
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         leaves = (
             await connection.execute(
                 text(
@@ -462,13 +463,13 @@ async def test_a_refusal_keeps_the_leaves_created_before_it(
     """
     await _forget_survivor_class(broker)
     parent = finite_class_parent_name(_SURVIVOR_KEY)
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         now = await database_now(connection)
     day_lower = now.replace(hour=0, minute=0, second=0, microsecond=0)
     # Day+2, deliberately: see the docstring.
     squatter = daily_leaf_name(parent, day_lower + timedelta(days=4))
     try:
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             registration = await register_finite_retention_class(
                 connection,
                 class_key=_SURVIVOR_KEY,
@@ -481,7 +482,7 @@ async def test_a_refusal_keeps_the_leaves_created_before_it(
         # Two is the floor: `EnsureLeafCoverage` refuses anything lower
         # as the health-contract red line. `range(horizon + 1)` makes
         # that today plus two future days.
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             first = await ensure_partition_coverage(
                 connection, history_horizon_days=2, heartbeat_horizon_hours=3
             )
@@ -490,14 +491,14 @@ async def test_a_refusal_keeps_the_leaves_created_before_it(
             'premise broken: the first pass must leave today and two days'
         )
 
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             await connection.execute(
                 text(f'CREATE TABLE IF NOT EXISTS {squatter} (x int)')
             )
 
         # Offsets 0-2 are already conformant, offset 3 is CREATED, and
         # offset 4 meets the squatter and refuses.
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             outcome = await ensure_partition_coverage(
                 connection, history_horizon_days=4, heartbeat_horizon_hours=3
             )

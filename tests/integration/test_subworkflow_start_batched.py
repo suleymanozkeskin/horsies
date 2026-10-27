@@ -24,6 +24,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -113,11 +114,11 @@ class TestBulkChildStart:
                 counter['n'] += 1
 
             child_def = _child_def(app, 20, shape=shape)
-            event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             try:
                 await _start_parent(app, broker, child_def)
             finally:
-                event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+                event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             counts[shape] = counter['n']
 
         # Flatness across shapes is the claim (old: flat=86, chain=29).

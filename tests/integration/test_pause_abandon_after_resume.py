@@ -35,6 +35,7 @@ from horsies.core.worker.claiming import ClaimMixin
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.workflows.lifecycle import resume_workflow
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
+from tests.broker_resources_support import current_resources, listener_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -107,7 +108,7 @@ def _claim_filter_probe(broker: PostgresBroker) -> ClaimMixin:
 
     class _Probe(ClaimMixin):
         def __init__(self) -> None:
-            self.sf = broker.session_factory
+            self.sf = current_resources(broker).session_factory
             self.cfg = cfg
             self.worker_instance_id = WORKER_ID
 
@@ -194,7 +195,7 @@ async def test_batch_abandon_refuses_after_a_committed_resume(
     resumed = await resume_workflow(broker, workflow_id)
     assert is_ok(resumed) and resumed.ok_value is True
 
-    async with broker.session_factory() as worker_session:
+    async with current_resources(broker).session_factory() as worker_session:
         outcomes = await apply_batch_async(
             await worker_session.connection(),
             AbandonOwnedNodes(
@@ -240,7 +241,7 @@ async def test_batch_abandon_applies_while_still_paused(
         claimed_at,
     )
 
-    async with broker.session_factory() as worker_session:
+    async with current_resources(broker).session_factory() as worker_session:
         outcomes = await apply_batch_async(
             await worker_session.connection(),
             AbandonOwnedNodes(
@@ -287,7 +288,7 @@ async def test_child_starts_a_task_resumed_before_its_abandon(
         session,
         claimed_at,
     )
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
     real_apply_sync = child_runner.apply_sync
 
     def _resume_then_apply(cursor: Any, command: Any) -> Any:
@@ -327,7 +328,7 @@ async def test_child_starts_a_task_resumed_before_its_status_read(
         session,
         claimed_at,
     )
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
     real_status_read = child_runner._get_workflow_status_for_task
 
     def _resume_then_read(cursor: Any, read_task_id: str) -> str | None:

@@ -44,6 +44,7 @@ from tests.e2e.tasks import instance_requeue_guard
 
 import subprocess
 import time
+from tests.broker_resources_support import current_resources
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
@@ -103,7 +104,7 @@ async def _wait_for_claimed_owner(
 
 async def _prepare_execution_ledger_tables(broker: PostgresBroker) -> None:
     """Create and clear DB-ledger tables used by the double-execution race test."""
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         await session.execute(
             text(
                 """
@@ -165,10 +166,10 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         ]
 
         # Wait for all tasks to complete
-        await wait_for_all_terminal(broker.session_factory, task_ids, timeout_s=30.0)
+        await wait_for_all_terminal(current_resources(broker).session_factory, task_ids, timeout_s=30.0)
 
         # Query distinct claimed_by_worker_id values
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             result = await session.execute(
                 text("""
                     SELECT DISTINCT last_claimed_worker_id
@@ -186,7 +187,7 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
         ), f'Expected at least 2 distinct worker IDs, got {len(worker_ids)}: {worker_ids}'
 
         # Verify all tasks completed successfully
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             for task_id in task_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -230,7 +231,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
         # Poll DB during execution to find max RUNNING count
         # Duration should cover at least a few task executions
         max_running = await poll_max_during(
-            cluster_cap_broker.session_factory,
+            current_resources(cluster_cap_broker).session_factory,
             "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING'",
             duration_s=4.0,
             poll_interval=0.05,
@@ -238,7 +239,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
 
         # Wait for all to complete
         await wait_for_all_terminal(
-            cluster_cap_broker.session_factory, task_ids, timeout_s=30.0
+            current_resources(cluster_cap_broker).session_factory, task_ids, timeout_s=30.0
         )
 
         # Guard against vacuous pass (all tasks completed before first poll sample)
@@ -250,7 +251,7 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
         ), f'RUNNING count {max_running} exceeded cluster_wide_cap {cluster_wide_cap}'
 
         # Verify all tasks completed successfully
-        async with cluster_cap_broker.session_factory() as session:
+        async with current_resources(cluster_cap_broker).session_factory() as session:
             for task_id in task_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -292,7 +293,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
 
         # Poll DB during execution to find max RUNNING count for this queue
         max_running = await poll_max_during(
-            custom_broker.session_factory,
+            current_resources(custom_broker).session_factory,
             "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
             duration_s=5.0,
             poll_interval=0.05,
@@ -301,7 +302,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
 
         # Wait for all to complete
         await wait_for_all_terminal(
-            custom_broker.session_factory, task_ids, timeout_s=30.0
+            current_resources(custom_broker).session_factory, task_ids, timeout_s=30.0
         )
 
         # Guard against vacuous pass (all tasks completed before first poll sample)
@@ -314,7 +315,7 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
         )
 
         # Verify all tasks completed successfully (prevents silent failures)
-        async with custom_broker.session_factory() as session:
+        async with current_resources(custom_broker).session_factory() as session:
             for task_id in task_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -398,7 +399,7 @@ async def test_softcap_db_ledger_race_single_execution(
             kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
         ).unwrap()
         await wait_for_status(
-            softcap_broker.session_factory,
+            current_resources(softcap_broker).session_factory,
             blocker_task_id,
             'RUNNING',
             timeout_s=10.0,
@@ -413,7 +414,7 @@ async def test_softcap_db_ledger_race_single_execution(
         ).unwrap()
 
         await _wait_for_claimed_owner(
-            softcap_broker.session_factory,
+            current_resources(softcap_broker).session_factory,
             ledger_task_id,
             timeout_s=10.0,
         )
@@ -431,12 +432,12 @@ async def test_softcap_db_ledger_race_single_execution(
             ready_check=_make_ready_check(instance_softcap.healthcheck),
         ):
             await wait_for_all_terminal(
-                softcap_broker.session_factory,
+                current_resources(softcap_broker).session_factory,
                 [blocker_task_id, ledger_task_id],
                 timeout_s=40.0,
             )
 
-    async with softcap_broker.session_factory() as session:
+    async with current_resources(softcap_broker).session_factory() as session:
         ledger_task = await read_task(session, ledger_task_id)
         assert ledger_task is not None
         assert ledger_task.status == TaskStatus.COMPLETED, (
@@ -508,7 +509,7 @@ async def test_stale_running_marked_failed_on_crash(
 
         # Wait until task reaches RUNNING
         await wait_for_status(
-            recovery_broker.session_factory,
+            current_resources(recovery_broker).session_factory,
             task_id,
             'RUNNING',
             timeout_s=15.0,
@@ -526,13 +527,13 @@ async def test_stale_running_marked_failed_on_crash(
     ):
         # Wait for task to reach terminal state (reaper marks it FAILED)
         await wait_for_all_terminal(
-            recovery_broker.session_factory,
+            current_resources(recovery_broker).session_factory,
             [task_id],
             timeout_s=15.0,
         )
 
     # Verify status and error code
-    async with recovery_broker.session_factory() as session:
+    async with current_resources(recovery_broker).session_factory() as session:
         task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.FAILED, (
@@ -569,7 +570,7 @@ async def test_stale_claimed_requeued_and_completed(
 
     # Manually set the row to CLAIMED with a stale timestamp, simulating a
     # worker that died before executing the task
-    async with recovery_broker.session_factory() as session:
+    async with current_resources(recovery_broker).session_factory() as session:
         await session.execute(
             text("""
                 UPDATE horsies_tasks
@@ -590,13 +591,13 @@ async def test_stale_claimed_requeued_and_completed(
         ready_check=_make_ready_check(instance_recovery.healthcheck),
     ):
         await wait_for_all_terminal(
-            recovery_broker.session_factory,
+            current_resources(recovery_broker).session_factory,
             [task_id],
             timeout_s=15.0,
         )
 
     # Verify the task completed and was re-claimed by a live worker
-    async with recovery_broker.session_factory() as session:
+    async with current_resources(recovery_broker).session_factory() as session:
         task = await read_task(session, task_id)
         assert task is not None
         assert task.status == TaskStatus.COMPLETED, (
@@ -642,11 +643,11 @@ async def test_cluster_cap_not_leaked_on_failure(
 
         # Wait for all failures
         await wait_for_all_terminal(
-            cluster_cap_broker.session_factory, fail_ids, timeout_s=15.0
+            current_resources(cluster_cap_broker).session_factory, fail_ids, timeout_s=15.0
         )
 
         # Verify all failed
-        async with cluster_cap_broker.session_factory() as session:
+        async with current_resources(cluster_cap_broker).session_factory() as session:
             for task_id in fail_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -668,11 +669,11 @@ async def test_cluster_cap_not_leaked_on_failure(
 
         # If cap leaked, these would hang forever as PENDING
         await wait_for_all_terminal(
-            cluster_cap_broker.session_factory, slow_ids, timeout_s=15.0
+            current_resources(cluster_cap_broker).session_factory, slow_ids, timeout_s=15.0
         )
 
         # Verify all slow tasks completed
-        async with cluster_cap_broker.session_factory() as session:
+        async with current_resources(cluster_cap_broker).session_factory() as session:
             for task_id in slow_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -705,11 +706,11 @@ async def test_retry_works_across_multiple_workers(broker: PostgresBroker) -> No
 
         # Wait for all to reach terminal state (3 retries x 1s + execution time)
         await wait_for_all_terminal(
-            broker.session_factory, task_ids, timeout_s=30.0
+            current_resources(broker).session_factory, task_ids, timeout_s=30.0
         )
 
         # Verify all tasks failed with correct retry count
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             for task_id in task_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -797,14 +798,14 @@ async def test_per_queue_caps_independent_across_queues(
         # Poll both queues concurrently for max RUNNING
         max_high, max_normal = await asyncio.gather(
             poll_max_during(
-                custom_broker.session_factory,
+                current_resources(custom_broker).session_factory,
                 "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
                 duration_s=5.0,
                 poll_interval=0.05,
                 params={'qn': 'high'},
             ),
             poll_max_during(
-                custom_broker.session_factory,
+                current_resources(custom_broker).session_factory,
                 "SELECT COUNT(*) FROM horsies_tasks WHERE status = 'RUNNING' AND queue_name = :qn",
                 duration_s=5.0,
                 poll_interval=0.05,
@@ -813,7 +814,7 @@ async def test_per_queue_caps_independent_across_queues(
         )
 
         await wait_for_all_terminal(
-            custom_broker.session_factory, all_ids, timeout_s=30.0
+            current_resources(custom_broker).session_factory, all_ids, timeout_s=30.0
         )
 
         # Guard against vacuous pass
@@ -829,7 +830,7 @@ async def test_per_queue_caps_independent_across_queues(
         )
 
         # All tasks completed
-        async with custom_broker.session_factory() as session:
+        async with current_resources(custom_broker).session_factory() as session:
             for task_id in all_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -883,11 +884,11 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         await wait_for_all_terminal(
-            custom_broker.session_factory, all_ids, timeout_s=30.0
+            current_resources(custom_broker).session_factory, all_ids, timeout_s=30.0
         )
 
     # Query completion timestamps
-    async with custom_broker.session_factory() as session:
+    async with current_resources(custom_broker).session_factory() as session:
         result = await session.execute(
             text("""
                 SELECT id, queue_name, completed_at
@@ -950,7 +951,7 @@ async def test_single_worker_crash_remaining_continue(
 
         # Wait until at least one task is RUNNING
         await wait_for_any_status(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             task_ids,
             target_status='RUNNING',
             timeout_s=15.0,
@@ -965,7 +966,7 @@ async def test_single_worker_crash_remaining_continue(
         await asyncio.sleep(8.0)
 
     # Query completed tasks and distinct worker IDs
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         result = await session.execute(
             text("""
                 SELECT COUNT(*) FROM itest_task_rows
@@ -1033,7 +1034,7 @@ async def test_concurrent_enqueue_during_processing(
 
         # Wait until processing begins
         await wait_for_any_status(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             batch1_ids,
             target_status='RUNNING',
             timeout_s=15.0,
@@ -1055,11 +1056,11 @@ async def test_concurrent_enqueue_during_processing(
 
         # All 10 tasks should complete
         await wait_for_all_terminal(
-            broker.session_factory, all_ids, timeout_s=30.0
+            current_resources(broker).session_factory, all_ids, timeout_s=30.0
         )
 
         # Verify all completed
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             for task_id in all_ids:
                 task = await read_task(session, task_id)
                 assert task is not None
@@ -1159,7 +1160,7 @@ async def test_softcap_expired_claim_requeued(
             ).unwrap()
 
             # Manually set to CLAIMED with an already-expired lease and a dead worker
-            async with softcap_broker.session_factory() as session:
+            async with current_resources(softcap_broker).session_factory() as session:
                 await session.execute(
                     text("""
                         UPDATE horsies_tasks
@@ -1182,13 +1183,13 @@ async def test_softcap_expired_claim_requeued(
                 ready_check=_make_ready_check(instance_softcap.healthcheck),
             ):
                 await wait_for_all_terminal(
-                    softcap_broker.session_factory,
+                    current_resources(softcap_broker).session_factory,
                     [task_id],
                     timeout_s=15.0,
                 )
 
             # Verify task completed successfully and was reclaimed
-            async with softcap_broker.session_factory() as session:
+            async with current_resources(softcap_broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
@@ -1254,7 +1255,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                     kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
                 ).unwrap()
                 await wait_for_status(
-                    softcap_broker.session_factory,
+                    current_resources(softcap_broker).session_factory,
                     blocker_task_id,
                     'RUNNING',
                     timeout_s=10.0,
@@ -1269,7 +1270,7 @@ async def test_softcap_owner_transition_after_worker_crash(
                 ).unwrap()
 
                 first_owner = await _wait_for_claimed_owner(
-                    softcap_broker.session_factory,
+                    current_resources(softcap_broker).session_factory,
                     task_id,
                     timeout_s=10.0,
                 )
@@ -1290,12 +1291,12 @@ async def test_softcap_owner_transition_after_worker_crash(
                     ready_check=_make_ready_check(instance_softcap.healthcheck),
                 ):
                     await wait_for_all_terminal(
-                        softcap_broker.session_factory,
+                        current_resources(softcap_broker).session_factory,
                         [task_id],
                         timeout_s=30.0,
                     )
 
-            async with softcap_broker.session_factory() as session:
+            async with current_resources(softcap_broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (
@@ -1440,11 +1441,11 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # Wait for task to be CLAIMED by Worker A
             await wait_for_status(
-                requeue_guard_broker.session_factory, task_id, 'CLAIMED', timeout_s=20.0,
+                current_resources(requeue_guard_broker).session_factory, task_id, 'CLAIMED', timeout_s=20.0,
             )
 
             # Record Worker A's id
-            async with requeue_guard_broker.session_factory() as session:
+            async with current_resources(requeue_guard_broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 worker_a_id = task.claimed_by_worker_id
@@ -1461,11 +1462,11 @@ async def test_requeue_db_error_age_guard_recovery(
 
             # Wait for completion
             await wait_for_status(
-                requeue_guard_broker.session_factory, task_id, 'COMPLETED', timeout_s=30.0,
+                current_resources(requeue_guard_broker).session_factory, task_id, 'COMPLETED', timeout_s=30.0,
             )
 
             # 5. Assert results
-            async with requeue_guard_broker.session_factory() as session:
+            async with current_resources(requeue_guard_broker).session_factory() as session:
                 task = await read_task(session, task_id)
                 assert task is not None
                 assert task.status == TaskStatus.COMPLETED, (

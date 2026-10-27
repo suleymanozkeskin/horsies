@@ -22,12 +22,13 @@ from horsies.core.history.maintenance.coverage import (
 )
 from horsies.core.history.names import RETENTION_CLASSES
 from horsies.core.history.heartbeats.partitioning import HEARTBEAT_CLASS_KEY
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 async def _stored_horizon(broker: PostgresBroker) -> timedelta:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -42,7 +43,7 @@ async def _stored_horizon(broker: PostgresBroker) -> timedelta:
 async def test_horizon_retune_is_a_success_not_a_failure(
     broker: PostgresBroker,
 ) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         first = await ensure_partition_coverage(
             connection, history_horizon_days=2, heartbeat_horizon_hours=3
         )
@@ -50,7 +51,7 @@ async def test_horizon_retune_is_a_success_not_a_failure(
 
     # The second pass changes the configured horizon, forcing the
     # update path deterministically regardless of the fixture's state.
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         second = await ensure_partition_coverage(
             connection, history_horizon_days=2, heartbeat_horizon_hours=6
         )

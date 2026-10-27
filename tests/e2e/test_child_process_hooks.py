@@ -25,6 +25,7 @@ from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_child_hook
 from tests.e2e.tasks import instance_child_hook_unfixed
+from tests.broker_resources_support import current_resources
 
 
 FIXED_INSTANCE = 'tests.e2e.tasks.instance_child_hook:app'
@@ -61,7 +62,7 @@ async def _count_app_engine_connections(
     broker: PostgresBroker,
     application_name: str,
 ) -> int:
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         row = (
             await session.execute(
                 text("""
@@ -87,7 +88,7 @@ async def _run_burst(
         unwrap_send(await db_task.send_async(sleep_ms=SLEEP_MS)) for _ in range(BURST)
     ]
     await wait_for_all_terminal(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         [h.task_id for h in handles],
         timeout_s=60.0,
     )

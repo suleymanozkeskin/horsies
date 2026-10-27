@@ -22,7 +22,7 @@ from horsies.core.models.health import WORKER_PING_CHANNEL
 from horsies.core.logging import get_logger
 from horsies.core.worker.current import set_current_app
 from horsies.core.models.resilience import WorkerResilienceConfig
-from horsies.core.types.result import Err, is_err
+from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.url import to_psycopg_url
 
@@ -879,6 +879,13 @@ class Worker(
                     )
                 case broker:
                     await broker.validate_worker_database_paths()
+            match await broker.select_resources():
+                case Err(conflict):
+                    raise AssertionError(
+                        f'worker broker resources: {conflict.describe()}'
+                    )
+                case Ok(resources):
+                    pass
 
             # Partitioned writes need their partitions before the first
             # claim: heartbeat leaves for this worker's liveness rows,
@@ -895,7 +902,7 @@ class Worker(
 
             retention_cfg = self.cfg.retention_config or RetentionConfig()
             startup_coverage = await ensure_startup_coverage_in_database(
-                broker.partition_maintenance,
+                resources.partition_maintenance,
                 history_horizon_days=retention_cfg.history_leaf_horizon_days,
                 heartbeat_horizon_hours=(
                     retention_cfg.heartbeat_leaf_horizon_hours

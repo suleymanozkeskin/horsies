@@ -26,6 +26,7 @@ from horsies.core.worker.sql import (
 )
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.broker_resources_support import current_resources, listener_of
 
 
 INSERT_TEST_TASK_SQL = text("""
@@ -315,7 +316,7 @@ class TestReclaimUnderCap:
 
         cfg = WorkerConfig(
             dsn=broker.config.database_url,
-            psycopg_dsn=broker.listener.database_url,
+            psycopg_dsn=listener_of(broker).database_url,
             queues=['default'],
             processes=1,
             max_claim_batch=1,
@@ -323,7 +324,7 @@ class TestReclaimUnderCap:
             cluster_wide_cap=1,
         )
         worker = Worker(
-            session_factory=broker.session_factory,
+            session_factory=current_resources(broker).session_factory,
             listener=MagicMock(),
             cfg=cfg,
         )

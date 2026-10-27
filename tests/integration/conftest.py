@@ -17,6 +17,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import ScheduleConfig  # noqa: F401 - needed for AppConfig.model_rebuild()
 from horsies.core.utils.db import register_identity_text_reads
+from tests.broker_resources_support import current_resources
 
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
@@ -86,7 +87,7 @@ async def broker() -> AsyncGenerator[PostgresBroker, None]:
     assert initialized.is_ok(), initialized
     from tests.integration.history_seeding import ensure_history_seedable
 
-    async with brk.async_engine.begin() as connection:
+    async with current_resources(brk).engine.begin() as connection:
         await ensure_history_seedable(connection)
     yield brk
     await brk.close_async()

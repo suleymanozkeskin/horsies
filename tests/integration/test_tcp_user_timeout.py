@@ -27,6 +27,7 @@ from horsies.core.worker.child_pool import (
     _initialize_worker_pool,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.web.events import EventBroadcaster
+from tests.broker_resources_support import current_resources, listener_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -73,9 +74,9 @@ async def broker(db_url: str) -> AsyncGenerator[PostgresBroker, None]:
 async def test_both_broker_engines_carry_the_timeout(
     broker: PostgresBroker,
 ) -> None:
-    session_engine = broker._session_engine  # pyright: ignore[reportPrivateUsage]
-    assert session_engine is not broker.async_engine
-    assert await _engine_timeout(broker.async_engine) == str(TIMEOUT_MS)
+    session_engine = current_resources(broker).session_async_engine()  # pyright: ignore[reportPrivateUsage]
+    assert session_engine is not current_resources(broker).engine
+    assert await _engine_timeout(current_resources(broker).engine) == str(TIMEOUT_MS)
     assert await _engine_timeout(session_engine) == str(TIMEOUT_MS)
 
 
@@ -83,7 +84,7 @@ async def test_both_broker_engines_carry_the_timeout(
 async def test_both_listener_connections_carry_the_timeout(
     broker: PostgresBroker,
 ) -> None:
-    listener = broker.listener
+    listener = listener_of(broker)
     started = await listener.start()
     assert not is_err(started), started
     try:

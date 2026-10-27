@@ -35,6 +35,7 @@ from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleRes
 from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Ok, is_err, is_ok
 from tests.integration.conftest import DB_URL
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -92,7 +93,7 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
 
 
 async def _hold_connection(broker: PostgresBroker, seconds: float) -> None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         await connection.execute(text('SELECT pg_sleep(:s)'), {'s': seconds})
 
 
@@ -133,7 +134,7 @@ def test_workflow_call_gets_connection_released_by_task_runner(
 ) -> None:
     broker = one_connection_app.app.get_broker()
     holder = _start_thread(
-        lambda: broker._loop_runner.call(_hold_connection, broker, HOLD_SECONDS),
+        lambda: broker.run_sync(_hold_connection, broker, HOLD_SECONDS),
     )
     time.sleep(WAITER_START_DELAY_SECONDS)
     handle: WorkflowHandle[Any] = WorkflowHandle(

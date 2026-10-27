@@ -50,6 +50,7 @@ from horsies.monitoring import (
 )
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
 from tests.integration.history_seeding import route_rows
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -351,7 +352,7 @@ async def claim_once(broker: PostgresBroker, worker_id: str) -> list[str]:
         'p_lease_ms': 60_000,
         'p_lock_keys': json.dumps([987654321]),
     }
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         rows = (await session.execute(HORSIES_CLAIM_SQL, params)).fetchall()
         await session.commit()
     return [str(row[0]) for row in rows]

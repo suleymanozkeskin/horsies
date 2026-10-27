@@ -44,6 +44,7 @@ from tests.e2e.helpers.workflow import (
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks.instance import app
+from tests.broker_resources_support import current_resources
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -94,12 +95,12 @@ async def test_linear_workflow(broker: PostgresBroker) -> None:
 
         # Use DB polling to wait for completion
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Get tasks via DB query
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 3
 
         # All tasks completed
@@ -137,12 +138,12 @@ async def test_linear_status_transitions(broker: PostgresBroker) -> None:
 
         # Use DB polling to wait for completion
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Verify DB state directly
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 3
 
         for task in db_tasks:
@@ -167,7 +168,7 @@ async def test_fanout_parallel_execution(broker: PostgresBroker) -> None:
         # Fan-out tasks take 500ms each, so poll for ~2 seconds
         async def poll_and_wait() -> int:
             max_concurrent = await poll_max_running_tasks(
-                broker.session_factory,
+                current_resources(broker).session_factory,
                 handle.workflow_id,
                 duration_s=2.0,
                 poll_interval=0.05,
@@ -179,7 +180,7 @@ async def test_fanout_parallel_execution(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -191,7 +192,7 @@ async def test_fanout_parallel_execution(broker: PostgresBroker) -> None:
         ), f'Expected at least 2 concurrent RUNNING tasks, observed max {max_concurrent}'
 
         # Verify all parallel tasks started after root completed
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         root = db_tasks[0]
         parallel_tasks = db_tasks[1:4]
 
@@ -212,12 +213,12 @@ async def test_fanout_sequential_with_single_process(broker: PostgresBroker) -> 
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=30.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=30.0
         )
         assert status == 'COMPLETED'
 
         # With 1 process, all tasks complete but sequentially
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert all(t['status'] == 'COMPLETED' for t in db_tasks)
 
 
@@ -235,11 +236,11 @@ async def test_fanin_waits_for_all(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 4
 
         # Tasks 0-2 are A, B, C (roots); task 3 is AGG
@@ -275,7 +276,7 @@ async def test_fanin_aggregator_pending_during_execution(
 
         async def _agg_pending_while_roots_running() -> bool:
             db_tasks = await get_workflow_tasks(
-                broker.session_factory, handle.workflow_id
+                current_resources(broker).session_factory, handle.workflow_id
             )
             if len(db_tasks) < 4:
                 return False
@@ -294,7 +295,7 @@ async def test_fanin_aggregator_pending_during_execution(
 
         # Wait for completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -313,11 +314,11 @@ async def test_diamond_structure(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert all(t['status'] == 'COMPLETED' for t in db_tasks)
 
         a, b, c, d = db_tasks
@@ -354,11 +355,11 @@ async def test_diamond_waits_for_slow_branch(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         _, c, d = db_tasks[1], db_tasks[2], db_tasks[3]
 
         # C takes longer (400ms vs B's 200ms)
@@ -393,11 +394,11 @@ async def test_complex_dag(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=30.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=30.0
         )
         assert status == 'COMPLETED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 7
         assert all(t['status'] == 'COMPLETED' for t in db_tasks)
 
@@ -453,7 +454,7 @@ async def test_explicit_output_task(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -476,7 +477,7 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -581,7 +582,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
         observe_deadline = asyncio.get_event_loop().time() + 2.0
         while asyncio.get_event_loop().time() < observe_deadline:
             status, _ = await _get_expiry_task_status(
-                broker.session_factory, handle.workflow_id, 0,
+                current_resources(broker).session_factory, handle.workflow_id, 0,
             )
             assert status in (
                 'PENDING', 'EXPIRED',
@@ -590,7 +591,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
 
         # Final verification: task was never claimed
         status, good_until_val = await _get_expiry_task_status(
-            broker.session_factory, handle.workflow_id, 0,
+            current_resources(broker).session_factory, handle.workflow_id, 0,
         )
         assert good_until_val is not None, 'good_until should be set on task'
         assert status in (
@@ -622,12 +623,12 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Verify the task completed successfully
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 1
         assert db_tasks[0]['status'] == 'COMPLETED'
 
@@ -645,11 +646,11 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_single_node)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'COMPLETED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 1
 
         task = db_tasks[0]
@@ -685,11 +686,11 @@ async def test_linear_failure_cascades_to_skip(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_linear_fail_mid)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 3
 
         a, b, c = db_tasks
@@ -716,7 +717,7 @@ async def test_handle_get_returns_error_on_failed_workflow(
         handle = start_ok_sync(wf_tasks.spec_linear_fail_mid)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
@@ -737,11 +738,11 @@ async def test_fanout_one_branch_fails(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_fanout_one_fail)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 4
 
         root, b, c, d = db_tasks
@@ -770,11 +771,11 @@ async def test_fanin_one_dep_fails_skips_aggregator(broker: PostgresBroker) -> N
         handle = start_ok_sync(wf_tasks.spec_fanin_one_fail)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 4
 
         a, b, c, agg = db_tasks
@@ -808,7 +809,7 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
         # Poll until first task (A, 200ms) completes
         async def _a_completed() -> bool:
             db_tasks = await get_workflow_tasks(
-                broker.session_factory, handle.workflow_id,
+                current_resources(broker).session_factory, handle.workflow_id,
             )
             if len(db_tasks) < 1:
                 return False
@@ -822,12 +823,12 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
         assert is_ok(cancel_r), 'cancel should succeed'
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'CANCELLED'
 
         # Remaining PENDING/READY tasks should be SKIPPED
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         for task in db_tasks[1:]:
             assert task['status'] in (
                 'SKIPPED', 'COMPLETED', 'RUNNING',

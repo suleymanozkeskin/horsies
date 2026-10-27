@@ -30,6 +30,7 @@ from horsies.core.workflows.recovery import (
 from horsies.core.schemas import recovery as recovery_schema
 from tests.integration.conftest import DB_URL
 from tests.integration.isolated_database import isolated_test_database
+from tests.broker_resources_support import current_resources
 
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
@@ -47,7 +48,7 @@ async def bounded_recovery_database() -> AsyncIterator[
         assert initialized.is_ok(), initialized
         from tests.integration.history_seeding import ensure_history_seedable
 
-        async with broker.async_engine.begin() as connection:
+        async with current_resources(broker).engine.begin() as connection:
             await ensure_history_seedable(connection)
         engine = create_async_engine(url)
         try:
@@ -162,7 +163,7 @@ async def test_global_cursor_reaches_a_candidate_after_three_pages(
     )
 
     reports = [
-        await recover_stuck_workflows_global(broker.session_factory, broker)
+        await recover_stuck_workflows_global(current_resources(broker).session_factory, broker)
         for _ in range(3)
     ]
 
@@ -233,7 +234,7 @@ async def test_cycle_upper_bound_defers_a_new_workflow(
         terminal_last=False,
     )
     first = await recover_stuck_workflows_global(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         broker,
     )
     assert first.metrics['case_2_3'].rows_selected == 200
@@ -255,7 +256,7 @@ async def test_cycle_upper_bound_defers_a_new_workflow(
         )
 
     second = await recover_stuck_workflows_global(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         broker,
     )
     assert second.metrics['case_4'].rows_selected == 1
@@ -268,12 +269,12 @@ async def test_cycle_upper_bound_defers_a_new_workflow(
     assert status == 'RUNNING'
 
     third = await recover_stuck_workflows_global(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         broker,
     )
     assert third.metrics['case_4'].candidates_returned == 0
     fourth = await recover_stuck_workflows_global(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         broker,
     )
     assert fourth.metrics['case_4'].candidates_returned == 1
@@ -305,7 +306,7 @@ async def test_candidate_share_lock_fences_an_expired_page_claim(
         )
 
     claim_token = str(uuid.uuid4())
-    async with broker.session_factory() as discovery:
+    async with current_resources(broker).session_factory() as discovery:
         audit = (await discovery.execute(
             GLOBAL_WORKFLOW_AUDIT_SQL,
             {
@@ -320,7 +321,7 @@ async def test_candidate_share_lock_fences_an_expired_page_claim(
         await discovery.commit()
     assert [str(value) for value in audit.orphan_ids] == [workflow_id]
 
-    async with broker.session_factory() as competitor:
+    async with current_resources(broker).session_factory() as competitor:
         refused = (await competitor.execute(
             GLOBAL_WORKFLOW_AUDIT_SQL,
             {
@@ -335,7 +336,7 @@ async def test_candidate_share_lock_fences_an_expired_page_claim(
         await competitor.commit()
     assert refused is None
 
-    async with broker.session_factory() as mutation:
+    async with current_resources(broker).session_factory() as mutation:
         held = (await mutation.execute(
             LOCK_GLOBAL_WORKFLOW_AUDIT_CLAIM_SQL,
             {'claim_token': claim_token},
@@ -343,7 +344,7 @@ async def test_candidate_share_lock_fences_an_expired_page_claim(
         assert held is True
         await asyncio.sleep(2.1)
 
-        async with broker.session_factory() as takeover:
+        async with current_resources(broker).session_factory() as takeover:
             blocked = (await takeover.execute(
                 GLOBAL_WORKFLOW_AUDIT_SQL,
                 {
@@ -389,7 +390,7 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
         )
 
     stale_token = str(uuid.uuid4())
-    async with broker.session_factory() as discovery:
+    async with current_resources(broker).session_factory() as discovery:
         first = (await discovery.execute(
             GLOBAL_WORKFLOW_AUDIT_SQL,
             {
@@ -405,7 +406,7 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
     assert [str(value) for value in first.orphan_ids] == [workflow_id]
 
     replacement_token = str(uuid.uuid4())
-    async with broker.session_factory() as takeover:
+    async with current_resources(broker).session_factory() as takeover:
         await takeover.execute(text('''
             UPDATE horsies_recovery_scan_cursors
             SET claim_expires_at = statement_timestamp() - interval '1 second'
@@ -413,7 +414,7 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
               AND claim_token = CAST(:claim_token AS uuid)
         '''), {'claim_token': stale_token})
         await takeover.commit()
-    async with broker.session_factory() as takeover:
+    async with current_resources(broker).session_factory() as takeover:
         second = (await takeover.execute(
             GLOBAL_WORKFLOW_AUDIT_SQL,
             {
@@ -429,7 +430,7 @@ async def test_stale_page_owner_cannot_mutate_after_claim_takeover(
     assert [str(value) for value in second.orphan_ids] == [workflow_id]
 
     outcome = await _recover_global_orphan_candidate(
-        broker.session_factory,
+        current_resources(broker).session_factory,
         workflow_id,
         'stale_owner_orphan',
         stale_token,

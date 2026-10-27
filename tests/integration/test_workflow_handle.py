@@ -33,6 +33,7 @@ from horsies.core.worker.worker import Worker
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
+from tests.broker_resources_support import current_resources, listener_of, replaced_resources
 
 
 # =============================================================================
@@ -326,7 +327,7 @@ class TestWorkflowHandleGet:
         )
 
         expired = await expire_paused_workflows(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             older_than=timedelta(0),
             batch_size=1,
         )
@@ -1431,15 +1432,15 @@ class TestWorkflowHandleCancel:
             await asyncio.sleep(0.1)
 
             worker = Worker(
-                session_factory=broker.session_factory,
+                session_factory=current_resources(broker).session_factory,
                 listener=MagicMock(),
                 cfg=WorkerConfig(
                     dsn=broker.config.database_url,
-                    psycopg_dsn=broker.listener.database_url,
+                    psycopg_dsn=listener_of(broker).database_url,
                     queues=['default'],
                 ),
             )
-            async with broker.session_factory() as claim_session:
+            async with current_resources(broker).session_factory() as claim_session:
                 claimed = await worker._claim_batch_locked(
                     claim_session, 'default', 1,
                 )
@@ -1505,11 +1506,11 @@ class TestWorkflowHandleCancel:
 
         cfg = WorkerConfig(
             dsn=broker.config.database_url,
-            psycopg_dsn=broker.listener.database_url,
+            psycopg_dsn=listener_of(broker).database_url,
             queues=['default'],
         )
         worker = Worker(
-            session_factory=broker.session_factory,
+            session_factory=current_resources(broker).session_factory,
             listener=MagicMock(),
             cfg=cfg,
         )
@@ -2027,7 +2028,7 @@ class TestWorkflowHandleInfraErrors:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
             status_r = await handle.status_async()
 
         assert is_err(status_r)
@@ -2058,7 +2059,7 @@ class TestWorkflowHandleInfraErrors:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
             result = await handle.get_async(timeout_ms=500)
 
         assert result.is_err()
@@ -2086,7 +2087,7 @@ class TestWorkflowHandleInfraErrors:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
             cancel_r = await handle.cancel_async()
 
         assert is_err(cancel_r)
@@ -2115,7 +2116,7 @@ class TestWorkflowHandleInfraErrors:
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_session)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
-        with patch.object(broker, 'session_factory', return_value=mock_ctx):
+        with replaced_resources(broker, session_factory=MagicMock(return_value=mock_ctx)):
             results_r = await handle.results_async()
 
         assert is_err(results_r)
@@ -2210,7 +2211,7 @@ class TestListenerFallbackContract:
             retryable=True,
         ))
         with patch.object(
-            broker.listener, 'listen', new=AsyncMock(return_value=listen_err),
+            listener_of(broker), 'listen', new=AsyncMock(return_value=listen_err),
         ):
             result = await handle.get_async(timeout_ms=5000)
 
@@ -2232,7 +2233,7 @@ class TestListenerFallbackContract:
         handle = await start_ok(spec, broker)
 
         with patch.object(
-            broker.listener, 'listen', new=AsyncMock(side_effect=TypeError('test bug')),
+            listener_of(broker), 'listen', new=AsyncMock(side_effect=TypeError('test bug')),
         ):
             with pytest.raises(TypeError, match='test bug'):
                 await handle.get_async(timeout_ms=1000)

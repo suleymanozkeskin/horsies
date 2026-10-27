@@ -59,6 +59,9 @@ class TaskActionErrorCode(Enum):
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
+    # The broker's async resources are in use by another open event loop.
+    # Nothing changed. It clears when that loop closes.
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,8 +227,22 @@ async def cancel_task(
     except ValueError:
         return _not_found(task_id)
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return Err(
+                TaskActionError(
+                    code=TaskActionErrorCode.EVENT_LOOP_CONFLICT,
+                    message=f'Task cancel of {task_id}: {conflict.describe()}',
+                    retryable=False,
+                    task_id=task_id,
+                    current_status=None,
+                )
+            )
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             locked = (await session.execute(_LOCK_TASK_SQL, {'id': task_id})).first()
             if locked is None:
                 return await _diagnose_live_miss(

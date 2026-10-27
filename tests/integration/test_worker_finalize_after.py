@@ -54,6 +54,7 @@ from tests.integration.conftest import (
     make_workflow_spec,
     start_ok,
 )
+from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -585,7 +586,7 @@ async def test_task_expired_workflow_task_advances_workflow_without_reaper(
     await asyncio.sleep(1.3)  # cross good_until before the child starts
 
     set_current_app(app)
-    database_url = broker.listener.database_url
+    database_url = listener_of(broker).database_url
     _initialize_worker_pool(database_url)
     wire = _run_task_entry(
         task_name=task_name,

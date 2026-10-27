@@ -22,6 +22,7 @@ from tests.e2e.helpers.workflow import wait_for_workflow_completion
 from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks import queues_custom
 from tests.e2e.tasks import workflows as wf_tasks
+from tests.broker_resources_support import current_resources
 
 
 CUSTOM_INSTANCE = 'tests.e2e.tasks.instance_custom:app'
@@ -57,7 +58,7 @@ async def _wait_for_high_queue_saturated(
     deadline = asyncio.get_running_loop().time() + timeout_s
     last_snapshot: tuple[int, int] = (0, 0)
     while asyncio.get_running_loop().time() < deadline:
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text("""
@@ -90,7 +91,7 @@ async def _wait_for_normal_started_before_high_drains(
     deadline = asyncio.get_running_loop().time() + timeout_s
     last_snapshot: tuple[int, int] = (0, 0)
     while asyncio.get_running_loop().time() < deadline:
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text("""
@@ -169,7 +170,7 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
             normal_ids=normal_ids,
         )
         await wait_for_all_terminal(
-            custom_broker.session_factory,
+            current_resources(custom_broker).session_factory,
             [*high_ids, *normal_ids],
             timeout_s=20.0,
         )
@@ -188,14 +189,14 @@ async def test_wide_fanin_join_does_not_create_orphaned_join_tasks(
     ):
         handle = start_ok_sync(wf_tasks.spec_wide_fanin_join)
         status = await wait_for_workflow_completion(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             handle.workflow_id,
             timeout_s=30.0,
         )
 
     assert status == 'COMPLETED'
 
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         row = (
             await session.execute(
                 text("""
