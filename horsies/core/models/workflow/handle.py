@@ -26,7 +26,7 @@ from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
-    EventLoopConflict,
+    EventLoopLimit,
     ListenerDisabled,
     ListenerEnabled,
 )
@@ -245,14 +245,14 @@ def _broker_task_error(message: str) -> TaskResult[Any, TaskError]:
     )
 
 
-def _event_loop_conflict_task_result(
-    workflow_id: str, conflict: EventLoopConflict,
+def _event_loop_limit_task_result(
+    workflow_id: str, loop_limit: EventLoopLimit,
 ) -> TaskResult[Any, TaskError]:
-    """Build a TaskResult with EVENT_LOOP_CONFLICT for fold-strategy methods."""
+    """Build a TaskResult with EVENT_LOOP_LIMIT for fold-strategy methods."""
     return TaskResult(
         err=TaskError(
-            error_code=RetrievalCode.EVENT_LOOP_CONFLICT,
-            message=f'workflow {workflow_id}: {conflict.describe()}',
+            error_code=RetrievalCode.EVENT_LOOP_LIMIT,
+            message=f'workflow {workflow_id}: {loop_limit.describe()}',
         ),
     )
 
@@ -560,13 +560,13 @@ class WorkflowHandle(Generic[OutT]):
     # NO_TYPE_AVAILABLE into the err slot when the ok slot is present.
     out_type: TypeAnnotation | None = None
 
-    def _event_loop_conflict(
-        self, conflict: EventLoopConflict, operation: str,
+    def _event_loop_limit(
+        self, loop_limit: EventLoopLimit, operation: str,
     ) -> Err[HandleOperationError]:
-        """Build the wrap-strategy error for an event loop conflict."""
+        """Build the wrap-strategy error for the event loop limit."""
         return Err(HandleOperationError(
-            code=HandleErrorCode.EVENT_LOOP_CONFLICT,
-            message=f'{operation} for workflow {self.workflow_id}: {conflict.describe()}',
+            code=HandleErrorCode.EVENT_LOOP_LIMIT,
+            message=f'{operation} for workflow {self.workflow_id}: {loop_limit.describe()}',
             retryable=False,
             workflow_id=self.workflow_id,
         ))
@@ -633,8 +633,8 @@ class WorkflowHandle(Generic[OutT]):
     async def status_async(self) -> HandleResult[WorkflowStatus]:
         """Async version of status()."""
         match await self.broker.select_resources():
-            case Err(conflict):
-                return self._event_loop_conflict(conflict, 'status')
+            case Err(loop_limit):
+                return self._event_loop_limit(loop_limit, 'status')
             case Ok(resources):
                 pass
         return await self._status(resources)
@@ -689,37 +689,31 @@ class WorkflowHandle(Generic[OutT]):
         timeout_sec = timeout_ms / 1000 if timeout_ms is not None else None
 
         match await self.broker.select_resources():
-            case Err(conflict):
+            case Err(loop_limit):
                 return cast(
                     'TaskResult[OutT, TaskError]',
-                    _event_loop_conflict_task_result(self.workflow_id, conflict),
+                    _event_loop_limit_task_result(self.workflow_id, loop_limit),
                 )
             case Ok(resources):
                 pass
 
         # Subscribe to workflow_done once before the loop. A broker without a
-        # listener, a cross-loop RuntimeError (programming error) or an
-        # infrastructure Err all fall back to sleep-based polling.
+        # listener or an infrastructure Err falls back to sleep-based polling.
         subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
         match resources.listener:
             case ListenerEnabled(listener=listener):
-                try:
-                    listen_r = await listener.listen('workflow_done')
-                except RuntimeError:
-                    # Cross-loop access (sync handle.get() via LoopRunner).
-                    pass
-                else:
-                    match listen_r:
-                        case Ok(queue):
-                            subscription = (listener, queue)
-                        case Err(listen_err):
-                            logger.debug(
-                                'LISTEN unavailable; falling back to polling for workflow_done. '
-                                'If using PgBouncer transaction pooling, configure '
-                                'PostgresConfig.session_database_url with a direct/session-capable '
-                                'Postgres URL. Original error: %s',
-                                listen_err.message,
-                            )
+                listen_r = await listener.listen('workflow_done')
+                match listen_r:
+                    case Ok(queue):
+                        subscription = (listener, queue)
+                    case Err(listen_err):
+                        logger.debug(
+                            'LISTEN unavailable; falling back to polling for workflow_done. '
+                            'If using PgBouncer transaction pooling, configure '
+                            'PostgresConfig.session_database_url with a direct/session-capable '
+                            'Postgres URL. Original error: %s',
+                            listen_err.message,
+                        )
             case ListenerDisabled():
                 pass
 
@@ -733,8 +727,8 @@ class WorkflowHandle(Generic[OutT]):
                     match handle_err.code:
                         case HandleErrorCode.WORKFLOW_NOT_FOUND:
                             error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
-                        case HandleErrorCode.EVENT_LOOP_CONFLICT:
-                            error_code = RetrievalCode.EVENT_LOOP_CONFLICT
+                        case HandleErrorCode.EVENT_LOOP_LIMIT:
+                            error_code = RetrievalCode.EVENT_LOOP_LIMIT
                         case _:
                             error_code = OperationalErrorCode.BROKER_ERROR
                     return cast(
@@ -1032,10 +1026,10 @@ class WorkflowHandle(Generic[OutT]):
             )
 
         match await self.broker.select_resources():
-            case Err(conflict):
+            case Err(loop_limit):
                 return cast(
                     'TaskResult[OkT, TaskError]',
-                    _event_loop_conflict_task_result(self.workflow_id, conflict),
+                    _event_loop_limit_task_result(self.workflow_id, loop_limit),
                 )
             case Ok(resources):
                 pass
@@ -1107,8 +1101,8 @@ class WorkflowHandle(Generic[OutT]):
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
         """
         match await self.broker.select_resources():
-            case Err(conflict):
-                return self._event_loop_conflict(conflict, 'results')
+            case Err(loop_limit):
+                return self._event_loop_limit(loop_limit, 'results')
             case Ok(resources):
                 pass
 
@@ -1158,8 +1152,8 @@ class WorkflowHandle(Generic[OutT]):
     async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
         """Async version of tasks()."""
         match await self.broker.select_resources():
-            case Err(conflict):
-                return self._event_loop_conflict(conflict, 'tasks')
+            case Err(loop_limit):
+                return self._event_loop_limit(loop_limit, 'tasks')
             case Ok(resources):
                 pass
 
@@ -1252,8 +1246,8 @@ class WorkflowHandle(Generic[OutT]):
     async def cancel_async(self) -> HandleResult[None]:
         """Async version of cancel()."""
         match await self.broker.select_resources():
-            case Err(conflict):
-                return self._event_loop_conflict(conflict, 'cancel')
+            case Err(loop_limit):
+                return self._event_loop_limit(loop_limit, 'cancel')
             case Ok(resources):
                 pass
 

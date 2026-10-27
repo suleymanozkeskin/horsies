@@ -64,6 +64,15 @@ class LoopRunner:
                 ) from exc
             self._started = True
 
+    def runs_on(self, loop: asyncio.AbstractEventLoop) -> bool:
+        """Whether ``loop`` is this runner's event loop.
+
+        Reads the loop reference without the state lock: ``stop()`` holds
+        that lock while it joins the runner thread, so a coroutine on the
+        runner thread that waited for it would delay the stop.
+        """
+        return self._loop is loop
+
     def stop(self) -> None:
         with self._state_lock:
             if self._started and self._loop is not None:

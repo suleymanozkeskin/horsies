@@ -138,8 +138,13 @@ def test_split_url_schema_lock_blocks_legacy_direct_url_initializer(
                 pgbouncer_transaction_mode=True,
             )
         )
+        async def _initialize():
+            selected = await broker.select_resources()
+            assert selected.is_ok(), selected
+            await broker._ensure_initialized(selected.ok_value)
+
         try:
-            asyncio.run(broker._ensure_initialized(broker._resources))
+            asyncio.run(_initialize())
         except RuntimeError as exc:
             if 'probe-stop' not in str(exc):
                 raise

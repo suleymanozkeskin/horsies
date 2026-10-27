@@ -59,9 +59,10 @@ class TaskActionErrorCode(Enum):
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    # The broker's async resources are in use by another open event loop.
-    # Nothing changed. It clears when that loop closes.
-    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
+    # The broker already holds resource sets for its limit of open event
+    # loops, and this call ran on a new one. Nothing changed. It clears when
+    # one of those loops closes.
+    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,11 +229,11 @@ async def cancel_task(
         return _not_found(task_id)
 
     match await broker.select_resources():
-        case Err(conflict):
+        case Err(loop_limit):
             return Err(
                 TaskActionError(
-                    code=TaskActionErrorCode.EVENT_LOOP_CONFLICT,
-                    message=f'Task cancel of {task_id}: {conflict.describe()}',
+                    code=TaskActionErrorCode.EVENT_LOOP_LIMIT,
+                    message=f'Task cancel of {task_id}: {loop_limit.describe()}',
                     retryable=False,
                     task_id=task_id,
                     current_status=None,

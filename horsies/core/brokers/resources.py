@@ -2,13 +2,17 @@
 
 An ``AsyncEngine`` pool and a ``PostgresListener`` bind to the event loop
 that first waits on them. A ``BrokerResources`` value is therefore used
-only on the event loop it was built for. Public entry points get it from
-``PostgresBroker.select_resources()`` once and pass it to their helpers.
+only on the event loop it was built for. The broker keeps one set per open
+event loop, up to a limit. Public entry points get the set for the running
+loop from ``PostgresBroker.select_resources()`` once and pass it to their
+helpers.
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+from enum import Enum
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -78,26 +82,142 @@ class BrokerResources:
 
 
 @dataclass(frozen=True, slots=True)
-class EventLoopConflict:
-    """The broker's async resources are bound to another open event loop.
+class EventLoopLimit:
+    """The broker already holds resource sets for its limit of open event loops.
+
+    The broker's sync runner loop does not count against the limit.
 
     Retry condition: repeating the call on the current loop returns the
-    same conflict. It clears when the bound loop closes.
+    same error until one of the loops that hold a set closes.
 
     Fields:
-        bound_thread_name: thread that runs the loop holding the resources.
+        limit: the number of open event loops, other than the sync runner
+            loop, that a broker serves.
+        held_thread_names: thread of each open loop that holds a set and
+            counts against the limit.
         current_thread_name: thread of the loop that made this call.
     """
 
-    bound_thread_name: str
+    limit: int
+    held_thread_names: tuple[str, ...]
     current_thread_name: str
 
     def describe(self) -> str:
         """Subject, cause and retry condition, for an error message."""
+        held = ', '.join(repr(name) for name in self.held_thread_names)
         return (
-            'the async resources of this broker are in use by the open event '
-            f'loop on thread {self.bound_thread_name!r}; this call ran on '
-            f'thread {self.current_thread_name!r}. Repeating the call on this '
-            'loop returns the same error until that loop closes. Use one '
-            'event loop per broker for async calls, or a second broker.'
+            f'this broker already holds async resources for {self.limit} open '
+            f'event loops (on threads {held}); this call ran on a new event '
+            f'loop on thread {self.current_thread_name!r}. Repeating the call '
+            'on this loop returns the same error until one of those loops '
+            'closes. Close event loops that are done, or use a second broker.'
         )
+
+
+class LoopRole(Enum):
+    """Which kind of event loop a resource set serves."""
+
+    # The broker's own sync runner loop. It does not count against the limit.
+    SYNC_RUNNER = 'sync_runner'
+    # Any other event loop.
+    CALLER = 'caller'
+
+
+@dataclass(frozen=True, slots=True)
+class LoopResources:
+    """A resource set and the event loop it was built for.
+
+    The entry holds a strong reference to ``loop``, so the loop object stays
+    alive and its identity is not reused while the entry exists.
+
+    Fields:
+        loop: the event loop the set was built for.
+        thread_name: thread that ran ``loop`` when the set was built.
+        role: whether ``loop`` is the broker's sync runner loop.
+        resources: the set.
+    """
+
+    loop: asyncio.AbstractEventLoop
+    thread_name: str
+    role: LoopRole
+    resources: BrokerResources
+
+
+@dataclass(frozen=True, slots=True)
+class UseExisting:
+    """A set already serves the loop."""
+
+    resources: BrokerResources
+
+
+@dataclass(frozen=True, slots=True)
+class BuildForLoop:
+    """No set serves the loop, and the limit allows a new one."""
+
+
+@dataclass(frozen=True, slots=True)
+class LimitReached:
+    """No set serves the loop, and the limit allows no new one."""
+
+    loop_limit: EventLoopLimit
+
+
+type LoopDecision = UseExisting | BuildForLoop | LimitReached
+
+
+def decide_for_loop(
+    entries: tuple[LoopResources, ...],
+    loop: asyncio.AbstractEventLoop,
+    thread_name: str,
+    role: LoopRole,
+    limit: int,
+) -> LoopDecision:
+    """Decide how ``loop`` gets its resource set. Pure: no I/O, no state change.
+
+    Entries whose loop is closed do not count against ``limit``; the caller
+    releases them. A ``SYNC_RUNNER`` loop never reaches the limit.
+    """
+    for entry in entries:
+        if entry.loop is loop:
+            return UseExisting(resources=entry.resources)
+    match role:
+        case LoopRole.SYNC_RUNNER:
+            return BuildForLoop()
+        case LoopRole.CALLER:
+            held = tuple(
+                entry.thread_name
+                for entry in entries
+                if entry.role is LoopRole.CALLER and not entry.loop.is_closed()
+            )
+            if len(held) < limit:
+                return BuildForLoop()
+            return LimitReached(
+                loop_limit=EventLoopLimit(
+                    limit=limit,
+                    held_thread_names=held,
+                    current_thread_name=thread_name,
+                ),
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class LoopEntriesByState:
+    """Entries split by whether their event loop is closed."""
+
+    open_loops: tuple[LoopResources, ...]
+    closed_loops: tuple[LoopResources, ...]
+
+
+def split_closed_loops(entries: tuple[LoopResources, ...]) -> LoopEntriesByState:
+    """Split entries by loop state. Reads each loop's state once. Pure."""
+    open_loops: list[LoopResources] = []
+    closed_loops: list[LoopResources] = []
+    for entry in entries:
+        match entry.loop.is_closed():
+            case True:
+                closed_loops.append(entry)
+            case False:
+                open_loops.append(entry)
+    return LoopEntriesByState(
+        open_loops=tuple(open_loops), closed_loops=tuple(closed_loops),
+    )

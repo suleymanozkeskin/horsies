@@ -586,11 +586,11 @@ def worker_command(args: argparse.Namespace) -> None:
 
                 broker = PostgresBroker(worker_postgres_config)
                 broker.app = app
-                # A fresh broker on this loop: a conflict is a programmer error.
+                # A fresh broker on this loop: reaching the loop limit is a programmer error.
                 match await broker.select_resources():
-                    case Err(conflict):
+                    case Err(loop_limit):
                         raise AssertionError(
-                            f'worker broker resources: {conflict.describe()}',
+                            f'worker broker resources: {loop_limit.describe()}',
                         )
                     case Ok(resources):
                         pass

@@ -56,7 +56,7 @@ from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.worker.runtime import WarmablePool
 from tests.broker_resources_support import (
-    attach_conflict,
+    attach_loop_limit,
     attach_resources,
     fake_resources,
     resources_of,
@@ -4938,22 +4938,22 @@ class TestReaperResourceSelection:
             assert call.args[0] is worker.broker
             assert call.args[1] is selected
 
-    async def test_conflict_on_the_worker_broker_crashes_loud(self) -> None:
+    async def test_loop_limit_on_the_worker_broker_crashes_loud(self) -> None:
         worker = self._ungated_reaper_worker()
         worker.broker = MagicMock()
         attach_resources(worker.broker, fake_resources())
-        conflict = attach_conflict(worker.broker)
+        loop_limit = attach_loop_limit(worker.broker)
         worker._run_reaper_pass = AsyncMock()  # type: ignore[method-assign]
 
         with pytest.raises(AssertionError) as raised:
             await asyncio.wait_for(worker._reaper_loop(), timeout=3.0)
 
         assert str(raised.value) == (
-            f'reaper loop broker resources: {conflict.describe()}'
+            f'reaper loop broker resources: {loop_limit.describe()}'
         )
         worker._run_reaper_pass.assert_not_awaited()
 
-    async def test_conflict_on_a_built_broker_crashes_loud_and_closes_it(
+    async def test_loop_limit_on_a_built_broker_crashes_loud_and_closes_it(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         worker = self._ungated_reaper_worker()
@@ -4961,7 +4961,7 @@ class TestReaperResourceSelection:
 
         class _ConflictBroker:
             def __init__(self, config: Any, **_kwargs: Any) -> None:
-                attach_conflict(self)
+                attach_loop_limit(self)
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.app: Any = None
                 built.append(self)

@@ -36,7 +36,7 @@ from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
-from horsies.core.brokers.resources import EventLoopConflict
+from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     TaskNode,
@@ -319,10 +319,10 @@ async def start_workflow_async(
     from horsies.core.types.result import is_err
 
     match await broker.select_resources():
-        case Err(conflict):
+        case Err(loop_limit):
             return Err(WorkflowStartError(
-                code=WorkflowStartErrorCode.EVENT_LOOP_CONFLICT,
-                message=f'start of workflow {spec.name!r}: {conflict.describe()}',
+                code=WorkflowStartErrorCode.EVENT_LOOP_LIMIT,
+                message=f'start of workflow {spec.name!r}: {loop_limit.describe()}',
                 retryable=False,
                 workflow_name=spec.name,
                 workflow_id=wf_id,
@@ -852,13 +852,13 @@ def start_workflow(
 
 
 
-def _event_loop_conflict(
-    workflow_id: str, operation: str, conflict: EventLoopConflict,
+def _event_loop_limit(
+    workflow_id: str, operation: str, loop_limit: EventLoopLimit,
 ) -> Err[HandleOperationError]:
-    """Build the lifecycle error for an event loop conflict. Nothing ran."""
+    """Build the lifecycle error for the event loop limit. Nothing ran."""
     return Err(HandleOperationError(
-        code=HandleErrorCode.EVENT_LOOP_CONFLICT,
-        message=f'{operation} of workflow {workflow_id}: {conflict.describe()}',
+        code=HandleErrorCode.EVENT_LOOP_LIMIT,
+        message=f'{operation} of workflow {workflow_id}: {loop_limit.describe()}',
         retryable=False,
         workflow_id=workflow_id,
     ))
@@ -889,12 +889,12 @@ async def pause_workflow(
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
         ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_CONFLICT)`` if another open event loop holds the
-        broker's async resources; nothing ran.
+        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
+        open event loops and this is a new one; nothing ran.
     """
     match await broker.select_resources():
-        case Err(conflict):
-            return _event_loop_conflict(workflow_id, 'pause', conflict)
+        case Err(loop_limit):
+            return _event_loop_limit(workflow_id, 'pause', loop_limit)
         case Ok(resources):
             pass
     try:
@@ -1086,8 +1086,8 @@ async def resume_workflow(
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
         ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
         ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_CONFLICT)`` if another open event loop holds the
-        broker's async resources; nothing ran.
+        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
+        open event loops and this is a new one; nothing ran.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -1100,8 +1100,8 @@ async def resume_workflow(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _event_loop_conflict(workflow_id, 'resume', conflict)
+        case Err(loop_limit):
+            return _event_loop_limit(workflow_id, 'resume', loop_limit)
         case Ok(resources):
             pass
 

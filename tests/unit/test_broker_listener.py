@@ -575,13 +575,33 @@ class TestListen:
     """Tests for listen(): subscription management and LISTEN commands."""
 
     @pytest.mark.asyncio
-    async def test_cross_loop_access_raises_runtime_error(self) -> None:
-        """listen() should fail fast when called from a different event loop."""
+    async def test_cross_loop_access_fails_an_assertion(self) -> None:
+        """listen() from a loop other than the owner is a defect: it asserts."""
         listener = _make_listener()
         listener._owner_loop = object()  # Force mismatch with current running loop.
 
-        with pytest.raises(RuntimeError, match='different event loop'):
+        with pytest.raises(AssertionError, match='other than its owner loop'):
             await listener.listen('task_done')
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_connection_race_returns_err(self) -> None:
+        """A dispatcher connection torn down after the ensure step is an Err."""
+        listener = _make_listener()
+        listener._dispatcher_conn = _make_mock_conn()
+        listener._command_conn = _make_mock_conn()
+
+        with patch.object(
+            listener,
+            '_ensure_dispatcher_connection',
+            new=AsyncMock(
+                side_effect=RuntimeError('dispatcher connection missing after ensure'),
+            ),
+        ):
+            result = await listener.listen('task_done')
+
+        assert result.is_err()
+        assert result.err_value.code == BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+        assert 'missing after ensure' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_first_subscriber_issues_listen_and_starts_dispatcher(self) -> None:
@@ -1067,26 +1087,34 @@ class TestClose:
         mock_threadsafe.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_cross_loop_close_noops_when_owner_loop_closed(self) -> None:
-        """close() should return without raising when owner loop is already closed."""
+    async def test_cross_loop_close_releases_when_owner_loop_closed(self) -> None:
+        """close() after the owner loop closed releases the connections here."""
         listener = _make_listener()
         owner_loop = MagicMock()
         owner_loop.is_closed.return_value = True
         listener._owner_loop = owner_loop
+        disp_conn = _make_mock_conn()
+        cmd_conn = _make_mock_conn()
+        listener._dispatcher_conn = disp_conn
+        listener._command_conn = cmd_conn
 
         with patch('asyncio.run_coroutine_threadsafe') as mock_threadsafe:
             await listener.close()
 
         mock_threadsafe.assert_not_called()
+        disp_conn.close.assert_awaited_once()
+        cmd_conn.close.assert_awaited_once()
+        assert listener._owner_loop is None
 
     @pytest.mark.asyncio
-    async def test_cross_loop_close_handoff_failure_falls_back_to_local_cleanup(
+    async def test_cross_loop_close_releases_when_owner_loop_closes_during_handoff(
         self,
     ) -> None:
-        """If handoff scheduling fails, close() should close handed coroutine and cleanup locally."""
+        """The owner loop closes between the check and the hand-off: release here."""
         listener = _make_listener()
         owner_loop = MagicMock()
-        owner_loop.is_closed.return_value = False
+        # Open at the close() check, closed when the hand-off is scheduled.
+        owner_loop.is_closed.side_effect = [False, True]
         listener._owner_loop = owner_loop
         disp_conn = _make_mock_conn()
         cmd_conn = _make_mock_conn()
@@ -1120,6 +1148,63 @@ class TestClose:
 # ---------------------------------------------------------------------------
 # TestListenerResultSurface
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestReleaseAfterOwnerLoopClosed:
+    """release_after_owner_loop_closed(): free a listener whose loop is gone."""
+
+    @pytest.mark.asyncio
+    async def test_closes_connections_and_clears_state_without_cancelling_tasks(
+        self,
+    ) -> None:
+        listener = _make_listener()
+        owner_loop = MagicMock()
+        owner_loop.is_closed.return_value = True
+        listener._owner_loop = owner_loop
+        disp_conn = _make_mock_conn()
+        cmd_conn = _make_mock_conn()
+        listener._dispatcher_conn = disp_conn
+        listener._command_conn = cmd_conn
+        dispatcher_task = MagicMock()
+        health_task = MagicMock()
+        listener._dispatcher_task = dispatcher_task
+        listener._health_check_task = health_task
+        listener._listen_channels.add('task_done')
+        listener._subs['task_done'].add(asyncio.Queue())
+        listener._payload_subs[('task_done', 't1')].add(asyncio.Queue())
+
+        await listener.release_after_owner_loop_closed()
+
+        disp_conn.close.assert_awaited_once()
+        cmd_conn.close.assert_awaited_once()
+        # The closed loop can never run these tasks; cancel() would need it.
+        dispatcher_task.cancel.assert_not_called()
+        health_task.cancel.assert_not_called()
+        assert listener._dispatcher_task is None
+        assert listener._health_check_task is None
+        assert listener._dispatcher_conn is None
+        assert listener._command_conn is None
+        assert not listener._listen_channels
+        assert not listener._subs
+        assert not listener._payload_subs
+        assert listener._owner_loop is None
+
+    @pytest.mark.asyncio
+    async def test_never_bound_listener_is_released(self) -> None:
+        listener = _make_listener()
+
+        await listener.release_after_owner_loop_closed()
+
+        assert listener._owner_loop is None
+
+    @pytest.mark.asyncio
+    async def test_open_owner_loop_fails_an_assertion(self) -> None:
+        listener = _make_listener()
+        listener._owner_loop = asyncio.get_running_loop()
+
+        with pytest.raises(AssertionError, match='owner loop'):
+            await listener.release_after_owner_loop_closed()
 
 
 @pytest.mark.unit
@@ -1238,12 +1323,12 @@ class TestListenerResultSurface:
         assert 'task_done' in err.message
 
     @pytest.mark.asyncio
-    async def test_listen_cross_loop_still_raises_runtime_error(self) -> None:
-        """RuntimeError from _bind_or_validate_loop is NOT wrapped in Result."""
+    async def test_listen_cross_loop_assertion_is_not_wrapped_in_result(self) -> None:
+        """The owner-loop assertion from _bind_or_validate_loop is NOT a Result."""
         listener = _make_listener()
         listener._owner_loop = object()  # force mismatch
 
-        with pytest.raises(RuntimeError, match='different event loop'):
+        with pytest.raises(AssertionError, match='other than its owner loop'):
             await listener.listen('task_done')
 
     @pytest.mark.asyncio

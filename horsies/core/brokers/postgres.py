@@ -16,13 +16,20 @@ from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
-    EventLoopConflict,
+    BuildForLoop,
+    EventLoopLimit,
+    LimitReached,
     ListenerDisabled,
     ListenerEnabled,
     ListenerState,
+    LoopResources,
+    LoopRole,
     SessionEngine,
     SessionEngineSeparate,
     SessionEngineShared,
+    UseExisting,
+    decide_for_loop,
+    split_closed_loops,
 )
 from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.result_types import (
@@ -113,17 +120,23 @@ def _broker_err(
     )
 
 
-def _loop_conflict_err(
-    operation: str, conflict: EventLoopConflict,
+def _loop_limit_err(
+    operation: str, loop_limit: EventLoopLimit,
 ) -> Err[BrokerOperationError]:
-    """Build the broker error for an event loop conflict. Nothing ran."""
+    """Build the broker error for the event loop limit. Nothing ran."""
     return Err(
         BrokerOperationError(
-            code=BrokerErrorCode.EVENT_LOOP_CONFLICT,
-            message=f'{operation}: {conflict.describe()}',
+            code=BrokerErrorCode.EVENT_LOOP_LIMIT,
+            message=f'{operation}: {loop_limit.describe()}',
             retryable=False,
         )
     )
+
+
+def _cancel_requested() -> bool:
+    """Whether the running task has a pending cancellation request."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _dbapi_sqlstate(exc: BaseException) -> str | None:
@@ -589,6 +602,28 @@ ENQUEUE_INSERT_SQL = text("""
 """)
 
 
+# Most open event loops, other than the broker's sync runner loop, that get
+# their own resource set. pytest-asyncio keeps one event loop open per
+# fixture scope (session, package, module, class, function), so one test
+# run can hold five open loops on one thread. A loop beyond the limit gets
+# EVENT_LOOP_LIMIT instead of one more connection pool.
+MAX_CALLER_EVENT_LOOPS = 5
+
+# Bound on the release of a resource set whose event loop closed. The
+# release waits for no other party: it drops the closed loop's tasks without
+# awaiting them, and closes at most pool_size + max_overflow idle
+# connections per engine plus 2 listener connections. Each close is local
+# work: psycopg AsyncConnection.close() calls PQfinish, which sends
+# Terminate and returns. The bound fails closed on a close that is stuck.
+DEAD_LOOP_RELEASE_TIMEOUT = timedelta(seconds=5)
+
+# Bound on a close handed off to the open event loop that owns a resource
+# set. It covers the delay before a busy owner loop runs the close, plus the
+# cancel-and-await of the listener's dispatcher and health tasks. The
+# connection closes inside it are local work, as above.
+CLOSE_HANDOFF_TIMEOUT = timedelta(seconds=5)
+
+
 class PostgresBroker:
     """
     PostgreSQL-based task broker with LISTEN/NOTIFY for real-time updates.
@@ -637,7 +672,10 @@ class PostgresBroker:
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
         self._assume_initialized = assume_initialized
-        self._resources = self._build_resources()
+        # One resource set per open event loop (see select_resources). The
+        # tuple is immutable: each change replaces it under the lock.
+        self._loop_sets: tuple[LoopResources, ...] = ()
+        self._loop_sets_lock = threading.Lock()
 
         self._initialized = assume_initialized
         # True once this broker saw the staged result function. Only a
@@ -702,14 +740,198 @@ class PostgresBroker:
             listener=listener,
         )
 
-    async def select_resources(self) -> Result[BrokerResources, EventLoopConflict]:
-        """Return the resources for the running event loop.
+    async def select_resources(self) -> Result[BrokerResources, EventLoopLimit]:
+        """Return the resource set for the running event loop.
 
         Call once at a public entry point and pass the value to helpers.
-        It must run inside a running event loop. It does no I/O.
-        The broker holds one set, so this always returns ``Ok``.
+        Each open event loop gets its own set, built on its first call
+        without I/O (engines and the listener connect on first use). The
+        broker's sync runner loop always gets a set. Other loops get one up
+        to ``MAX_CALLER_EVENT_LOOPS``; a loop beyond that gets
+        ``Err(EventLoopLimit)`` and nothing runs.
+
+        Each call also releases the sets of loops that closed, each bounded
+        by ``DEAD_LOOP_RELEASE_TIMEOUT``. A failed release is logged at
+        WARNING and does not fail the call.
         """
-        return Ok(self._resources)
+        selected = self._resources_for_loop(
+            asyncio.get_running_loop(), threading.current_thread().name,
+        )
+        closed_loop_sets = self._take_closed_loop_sets()
+        if closed_loop_sets:
+            await asyncio.gather(
+                *(self._release_closed_loop_set(entry) for entry in closed_loop_sets),
+            )
+        return selected
+
+    def _resources_for_loop(
+        self, loop: asyncio.AbstractEventLoop, thread_name: str,
+    ) -> Result[BrokerResources, EventLoopLimit]:
+        """Find or build the set for ``loop``. No I/O; it never releases a set."""
+        role: LoopRole
+        match self._loop_runner.runs_on(loop):
+            case True:
+                role = LoopRole.SYNC_RUNNER
+            case False:
+                role = LoopRole.CALLER
+        with self._loop_sets_lock:
+            decision = decide_for_loop(
+                self._loop_sets, loop, thread_name, role, MAX_CALLER_EVENT_LOOPS,
+            )
+            match decision:
+                case UseExisting(resources=resources):
+                    return Ok(resources)
+                case LimitReached(loop_limit=loop_limit):
+                    return Err(loop_limit)
+                case BuildForLoop():
+                    resources = self._build_resources()
+                    entry = LoopResources(
+                        loop=loop, thread_name=thread_name, role=role,
+                        resources=resources,
+                    )
+                    self._loop_sets = (*self._loop_sets, entry)
+                    return Ok(resources)
+
+    def _take_closed_loop_sets(self) -> tuple[LoopResources, ...]:
+        """Remove and return the entries whose event loop is closed."""
+        with self._loop_sets_lock:
+            by_state = split_closed_loops(self._loop_sets)
+            self._loop_sets = by_state.open_loops
+        return by_state.closed_loops
+
+    async def _release_closed_loop_set(self, entry: LoopResources) -> None:
+        """Release the set of a closed event loop. Total: failures are logged."""
+        for error in await self._release_with_bound(entry):
+            self.logger.warning(
+                'Release of the resource set of the closed event loop of '
+                'thread %r failed: %s: %s',
+                entry.thread_name, type(error).__name__, error,
+            )
+
+    async def _release_with_bound(self, entry: LoopResources) -> list[BaseException]:
+        """Release a closed loop's set on the running loop, bounded by
+        ``DEAD_LOOP_RELEASE_TIMEOUT``. Returns the failures; raises none.
+
+        A connection that a task of the closed loop still held stays
+        checked out; garbage collection closes it.
+        """
+        bound = DEAD_LOOP_RELEASE_TIMEOUT.total_seconds()
+        try:
+            return await asyncio.wait_for(
+                self._release_resource_set(entry.resources), timeout=bound,
+            )
+        except TimeoutError:
+            return [
+                TimeoutError(
+                    'release of the resource set of the closed event loop of '
+                    f'thread {entry.thread_name!r} did not finish within {bound} s',
+                ),
+            ]
+
+    async def _release_resource_set(
+        self, resources: BrokerResources,
+    ) -> list[BaseException]:
+        """Release a set whose event loop is closed, on the running loop.
+
+        Returns the failures; raises none.
+        """
+        errors: list[BaseException] = []
+        match resources.listener:
+            case ListenerEnabled(listener=listener):
+                try:
+                    await listener.release_after_owner_loop_closed()
+                except Exception as exc:
+                    errors.append(exc)
+            case ListenerDisabled():
+                pass
+        errors.extend(await self._dispose_engines(resources))
+        return errors
+
+    async def _close_resource_set(
+        self, resources: BrokerResources,
+    ) -> list[BaseException]:
+        """Close a set on its own event loop. Returns the failures; raises none."""
+        errors: list[BaseException] = []
+        match resources.listener:
+            case ListenerEnabled(listener=listener):
+                try:
+                    await listener.close()
+                except Exception as exc:
+                    errors.append(exc)
+            case ListenerDisabled():
+                pass
+        errors.extend(await self._dispose_engines(resources))
+        return errors
+
+    async def _dispose_engines(self, resources: BrokerResources) -> list[BaseException]:
+        """Dispose the set's engines, which closes their idle connections.
+
+        Returns the failures; raises none.
+        """
+        errors: list[BaseException] = []
+        try:
+            await resources.engine.dispose()
+        except Exception as exc:
+            errors.append(exc)
+        match resources.session_engine:
+            case SessionEngineSeparate(engine=session_engine):
+                try:
+                    await session_engine.dispose()
+                except Exception as exc:
+                    errors.append(exc)
+            case SessionEngineShared():
+                pass
+        return errors
+
+    async def _close_loop_set(
+        self, entry: LoopResources, current_loop: asyncio.AbstractEventLoop,
+    ) -> list[BaseException]:
+        """Close one set by the rule for its loop. Returns the failures."""
+        match entry.loop:
+            case owner_loop if owner_loop is current_loop:
+                return await self._close_resource_set(entry.resources)
+            case owner_loop if owner_loop.is_closed():
+                return await self._release_with_bound(entry)
+            case _:
+                return await self._hand_off_close(entry)
+
+    async def _hand_off_close(self, entry: LoopResources) -> list[BaseException]:
+        """Close a set on its own open event loop, from another loop.
+
+        Waits at most ``CLOSE_HANDOFF_TIMEOUT``. On timeout the close stays
+        scheduled on the owner loop and runs if that loop runs again; the
+        timeout is returned as a failure that names the owner thread.
+        Returns the failures; raises none except the caller's cancellation.
+        """
+        close_coroutine = self._close_resource_set(entry.resources)
+        try:
+            future = asyncio.run_coroutine_threadsafe(close_coroutine, entry.loop)
+        except RuntimeError:
+            # The owner loop closed after the close rule was chosen.
+            close_coroutine.close()
+            return await self._release_with_bound(entry)
+        bound = CLOSE_HANDOFF_TIMEOUT.total_seconds()
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)), timeout=bound,
+            )
+        except TimeoutError:
+            return [
+                TimeoutError(
+                    'close of the resource set of the event loop on thread '
+                    f'{entry.thread_name!r} did not finish within {bound} s; '
+                    'the close stays scheduled on that loop',
+                ),
+            ]
+        except asyncio.CancelledError:
+            if _cancel_requested():
+                raise
+            return [
+                RuntimeError(
+                    'close of the resource set of the event loop on thread '
+                    f'{entry.thread_name!r} was cancelled on that loop',
+                ),
+            ]
 
     def run_sync[**P, T](
         self,
@@ -789,24 +1011,28 @@ class PostgresBroker:
         """Drop the pools a forked child inherited, without closing them.
 
         The parent process owns the inherited connections, so the child must
-        not use or close them: each engine is disposed with ``close=False``.
-        Listener connections are dropped with the broker; psycopg closes a
-        connection on garbage collection only in the process that opened it.
+        not use or close them: each engine of each set is disposed with
+        ``close=False``. Listener connections are dropped with the broker;
+        psycopg closes a connection on garbage collection only in the
+        process that opened it. It takes no lock: a lock that a parent
+        thread held at fork time stays held in the child.
         """
-        self._resources.engine.sync_engine.dispose(close=False)
-        match self._resources.session_engine:
-            case SessionEngineSeparate(engine=session_engine):
-                session_engine.sync_engine.dispose(close=False)
-            case SessionEngineShared():
-                pass
+        loop_sets = self._loop_sets
+        self._loop_sets = ()
+        for entry in loop_sets:
+            entry.resources.engine.sync_engine.dispose(close=False)
+            match entry.resources.session_engine:
+                case SessionEngineSeparate(engine=session_engine):
+                    session_engine.sync_engine.dispose(close=False)
+                case SessionEngineShared():
+                    pass
 
     async def validate_worker_database_paths(self) -> None:
         """Connect both worker paths and prove session capability."""
         match await self.select_resources():
-            case Err(conflict):
+            case Err(loop_limit):
                 raise AssertionError(
-                    f'worker broker resources are bound to another loop: '
-                    f'{conflict.describe()}'
+                    f'worker broker resources: {loop_limit.describe()}'
                 )
             case Ok(resources):
                 pass
@@ -1547,8 +1773,8 @@ class PostgresBroker:
         Returns Ok(None) on success, Err(BrokerOperationError) on failure.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('ensure_schema_initialized', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('ensure_schema_initialized', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -1766,8 +1992,8 @@ class PostgresBroker:
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('enqueue', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('enqueue', loop_limit)
             case Ok(resources):
                 pass
         # The ratified retention resolution: absent → the immutable
@@ -2454,8 +2680,8 @@ class PostgresBroker:
         - ``Err(...)`` with other codes for DB / listener failures.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('raw result fetch', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('raw result fetch', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -2480,27 +2706,17 @@ class PostgresBroker:
             subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
             match resources.listener:
                 case ListenerEnabled(listener=listener):
-                    try:
-                        listen_r = await listener.listen_payload(
-                            'task_done', task_id,
-                        )
-                    except RuntimeError as e:
-                        self.logger.debug(
-                            'LISTEN unavailable; falling back to polling for '
-                            'task_done. Original error: %s',
-                            e,
-                        )
-                    else:
-                        match listen_r:
-                            case Ok(queue):
-                                q = queue
-                                subscription = (listener, queue)
-                            case Err(listen_err):
-                                self.logger.debug(
-                                    'LISTEN unavailable; falling back to polling '
-                                    'for task_done. Original error: %s',
-                                    listen_err.message,
-                                )
+                    listen_r = await listener.listen_payload('task_done', task_id)
+                    match listen_r:
+                        case Ok(queue):
+                            q = queue
+                            subscription = (listener, queue)
+                        case Err(listen_err):
+                            self.logger.debug(
+                                'LISTEN unavailable; falling back to polling '
+                                'for task_done. Original error: %s',
+                                listen_err.message,
+                            )
                 case ListenerDisabled():
                     pass
 
@@ -2619,38 +2835,31 @@ class PostgresBroker:
                 cancelled_during_cleanup = True
                 continue
 
-        # Preserve existing semantics: cross-loop RuntimeError on unsubscribe is non-fatal.
-        with contextlib.suppress(RuntimeError):
-            await unsubscribe_task
+        await unsubscribe_task
 
         # Propagate cancellation only after cleanup has completed.
         if cancelled_during_cleanup:
             raise asyncio.CancelledError
 
     async def close_async(self) -> BrokerResult[None]:
-        """Close listener/engine and stop sync loop runner if it was started."""
-        errors: list[BaseException] = []
-        resources = self._resources
-        match resources.listener:
-            case ListenerEnabled(listener=listener):
-                try:
-                    await listener.close()
-                except Exception as exc:
-                    errors.append(exc)
-            case ListenerDisabled():
-                pass
-        try:
-            await resources.engine.dispose()
-        except Exception as exc:
-            errors.append(exc)
-        match resources.session_engine:
-            case SessionEngineSeparate(engine=session_engine):
-                try:
-                    await session_engine.dispose()
-                except Exception as exc:
-                    errors.append(exc)
-            case SessionEngineShared():
-                pass
+        """Close every resource set, then stop the sync runner if it was started.
+
+        Each set closes on its own event loop: the running loop's set
+        directly, the set of a closed loop by release, and the set of
+        another open loop by a hand-off bounded by ``CLOSE_HANDOFF_TIMEOUT``.
+        The broker stays usable: a later async call builds a new set for
+        its loop.
+        """
+        current_loop = asyncio.get_running_loop()
+        with self._loop_sets_lock:
+            loop_sets = self._loop_sets
+            self._loop_sets = ()
+        per_set_errors = await asyncio.gather(
+            *(self._close_loop_set(entry, current_loop) for entry in loop_sets),
+        )
+        errors: list[BaseException] = [
+            error for set_errors in per_set_errors for error in set_errors
+        ]
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         loop_thread = self._loop_runner._thread
@@ -2679,8 +2888,8 @@ class PostgresBroker:
     ) -> BrokerResult[list[dict[str, Any]]]:
         """Identify potentially crashed tasks based on heartbeat absence."""
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('get_stale_tasks', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('get_stale_tasks', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -2706,8 +2915,8 @@ class PostgresBroker:
         measured round-trip latency.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('ping_database', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('ping_database', loop_limit)
             case Ok(resources):
                 pass
         loop = asyncio.get_running_loop()
@@ -2748,8 +2957,8 @@ class PostgresBroker:
         ``list_worker_states_async`` but absent here are non-responsive.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('ping_workers', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('ping_workers', loop_limit)
             case Ok(resources):
                 pass
         if timeout_seconds <= 0:
@@ -2772,9 +2981,8 @@ class PostgresBroker:
         correlation_id = uuid.uuid4().hex
         reply_channel = f'horsies_worker_pong_{correlation_id}'
 
-        # A broker without a listener cannot receive replies, and listen()
-        # raises on cross-loop misuse. Both become an Err so the Result
-        # contract holds on every path.
+        # A broker without a listener cannot receive replies: an Err, so the
+        # Result contract holds on every path.
         match resources.listener:
             case ListenerEnabled(listener=listener):
                 pass
@@ -2789,14 +2997,7 @@ class PostgresBroker:
                         retryable=False,
                     )
                 )
-        try:
-            listen_r = await listener.listen(reply_channel)
-        except RuntimeError as exc:
-            return _broker_err(
-                BrokerErrorCode.WORKER_PING_FAILED,
-                f'ping_workers listener unavailable: {exc}',
-                exc,
-            )
+        listen_r = await listener.listen(reply_channel)
         if is_err(listen_r):
             err = listen_r.err_value
             return Err(
@@ -2874,8 +3075,7 @@ class PostgresBroker:
 
         Mirrors ``_unsubscribe_task_done_safely``: shields the unsubscribe so a
         cancelled ``ping_workers_async`` does not leak the server-side LISTEN,
-        suppresses the cross-loop RuntimeError, and re-raises cancellation only
-        after cleanup finishes.
+        and re-raises cancellation only after cleanup finishes.
         """
         unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, q))
         cancelled_during_cleanup = False
@@ -2885,8 +3085,7 @@ class PostgresBroker:
             except asyncio.CancelledError:
                 cancelled_during_cleanup = True
                 continue
-        with contextlib.suppress(RuntimeError):
-            await unsubscribe_task
+        await unsubscribe_task
         if cancelled_during_cleanup:
             raise asyncio.CancelledError
 
@@ -2954,8 +3153,8 @@ class PostgresBroker:
         snapshot appears, regardless of current load.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('list_worker_states', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('list_worker_states', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -2977,8 +3176,8 @@ class PostgresBroker:
     ) -> BrokerResult[WorkerStateSnapshot | None]:
         """Latest state snapshot for one worker, or ``None`` if unknown."""
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('get_worker_state', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('get_worker_state', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -3010,8 +3209,8 @@ class PostgresBroker:
         to bound the fetch (the table grows ~1 row per worker per interval).
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('get_worker_state_history', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('get_worker_state_history', loop_limit)
             case Ok(resources):
                 pass
         if limit is not None and limit <= 0:
@@ -3041,8 +3240,8 @@ class PostgresBroker:
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """Find tasks that expired before worker processing."""
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('get_expired_tasks', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('get_expired_tasks', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -3073,8 +3272,8 @@ class PostgresBroker:
         preventing races with concurrent worker finalizers.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('mark_stale_tasks_as_failed', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('mark_stale_tasks_as_failed', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -3356,8 +3555,8 @@ class PostgresBroker:
         No attempt row is written (the task never started).
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('expire_pending_tasks', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('expire_pending_tasks', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -3434,8 +3633,8 @@ class PostgresBroker:
     ) -> BrokerResult[int]:
         """Requeue tasks stuck in CLAIMED without recent claimer heartbeat."""
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('requeue_stale_claimed', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('requeue_stale_claimed', loop_limit)
             case Ok(resources):
                 pass
         try:
@@ -3460,8 +3659,8 @@ class PostgresBroker:
     ) -> BrokerResult[OrphanTaskAuditReport]:
         """Scan and cancel one bounded page of orphan workflow tasks."""
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('audit_orphaned_workflow_tasks', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('audit_orphaned_workflow_tasks', loop_limit)
             case Ok(resources):
                 pass
         started = time.monotonic()
@@ -3734,8 +3933,8 @@ class PostgresBroker:
         Err(BrokerOperationError) on infrastructure failure.
         """
         match await self.select_resources():
-            case Err(conflict):
-                return _loop_conflict_err('get_task_info', conflict)
+            case Err(loop_limit):
+                return _loop_limit_err('get_task_info', loop_limit)
             case Ok(resources):
                 pass
         try:

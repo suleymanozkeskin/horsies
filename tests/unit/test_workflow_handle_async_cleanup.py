@@ -11,9 +11,20 @@ import pytest
 from horsies.core.models.tasks import OutcomeCode, RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Err, Ok
 from horsies.core.brokers.resources import ListenerEnabled
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
 from tests.broker_resources_support import attach_resources, fake_resources
+
+
+# A failed LISTEN: the wait falls back to polling.
+_SUBSCRIBE_FAILED = Err(
+    BrokerOperationError(
+        code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
+        message='listener unavailable',
+        retryable=True,
+    ),
+)
 
 
 def _make_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
@@ -77,7 +88,7 @@ class TestWorkflowHandleZeroTimeout:
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_wait_timeout_immediately(self) -> None:
         handle, listener = _make_handle()
-        listener.listen = AsyncMock(side_effect=RuntimeError())
+        listener.listen = AsyncMock(return_value=_SUBSCRIBE_FAILED)
         handle._status = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
 
         result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
@@ -90,7 +101,7 @@ class TestWorkflowHandleZeroTimeout:
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_result_when_already_complete(self) -> None:
         handle, listener = _make_handle()
-        listener.listen = AsyncMock(side_effect=RuntimeError())
+        listener.listen = AsyncMock(return_value=_SUBSCRIBE_FAILED)
         handle._status = AsyncMock(return_value=Ok(WorkflowStatus.COMPLETED))
         expected: TaskResult[Any, Any] = TaskResult(ok=42)
         handle._get_result = AsyncMock(return_value=expected)
@@ -102,7 +113,7 @@ class TestWorkflowHandleZeroTimeout:
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_persisted_expired_error(self) -> None:
         handle, listener = _make_handle()
-        listener.listen = AsyncMock(side_effect=RuntimeError())
+        listener.listen = AsyncMock(return_value=_SUBSCRIBE_FAILED)
         handle._status = AsyncMock(return_value=Ok(WorkflowStatus.EXPIRED))
         expected: TaskResult[Any, TaskError] = TaskResult(
             err=TaskError(
