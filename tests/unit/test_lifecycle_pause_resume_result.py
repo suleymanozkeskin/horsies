@@ -268,10 +268,10 @@ class TestPauseSyncWrapper:
         from horsies.core.utils.loop_runner import LoopRunnerError
 
         broker = MagicMock()
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-        ) as mock_runner_fn:
-            mock_runner_fn.return_value.call.side_effect = LoopRunnerError('dead')
+        with patch.object(
+            broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError('dead')
             result = pause_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)
@@ -286,10 +286,10 @@ class TestPauseSyncWrapper:
         from horsies.core.workflows.lifecycle import pause_workflow_sync
 
         broker = MagicMock()
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-        ) as mock_runner_fn:
-            mock_runner_fn.return_value.call.side_effect = RuntimeError('boom')
+        with patch.object(
+            broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = RuntimeError('boom')
             result = pause_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)
@@ -308,10 +308,10 @@ class TestResumeSyncWrapper:
         from horsies.core.utils.loop_runner import LoopRunnerError
 
         broker = MagicMock()
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-        ) as mock_runner_fn:
-            mock_runner_fn.return_value.call.side_effect = LoopRunnerError('dead')
+        with patch.object(
+            broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = LoopRunnerError('dead')
             result = resume_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)
@@ -326,10 +326,10 @@ class TestResumeSyncWrapper:
         from horsies.core.workflows.lifecycle import resume_workflow_sync
 
         broker = MagicMock()
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-        ) as mock_runner_fn:
-            mock_runner_fn.return_value.call.side_effect = RuntimeError('boom')
+        with patch.object(
+            broker._loop_runner, 'call',
+        ) as mock_call:
+            mock_call.side_effect = RuntimeError('boom')
             result = resume_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)

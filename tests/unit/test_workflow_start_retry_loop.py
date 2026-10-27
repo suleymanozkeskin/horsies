@@ -351,12 +351,8 @@ class TestSyncWrapperForwarding:
         broker = MagicMock()
         mock_handle = MagicMock()
 
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-        ) as mock_get_runner:
-            mock_runner = MagicMock()
-            mock_runner.call.return_value = Ok(mock_handle)
-            mock_get_runner.return_value = mock_runner
+        with patch.object(broker._loop_runner, 'call') as mock_call:
+            mock_call.return_value = Ok(mock_handle)
 
             result = start_workflow(
                 spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
@@ -364,5 +360,5 @@ class TestSyncWrapperForwarding:
 
         assert is_ok(result)
         # Verify the async function was called with the flag
-        call_kwargs = mock_runner.call.call_args
+        call_kwargs = mock_call.call_args
         assert call_kwargs.kwargs.get('resend_on_transient_err') is True

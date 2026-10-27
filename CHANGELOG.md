@@ -8,6 +8,32 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **Sync workflow calls stop when the broker's sync runner stops.** After
+  sync `close()`, or `close_async()` after any sync call, `spec.start()`
+  returns `INTERNAL_FAILED`, the sync `WorkflowHandle` wrap methods and
+  `pause_workflow_sync` / `resume_workflow_sync` return `LOOP_RUNNER_FAILED`,
+  and `WorkflowHandle.get()` / `result_for()` return a `BROKER_ERROR`
+  result. Sync task calls already behaved this way. Before, sync workflow
+  calls continued on a process-wide event loop.
+
+### Fixed
+
+- **Sync workflow calls and sync task calls share one sync runner.**
+  `spec.start()`, the sync `WorkflowHandle` methods and
+  `pause_workflow_sync` / `resume_workflow_sync` now run on the broker's own
+  runner, the same one that `send()`, `TaskHandle.get()` and the app's sync
+  pings use. Before, they ran on a second, process-wide event loop that
+  shared the broker's connection pool and listener. A sync call that waited
+  for a pool connection returned by a call on the other loop waited until
+  `pool_timeout` (30 s by default); after that, every pool wait from the
+  other loop failed at once with "bound to a different event loop"
+  (`ENQUEUE_FAILED` from `send()`, `INTERNAL_FAILED` from a handle). The
+  listener bound to the first loop that used it: after a sync workflow
+  `get()`, `app.ping_workers()` returned `WORKER_PING_FAILED` for the rest of
+  the process, and result waits from the other loop fell back to polling.
+
 ## [0.5.4] - 2026-10-20
 
 ### Upgrade notes

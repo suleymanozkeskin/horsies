@@ -2649,7 +2649,7 @@ class TestWorkflowStartErrors:
         setup: _SetupTuple,
     ) -> None:
         """Sync bridge failure returns Err(INTERNAL_FAILED)."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         from horsies.core.workflows.engine import start_workflow
         from horsies.core.utils.loop_runner import LoopRunnerError
@@ -2663,13 +2663,11 @@ class TestWorkflowStartErrors:
             broker,
         )
 
-        # Mock get_shared_runner to raise an infrastructure error
-        mock_runner = MagicMock()
-        mock_runner.call.side_effect = LoopRunnerError('No running event loop')
-
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-            return_value=mock_runner,
+        # Make the broker's sync runner raise an infrastructure error
+        with patch.object(
+            broker._loop_runner,
+            'call',
+            side_effect=LoopRunnerError('No running event loop'),
         ):
             r = start_workflow(spec, broker)
 
@@ -2685,7 +2683,7 @@ class TestWorkflowStartErrors:
         setup: _SetupTuple,
     ) -> None:
         """Unexpected sync-path exception returns Err(INTERNAL_FAILED)."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
 
         from horsies.core.workflows.engine import start_workflow
 
@@ -2698,12 +2696,10 @@ class TestWorkflowStartErrors:
             broker,
         )
 
-        mock_runner = MagicMock()
-        mock_runner.call.side_effect = RuntimeError('Unexpected runner call failure')
-
-        with patch(
-            'horsies.core.utils.loop_runner.get_shared_runner',
-            return_value=mock_runner,
+        with patch.object(
+            broker._loop_runner,
+            'call',
+            side_effect=RuntimeError('Unexpected runner call failure'),
         ):
             r = start_workflow(spec, broker)
 
