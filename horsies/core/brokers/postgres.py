@@ -1,7 +1,7 @@
 # app/core/brokers/postgres.py
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
@@ -706,6 +706,24 @@ class PostgresBroker:
         Today the broker holds one set, so this always returns ``Ok``.
         """
         return Ok(self._resources)
+
+    def run_sync[**P, T](
+        self,
+        coro_fn: Callable[P, Coroutine[Any, Any, T]],
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> T:
+        """Run ``coro_fn`` on this broker's sync runner and block until it returns.
+
+        Every sync facade calls this, so a broker has one sync event loop.
+        It blocks the calling thread, so it must not run inside an event loop.
+
+        Raises:
+            LoopRunnerError: the runner is stopped, or scheduling onto its
+                loop failed.
+            Exception: the coroutine's own exception, unchanged.
+        """
+        return self._loop_runner.call(coro_fn, *args, **kwargs)
 
     def _runtime_session_settings(self) -> SessionSettings:
         """Whether runtime-pool connections keep session settings."""
@@ -2527,7 +2545,7 @@ class PostgresBroker:
         ``LoopRunner``.
         """
         try:
-            return self._loop_runner.call(
+            return self.run_sync(
                 self.get_raw_result_record_async, task_id, timeout_ms,
             )
         except Exception as exc:
@@ -3405,7 +3423,7 @@ class PostgresBroker:
     ) -> BrokerResult[str]:
         """Synchronous task submission (runs enqueue_async in background loop)."""
         try:
-            return self._loop_runner.call(
+            return self.run_sync(
                 self.enqueue_async,
                 task_name,
                 queue_name,
@@ -3791,7 +3809,7 @@ class PostgresBroker:
     ) -> BrokerResult[TaskInfo | None]:
         """Synchronous wrapper for get_task_info_async()."""
         try:
-            return self._loop_runner.call(
+            return self.run_sync(
                 self.get_task_info_async,
                 task_id,
                 include_result=include_result,
@@ -3808,7 +3826,7 @@ class PostgresBroker:
     def close(self) -> BrokerResult[None]:
         """Synchronous cleanup (runs close_async in background loop)."""
         try:
-            return self._loop_runner.call(self.close_async)
+            return self.run_sync(self.close_async)
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLOSE_FAILED,

@@ -808,7 +808,7 @@ def start_workflow(
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     try:
-        return broker._loop_runner.call(
+        return broker.run_sync(
             start_workflow_async,
             spec,
             broker,
@@ -1011,7 +1011,7 @@ def pause_workflow_sync(
     from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return broker._loop_runner.call(pause_workflow, broker, workflow_id)
+        return broker.run_sync(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
@@ -1323,7 +1323,7 @@ def resume_workflow_sync(
     from horsies.core.utils.loop_runner import LoopRunnerError
 
     try:
-        return broker._loop_runner.call(resume_workflow, broker, workflow_id)
+        return broker.run_sync(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,

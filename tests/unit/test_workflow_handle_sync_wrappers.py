@@ -38,7 +38,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -55,7 +55,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -71,7 +71,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -87,7 +87,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -103,7 +103,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -119,7 +119,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -135,7 +135,7 @@ class TestSyncCallWrapStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = RuntimeError(
                 'something unexpected',
@@ -153,7 +153,7 @@ class TestSyncCallWrapStrategy:
         from horsies.core.types.result import Ok
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.return_value = Ok('RUNNING')
             result = handle.status()
@@ -176,7 +176,7 @@ class TestSyncTaskResultCallFoldStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -196,7 +196,7 @@ class TestSyncTaskResultCallFoldStrategy:
         mock_node.node_id = 'test-node'
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError(
                 'Thread dead',
@@ -211,7 +211,7 @@ class TestSyncTaskResultCallFoldStrategy:
         handle = _make_handle()
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = RuntimeError(
                 'something unexpected',
@@ -229,7 +229,7 @@ class TestSyncTaskResultCallFoldStrategy:
         expected = TaskResult(ok=42)
 
         with patch.object(
-            handle.broker._loop_runner, 'call',
+            handle.broker, 'run_sync',
         ) as mock_call:
             mock_call.return_value = expected
             result = handle.get(timeout_ms=100)

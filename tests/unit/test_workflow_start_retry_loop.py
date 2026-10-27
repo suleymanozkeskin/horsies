@@ -351,7 +351,7 @@ class TestSyncWrapperForwarding:
         broker = MagicMock()
         mock_handle = MagicMock()
 
-        with patch.object(broker._loop_runner, 'call') as mock_call:
+        with patch.object(broker, 'run_sync') as mock_call:
             mock_call.return_value = Ok(mock_handle)
 
             result = start_workflow(

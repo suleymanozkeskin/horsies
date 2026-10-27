@@ -9,8 +9,8 @@ from datetime import datetime
 from typing import (
     TYPE_CHECKING,
     Any,
-    Awaitable,
     Callable,
+    Coroutine,
     Generic,
     TypeVar,
     assert_never,
@@ -545,13 +545,13 @@ class WorkflowHandle(Generic[OutT]):
 
     def _sync_call(
         self,
-        coro_fn: Callable[..., Awaitable[HandleResult[_T]]],
+        coro_fn: Callable[..., Coroutine[Any, Any, HandleResult[_T]]],
         operation: str,
         *args: Any,
     ) -> HandleResult[_T]:
         """Sync bridge for wrap-strategy async methods."""
         try:
-            return self.broker._loop_runner.call(coro_fn, *args)
+            return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:
@@ -575,12 +575,12 @@ class WorkflowHandle(Generic[OutT]):
 
     def _sync_task_result_call(
         self,
-        coro_fn: Callable[..., Awaitable[TaskResult[_T, TaskError]]],
+        coro_fn: Callable[..., Coroutine[Any, Any, TaskResult[_T, TaskError]]],
         *args: Any,
     ) -> TaskResult[_T, TaskError]:
         """Sync bridge for fold-strategy async methods."""
         try:
-            return self.broker._loop_runner.call(coro_fn, *args)
+            return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
             raise
         except LoopRunnerError as exc:

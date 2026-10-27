@@ -133,7 +133,7 @@ def test_workflow_call_gets_connection_released_by_task_runner(
 ) -> None:
     broker = one_connection_app.app.get_broker()
     holder = _start_thread(
-        lambda: broker._loop_runner.call(_hold_connection, broker, HOLD_SECONDS),
+        lambda: broker.run_sync(_hold_connection, broker, HOLD_SECONDS),
     )
     time.sleep(WAITER_START_DELAY_SECONDS)
     handle: WorkflowHandle[Any] = WorkflowHandle(

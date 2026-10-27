@@ -269,7 +269,7 @@ class TestPauseSyncWrapper:
 
         broker = MagicMock()
         with patch.object(
-            broker._loop_runner, 'call',
+            broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError('dead')
             result = pause_workflow_sync(broker, 'wf-1')
@@ -287,7 +287,7 @@ class TestPauseSyncWrapper:
 
         broker = MagicMock()
         with patch.object(
-            broker._loop_runner, 'call',
+            broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = RuntimeError('boom')
             result = pause_workflow_sync(broker, 'wf-1')
@@ -309,7 +309,7 @@ class TestResumeSyncWrapper:
 
         broker = MagicMock()
         with patch.object(
-            broker._loop_runner, 'call',
+            broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = LoopRunnerError('dead')
             result = resume_workflow_sync(broker, 'wf-1')
@@ -327,7 +327,7 @@ class TestResumeSyncWrapper:
 
         broker = MagicMock()
         with patch.object(
-            broker._loop_runner, 'call',
+            broker, 'run_sync',
         ) as mock_call:
             mock_call.side_effect = RuntimeError('boom')
             result = resume_workflow_sync(broker, 'wf-1')
