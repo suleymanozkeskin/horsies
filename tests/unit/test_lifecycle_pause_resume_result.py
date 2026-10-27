@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.broker_resources_support import attach_resources, fake_resources
+
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.workflow.handle_types import (
     HandleErrorCode,
@@ -56,7 +58,7 @@ def _mock_broker(
         cm.__aenter__ = AsyncMock(side_effect=side_effect)
         cm.__aexit__ = AsyncMock(return_value=False)
         broker = MagicMock()
-        broker.session_factory.return_value = cm
+        attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=cm)))
         return broker
 
     # Build a call counter so we can return different results for
@@ -89,7 +91,7 @@ def _mock_broker(
     cm.__aexit__ = AsyncMock(return_value=False)
 
     broker = MagicMock()
-    broker.session_factory.return_value = cm
+    attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=cm)))
     return broker
 
 

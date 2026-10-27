@@ -24,6 +24,7 @@ from tests.pgbouncer_utils import (
     isolated_pgbouncer_database,
     skip_if_pgbouncer_disabled,
 )
+from tests.broker_resources_support import current_resources, listener_of
 
 
 skip_if_pgbouncer_disabled()
@@ -96,7 +97,7 @@ async def test_transaction_pool_uses_pooled_runtime_and_direct_session(
         assert errors == []
         await broker.validate_worker_database_paths()
 
-        async with broker.partition_maintenance.autocommit() as connection:
+        async with current_resources(broker).partition_maintenance.autocommit() as connection:
             backend_pid = (
                 await connection.execute(text('SELECT pg_backend_pid()'))
             ).scalar_one()
@@ -179,7 +180,7 @@ async def test_session_pool_works_without_transaction_mode(
 
         channel = f"pgbouncer_session_probe_{uuid4().hex}"
         listen_r = await asyncio.wait_for(
-            broker.listener.listen(channel),
+            listener_of(broker).listen(channel),
             timeout=5.0,
         )
         assert is_ok(listen_r)

@@ -23,6 +23,7 @@ from pydantic import ValidationError
 from pydantic_core import PydanticSerializationError
 
 from horsies.core.app import Horsies
+from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.worker.runtime import _set_child_warmup_barrier
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import decode_kwargs, underlying_task_fn
@@ -225,20 +226,20 @@ def _locate_app(app_locator: str) -> Horsies:
 
 
 def _discard_inherited_broker(app: Horsies) -> None:
-    """Drop any broker object inherited from a forked parent process."""
-    broker = getattr(app, '_broker', None)
-    if broker is None:
-        return
-    async_engine = getattr(broker, 'async_engine', None)
-    sync_engine = getattr(async_engine, 'sync_engine', None)
-    dispose = getattr(sync_engine, 'dispose', None)
-    if callable(dispose):
-        try:
-            dispose(close=False)
-        except TypeError:
-            dispose()
-        except Exception as exc:
-            logger.warning('Failed to discard inherited broker pool in child: %s', exc)
+    """Drop any broker object inherited from a forked parent process.
+
+    The broker's pools are disposed without closing their connections, which
+    belong to the parent. ``app.get_broker()`` then builds a new broker.
+    """
+    match getattr(app, '_broker', None):
+        case PostgresBroker() as broker:
+            try:
+                broker.discard_inherited_resources()
+            except Exception as exc:
+                logger.warning('Failed to discard inherited broker pool in child: %s', exc)
+        case _:
+            # No broker was built in the parent before the fork.
+            pass
     try:
         setattr(app, '_broker', None)
     except Exception as exc:

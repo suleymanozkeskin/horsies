@@ -56,6 +56,7 @@ from tests.integration.test_task_history_schema_emission import (
     MakeDatabase,
     make_database,
 )
+from tests.broker_resources_support import current_resources
 
 __all__ = ['make_database']
 
@@ -126,10 +127,10 @@ async def _probe_statements(
     ) -> None:
         statements.append(statement)
 
-    engine = broker.session_factory.kw['bind'].sync_engine
+    engine = current_resources(broker).session_factory.kw['bind'].sync_engine
     event.listen(engine, 'before_cursor_execute', record)
     try:
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             outcome = await broker._probe_result_row(  # pyright: ignore[reportPrivateUsage]
                 session,
                 task_id,

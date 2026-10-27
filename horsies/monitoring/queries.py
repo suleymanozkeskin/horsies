@@ -1,9 +1,11 @@
 """Read queries backing the monitoring UI.
 
-Every function takes the broker, opens one session, and returns a
-``MonitoringResult``. ``SQLAlchemyError`` is caught at the session boundary
-and mapped to ``MonitoringQueryError``; nothing else is caught. A row that
-does not exist is ``Ok(None)``, not an error.
+Every query takes the broker, selects its resources once, opens one
+session, and returns a ``MonitoringResult``. When the broker's resources are
+in use by another open event loop, the query returns ``EVENT_LOOP_CONFLICT``
+and runs nothing. ``SQLAlchemyError`` is caught at the session boundary and
+mapped to ``MonitoringQueryError``; nothing else is caught. A row that does
+not exist is ``Ok(None)``, not an error.
 
 Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
@@ -39,6 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.resources import EventLoopConflict
 from horsies.core.models.task_pg import (
     ScheduleStateModel,
     TaskAttemptModel,
@@ -309,6 +312,19 @@ def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
             message=f'{operation} failed: {exc}',
             retryable=is_retryable_connection_error(exc),
             exception=exc,
+        )
+    )
+
+
+def _conflict_err(
+    operation: str, conflict: EventLoopConflict,
+) -> Err[MonitoringQueryError]:
+    """The broker's resources are in use by another event loop. Nothing ran."""
+    return Err(
+        MonitoringQueryError(
+            code=MonitoringQueryErrorCode.EVENT_LOOP_CONFLICT,
+            message=f'{operation}: {conflict.describe()}',
+            retryable=False,
         )
     )
 
@@ -828,8 +844,14 @@ async def task_stats(
         ),
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('task stats query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
             history_rows = (
                 await session.execute(text(history_sql), history_params)
@@ -891,8 +913,14 @@ async def task_facets(
         .order_by(error_count.desc())
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('task facets query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             live_error_rows = (await session.execute(errors_stmt)).tuples().all()
             combined_facets: dict[HistoryFacet, list[tuple[str, int]]] = {}
             for facet in (
@@ -1062,8 +1090,14 @@ async def task_breakdown(
         group_column=history_group_column,
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('task breakdown query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             rows = (await session.execute(stmt)).tuples().all()
             history_rows = (
                 await session.execute(text(history_sql), history_params)
@@ -1320,8 +1354,14 @@ async def list_tasks(
         window, history_scope
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('task list query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             # Both sides follow the documented total contract together:
             # filters active means exact on both, the unfiltered view is
             # a planner estimate on both. The branch is on ``scope`` —
@@ -1403,8 +1443,14 @@ async def get_task_detail(
         WorkflowTaskModel.workflow_id, WorkflowTaskModel.task_index
     ).where(WorkflowTaskModel.task_id == task_id)
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('task detail query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             task = (await session.execute(task_stmt)).scalar_one_or_none()
             if task is None:
                 history = await _history_detail_or_none(session, task_id)
@@ -1488,8 +1534,14 @@ async def list_workflow_names(
         .order_by(WorkflowModel.name)
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('workflow names query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             names = (await session.execute(stmt)).scalars().all()
     except SQLAlchemyError as exc:
         return _db_err('workflow names query', exc)
@@ -1521,8 +1573,14 @@ async def list_workflow_runs(
         .limit(limit)
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('workflow runs query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             runs = (await session.execute(stmt)).scalars().all()
     except SQLAlchemyError as exc:
         return _db_err('workflow runs query', exc)
@@ -1549,8 +1607,14 @@ async def get_workflow_run(
         .order_by(WorkflowTaskModel.task_index)
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('workflow run detail query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             run = (await session.execute(run_stmt)).scalar_one_or_none()
             if run is None:
                 return Ok(None)
@@ -1646,8 +1710,14 @@ async def get_workflow_node(
         WorkflowTaskModel.task_index == task_index,
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('workflow node detail query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             node = (await session.execute(node_stmt)).scalar_one_or_none()
             if node is None:
                 return Ok(None)
@@ -1710,8 +1780,14 @@ async def list_schedules(
         nulls_last(ScheduleStateModel.next_run_at.asc())
     )
 
+    match await broker.select_resources():
+        case Err(conflict):
+            return _conflict_err('schedule state query', conflict)
+        case Ok(resources):
+            pass
+
     try:
-        async with broker.session_factory() as session:
+        async with resources.session_factory() as session:
             rows = (await session.execute(stmt)).scalars().all()
     except SQLAlchemyError as exc:
         return _db_err('schedule state query', exc)

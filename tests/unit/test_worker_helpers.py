@@ -55,6 +55,12 @@ from horsies.core.worker.worker import (
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.worker.runtime import WarmablePool
+from tests.broker_resources_support import (
+    attach_conflict,
+    attach_resources,
+    fake_resources,
+    resources_of,
+)
 
 
 def _empty_workflow_recovery_report() -> SimpleNamespace:
@@ -722,7 +728,10 @@ class TestReaperRetentionPass:
                 self.config = config
                 self.assume_initialized = kwargs.get('assume_initialized')
                 self.app = None
-                self.session_factory = MagicMock(return_value=session)
+                attach_resources(
+                    self,
+                    fake_resources(session_factory=MagicMock(return_value=session)),
+                )
                 self.close_async = AsyncMock(return_value=Ok(None))
                 created_brokers.append(self)
 
@@ -753,8 +762,8 @@ class TestRetentionBatchedDeletes:
     """_delete_expired_in_batches loop: batch bound, drain, deadline."""
 
     @staticmethod
-    def _make_fake_broker(rowcounts: list[int]) -> tuple[Any, AsyncMock]:
-        """Broker whose session pops one rowcount per execute call."""
+    def _make_fake_session_factory(rowcounts: list[int]) -> tuple[Any, AsyncMock]:
+        """Session factory whose session pops one rowcount per execute call."""
         session = AsyncMock()
         session.__aenter__ = AsyncMock(return_value=session)
         session.__aexit__ = AsyncMock(return_value=None)
@@ -765,18 +774,16 @@ class TestRetentionBatchedDeletes:
             return MagicMock(rowcount=remaining.pop(0))
 
         session.execute = AsyncMock(side_effect=_execute)
-        broker = MagicMock()
-        broker.session_factory = MagicMock(return_value=session)
-        return broker, session
+        return MagicMock(return_value=session), session
 
     @pytest.mark.asyncio
     async def test_repeats_full_batches_until_short_batch(self) -> None:
         """Full batches keep the loop going; a short batch ends it."""
         worker = _make_worker()
-        broker, session = self._make_fake_broker([5, 5, 3])
+        session_factory, session = self._make_fake_session_factory([5, 5, 3])
 
         total = await worker._delete_expired_in_batches(
-            broker,
+            session_factory,
             DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() + 3600.0,
@@ -792,10 +799,10 @@ class TestRetentionBatchedDeletes:
     async def test_batch_size_param_passed_to_statement(self) -> None:
         """The caller-provided batch size reaches the statement parameters."""
         worker = _make_worker()
-        broker, session = self._make_fake_broker([0])
+        session_factory, session = self._make_fake_session_factory([0])
 
         await worker._delete_expired_in_batches(
-            broker,
+            session_factory,
             DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 12},
             deadline_monotonic=time.monotonic() + 3600.0,
@@ -817,10 +824,10 @@ class TestRetentionBatchedDeletes:
         zero-row batch means drained.
         """
         worker = _make_worker()
-        broker, session = self._make_fake_broker([3, 2, 0])
+        session_factory, session = self._make_fake_session_factory([3, 2, 0])
 
         total = await worker._delete_expired_in_batches(
-            broker,
+            session_factory,
             DELETE_EXPIRED_WORKFLOWS_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() + 3600.0,
@@ -835,10 +842,10 @@ class TestRetentionBatchedDeletes:
     async def test_expired_deadline_stops_after_one_batch(self) -> None:
         """A pass past its deadline still makes progress: exactly one batch."""
         worker = _make_worker()
-        broker, session = self._make_fake_broker([5, 5])
+        session_factory, session = self._make_fake_session_factory([5, 5])
 
         total = await worker._delete_expired_in_batches(
-            broker,
+            session_factory,
             DELETE_EXPIRED_WORKER_STATES_SQL,
             {'retention_hours': 24},
             deadline_monotonic=time.monotonic() - 1.0,
@@ -3327,6 +3334,7 @@ class TestStartupRegistersEveryClassItRuns:
             coverage_module, 'ensure_startup_coverage_in_database', _ensured
         )
         worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
         worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
         worker._create_executor = MagicMock(  # type: ignore[assignment]
@@ -3380,6 +3388,7 @@ class TestWorkerStartupCoverageOutcome:
             AsyncMock(return_value=failure),
         )
         worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
         worker.broker.validate_worker_database_paths = AsyncMock()
         worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
         worker._create_executor = MagicMock(return_value=MagicMock())  # type: ignore[assignment]
@@ -3437,6 +3446,7 @@ class TestWorkerStartConnectionOrdering:
             coverage_module, 'ensure_startup_coverage_in_database', _ensured
         )
         worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
         worker.broker.validate_worker_database_paths = AsyncMock(
             side_effect=lambda: events.append('database-paths')
         )
@@ -3565,7 +3575,10 @@ def _make_reaper_worker(
             created_brokers.append(self)
             self.config = config
             self.assume_initialized = kwargs.get('assume_initialized')
-            self.session_factory = MagicMock(return_value=session)
+            attach_resources(
+                self,
+                fake_resources(session_factory=MagicMock(return_value=session)),
+            )
             self.close_async = AsyncMock(return_value=close_rv)
             self.requeue_stale_claimed = _requeue_side_effect
             self.mark_stale_tasks_as_failed = _mark_failed_side_effect
@@ -3855,7 +3868,10 @@ class TestReaperMatchArms:
 
         class _BoomBroker:
             def __init__(self, config: Any, **_kwargs: Any) -> None:
-                self.session_factory = MagicMock(return_value=session)
+                attach_resources(
+                    self,
+                    fake_resources(session_factory=MagicMock(return_value=session)),
+                )
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.requeue_stale_claimed = _requeue_with_boom
                 self.mark_stale_tasks_as_failed = AsyncMock(return_value=Ok(0))
@@ -3904,7 +3920,7 @@ class TestReaperMatchArms:
 
         class _CancelBroker:
             def __init__(self, config: Any, **_kwargs: Any) -> None:
-                self.session_factory = MagicMock()
+                attach_resources(self, fake_resources())
                 self.close_async = AsyncMock(return_value=Ok(None))
                 self.requeue_stale_claimed = _cancel_on_requeue
                 self.mark_stale_tasks_as_failed = AsyncMock(return_value=Ok(0))
@@ -4843,6 +4859,7 @@ class TestReaperGatePoolCapacity:
         """Capacity 1: the pass runs without ever opening a gate session."""
         worker = self._capacity_worker(1, 0)
         worker.broker = MagicMock()  # temp_broker = self.broker, no real engine
+        attach_resources(worker.broker, fake_resources())
 
         async def _pass(*args: Any, **kwargs: Any) -> None:
             worker._stop.set()
@@ -4859,6 +4876,7 @@ class TestReaperGatePoolCapacity:
         """Capacity 2: the gate session is opened and the held lock runs the pass."""
         worker = self._capacity_worker(1, 1)
         worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
 
         gate_result = MagicMock()
         gate_result.scalar.return_value = True
@@ -4877,6 +4895,88 @@ class TestReaperGatePoolCapacity:
 
         assert worker._run_reaper_pass.await_count == 1
         worker.sf.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+class TestReaperResourceSelection:
+    """The reaper loop selects its broker's resources once, before any pass."""
+
+    @staticmethod
+    def _ungated_reaper_worker() -> Worker:
+        """A worker whose reaper runs passes without a gate session."""
+        cfg = WorkerConfig(
+            dsn='postgresql+psycopg://u:p@localhost/db',
+            psycopg_dsn='postgresql://u:p@localhost/db',
+            queues=['default'],
+            parent_pool_size=1,
+            parent_max_overflow=0,
+            recovery_config=RecoveryConfig(check_interval_ms=1_000),
+        )
+        return Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
+
+    async def test_every_pass_gets_the_set_selected_at_start(self) -> None:
+        worker = self._ungated_reaper_worker()
+        worker.broker = MagicMock()
+        selected = attach_resources(worker.broker, fake_resources())
+        passes = 0
+
+        async def _pass(*args: Any, **kwargs: Any) -> None:
+            nonlocal passes
+            passes += 1
+            if passes == 2:
+                worker._stop.set()
+
+        worker._run_reaper_pass = AsyncMock(side_effect=_pass)  # type: ignore[method-assign]
+
+        # Two passes are one check interval (1 s) apart.
+        await asyncio.wait_for(worker._reaper_loop(), timeout=5.0)
+
+        worker.broker.select_resources.assert_awaited_once()
+        assert worker._run_reaper_pass.await_count == 2
+        for call in worker._run_reaper_pass.await_args_list:
+            assert call.args[0] is worker.broker
+            assert call.args[1] is selected
+
+    async def test_conflict_on_the_worker_broker_crashes_loud(self) -> None:
+        worker = self._ungated_reaper_worker()
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        conflict = attach_conflict(worker.broker)
+        worker._run_reaper_pass = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(AssertionError) as raised:
+            await asyncio.wait_for(worker._reaper_loop(), timeout=3.0)
+
+        assert str(raised.value) == (
+            f'reaper loop broker resources: {conflict.describe()}'
+        )
+        worker._run_reaper_pass.assert_not_awaited()
+
+    async def test_conflict_on_a_built_broker_crashes_loud_and_closes_it(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = self._ungated_reaper_worker()
+        built: list[Any] = []
+
+        class _ConflictBroker:
+            def __init__(self, config: Any, **_kwargs: Any) -> None:
+                attach_conflict(self)
+                self.close_async = AsyncMock(return_value=Ok(None))
+                self.app: Any = None
+                built.append(self)
+
+        monkeypatch.setattr(
+            'horsies.core.brokers.postgres.PostgresBroker', _ConflictBroker,
+        )
+        worker._run_reaper_pass = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(AssertionError, match='reaper loop broker resources'):
+            await asyncio.wait_for(worker._reaper_loop(), timeout=3.0)
+
+        worker._run_reaper_pass.assert_not_awaited()
+        assert len(built) == 1
+        built[0].close_async.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -5286,7 +5386,7 @@ def _make_reaper_broker(
     cm = MagicMock()
     cm.__aenter__ = AsyncMock(return_value=session)
     cm.__aexit__ = AsyncMock(return_value=False)
-    broker.session_factory = MagicMock(return_value=cm)
+    attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=cm)))
     return broker
 
 
@@ -5304,7 +5404,7 @@ async def _run_pass(worker: Worker, broker: MagicMock, state: _ReaperPassState) 
         AsyncMock(return_value=_empty_workflow_recovery_report()),
     ):
         await worker._run_reaper_pass(
-            broker, RecoveryConfig(), RetentionConfig(), state
+            broker, await resources_of(broker), RecoveryConfig(), RetentionConfig(), state
         )
 
 
@@ -5325,12 +5425,14 @@ async def test_orphan_audit_has_its_own_cadence() -> None:
     ):
         await worker._run_reaper_pass(
             broker,
+            await resources_of(broker),
             config,
             RetentionConfig(),
             state,
         )
         await worker._run_reaper_pass(
             broker,
+            await resources_of(broker),
             config,
             RetentionConfig(),
             state,
@@ -5417,6 +5519,7 @@ async def test_workflow_recovery_failure_publishes_partial_health() -> None:
     ):
         await worker._run_reaper_pass(
             broker,
+            await resources_of(broker),
             config,
             RetentionConfig(),
             state,

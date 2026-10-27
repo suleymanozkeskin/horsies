@@ -39,6 +39,7 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.broker_resources_support import current_resources
 
 # Comfortably past the six-hour heartbeat horizon, so the leaf is overdue
 # under any plausible clock skew between test and server.
@@ -82,7 +83,7 @@ def _pruning_pass_state() -> _ReaperPassState:
 
 async def _make_overdue_leaf(broker: PostgresBroker) -> tuple[str, str]:
     """Create one leaf past its horizon and one current. Returns names."""
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await register_heartbeat_class(connection, horizon=timedelta(hours=6))
         now = await database_now(connection)
         hour = now.replace(minute=0, second=0, microsecond=0)
@@ -134,7 +135,7 @@ async def _make_overdue_leaf(broker: PostgresBroker) -> tuple[str, str]:
 
 
 async def _leaf_exists(broker: PostgresBroker, leaf_name: str) -> bool:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return bool(
             (
                 await connection.execute(
@@ -148,7 +149,7 @@ async def _leaf_exists(broker: PostgresBroker, leaf_name: str) -> bool:
 async def _drop_leaf_if_present(broker: PostgresBroker, leaf_name: str) -> None:
     """Teardown for the case the pass did NOT prune — keeps the shared
     database clean when this test fails."""
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(text(f'DROP TABLE IF EXISTS {leaf_name}'))
         await connection.execute(
             text(
@@ -176,6 +177,7 @@ class TestReaperPrunesExpiredLeaves:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                current_resources(broker),
                 RecoveryConfig(),
                 RetentionConfig(),
                 _pruning_pass_state(),
@@ -186,7 +188,7 @@ class TestReaperPrunesExpiredLeaves:
                 'pass — the pruning mechanism exists but the pass does not '
                 'call it'
             )
-            async with broker.async_engine.connect() as connection:
+            async with current_resources(broker).engine.connect() as connection:
                 record = (
                     await connection.execute(
                         text(
@@ -212,6 +214,7 @@ class TestReaperPrunesExpiredLeaves:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                current_resources(broker),
                 RecoveryConfig(),
                 RetentionConfig(),
                 _pruning_pass_state(),

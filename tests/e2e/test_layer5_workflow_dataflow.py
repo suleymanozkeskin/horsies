@@ -27,6 +27,7 @@ from tests.e2e.helpers.workflow import (
 )
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
+from tests.broker_resources_support import current_resources
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -72,7 +73,7 @@ async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_args_from_single)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -106,7 +107,7 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_args_from_multi)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -138,7 +139,7 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_ctx_single)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -170,7 +171,7 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
         handle = start_ok_sync(wf_tasks.spec_ctx_multi)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -202,12 +203,12 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_failed_propagation)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Check task statuses
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 2
 
         # A should be FAILED
@@ -250,12 +251,12 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_skipped_propagation)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Check task statuses
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 3
 
         # A should be FAILED
@@ -303,12 +304,12 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_join_ctx_gating)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
         # Check task statuses
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 3
 
         # All should be COMPLETED
@@ -355,7 +356,7 @@ async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_mixed_dataflow)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0
         )
         assert status == 'COMPLETED'
 
@@ -396,7 +397,7 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_args_from_chain)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'COMPLETED'
 
@@ -429,12 +430,12 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
         handle = start_ok_sync(wf_tasks.spec_args_from_fail_workflow)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
         # Verify task statuses
-        db_tasks = await get_workflow_tasks(broker.session_factory, handle.workflow_id)
+        db_tasks = await get_workflow_tasks(current_resources(broker).session_factory, handle.workflow_id)
         assert len(db_tasks) == 2
 
         assert (
@@ -462,7 +463,7 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_args_from_dict)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'COMPLETED'
 
@@ -504,7 +505,7 @@ async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
         handle = start_ok_sync(wf_tasks.spec_dual_injection)
 
         status = await wait_for_workflow_completion(
-            broker.session_factory, handle.workflow_id, timeout_s=15.0,
+            current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'COMPLETED'
 

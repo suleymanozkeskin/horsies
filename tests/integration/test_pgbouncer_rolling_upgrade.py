@@ -139,7 +139,7 @@ def test_split_url_schema_lock_blocks_legacy_direct_url_initializer(
             )
         )
         try:
-            asyncio.run(broker._ensure_initialized())
+            asyncio.run(broker._ensure_initialized(broker._resources))
         except RuntimeError as exc:
             if 'probe-stop' not in str(exc):
                 raise

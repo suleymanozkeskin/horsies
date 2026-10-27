@@ -29,6 +29,7 @@ from horsies.core.worker.sql import (
     COUNT_RUNNING_FOR_WORKER_SQL,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -170,7 +171,7 @@ class TestClaimPassCounts:
 
         class _Probe(ClaimMixin):
             def __init__(self) -> None:
-                self.sf = broker.session_factory
+                self.sf = current_resources(broker).session_factory
                 self.cfg = cfg
                 self.worker_instance_id = f'probe-{uuid.uuid4().hex[:8]}'
 
@@ -183,11 +184,11 @@ class TestClaimPassCounts:
         def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
             counter['n'] += 1
 
-        event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         try:
             claimed = await probe._claim_and_dispatch_all()
         finally:
-            event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
 
         assert claimed is False
         assert counter['n'] == 1, f'empty capped pass ran {counter["n"]} statements'

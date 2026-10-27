@@ -113,6 +113,19 @@ def _broker_err(
     )
 
 
+def _loop_conflict_err(
+    operation: str, conflict: EventLoopConflict,
+) -> Err[BrokerOperationError]:
+    """Build the broker error for an event loop conflict. Nothing ran."""
+    return Err(
+        BrokerOperationError(
+            code=BrokerErrorCode.EVENT_LOOP_CONFLICT,
+            message=f'{operation}: {conflict.describe()}',
+            retryable=False,
+        )
+    )
+
+
 def _dbapi_sqlstate(exc: BaseException) -> str | None:
     orig = getattr(exc, 'orig', exc)
     sqlstate = getattr(orig, 'sqlstate', None)
@@ -625,15 +638,6 @@ class PostgresBroker:
 
         self._assume_initialized = assume_initialized
         self._resources = self._build_resources()
-        self.async_engine = self._resources.engine
-        self.session_factory = self._resources.session_factory
-        self._session_engine = self._resources.session_async_engine()
-        self.partition_maintenance = self._resources.partition_maintenance
-        match self._resources.listener:
-            case ListenerEnabled(listener=listener):
-                self._listener: PostgresListener | None = listener
-            case ListenerDisabled():
-                self._listener = None
 
         self._initialized = assume_initialized
         # True once this broker saw the staged result function. Only a
@@ -703,7 +707,7 @@ class PostgresBroker:
 
         Call once at a public entry point and pass the value to helpers.
         It must run inside a running event loop. It does no I/O.
-        Today the broker holds one set, so this always returns ``Ok``.
+        The broker holds one set, so this always returns ``Ok``.
         """
         return Ok(self._resources)
 
@@ -781,21 +785,34 @@ class PostgresBroker:
         """Set the Horsies app instance."""
         self._app = value
 
-    @property
-    def listener(self) -> PostgresListener:
-        if self._listener is None:
-            raise RuntimeError('Postgres listener is disabled for this broker')
-        return self._listener
+    def discard_inherited_resources(self) -> None:
+        """Drop the pools a forked child inherited, without closing them.
 
-    @listener.setter
-    def listener(self, value: PostgresListener | None) -> None:
-        self._listener = value
+        The parent process owns the inherited connections, so the child must
+        not use or close them: each engine is disposed with ``close=False``.
+        Listener connections are dropped with the broker; psycopg closes a
+        connection on garbage collection only in the process that opened it.
+        """
+        self._resources.engine.sync_engine.dispose(close=False)
+        match self._resources.session_engine:
+            case SessionEngineSeparate(engine=session_engine):
+                session_engine.sync_engine.dispose(close=False)
+            case SessionEngineShared():
+                pass
 
     async def validate_worker_database_paths(self) -> None:
         """Connect both worker paths and prove session capability."""
-        async with self.async_engine.connect() as connection:
+        match await self.select_resources():
+            case Err(conflict):
+                raise AssertionError(
+                    f'worker broker resources are bound to another loop: '
+                    f'{conflict.describe()}'
+                )
+            case Ok(resources):
+                pass
+        async with resources.engine.connect() as connection:
             await connection.execute(text('SELECT 1'))
-        async with self.partition_maintenance.connect() as connection:
+        async with resources.partition_maintenance.connect() as connection:
             await connection.execute(text('SELECT 1'))
         try:
             await probe_session_capability(
@@ -916,8 +933,10 @@ class PostgresBroker:
         await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_FUNCTION_SQL)
         await conn.execute(CREATE_WORKFLOW_STATUS_NOTIFY_TRIGGER_SQL)
 
-    async def _run_with_schema_engine(self, fn: Any) -> None:
-        await fn(self._session_engine)
+    async def _run_with_schema_engine(
+        self, resources: BrokerResources, fn: Any,
+    ) -> None:
+        await fn(resources.session_async_engine())
 
     async def _read_schema_version(self, conn: Any) -> int:
         result = await conn.execute(READ_SCHEMA_VERSION_SQL)
@@ -1512,10 +1531,10 @@ class PostgresBroker:
     async def _initialize_schema(self, engine: AsyncEngine) -> None:
         await self._run_schema_migrations_with_retry(engine)
 
-    async def _ensure_initialized(self) -> None:
+    async def _ensure_initialized(self, resources: BrokerResources) -> None:
         if self._initialized:
             return
-        await self._run_with_schema_engine(self._maybe_run_schema_init)
+        await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
         self._initialized = True
 
     async def ensure_schema_initialized(self) -> BrokerResult[None]:
@@ -1527,8 +1546,13 @@ class PostgresBroker:
 
         Returns Ok(None) on success, Err(BrokerOperationError) on failure.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('ensure_schema_initialized', conflict)
+            case Ok(resources):
+                pass
         try:
-            await self._ensure_initialized()
+            await self._ensure_initialized(resources)
             return Ok(None)
         except Exception as exc:
             return _broker_err(
@@ -1741,6 +1765,11 @@ class PostgresBroker:
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
     ) -> BrokerResult[str]:
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('enqueue', conflict)
+            case Ok(resources):
+                pass
         # The ratified retention resolution: absent → the immutable
         # 30-day default class; forever only by EXPLICIT None.
         resolved_retention_class_key = resolve_retention_class_key(
@@ -1777,7 +1806,7 @@ class PostgresBroker:
                 ValueError('future sent_at without explicit scheduling parameter'),
             )
         try:
-            await self._ensure_initialized()
+            await self._ensure_initialized(resources)
 
             call_site_sent_at = sent_at or datetime.now(timezone.utc)
 
@@ -1858,7 +1887,7 @@ class PostgresBroker:
             )
 
             if scoped_key_digest is not None:
-                async with self.session_factory() as session:
+                async with resources.session_factory() as session:
                     # Claim and insert in ONE transaction: the claim
                     # reuses the command fingerprint computed for the
                     # cutover columns, and a replayed key returns the
@@ -1930,7 +1959,7 @@ class PostgresBroker:
                 # the BEGIN/COMMIT round trips a session transaction pays.
                 # The connection-level isolation override is reset when
                 # the connection returns to the pool.
-                async with self.async_engine.connect() as conn:
+                async with resources.engine.connect() as conn:
                     autocommit_conn = await conn.execution_options(
                         isolation_level='AUTOCOMMIT',
                     )
@@ -1944,7 +1973,9 @@ class PostgresBroker:
                 return Ok(task_id)
 
             # Conflict: task_id already exists. Verify payload identity via stored SHA.
-            return await self._verify_enqueue_conflict(task_id, enqueue_sha, task_name)
+            return await self._verify_enqueue_conflict(
+                resources, task_id, enqueue_sha, task_name,
+            )
 
         except Exception as exc:
             return _broker_err(
@@ -2043,6 +2074,7 @@ class PostgresBroker:
 
     async def _verify_enqueue_conflict(
         self,
+        resources: BrokerResources,
         task_id: str,
         enqueue_sha: str,
         task_name: str,
@@ -2052,7 +2084,7 @@ class PostgresBroker:
         Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
         """
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 row = (
                     await session.execute(
                         select(TaskModel.enqueue_sha).where(TaskModel.id == task_id),
@@ -2421,8 +2453,13 @@ class PostgresBroker:
           float, non-object envelope).
         - ``Err(...)`` with other codes for DB / listener failures.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('raw result fetch', conflict)
+            case Ok(resources):
+                pass
         try:
-            await self._ensure_initialized()
+            await self._ensure_initialized(resources)
 
             start_time = asyncio.get_event_loop().time()
 
@@ -2431,35 +2468,41 @@ class PostgresBroker:
                 timeout_seconds = timeout_ms / 1000.0
 
             # Quick path: row may already be terminal.
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 outcome = await self._probe_result_row(session, task_id)
                 if outcome is not _STILL_WAITING:
                     return cast(
                         'BrokerResult[RawResultRecord | None]', outcome,
                     )
 
-            # Listen + poll loop.
+            # Listen + poll loop. A broker without a listener polls.
             q: asyncio.Queue[Any] | None = None
-            try:
-                listen_r = await self.listener.listen_payload(
-                    'task_done', task_id,
-                )
-            except RuntimeError as e:
-                self.logger.debug(
-                    'LISTEN unavailable; falling back to polling for '
-                    'task_done. Original error: %s',
-                    e,
-                )
-            else:
-                match listen_r:
-                    case Ok(queue):
-                        q = queue
-                    case Err(listen_err):
-                        self.logger.debug(
-                            'LISTEN unavailable; falling back to polling '
-                            'for task_done. Original error: %s',
-                            listen_err.message,
+            subscription: tuple[PostgresListener, asyncio.Queue[Any]] | None = None
+            match resources.listener:
+                case ListenerEnabled(listener=listener):
+                    try:
+                        listen_r = await listener.listen_payload(
+                            'task_done', task_id,
                         )
+                    except RuntimeError as e:
+                        self.logger.debug(
+                            'LISTEN unavailable; falling back to polling for '
+                            'task_done. Original error: %s',
+                            e,
+                        )
+                    else:
+                        match listen_r:
+                            case Ok(queue):
+                                q = queue
+                                subscription = (listener, queue)
+                            case Err(listen_err):
+                                self.logger.debug(
+                                    'LISTEN unavailable; falling back to polling '
+                                    'for task_done. Original error: %s',
+                                    listen_err.message,
+                                )
+                case ListenerDisabled():
+                    pass
 
             try:
                 poll_interval = 5.0 if q is not None else 0.2
@@ -2476,7 +2519,7 @@ class PostgresBroker:
                             # codes per their UX. The row may have moved
                             # to terminal between checks; one more read
                             # to capture the latest snapshot.
-                            async with self.session_factory() as session:
+                            async with resources.session_factory() as session:
                                 outcome = await self._probe_result_row(
                                     session,
                                     task_id,
@@ -2510,7 +2553,7 @@ class PostgresBroker:
                     else:
                         await asyncio.sleep(wait_time)
 
-                    async with self.session_factory() as session:
+                    async with resources.session_factory() as session:
                         outcome = await self._probe_result_row(
                             session, task_id,
                         )
@@ -2520,8 +2563,13 @@ class PostgresBroker:
                                 outcome,
                             )
             finally:
-                if q is not None:
-                    await self._unsubscribe_task_done_safely(task_id, q)
+                match subscription:
+                    case (listener, queue):
+                        await self._unsubscribe_task_done_safely(
+                            listener, task_id, queue,
+                        )
+                    case None:
+                        pass
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -2557,11 +2605,11 @@ class PostgresBroker:
             )
 
     async def _unsubscribe_task_done_safely(
-        self, task_id: str, q: asyncio.Queue[Any],
+        self, listener: PostgresListener, task_id: str, q: asyncio.Queue[Any],
     ) -> None:
         """Ensure task_done unsubscribe completes even under repeated cancellation."""
         unsubscribe_task = asyncio.create_task(
-            self.listener.unsubscribe_payload('task_done', task_id, q)
+            listener.unsubscribe_payload('task_done', task_id, q)
         )
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
@@ -2582,20 +2630,27 @@ class PostgresBroker:
     async def close_async(self) -> BrokerResult[None]:
         """Close listener/engine and stop sync loop runner if it was started."""
         errors: list[BaseException] = []
+        resources = self._resources
+        match resources.listener:
+            case ListenerEnabled(listener=listener):
+                try:
+                    await listener.close()
+                except Exception as exc:
+                    errors.append(exc)
+            case ListenerDisabled():
+                pass
         try:
-            if self._listener is not None:
-                await self._listener.close()
+            await resources.engine.dispose()
         except Exception as exc:
             errors.append(exc)
-        try:
-            await self.async_engine.dispose()
-        except Exception as exc:
-            errors.append(exc)
-        if self._session_engine is not self.async_engine:
-            try:
-                await self._session_engine.dispose()
-            except Exception as exc:
-                errors.append(exc)
+        match resources.session_engine:
+            case SessionEngineSeparate(engine=session_engine):
+                try:
+                    await session_engine.dispose()
+                except Exception as exc:
+                    errors.append(exc)
+            case SessionEngineShared():
+                pass
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
         loop_thread = self._loop_runner._thread
@@ -2623,8 +2678,13 @@ class PostgresBroker:
         stale_threshold_minutes: int = 2,
     ) -> BrokerResult[list[dict[str, Any]]]:
         """Identify potentially crashed tasks based on heartbeat absence."""
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('get_stale_tasks', conflict)
+            case Ok(resources):
+                pass
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_STALE_TASKS_SQL,
                     {'stale_threshold': stale_threshold_minutes},
@@ -2645,10 +2705,15 @@ class PostgresBroker:
         success also confirms a connection could be checked out. Returns the
         measured round-trip latency.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('ping_database', conflict)
+            case Ok(resources):
+                pass
         loop = asyncio.get_running_loop()
         try:
             start = loop.time()
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 await session.execute(text('SELECT 1'))
             latency_ms = (loop.time() - start) * 1000.0
             return Ok(DatabasePing(latency_ms=latency_ms))
@@ -2682,6 +2747,11 @@ class PostgresBroker:
         that it can reach Postgres. Workers present in
         ``list_worker_states_async`` but absent here are non-responsive.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('ping_workers', conflict)
+            case Ok(resources):
+                pass
         if timeout_seconds <= 0:
             return Err(
                 BrokerOperationError(
@@ -2702,11 +2772,25 @@ class PostgresBroker:
         correlation_id = uuid.uuid4().hex
         reply_channel = f'horsies_worker_pong_{correlation_id}'
 
-        # The `listener` property raises if the broker has no listener
-        # (assume_initialized), and listen() raises on cross-loop misuse.
-        # Convert both to an Err so the Result contract holds on every path.
+        # A broker without a listener cannot receive replies, and listen()
+        # raises on cross-loop misuse. Both become an Err so the Result
+        # contract holds on every path.
+        match resources.listener:
+            case ListenerEnabled(listener=listener):
+                pass
+            case ListenerDisabled():
+                return Err(
+                    BrokerOperationError(
+                        code=BrokerErrorCode.WORKER_PING_FAILED,
+                        message=(
+                            'ping_workers listener unavailable: this broker was '
+                            'built with assume_initialized=True and has no listener'
+                        ),
+                        retryable=False,
+                    )
+                )
         try:
-            listen_r = await self.listener.listen(reply_channel)
+            listen_r = await listener.listen(reply_channel)
         except RuntimeError as exc:
             return _broker_err(
                 BrokerErrorCode.WORKER_PING_FAILED,
@@ -2743,7 +2827,7 @@ class PostgresBroker:
             payload = payload_r.ok_value
 
             loop = asyncio.get_running_loop()
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 await session.execute(
                     text('SELECT pg_notify(:ch, :p)'),
                     {'ch': WORKER_PING_CHANNEL, 'p': payload},
@@ -2781,10 +2865,10 @@ class PostgresBroker:
                 exc,
             )
         finally:
-            await self._unsubscribe_ping_safely(reply_channel, queue)
+            await self._unsubscribe_ping_safely(listener, reply_channel, queue)
 
     async def _unsubscribe_ping_safely(
-        self, channel: str, q: asyncio.Queue[Any]
+        self, listener: PostgresListener, channel: str, q: asyncio.Queue[Any],
     ) -> None:
         """Ensure reply-channel unsubscribe completes even under repeated cancellation.
 
@@ -2793,7 +2877,7 @@ class PostgresBroker:
         suppresses the cross-loop RuntimeError, and re-raises cancellation only
         after cleanup finishes.
         """
-        unsubscribe_task = asyncio.create_task(self.listener.unsubscribe(channel, q))
+        unsubscribe_task = asyncio.create_task(listener.unsubscribe(channel, q))
         cancelled_during_cleanup = False
         while not unsubscribe_task.done():
             try:
@@ -2869,8 +2953,13 @@ class PostgresBroker:
         reads ``horsies_worker_states`` so every worker that has reported a
         snapshot appears, regardless of current load.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('list_worker_states', conflict)
+            case Ok(resources):
+                pass
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(LIST_WORKER_STATES_SQL)
                 return Ok(
                     [self._row_to_worker_snapshot(row) for row in result.fetchall()]
@@ -2887,8 +2976,13 @@ class PostgresBroker:
         worker_id: str,
     ) -> BrokerResult[WorkerStateSnapshot | None]:
         """Latest state snapshot for one worker, or ``None`` if unknown."""
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('get_worker_state', conflict)
+            case Ok(resources):
+                pass
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKER_STATE_LATEST_SQL,
                     {'worker_id': worker_id},
@@ -2915,6 +3009,11 @@ class PostgresBroker:
         ``limit`` of ``None`` returns all retained rows; pass an explicit cap
         to bound the fetch (the table grows ~1 row per worker per interval).
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('get_worker_state_history', conflict)
+            case Ok(resources):
+                pass
         if limit is not None and limit <= 0:
             return Err(
                 BrokerOperationError(
@@ -2924,7 +3023,7 @@ class PostgresBroker:
                 )
             )
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     GET_WORKER_STATE_HISTORY_SQL,
                     {'worker_id': worker_id, 'limit': limit},
@@ -2941,8 +3040,13 @@ class PostgresBroker:
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
         """Find tasks that expired before worker processing."""
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('get_expired_tasks', conflict)
+            case Ok(resources):
+                pass
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(GET_EXPIRED_TASKS_SQL)
                 columns = result.keys()
                 return Ok([dict(zip(columns, row)) for row in result.fetchall()])
@@ -2968,6 +3072,11 @@ class PostgresBroker:
         This avoids holding row locks across the entire batch while still
         preventing races with concurrent worker finalizers.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('mark_stale_tasks_as_failed', conflict)
+            case Ok(resources):
+                pass
         try:
             from horsies.core.models.tasks import (
                 TaskResult,
@@ -2988,7 +3097,7 @@ class PostgresBroker:
             # Phase 1: lightweight scan to collect candidate task IDs.
             # FOR UPDATE SKIP LOCKED prevents picking up rows already being finalized,
             # but we release locks immediately — the IDs are just candidates.
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 stale_tasks_result = await session.execute(
                     SELECT_STALE_RUNNING_TASKS_SQL,
                     {
@@ -3007,7 +3116,7 @@ class PostgresBroker:
             processed = 0
             for task_id in candidate_ids:
                 try:
-                    async with self.session_factory() as session:
+                    async with resources.session_factory() as session:
                         # Lock the row and re-read current state (fresh db_now).
                         # If the row is no longer RUNNING, a worker finalized it
                         # between scan and now — skip it.
@@ -3246,6 +3355,11 @@ class PostgresBroker:
         TASK_EXPIRED outcome code so callers have a meaningful result payload.
         No attempt row is written (the task never started).
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('expire_pending_tasks', conflict)
+            case Ok(resources):
+                pass
         try:
             from horsies.core.models.tasks import TaskResult, TaskError, OutcomeCode
             from horsies.core.codec.json_io import dumps_json
@@ -3270,7 +3384,7 @@ class PostgresBroker:
 
             total_expired = 0
             for _ in range(_EXPIRE_MAX_BATCHES_PER_PASS):
-                async with self.session_factory() as session:
+                async with resources.session_factory() as session:
                     outcomes = await apply_batch_async(
                         await session.connection(),
                         ExpirePendingTasks(
@@ -3319,10 +3433,15 @@ class PostgresBroker:
         stale_threshold_ms: int = 120_000,
     ) -> BrokerResult[int]:
         """Requeue tasks stuck in CLAIMED without recent claimer heartbeat."""
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('requeue_stale_claimed', conflict)
+            case Ok(resources):
+                pass
         try:
             stale_threshold_seconds = stale_threshold_ms / 1000.0
 
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 result = await session.execute(
                     REQUEUE_STALE_CLAIMED_SQL,
                     {'stale_threshold': stale_threshold_seconds},
@@ -3340,9 +3459,14 @@ class PostgresBroker:
         self,
     ) -> BrokerResult[OrphanTaskAuditReport]:
         """Scan and cancel one bounded page of orphan workflow tasks."""
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('audit_orphaned_workflow_tasks', conflict)
+            case Ok(resources):
+                pass
         started = time.monotonic()
         try:
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 outcomes = await apply_batch_async(
                     await session.connection(),
                     CancelOrphanedTasks(batch_size=_ORPHAN_BATCH_SIZE),
@@ -3609,10 +3733,15 @@ class PostgresBroker:
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
         Err(BrokerOperationError) on infrastructure failure.
         """
+        match await self.select_resources():
+            case Err(conflict):
+                return _loop_conflict_err('get_task_info', conflict)
+            case Ok(resources):
+                pass
         try:
-            await self._ensure_initialized()
+            await self._ensure_initialized(resources)
 
-            async with self.session_factory() as session:
+            async with resources.session_factory() as session:
                 base_columns = [
                     'id',
                     'task_name',

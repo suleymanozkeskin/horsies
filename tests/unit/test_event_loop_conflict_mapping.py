@@ -18,14 +18,19 @@ from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendErrorCode
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.models.workflow.handle_types import (
-    HandleErrorCode,
-    HandleOperationError,
-)
+from horsies.core.models.workflow import NodeKey
+from horsies.core.models.workflow.handle_types import HandleErrorCode
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.result import Err, is_err
 from horsies.monitoring.task_actions import TaskActionError, TaskActionErrorCode
+from horsies.core.workflows.lifecycle import (
+    pause_workflow,
+    resume_workflow,
+    start_workflow_async,
+)
+from horsies.core.workflows.start_types import WorkflowStartErrorCode
 from horsies.web.routes.actions import _task_action_failed
+from tests.broker_resources_support import attach_conflict
 
 CONFLICT_MESSAGE = 'resources in use by the open event loop on thread MainThread'
 
@@ -81,23 +86,75 @@ def test_web_task_action_maps_conflict_to_503() -> None:
     assert outcome.content == {'detail': CONFLICT_MESSAGE}
 
 
-@pytest.mark.unit
-def test_workflow_get_maps_handle_conflict_to_retrieval_code() -> None:
+WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
+
+
+def _conflicted_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
     broker = MagicMock()
-    broker.listener.listen = AsyncMock(return_value=Err(MagicMock()))
-    handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id='wf-1', broker=broker)
-    handle.status_async = AsyncMock(  # type: ignore[method-assign]
-        return_value=Err(HandleOperationError(
-            code=HandleErrorCode.EVENT_LOOP_CONFLICT,
-            message=CONFLICT_MESSAGE,
-            retryable=False,
-            workflow_id='wf-1',
-        )),
-    )
+    attach_conflict(broker)
+    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker), broker
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async', 'cancel_async'])
+def test_handle_wrap_methods_return_conflict(method: str) -> None:
+    handle, broker = _conflicted_handle()
+
+    result = asyncio.run(getattr(handle, method)())
+
+    assert is_err(result)
+    assert result.err_value.code is HandleErrorCode.EVENT_LOOP_CONFLICT
+    assert result.err_value.retryable is False
+    assert result.err_value.workflow_id == WORKFLOW_ID
+
+
+@pytest.mark.unit
+def test_handle_get_folds_conflict_into_retrieval_code() -> None:
+    handle, broker = _conflicted_handle()
 
     result = asyncio.run(handle.get_async(timeout_ms=100))
 
     assert result.is_err()
-    err = result.unwrap_err()
-    assert err.error_code is RetrievalCode.EVENT_LOOP_CONFLICT
-    assert err.message == CONFLICT_MESSAGE
+    assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_CONFLICT
+
+
+@pytest.mark.unit
+def test_handle_result_for_folds_conflict_into_retrieval_code() -> None:
+    handle, _ = _conflicted_handle()
+
+    result = asyncio.run(handle.result_for_async(NodeKey('node-1')))
+
+    assert result.is_err()
+    assert result.unwrap_err().error_code is RetrievalCode.EVENT_LOOP_CONFLICT
+
+
+@pytest.mark.unit
+def test_start_workflow_returns_conflict_before_any_attempt() -> None:
+    spec = MagicMock()
+    spec.name = 'conflict-wf'
+    spec.tasks = []
+    spec.workflow_def_cls = None
+    broker = MagicMock()
+    broker.ensure_schema_initialized = AsyncMock()
+    attach_conflict(broker)
+
+    result = asyncio.run(start_workflow_async(spec, broker, WORKFLOW_ID))
+
+    assert is_err(result)
+    assert result.err_value.code is WorkflowStartErrorCode.EVENT_LOOP_CONFLICT
+    assert result.err_value.retryable is False
+    assert result.err_value.workflow_id == WORKFLOW_ID
+    broker.ensure_schema_initialized.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('operation', [pause_workflow, resume_workflow])
+def test_pause_and_resume_return_conflict(operation: Any) -> None:
+    broker = MagicMock()
+    attach_conflict(broker)
+
+    result = asyncio.run(operation(broker, WORKFLOW_ID))
+
+    assert is_err(result)
+    assert result.err_value.code is HandleErrorCode.EVENT_LOOP_CONFLICT
+    assert result.err_value.retryable is False

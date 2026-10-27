@@ -29,6 +29,7 @@ from horsies.core.models.health import (
 )
 from horsies.core.types.result import is_ok
 from horsies.core.utils.url import to_psycopg_url
+from tests.broker_resources_support import current_resources
 
 
 _INSERT_WORKER_STATE = text("""
@@ -235,7 +236,7 @@ async def test_ping_workers_roundtrip(broker: PostgresBroker) -> None:
             hostname='itest-host',
             pid=4242,
         )
-        async with broker.session_factory() as s:
+        async with current_resources(broker).session_factory() as s:
             await s.execute(
                 text('SELECT pg_notify(:ch, :p)'),
                 {'ch': req.reply_channel, 'p': dumps_json(pong.model_dump()).ok_value},

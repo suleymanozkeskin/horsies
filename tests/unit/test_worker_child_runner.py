@@ -320,9 +320,10 @@ class TestChildInitializer:
     ) -> None:
         from horsies.core.worker.child_runner import _child_initializer
 
+        from horsies.core.brokers.postgres import PostgresBroker
+
         mocks = self._make_patches(app_tasks={'add': True})
-        inherited_broker = MagicMock()
-        inherited_broker.async_engine.sync_engine.dispose = MagicMock()
+        inherited_broker = MagicMock(spec=PostgresBroker)
         mocks['app']._broker = inherited_broker
         mock_locate_app.return_value = mocks['app']
 
@@ -334,9 +335,7 @@ class TestChildInitializer:
             database_url='postgresql://localhost/test',
         )
 
-        inherited_broker.async_engine.sync_engine.dispose.assert_called_once_with(
-            close=False
-        )
+        inherited_broker.discard_inherited_resources.assert_called_once_with()
         assert mocks['app']._broker is None
         mocks['app'].set_role.assert_called_once_with('worker')
 

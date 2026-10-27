@@ -14,13 +14,14 @@ import pytest
 from sqlalchemy import text
 
 from horsies.core.brokers.postgres import PostgresBroker
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_function_forces_a_generic_plan(broker: PostgresBroker) -> None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         setting = (
             await connection.execute(
                 text("""
@@ -36,7 +37,7 @@ async def test_function_forces_a_generic_plan(broker: PostgresBroker) -> None:
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_caller_plan_setting_survives_the_call(broker: PostgresBroker) -> None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         async with connection.begin():
             await connection.execute(
                 text('SET LOCAL plan_cache_mode = force_custom_plan')

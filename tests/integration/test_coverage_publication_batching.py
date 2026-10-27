@@ -31,6 +31,7 @@ from horsies.core.history.reads.publisher import (
     StagedLoaderPublisher,
     published_manifest_matches_catalog,
 )
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -60,12 +61,12 @@ async def test_coverage_creating_leaves_in_two_classes_publishes_once(
     broker: PostgresBroker,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         classes = [await _register(connection), await _register(connection)]
     monkeypatch.setattr(coverage_module, 'StagedLoaderPublisher', CountingPublisher)
     CountingPublisher.republished = 0
 
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         outcome = await ensure_partition_coverage(
             connection,
             history_horizon_days=HORIZON_DAYS,
@@ -74,7 +75,7 @@ async def test_coverage_creating_leaves_in_two_classes_publishes_once(
     assert isinstance(outcome, CoverageEnsured), outcome
     assert CountingPublisher.republished == 1
 
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         created = (await connection.execute(
             text(
                 f'SELECT count(*) FROM {LEAF_CATALOG} '

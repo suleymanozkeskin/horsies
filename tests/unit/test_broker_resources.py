@@ -7,10 +7,12 @@ so these brokers never reach a database.
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 from pydantic import SecretStr
 
+from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -20,8 +22,10 @@ from horsies.core.brokers.resources import (
     SessionEngineSeparate,
     SessionEngineShared,
 )
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import Result, is_ok
+from horsies.core.worker.child_runner import _discard_inherited_broker
 
 RUNTIME_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
 SESSION_URL = 'postgresql+psycopg://u:p@localhost:6543/db'
@@ -98,3 +102,49 @@ class TestEventLoopConflict:
         assert "'MainThread'" in text
         assert "'worker-2'" in text
         assert 'until that loop closes' in text
+
+
+def _app_with(broker: PostgresBroker | None) -> Horsies:
+    app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(RUNTIME_URL))))
+    app._broker = broker
+    return app
+
+
+@pytest.mark.unit
+class TestDiscardInheritedBroker:
+    """A forked child drops the parent's pools without closing their connections."""
+
+    def test_disposes_every_engine_with_close_false(self) -> None:
+        broker = _broker(session_url=SESSION_URL)
+        resources = _selected(broker)
+        separate = resources.session_engine
+        assert isinstance(separate, SessionEngineSeparate)
+        app = _app_with(broker)
+
+        with (
+            patch.object(resources.engine.sync_engine, 'dispose') as runtime_dispose,
+            patch.object(separate.engine.sync_engine, 'dispose') as session_dispose,
+        ):
+            _discard_inherited_broker(app)
+
+        runtime_dispose.assert_called_once_with(close=False)
+        session_dispose.assert_called_once_with(close=False)
+        assert app._broker is None
+
+    def test_shared_session_engine_is_disposed_once(self) -> None:
+        broker = _broker()
+        resources = _selected(broker)
+        app = _app_with(broker)
+
+        with patch.object(resources.engine.sync_engine, 'dispose') as runtime_dispose:
+            _discard_inherited_broker(app)
+
+        runtime_dispose.assert_called_once_with(close=False)
+        assert app._broker is None
+
+    def test_without_a_broker_does_nothing(self) -> None:
+        app = _app_with(None)
+
+        _discard_inherited_broker(app)
+
+        assert app._broker is None

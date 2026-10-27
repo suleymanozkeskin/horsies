@@ -32,6 +32,7 @@ from tests.e2e.helpers.assertions import start_ok_sync, unwrap_send
 from tests.e2e.helpers.db import wait_for_all_terminal, wait_for_status
 from tests.e2e.tasks import priority_binding as pb
 from tests.e2e.tasks.instance_priority_binding import app  # noqa: F401
+from tests.broker_resources_support import current_resources
 
 pytestmark = [
     pytest.mark.e2e,
@@ -68,7 +69,7 @@ async def _wait_for_task_row(
     """Poll until a task row with the given name exists; return its id."""
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text('SELECT id FROM itest_task_rows WHERE task_name = :n LIMIT 1'),
@@ -101,7 +102,7 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
         ).unwrap()
         await wait_for_status(
-            broker.session_factory, blocker_id, 'RUNNING', timeout_s=15.0,
+            current_resources(broker).session_factory, blocker_id, 'RUNNING', timeout_s=15.0,
         )
 
         # 2. Start the parent subworkflow; the worker expands it via the child's
@@ -116,12 +117,12 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
 
         # 4. Drain: blocker finishes, worker claims scrape then direct.
         await wait_for_all_terminal(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             [blocker_id, scrape_id, direct_id],
             timeout_s=30.0,
         )
 
-    async with broker.session_factory() as session:
+    async with current_resources(broker).session_factory() as session:
         rows = (
             await session.execute(
                 text("""

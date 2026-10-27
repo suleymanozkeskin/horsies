@@ -25,6 +25,7 @@ from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.integration.history_seeding import read_attempts
+from tests.broker_resources_support import current_resources
 
 
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
@@ -66,13 +67,13 @@ async def test_timeout_fails_task_and_worker_survives(
 
         # Deadline fires at 2s; allow slack for claim + dispatch + persist.
         await wait_for_status(
-            broker.session_factory,
+            current_resources(broker).session_factory,
             handle.task_id,
             'FAILED',
             timeout_s=20.0,
         )
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             row = (
                 await session.execute(
                     text("""
@@ -145,13 +146,13 @@ async def test_timeout_backlog_drains_without_killing_worker(
         # leaves the tail of the backlog stuck and times this out.
         for handle in handles:
             await wait_for_status(
-                broker.session_factory,
+                current_resources(broker).session_factory,
                 handle.task_id,
                 'FAILED',
                 timeout_s=180.0,
             )
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             rows = (
                 await session.execute(
                     text("""
@@ -212,13 +213,13 @@ async def test_pool_breaker_storm_does_not_kill_worker(
         # A worker killed mid-storm leaves the tail stuck and times this out.
         for handle in handles:
             await wait_for_status(
-                broker.session_factory,
+                current_resources(broker).session_factory,
                 handle.task_id,
                 'FAILED',
                 timeout_s=180.0,
             )
 
-        async with broker.session_factory() as session:
+        async with current_resources(broker).session_factory() as session:
             rows = (
                 await session.execute(
                     text("""

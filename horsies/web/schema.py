@@ -30,6 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.logging import get_logger
+from horsies.core.types.result import Err, Ok
 from horsies.core.schemas.migrations import (
     READ_SCHEMA_VERSION_SQL,
     SCHEMA_VERSION,
@@ -156,9 +157,20 @@ class SchemaProbe:
         return observed
 
     async def _read(self) -> SchemaStatus | None:
-        """Read the stored version, or None when the database cannot answer."""
+        """Read the stored version, or None when the read fails.
+
+        A read fails on a database error, or when another open event loop
+        holds the broker's async resources. Neither is a verdict about the
+        schema; the warning log names the cause.
+        """
+        match await self._broker.select_resources():
+            case Err(conflict):
+                logger.warning(f'Schema version probe failed: {conflict.describe()}')
+                return None
+            case Ok(resources):
+                pass
         try:
-            async with self._broker.session_factory() as session:
+            async with resources.session_factory() as session:
                 present = (
                     await session.execute(SCHEMA_VERSION_TABLE_EXISTS_SQL)
                 ).scalar()

@@ -19,6 +19,7 @@ from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.sql import COUNT_IN_FLIGHT_FOR_WORKER_SQL
 from horsies.core.worker.worker import Worker
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.broker_resources_support import current_resources
 
 
 async def _seed_orphaned_claimed_workflow_task(
@@ -163,7 +164,7 @@ async def test_workflow_check_failed_cancels_orphan_and_frees_budget(
     assert await _in_flight_for_worker(session, worker_id) == 1
 
     worker = Worker(
-        session_factory=broker.session_factory,
+        session_factory=current_resources(broker).session_factory,
         listener=MagicMock(),
         cfg=WorkerConfig(
             dsn=db_url,
@@ -210,7 +211,7 @@ async def test_workflow_check_failed_disabled_leaves_orphan_claimed(
     task_id = await _seed_orphaned_claimed_workflow_task(session, worker_id=worker_id)
 
     worker = Worker(
-        session_factory=broker.session_factory,
+        session_factory=current_resources(broker).session_factory,
         listener=MagicMock(),
         cfg=WorkerConfig(
             dsn=db_url,
@@ -255,7 +256,7 @@ async def test_finalize_does_not_cancel_a_task_with_a_runnable_node_link(
     )
     await _link_runnable_workflow_node(session, task_id)
     worker = Worker(
-        session_factory=broker.session_factory,
+        session_factory=current_resources(broker).session_factory,
         listener=MagicMock(),
         cfg=WorkerConfig(
             dsn=db_url,

@@ -12,12 +12,16 @@ from horsies.core.models.tasks import OutcomeCode, RetrievalCode, TaskError, Tas
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import Ok
+from horsies.core.brokers.resources import ListenerEnabled
+from tests.broker_resources_support import attach_resources, fake_resources
 
 
-def _make_handle() -> WorkflowHandle[Any]:
+def _make_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
+    """A handle on a mock broker, and the mock listener its resources hold."""
     broker = MagicMock()
-    broker.listener = MagicMock()
-    return WorkflowHandle(workflow_id='wf-1', broker=broker)
+    listener = MagicMock()
+    attach_resources(broker, fake_resources(listener=ListenerEnabled(listener=listener)))
+    return WorkflowHandle(workflow_id='wf-1', broker=broker), listener
 
 
 @pytest.mark.unit
@@ -27,9 +31,9 @@ class TestWorkflowHandleAsyncCleanup:
     @pytest.mark.asyncio
     async def test_get_async_cancellation_still_completes_unsubscribe(self) -> None:
         """A second cancellation during finally should not interrupt unsubscribe cleanup."""
-        handle = _make_handle()
+        handle, listener = _make_handle()
         q: asyncio.Queue[object] = asyncio.Queue()
-        handle.broker.listener.listen = AsyncMock(return_value=Ok(q))
+        listener.listen = AsyncMock(return_value=Ok(q))
 
         started = asyncio.Event()
         release = asyncio.Event()
@@ -40,13 +44,13 @@ class TestWorkflowHandleAsyncCleanup:
             await release.wait()
             finished.set()
 
-        handle.broker.listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
-        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
+        listener.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+        handle._status = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
 
         task = asyncio.create_task(handle.get_async(timeout_ms=60_000))
 
         for _ in range(50):
-            if handle.broker.listener.listen.await_count > 0:
+            if listener.listen.await_count > 0:
                 break
             await asyncio.sleep(0)
 
@@ -62,7 +66,7 @@ class TestWorkflowHandleAsyncCleanup:
             await task
 
         assert finished.is_set() is True
-        handle.broker.listener.unsubscribe.assert_awaited_once_with('workflow_done', q)
+        listener.unsubscribe.assert_awaited_once_with('workflow_done', q)
 
 
 @pytest.mark.unit
@@ -72,22 +76,22 @@ class TestWorkflowHandleZeroTimeout:
 
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_wait_timeout_immediately(self) -> None:
-        handle = _make_handle()
-        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
-        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
+        handle, listener = _make_handle()
+        listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle._status = AsyncMock(return_value=Ok(WorkflowStatus.RUNNING))
 
         result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
 
         assert result.is_err()
         assert result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT
         # Polled status exactly once, then timed out without ever waiting.
-        assert handle.status_async.await_count == 1
+        assert handle._status.await_count == 1
 
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_result_when_already_complete(self) -> None:
-        handle = _make_handle()
-        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
-        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.COMPLETED))
+        handle, listener = _make_handle()
+        listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle._status = AsyncMock(return_value=Ok(WorkflowStatus.COMPLETED))
         expected: TaskResult[Any, Any] = TaskResult(ok=42)
         handle._get_result = AsyncMock(return_value=expected)
 
@@ -97,9 +101,9 @@ class TestWorkflowHandleZeroTimeout:
 
     @pytest.mark.asyncio
     async def test_zero_timeout_returns_persisted_expired_error(self) -> None:
-        handle = _make_handle()
-        handle.broker.listener.listen = AsyncMock(side_effect=RuntimeError())
-        handle.status_async = AsyncMock(return_value=Ok(WorkflowStatus.EXPIRED))
+        handle, listener = _make_handle()
+        listener.listen = AsyncMock(side_effect=RuntimeError())
+        handle._status = AsyncMock(return_value=Ok(WorkflowStatus.EXPIRED))
         expected: TaskResult[Any, TaskError] = TaskResult(
             err=TaskError(
                 error_code=OutcomeCode.WORKFLOW_EXPIRED,
@@ -111,4 +115,4 @@ class TestWorkflowHandleZeroTimeout:
         result = await asyncio.wait_for(handle.get_async(timeout_ms=0), timeout=1.0)
 
         assert result is expected
-        handle._get_error.assert_awaited_once_with()
+        handle._get_error.assert_awaited_once()

@@ -48,6 +48,7 @@ from horsies.core.worker.worker import (
 )
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import force_terminal
+from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -886,7 +887,7 @@ async def test_confirm_ownership_rejects_stale_claim_generation(
     await _set_task_status(session, task_id, 'CLAIMED')
     await session.commit()  # the child confirm runs on its own connection
 
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
 
     stale_result = _confirm_ownership_and_set_running(
         task_id, OWNER_WORKER_ID, False, GEN_STALE,
@@ -925,7 +926,7 @@ async def test_finalizing_marker_rejects_stale_claim_generation(
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await session.commit()  # the child marker runs on its own connection
 
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
 
     _mark_task_finalizing(task_id, OWNER_WORKER_ID, GEN_STALE)
     assert await _get_finalizing_worker(session, task_id) is None
@@ -944,7 +945,7 @@ async def test_finalizing_marker_null_fence_matches_any_generation(
     task_id = await _insert_running_task(session, claimed_at=GEN_CURRENT)
     await session.commit()
 
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
 
     _mark_task_finalizing(task_id, OWNER_WORKER_ID, None)
     assert await _get_finalizing_worker(session, task_id) == OWNER_WORKER_ID

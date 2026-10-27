@@ -22,6 +22,7 @@ from typing import Any, NoReturn
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -32,7 +33,7 @@ from horsies.core.logging import get_logger
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.scheduler import Scheduler
 from horsies.core.worker.worker import Worker, WorkerConfig
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.utils.imports import (
     import_file_path,
     setup_sys_path_from_cwd,
@@ -585,9 +586,25 @@ def worker_command(args: argparse.Namespace) -> None:
 
                 broker = PostgresBroker(worker_postgres_config)
                 broker.app = app
+                # A fresh broker on this loop: a conflict is a programmer error.
+                match await broker.select_resources():
+                    case Err(conflict):
+                        raise AssertionError(
+                            f'worker broker resources: {conflict.describe()}',
+                        )
+                    case Ok(resources):
+                        pass
+                match resources.listener:
+                    case ListenerEnabled(listener=listener):
+                        pass
+                    case ListenerDisabled():
+                        raise AssertionError(
+                            'worker broker has no listener; a broker built '
+                            'without assume_initialized always owns one',
+                        )
                 worker = Worker(
-                    broker.session_factory,
-                    broker.listener,
+                    resources.session_factory,
+                    listener,
                     worker_config,
                     broker=broker,
                 )

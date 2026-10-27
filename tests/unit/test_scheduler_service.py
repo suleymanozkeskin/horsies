@@ -27,6 +27,11 @@ from horsies.core.scheduler.validation import (
     _signature_error,
 )
 from horsies.core.types.result import Err, Ok, is_err
+from tests.broker_resources_support import (
+    attach_conflict,
+    attach_resources,
+    fake_resources,
+)
 
 
 def _utc(
@@ -1013,7 +1018,11 @@ def _make_broker_mock(
                 retryable=False,
             )),
         )
+    # ``broker.session_factory`` is a test-side handle only: the same mock is
+    # placed in the attached resource set, which is what the code under test
+    # reads through ``select_resources()``. Tests configure it through this name.
     broker.session_factory = MagicMock()
+    attach_resources(broker, fake_resources(session_factory=broker.session_factory))
     broker.create_single_connection_engine = MagicMock(
         return_value=MagicMock(dispose=AsyncMock()),
     )
@@ -1063,6 +1072,59 @@ class TestSchedulerStart:
 
         with pytest.raises(RuntimeError, match='Schema initialization failed'):
             await scheduler.start()
+
+    async def test_event_loop_conflict_raises_before_schema_init(self) -> None:
+        """A broker whose resources serve another loop stops start(); nothing runs."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        broker = _make_broker_mock()
+        conflict = attach_conflict(broker)
+        app.get_broker = MagicMock(return_value=broker)
+        scheduler = Scheduler(app)
+
+        with pytest.raises(RuntimeError) as raised:
+            await scheduler.start()
+
+        assert str(raised.value) == (
+            f'Scheduler start failed: {conflict.describe()}'
+        )
+        broker.ensure_schema_initialized.assert_not_awaited()
+        assert scheduler.state_manager is None
+        assert scheduler._initialized is False
+
+    async def test_state_manager_uses_selected_session_factory(self) -> None:
+        """start() selects once and gives the state manager that set's session factory."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config, tasks={'my_task': _make_task_mock(lambda: 'ok')})
+        broker = _make_broker_mock()
+        selected = attach_resources(broker, fake_resources(session_factory=MagicMock()))
+        app.get_broker = MagicMock(return_value=broker)
+        scheduler = Scheduler(app)
+        scheduler._preload_task_modules = MagicMock()  # type: ignore[method-assign]
+        scheduler._validate_schedules = MagicMock()  # type: ignore[method-assign]
+        scheduler._initialize_schedules = AsyncMock()  # type: ignore[method-assign]
+
+        await scheduler.start()
+
+        broker.select_resources.assert_awaited_once()
+        assert scheduler.state_manager is not None
+        assert scheduler.state_manager.session_factory is selected.session_factory
 
     async def test_happy_path_initializes_all_components(self) -> None:
         """Successful start: broker, preload, state_manager, validate, init schedules."""

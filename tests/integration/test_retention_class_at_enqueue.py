@@ -40,6 +40,7 @@ from horsies.core.models.retention import (
 from horsies.core.models.task_send_types import TaskSendErrorCode
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
+from tests.broker_resources_support import current_resources
 
 pytestmark = [
     pytest.mark.integration,
@@ -110,7 +111,7 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
 
 
 async def _row_class(broker: PostgresBroker, task_id: str) -> str | None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -131,7 +132,7 @@ async def _terminalize(
     moved record — the partition read from ``tableoid``, which is the
     routing fact itself rather than an inference from the class column.
     """
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(
                 "UPDATE horsies_tasks SET status = 'RUNNING', "
@@ -154,7 +155,7 @@ async def _terminalize(
             )
         ).one()
         assert outcome.outcome == 'APPLIED', outcome
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         row = (
             await connection.execute(
                 text(
@@ -176,7 +177,7 @@ async def _coverage(broker: PostgresBroker) -> None:
     startup ensure returns a TYPED refusal that must be checked, not
     assumed away."""
     defaults = RetentionConfig()
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         outcome = await ensure_startup_coverage(
             connection,
             history_horizon_days=defaults.history_leaf_horizon_days,
@@ -217,7 +218,7 @@ class TestRetentionClassAtEnqueue:
     ) -> None:
         app = _test_app(broker)
         task: Any = app.tasks['retention_enqueue_test']
-        async with broker.async_engine.connect() as connection:
+        async with current_resources(broker).engine.connect() as connection:
             before = (
                 await connection.execute(
                     text('SELECT count(*) FROM horsies_tasks')
@@ -231,7 +232,7 @@ class TestRetentionClassAtEnqueue:
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
         assert 'no_such_class' in result.err_value.message
-        async with broker.async_engine.connect() as connection:
+        async with current_resources(broker).engine.connect() as connection:
             after = (
                 await connection.execute(
                     text('SELECT count(*) FROM horsies_tasks')

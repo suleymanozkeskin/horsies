@@ -24,6 +24,7 @@ from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -66,11 +67,11 @@ class TestBatchedStartShape:
             counts['n'] += 1
 
         spec = _fanout_spec(app, 50)
-        event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+        event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         try:
             result = await start_workflow_async(spec, broker)
         finally:
-            event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
         assert not is_err(result), result
         # workflow insert + bulk node insert + bulk task insert + overhead.
         # The old shape was ~201 statements for N=50 (1 + 50 + 3*50).

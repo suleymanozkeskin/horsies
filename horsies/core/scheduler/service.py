@@ -27,7 +27,7 @@ from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.payload_guard import enforce_payload_policy
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
-from horsies.core.types.result import Err, is_err
+from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
@@ -121,7 +121,9 @@ class Scheduler:
         schema is ready or will succeed on first attempt.
 
         Raises:
-            RuntimeError: schema initialization failed (broker Err unwrapped).
+            RuntimeError: the broker's resources are in use by another open
+                event loop, or schema initialization failed (broker Err
+                unwrapped).
             HorsiesError: broker construction failed (``get_broker``).
             RegistryError | ConfigurationError: schedule validation failed.
                 All propagate through run_forever to the CLI boundary —
@@ -131,6 +133,13 @@ class Scheduler:
             return
 
         self.broker = self.app.get_broker()
+        match await self.broker.select_resources():
+            case Err(conflict):
+                raise RuntimeError(
+                    f'Scheduler start failed: {conflict.describe()}',
+                )
+            case Ok(resources):
+                pass
         init_result = await self.broker.ensure_schema_initialized()
         if is_err(init_result):
             err = init_result.err_value
@@ -147,8 +156,8 @@ class Scheduler:
         # Import task modules so task registry is populated for scheduled names
         self._preload_task_modules()
 
-        # Initialize state manager with broker's session factory
-        self.state_manager = ScheduleStateManager(self.broker.session_factory)
+        # The state manager keeps the session factory selected above.
+        self.state_manager = ScheduleStateManager(resources.session_factory)
         logger.info('State manager initialized')
 
         # Validate schedules eagerly (task exists, queue valid)

@@ -43,6 +43,7 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.runtime import _ReaperPassState
 from horsies.core.worker.worker import Worker, WorkerConfig
+from tests.broker_resources_support import current_resources
 
 # Comfortably past the default class's 30-day horizon.
 BLOCKED_AGE = timedelta(days=45)
@@ -97,7 +98,7 @@ def _daily_leaf_for_age(age: timedelta) -> LeafRef:
 async def _make_expired_leaf(
     broker: PostgresBroker, age: timedelta
 ) -> LeafRef:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         now = await database_now(connection)
         day = (now - age).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -125,7 +126,7 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
     node_id = uuid.uuid4()
     task_id = uuid.uuid4()
     anchor = leaf.bounds.lower + timedelta(hours=12)
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         await connection.execute(
             text(
                 'INSERT INTO horsies_workflows '
@@ -184,7 +185,7 @@ async def _block_leaf(broker: PostgresBroker, leaf: LeafRef) -> uuid.UUID:
 
 
 async def _leaf_exists(broker: PostgresBroker, leaf: LeafRef) -> bool:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return bool(
             (
                 await connection.execute(
@@ -200,7 +201,7 @@ async def _cleanup(
     leaves: tuple[LeafRef, ...],
     workflow_id: uuid.UUID | None,
 ) -> None:
-    async with broker.async_engine.begin() as connection:
+    async with current_resources(broker).engine.begin() as connection:
         if workflow_id is not None:
             # phase2_pending cascades from the node row.
             await connection.execute(
@@ -238,6 +239,7 @@ class TestPruningRefusalContainment:
             # The assertion is that this RETURNS rather than raising.
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                current_resources(broker),
                 RecoveryConfig(),
                 RetentionConfig(),
                 _pruning_pass_state(),
@@ -246,7 +248,7 @@ class TestPruningRefusalContainment:
                 f'{leaf.leaf_name} has a pending locator and must not be '
                 'dropped'
             )
-            async with broker.async_engine.connect() as connection:
+            async with current_resources(broker).engine.connect() as connection:
                 stamps = (
                     await connection.execute(
                         text(
@@ -282,6 +284,7 @@ class TestPruningRefusalContainment:
             worker = _reaper_worker(broker)
             await worker._run_reaper_pass(  # pyright: ignore[reportPrivateUsage]
                 broker,
+                current_resources(broker),
                 RecoveryConfig(),
                 RetentionConfig(),
                 _pruning_pass_state(),

@@ -28,6 +28,7 @@ from horsies.core.worker.worker import _run_task_entry, _initialize_worker_pool
 
 from .conftest import make_simple_task, make_no_ctx_task, make_workflow_spec, start_ok
 from tests.integration.conftest import task_name_for
+from tests.broker_resources_support import listener_of
 
 
 def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
@@ -521,7 +522,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -590,7 +591,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -662,7 +663,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -949,7 +950,7 @@ class TestWorkflowCtx:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,

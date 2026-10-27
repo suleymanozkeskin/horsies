@@ -25,6 +25,7 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.history.reads.pages import HistoryWindow
+from tests.broker_resources_support import current_resources
 
 
 def _test_window() -> HistoryWindow:
@@ -1262,7 +1263,7 @@ class TestListTasks:
         ) -> None:
             captured.append(statement)
 
-        sync_engine = broker.async_engine.sync_engine
+        sync_engine = current_resources(broker).engine.sync_engine
         event.listen(sync_engine, 'before_cursor_execute', capture_statement)
         try:
             result = await list_tasks(
@@ -2371,7 +2372,7 @@ class _StatementCapture:
     """Every SQL string the engine executes inside the ``with`` block."""
 
     def __init__(self, broker: PostgresBroker) -> None:
-        self._engine = broker.async_engine.sync_engine
+        self._engine = current_resources(broker).engine.sync_engine
         self.statements: list[str] = []
 
     def _collect(

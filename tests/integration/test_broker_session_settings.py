@@ -19,6 +19,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.utils.url import to_psycopg_url
 from tests.integration.conftest import DB_URL
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
@@ -48,9 +49,9 @@ async def test_direct_connections_run_without_jit() -> None:
     ))
     single = broker.create_single_connection_engine()
     try:
-        assert broker._session_engine is not broker.async_engine
-        assert await _jit_setting(broker.async_engine) == 'off'
-        assert await _jit_setting(broker._session_engine) == 'off'
+        assert current_resources(broker).session_async_engine() is not current_resources(broker).engine
+        assert await _jit_setting(current_resources(broker).engine) == 'off'
+        assert await _jit_setting(current_resources(broker).session_async_engine()) == 'off'
         assert await _jit_setting(single) == 'off'
     finally:
         await single.dispose()
@@ -60,7 +61,7 @@ async def test_direct_connections_run_without_jit() -> None:
 async def test_setting_survives_a_rollback_of_the_first_transaction() -> None:
     broker = PostgresBroker(PostgresConfig(database_url=SecretStr(DB_URL)))
     try:
-        async with broker.async_engine.connect() as connection:
+        async with current_resources(broker).engine.connect() as connection:
             await connection.execute(text('SELECT 1'))
             await connection.rollback()
             jit = (await connection.execute(text('SHOW jit'))).scalar_one()
@@ -78,9 +79,9 @@ async def test_transaction_mode_runtime_pool_keeps_the_server_setting() -> None:
     single = broker.create_single_connection_engine()
     try:
         server_setting = await _server_jit_setting()
-        assert await _jit_setting(broker.async_engine) == server_setting
+        assert await _jit_setting(current_resources(broker).engine) == server_setting
         assert await _jit_setting(single) == server_setting
-        assert await _jit_setting(broker._session_engine) == 'off'
+        assert await _jit_setting(current_resources(broker).session_async_engine()) == 'off'
     finally:
         await single.dispose()
         await broker.close_async()

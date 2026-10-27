@@ -20,6 +20,7 @@ from horsies.core.worker.worker import (
     _initialize_worker_pool,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
+from tests.broker_resources_support import listener_of
 
 pytestmark = [pytest.mark.integration]
 
@@ -146,7 +147,7 @@ async def _arrange(
         case str():
             await _seed_running_workflow_with_node(session, task_id, node_status)
     await session.commit()  # the child confirm runs on its own connection
-    _initialize_worker_pool(broker.listener.database_url)
+    _initialize_worker_pool(listener_of(broker).database_url)
     return task_id, claimed_at
 
 

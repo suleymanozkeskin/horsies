@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from horsies.core.app import Horsies
+from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.cli import (
     _build_queue_settings,
     _ensure_schema_with_retry,
@@ -36,6 +37,11 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
+from tests.broker_resources_support import (
+    attach_conflict,
+    attach_resources,
+    fake_resources,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -559,8 +565,7 @@ def _make_mock_broker() -> MagicMock:
     broker = MagicMock()
     broker.config = MagicMock()
     broker.config.database_url = 'postgresql://localhost/test'
-    broker.session_factory = MagicMock()
-    broker.listener = MagicMock()
+    attach_resources(broker, fake_resources())
     broker.close_async = AsyncMock(return_value=Ok(None))
     broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
     return broker
@@ -1658,6 +1663,127 @@ class TestWorkerCommandQueueException:
 # ---------------------------------------------------------------------------
 # run_worker / run_scheduler inner async function coverage
 # ---------------------------------------------------------------------------
+
+
+async def _run_captured_worker(
+    args: argparse.Namespace,
+    brokers: list[MagicMock],
+) -> None:
+    """Run ``worker_command`` and then await the ``run_worker`` coroutine it built.
+
+    ``brokers`` are returned by successive ``PostgresBroker(...)`` calls.
+    """
+    captured_coro: list[Any] = []
+
+    def capture_run(coro: Any) -> None:
+        captured_coro.append(coro)
+        raise KeyboardInterrupt
+
+    with (
+        patch(
+            'horsies.core.cli.PostgresBroker',
+            autospec=True,
+            side_effect=brokers,
+        ),
+        patch('horsies.core.cli.asyncio.run', side_effect=capture_run),
+    ):
+        worker_command(args)
+        assert len(captured_coro) == 1
+        await captured_coro[0]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings('ignore:coroutine.*was never awaited:RuntimeWarning')
+class TestRunWorkerResourceSelection:
+    """run_worker selects the worker broker's resources once and builds the Worker from them."""
+
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_worker_gets_selected_session_factory_and_listener(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+    ) -> None:
+        session_factory = MagicMock()
+        listener = MagicMock()
+        broker = _make_mock_broker()
+        attach_resources(
+            broker,
+            fake_resources(
+                session_factory=session_factory,
+                listener=ListenerEnabled(listener=listener),
+            ),
+        )
+        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
+        mock_worker_cls.return_value = MagicMock(run_forever=AsyncMock())
+
+        await _run_captured_worker(
+            _make_worker_namespace(), [_make_mock_broker(), broker],
+        )
+
+        broker.select_resources.assert_awaited_once()
+        assert mock_worker_cls.call_args.args[0] is session_factory
+        assert mock_worker_cls.call_args.args[1] is listener
+
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_event_loop_conflict_crashes_loud(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+    ) -> None:
+        broker = _make_mock_broker()
+        conflict = attach_conflict(broker)
+        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
+
+        with pytest.raises(AssertionError) as raised:
+            await _run_captured_worker(
+                _make_worker_namespace(), [_make_mock_broker(), broker],
+            )
+
+        assert str(raised.value) == (
+            f'worker broker resources: {conflict.describe()}'
+        )
+        mock_worker_cls.assert_not_called()
+        broker.close_async.assert_awaited_once()
+
+    @patch('horsies.core.cli.Worker', autospec=True)
+    @patch('horsies.core.cli.print_banner', autospec=True)
+    @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
+    @patch('horsies.core.cli.setup_logging', autospec=True)
+    @patch('horsies.core.cli.discover_app', autospec=True)
+    async def test_disabled_listener_crashes_loud(
+        self,
+        mock_discover: MagicMock,
+        _mock_logging: MagicMock,
+        _mock_url: MagicMock,
+        _mock_banner: MagicMock,
+        mock_worker_cls: MagicMock,
+    ) -> None:
+        broker = _make_mock_broker()
+        attach_resources(broker, fake_resources(listener=ListenerDisabled()))
+        mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
+
+        with pytest.raises(AssertionError, match='worker broker has no listener'):
+            await _run_captured_worker(
+                _make_worker_namespace(), [_make_mock_broker(), broker],
+            )
+
+        mock_worker_cls.assert_not_called()
+        broker.close_async.assert_awaited_once()
 
 
 @pytest.mark.unit

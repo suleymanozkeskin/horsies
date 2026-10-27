@@ -28,6 +28,7 @@ from tests.e2e.tasks import instance_priority_binding
 
 
 from tests.e2e.helpers.env import e2e_database_url
+from tests.broker_resources_support import current_resources, listener_of
 
 DB_URL = e2e_database_url('HORSES_E2E_DB_URL')
 
@@ -51,12 +52,12 @@ async def _initialize_session_broker(
         return
     schema = await brk.ensure_schema_initialized()
     assert schema.is_ok(), schema
-    listener = await brk.listener.start()
+    listener = await listener_of(brk).start()
     assert listener.is_ok(), listener
     if seed_history:
         from tests.integration.history_seeding import ensure_history_seedable
 
-        async with brk.async_engine.begin() as connection:
+        async with current_resources(brk).engine.begin() as connection:
             await ensure_history_seedable(connection)
 
 
@@ -180,7 +181,7 @@ async def bind_all_session_brokers(
 @pytest_asyncio.fixture(loop_scope='session')
 async def session(broker: PostgresBroker) -> AsyncGenerator[AsyncSession, None]:
     """Database session for e2e assertions."""
-    async with broker.session_factory() as sess:
+    async with current_resources(broker).session_factory() as sess:
         yield sess
 
 

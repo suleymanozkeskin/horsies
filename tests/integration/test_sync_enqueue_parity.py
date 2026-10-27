@@ -20,12 +20,13 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.history.ddl.tables import FOREVER_CLASS_KEY
 from horsies.core.types.result import is_err
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
 
 
 async def _row_class(broker: PostgresBroker, task_id: str) -> str | None:
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         return (
             await connection.execute(
                 text(
@@ -75,7 +76,7 @@ async def test_sync_enqueue_carries_retain_rerun_input(
     broker: PostgresBroker,
 ) -> None:
     task_id, _ = await _sync_enqueue(broker, retain_rerun_input=True)
-    async with broker.async_engine.connect() as connection:
+    async with current_resources(broker).engine.connect() as connection:
         retained = (
             await connection.execute(
                 text(

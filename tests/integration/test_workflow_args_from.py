@@ -29,6 +29,7 @@ from .conftest import (
     make_workflow_spec,
     start_ok,
 )
+from tests.broker_resources_support import listener_of
 
 
 @pytest.mark.integration
@@ -483,7 +484,7 @@ class TestArgsFromInjection:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -569,7 +570,7 @@ class TestArgsFromInjection:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -734,7 +735,7 @@ class TestArgsFromInjection:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,
@@ -817,7 +818,7 @@ class TestArgsFromInjection:
         await self._claim_task(session, task_id, 'test-worker')
 
         set_current_app(app)
-        database_url = broker.listener.database_url
+        database_url = listener_of(broker).database_url
         _initialize_worker_pool(database_url)
         ok, result_json, worker_failure = _run_task_entry(
             task_name=task_name,

@@ -25,6 +25,7 @@ from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 from tests.integration.conftest import complete_task
+from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration]
 
@@ -93,11 +94,11 @@ class TestBatchedPromotionShape:
             def _count(conn: Any, cursor: Any, stmt: Any, params: Any, ctx: Any, many: Any) -> None:
                 counter['n'] += 1
 
-            event.listen(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+            event.listen(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             try:
                 await complete_task(session, broker, wf_id, 0, TaskResult(ok=0))
             finally:
-                event.remove(broker.async_engine.sync_engine, 'before_cursor_execute', _count)
+                event.remove(current_resources(broker).engine.sync_engine, 'before_cursor_execute', _count)
             await session.commit()
             counts_by_f[fan_out] = counter['n']
 
