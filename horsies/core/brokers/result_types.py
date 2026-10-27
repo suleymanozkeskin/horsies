@@ -83,6 +83,9 @@ class BrokerErrorCode(str, Enum):
     # The task options passed to enqueue carry a retry limit that cannot
     # be stored; nothing was written.
     INVALID_TASK_OPTIONS = 'INVALID_TASK_OPTIONS'
+    # The broker's async resources are in use by another open event loop.
+    # Nothing ran. It clears when that loop closes.
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(slots=True, frozen=True)

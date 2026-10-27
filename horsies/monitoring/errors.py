@@ -17,6 +17,9 @@ class MonitoringQueryErrorCode(str, Enum):
     """Failure category for a monitoring read."""
 
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
+    # The broker's async resources are in use by another open event loop.
+    # Nothing ran. It clears when that loop closes.
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(frozen=True, slots=True)

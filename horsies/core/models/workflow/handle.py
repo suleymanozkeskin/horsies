@@ -681,6 +681,8 @@ class WorkflowHandle(Generic[OutT]):
                     match handle_err.code:
                         case HandleErrorCode.WORKFLOW_NOT_FOUND:
                             error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
+                        case HandleErrorCode.EVENT_LOOP_CONFLICT:
+                            error_code = RetrievalCode.EVENT_LOOP_CONFLICT
                         case _:
                             error_code = OperationalErrorCode.BROKER_ERROR
                     return cast(

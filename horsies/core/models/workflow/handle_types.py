@@ -30,6 +30,9 @@ class HandleErrorCode(str, Enum):
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
     LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
     INTERNAL_FAILED = 'INTERNAL_FAILED'
+    # The broker's async resources are in use by another open event loop.
+    # Nothing ran. It clears when that loop closes.
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(slots=True, frozen=True)

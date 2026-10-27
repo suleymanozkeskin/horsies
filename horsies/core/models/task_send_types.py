@@ -51,6 +51,11 @@ class TaskSendErrorCode(str, Enum):
     written. Non-retryable — shrink the payload (pass a reference to
     external storage) or raise the configured limit."""
 
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
+    """The broker's async resources are in use by another open event loop;
+    nothing was written. Repeating the send on this loop returns the same
+    error; it clears when that loop closes. ``retryable=False``."""
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:

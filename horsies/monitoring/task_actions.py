@@ -59,6 +59,9 @@ class TaskActionErrorCode(Enum):
     TASK_NOT_CANCELLABLE = 'TASK_NOT_CANCELLABLE'
     TASK_IS_WORKFLOW_TASK = 'TASK_IS_WORKFLOW_TASK'
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
+    # The broker's async resources are in use by another open event loop.
+    # Nothing changed. It clears when that loop closes.
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(frozen=True, slots=True)

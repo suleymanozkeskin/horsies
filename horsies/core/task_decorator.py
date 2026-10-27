@@ -20,6 +20,7 @@ from typing import (
     TYPE_CHECKING,
     Optional,
     Any,
+    assert_never,
     cast,
 )
 from abc import abstractmethod
@@ -1215,20 +1216,37 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> Err[TaskSendError]:
         """Map a BrokerOperationError to a TaskSendError."""
-        # Detect SHA mismatch → PAYLOAD_MISMATCH
-        if broker_err.code == BrokerErrorCode.PAYLOAD_MISMATCH:
-            return Err(TaskSendError(
-                code=TaskSendErrorCode.PAYLOAD_MISMATCH,
-                message=broker_err.message,
-                retryable=False,
-                task_id=task_id,
-                payload=payload,
-                exception=broker_err.exception,
-            ))
+        code: TaskSendErrorCode
+        retryable: bool
+        match broker_err.code:
+            case BrokerErrorCode.PAYLOAD_MISMATCH:
+                code, retryable = TaskSendErrorCode.PAYLOAD_MISMATCH, False
+            case BrokerErrorCode.EVENT_LOOP_CONFLICT:
+                code, retryable = TaskSendErrorCode.EVENT_LOOP_CONFLICT, False
+            case (
+                BrokerErrorCode.SCHEMA_INIT_FAILED
+                | BrokerErrorCode.ENQUEUE_FAILED
+                | BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+                | BrokerErrorCode.TASK_INFO_QUERY_FAILED
+                | BrokerErrorCode.MONITORING_QUERY_FAILED
+                | BrokerErrorCode.DB_PING_FAILED
+                | BrokerErrorCode.WORKER_PING_FAILED
+                | BrokerErrorCode.CLEANUP_FAILED
+                | BrokerErrorCode.CLOSE_FAILED
+                | BrokerErrorCode.LISTENER_START_FAILED
+                | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+                | BrokerErrorCode.NO_BROKER
+                | BrokerErrorCode.NO_TYPE_AVAILABLE
+                | BrokerErrorCode.INVALID_JSON_PAYLOAD
+                | BrokerErrorCode.INVALID_TASK_OPTIONS
+            ):
+                code, retryable = TaskSendErrorCode.ENQUEUE_FAILED, broker_err.retryable
+            case _ as unreachable:
+                assert_never(unreachable)
         return Err(TaskSendError(
-            code=TaskSendErrorCode.ENQUEUE_FAILED,
+            code=code,
             message=broker_err.message,
-            retryable=broker_err.retryable,
+            retryable=retryable,
             task_id=task_id,
             payload=payload,
             exception=broker_err.exception,

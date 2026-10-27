@@ -14,6 +14,16 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy import text, select
 from sqlalchemy.exc import DBAPIError
 from horsies.core.brokers.listener import PostgresListener
+from horsies.core.brokers.resources import (
+    BrokerResources,
+    EventLoopConflict,
+    ListenerDisabled,
+    ListenerEnabled,
+    ListenerState,
+    SessionEngine,
+    SessionEngineSeparate,
+    SessionEngineShared,
+)
 from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
@@ -30,7 +40,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowTaskModel as _WorkflowTaskModel,
 )
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
@@ -613,43 +623,17 @@ class PostgresBroker:
         self.logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
-        engine_cfg = self._runtime_engine_config()
-        self.async_engine = create_async_engine(
-            self.config.database_url.get_secret_value(), **engine_cfg,
-        )
-        register_identity_text_reads(self.async_engine)
-        register_session_settings(
-            self.async_engine, self._runtime_session_settings(),
-        )
-        self.session_factory = async_sessionmaker(
-            self.async_engine, expire_on_commit=False
-        )
-
-        session_url = self.config.effective_session_database_url
-        if session_url == self.config.database_url.get_secret_value():
-            self._session_engine = self.async_engine
-        else:
-            self._session_engine = create_async_engine(
-                session_url, **self._session_engine_config()
-            )
-            # The session URL must keep session state (LISTEN, session
-            # advisory locks), so it keeps session settings too.
-            register_session_settings(
-                self._session_engine, SessionSettings.KEPT,
-            )
-        self.partition_maintenance = PartitionMaintenanceDatabase(
-            self._session_engine,
-            connection_capacity=self.config.pool_size + self.config.max_overflow,
-        )
-
-        if assume_initialized:
-            self._listener = None
-        else:
-            psycopg_url = to_psycopg_url(self.config.effective_session_database_url)
-            self._listener = PostgresListener(
-                psycopg_url,
-                tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
-            )
+        self._assume_initialized = assume_initialized
+        self._resources = self._build_resources()
+        self.async_engine = self._resources.engine
+        self.session_factory = self._resources.session_factory
+        self._session_engine = self._resources.session_async_engine()
+        self.partition_maintenance = self._resources.partition_maintenance
+        match self._resources.listener:
+            case ListenerEnabled(listener=listener):
+                self._listener: PostgresListener | None = listener
+            case ListenerDisabled():
+                self._listener = None
 
         self._initialized = assume_initialized
         # True once this broker saw the staged result function. Only a
@@ -664,6 +648,64 @@ class PostgresBroker:
             self.logger.debug('PostgresBroker initialized')
         else:
             self.logger.info('PostgresBroker initialized')
+
+    def _build_resources(self) -> BrokerResources:
+        """Build one set of loop-bound resources. No I/O: engines and the
+        listener connect on first use.
+        """
+        engine = create_async_engine(
+            self.config.database_url.get_secret_value(),
+            **self._runtime_engine_config(),
+        )
+        register_identity_text_reads(engine)
+        register_session_settings(engine, self._runtime_session_settings())
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        session_url = self.config.effective_session_database_url
+        session_engine: SessionEngine
+        if session_url == self.config.database_url.get_secret_value():
+            session_engine = SessionEngineShared()
+            session_async_engine = engine
+        else:
+            session_async_engine = create_async_engine(
+                session_url, **self._session_engine_config()
+            )
+            # The session URL must keep session state (LISTEN, session
+            # advisory locks), so it keeps session settings too.
+            register_session_settings(session_async_engine, SessionSettings.KEPT)
+            session_engine = SessionEngineSeparate(engine=session_async_engine)
+        partition_maintenance = PartitionMaintenanceDatabase(
+            session_async_engine,
+            connection_capacity=self.config.pool_size + self.config.max_overflow,
+        )
+
+        listener: ListenerState
+        match self._assume_initialized:
+            case True:
+                listener = ListenerDisabled()
+            case False:
+                listener = ListenerEnabled(
+                    listener=PostgresListener(
+                        to_psycopg_url(session_url),
+                        tcp_user_timeout_ms=self.config.tcp_user_timeout_ms,
+                    ),
+                )
+        return BrokerResources(
+            engine=engine,
+            session_factory=session_factory,
+            session_engine=session_engine,
+            partition_maintenance=partition_maintenance,
+            listener=listener,
+        )
+
+    async def select_resources(self) -> Result[BrokerResources, EventLoopConflict]:
+        """Return the resources for the running event loop.
+
+        Call once at a public entry point and pass the value to helpers.
+        It must run inside a running event loop. It does no I/O.
+        Today the broker holds one set, so this always returns ``Ok``.
+        """
+        return Ok(self._resources)
 
     def _runtime_session_settings(self) -> SessionSettings:
         """Whether runtime-pool connections keep session settings."""

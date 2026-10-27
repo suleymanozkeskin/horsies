@@ -31,12 +31,16 @@ class WorkflowStartErrorCode(str, Enum):
     - ``VALIDATION_FAILED``: programmer error (bad DAG, bad args, serialization)
     - ``ENQUEUE_FAILED``: infra error (schema init, DB transaction), conditionally retryable
     - ``INTERNAL_FAILED``: bug / catch-all
+    - ``EVENT_LOOP_CONFLICT``: the broker's async resources are in use by
+      another open event loop; nothing was written; clears when that loop
+      closes
     """
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     INTERNAL_FAILED = 'INTERNAL_FAILED'
+    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
 
 
 @dataclass(slots=True, frozen=True)
