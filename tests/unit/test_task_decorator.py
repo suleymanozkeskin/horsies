@@ -40,6 +40,7 @@ from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendPayload,
 )
+from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Err, Ok, is_ok, is_err
 
 
@@ -2328,6 +2329,59 @@ class TestPayloadMismatchClassification:
         assert is_err(result)
         assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
         assert result.err_value.retryable
+
+
+@pytest.mark.unit
+class TestIdempotencyKeyConflictClassification:
+    """A key reserved by another task keeps its own code and the owner id."""
+
+    def test_conflict_maps_to_its_own_code_with_the_owner(self) -> None:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        owner = IdempotencyKeyOwner(owner_task_id='owner-task-1')
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+            message='idempotency key is reserved by task owner-task-1',
+            retryable=False,
+            detail=owner,
+        ))
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=1)
+
+        assert is_err(result)
+        assert result.err_value.code is TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        assert result.err_value.retryable is False
+        assert result.err_value.detail == owner
+        assert result.err_value.payload is not None
+
+    def test_retry_send_accepts_the_conflict(self) -> None:
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        broker = MagicMock()
+        broker.enqueue.return_value = Ok('retry-id-1')
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        enqueue_failed = _make_enqueue_failed_error()
+        conflict = TaskSendError(
+            code=TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+            message='idempotency key is reserved by task owner-task-1',
+            retryable=False,
+            task_id=enqueue_failed.task_id,
+            payload=enqueue_failed.payload,
+            detail=IdempotencyKeyOwner(owner_task_id='owner-task-1'),
+        )
+
+        result = wrapper.retry_send(conflict)
+
+        assert is_ok(result)
+        assert broker.enqueue.call_args.kwargs['task_id'] == 'retry-id-1'
 
 
 # =============================================================================

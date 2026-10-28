@@ -20,6 +20,7 @@ from datetime import datetime
 from enum import Enum
 
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
+from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Result
 
 
@@ -44,7 +45,18 @@ class TaskSendErrorCode(str, Enum):
 
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
+
     PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
+    """The task id already exists, and the command or the idempotency key
+    differs from the original send; nothing was written. The message names
+    which one differs. ``retryable=False``; the retry methods refuse it."""
+
+    IDEMPOTENCY_KEY_CONFLICT = 'IDEMPOTENCY_KEY_CONFLICT'
+    """The idempotency key is reserved by another task with a different
+    command; nothing was written. ``detail`` is an ``IdempotencyKeyOwner``
+    that names the owner task. The retry methods accept this error: a retry
+    after the reservation ends is accepted, and a retry before that returns
+    the same error. ``retryable=False``: do not retry in a tight loop."""
 
     PAYLOAD_TOO_LARGE = 'PAYLOAD_TOO_LARGE'
     """Serialized kwargs exceeded ``payload.reject_bytes``; nothing was
@@ -99,6 +111,8 @@ class TaskSendError:
             be set for VALIDATION_FAILED depending on when the failure occurs)
         payload: serialized envelope for replay (None when no serialization happened)
         exception: the original cause (if any)
+        detail: ``IdempotencyKeyOwner`` for ``IDEMPOTENCY_KEY_CONFLICT``;
+            ``None`` for every other code
     """
 
     code: TaskSendErrorCode
@@ -107,6 +121,16 @@ class TaskSendError:
     task_id: str | None = None
     payload: TaskSendPayload | None = None
     exception: BaseException | None = None
+    detail: IdempotencyKeyOwner | None = None
+
+    def __post_init__(self) -> None:
+        is_key_conflict = self.code is TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        carries_owner = isinstance(self.detail, IdempotencyKeyOwner)
+        assert is_key_conflict == carries_owner, (
+            f'TaskSendError {self.code!r} with detail {self.detail!r}: '
+            'IDEMPOTENCY_KEY_CONFLICT carries an IdempotencyKeyOwner, '
+            'every other code carries no detail'
+        )
 
     def __repr__(self) -> str:
         """Redacted repr — never leak args/kwargs in logs."""

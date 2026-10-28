@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Result
 
 
@@ -98,12 +99,24 @@ class BrokerOperationError:
         message: human-readable description
         retryable: whether the caller can retry this operation
         exception: the original cause (if any)
+        detail: ``IdempotencyKeyOwner`` for ``IDEMPOTENCY_KEY_CONFLICT``;
+            ``None`` for every other code
     """
 
     code: BrokerErrorCode
     message: str
     retryable: bool
     exception: BaseException | None = None
+    detail: IdempotencyKeyOwner | None = None
+
+    def __post_init__(self) -> None:
+        is_key_conflict = self.code is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        carries_owner = isinstance(self.detail, IdempotencyKeyOwner)
+        assert is_key_conflict == carries_owner, (
+            f'BrokerOperationError {self.code!r} with detail {self.detail!r}: '
+            'IDEMPOTENCY_KEY_CONFLICT carries an IdempotencyKeyOwner, '
+            'every other code carries no detail'
+        )
 
 
 type BrokerResult[T] = Result[T, BrokerOperationError]

@@ -8,6 +8,24 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Changed
+
+- **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
+  whose idempotency key is reserved by another task with a different
+  command returns this code instead of `ENQUEUE_FAILED`. `err.detail` is an
+  `IdempotencyKeyOwner`, and its `owner_task_id` names the task that holds
+  the key. The retry methods accept the error; a retry after the
+  reservation ends is accepted. `retryable` is `False`. An exhaustive
+  `match` on `TaskSendErrorCode` needs an `IDEMPOTENCY_KEY_CONFLICT` case.
+- **`TaskSendError` and `BrokerOperationError` have a new field, `detail`.**
+  It is an `IdempotencyKeyOwner` for `IDEMPOTENCY_KEY_CONFLICT` and `None`
+  for every other code. An error built with a code and a detail that do
+  not agree fails an assertion.
+- **A retry that changes the idempotency key of a sent task id returns
+  `PAYLOAD_MISMATCH`.** Before, it returned `ENQUEUE_FAILED`, which the
+  retry methods accept, and a retry of it could not succeed while the task
+  row was live.
+
 ## [0.5.5] - 2026-10-28
 
 ### Upgrade notes

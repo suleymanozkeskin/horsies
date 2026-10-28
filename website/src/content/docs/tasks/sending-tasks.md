@@ -263,7 +263,7 @@ match my_task.send(name="alice", count=3):
         print(f"Permanent failure: {err.code}")
 ```
 
-Retry methods only accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.
+Retry methods only accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.
 
 ### Automatic Retry via Config
 
@@ -350,7 +350,7 @@ afterwards. A retry replays the class its original send chose, so editing
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed send using the stored payload from the error. Only valid for `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors.
+Retry a failed send using the stored payload from the error. Only valid for `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
@@ -364,7 +364,7 @@ Async variant of `.retry_send()`.
 
 ### `.retry_schedule(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED` and `ASYNC_CONTEXT` errors that originated from `.schedule()`.
+Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors that originated from `.schedule()`.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
@@ -399,6 +399,7 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 | `task_id` | `str \| None` | Generated task ID (`None` for `SEND_SUPPRESSED`, `VALIDATION_FAILED`) |
 | `payload` | `TaskSendPayload \| None` | Serialized envelope for replay (`None` when no serialization happened) |
 | `exception` | `BaseException \| None` | The original cause, if any |
+| `detail` | `IdempotencyKeyOwner \| None` | `IdempotencyKeyOwner(owner_task_id)` for `IDEMPOTENCY_KEY_CONFLICT`; `None` for every other code |
 
 ### `TaskSendErrorCode`
 
@@ -408,7 +409,8 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 | `ASYNC_CONTEXT` | Sync send/schedule called inside a running event loop; complete via `retry_*_async(err)` or the `*_async` entry point | No |
 | `VALIDATION_FAILED` | Argument serialization or validation failed | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue | Yes |
-| `PAYLOAD_MISMATCH` | Retry payload SHA does not match (payload was altered) | No |
+| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send (the payload was altered) | No |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `detail` is an `IdempotencyKeyOwner` that names the owner task. The retry methods accept it; a retry after the reservation ends is accepted | No |
 
 ### `TaskHandle[T]`
 
