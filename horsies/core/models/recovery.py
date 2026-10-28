@@ -66,6 +66,7 @@ class RecoveryConfig(BaseModel):
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
+    - phase2_quarantine_after_attempts: Recovery passes an unresolvable phase-2 pending row may retain before it is quarantined
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
@@ -164,14 +165,14 @@ class RecoveryConfig(BaseModel):
     runner_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
-            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (5s-2min); '
+            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (1s-2min); '
             'increase stale thresholds for CPU/GIL-heavy tasks to avoid false positives'
         ),
     )
 
     claimer_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
-        description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (5s-2min)',
+        description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (1s-2min)',
     )
 
     worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000, le=300_000)] = Field(

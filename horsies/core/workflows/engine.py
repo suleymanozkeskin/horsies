@@ -793,9 +793,9 @@ async def _build_enqueued_task_params(
     # — the likeliest producer of oversized payloads. Workflow nodes warn
     # and never reject: no node-failure path exists for a size refusal,
     # and a size limit must not strand a running workflow. The
-    # reject_bytes result of enforce_payload_policy is therefore unused.
+    # reject_bytes result of enforce_payload_policy is therefore discarded.
     if broker is not None and broker.app is not None:
-        enforce_payload_policy(
+        _ = enforce_payload_policy(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',

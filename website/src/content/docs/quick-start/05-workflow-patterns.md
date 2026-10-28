@@ -60,7 +60,8 @@ def start_order_workflow(
     if include_address_validation:
         node_address: TaskNode[Any] = TaskNode(
             fn=check_address,
-            waits_for=[prev_node] if prev_node else [],
+            # An args_from source must also be in waits_for (HRS-008).
+            waits_for=[prev_node] if prev_node is node_validate else [prev_node, node_validate],
             args_from={"order_result": node_validate},
             node_id="check_address",
         )

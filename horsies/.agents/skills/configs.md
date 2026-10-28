@@ -133,6 +133,8 @@ info = broker.get_task_info("task-uuid", include_result=True)  # sync
 ## PostgresConfig
 
 ```python
+from pydantic import SecretStr
+
 from horsies import PostgresConfig
 
 config = PostgresConfig(
@@ -142,14 +144,14 @@ config = PostgresConfig(
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `database_url` | `SecretStr` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
+| `database_url` | `SecretStr` | required | Must start with `"postgresql+psycopg://"` (HRS-203 otherwise) |
 | `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
 | `retain_rerun_input_default` | `bool` | `False` | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
-| `worker_pool_size` | `int | None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
-| `worker_max_overflow` | `int | None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
+| `worker_pool_size` | `int \| None` | `3` | Worker coordinator pool size; `None` inherits `pool_size` |
+| `worker_max_overflow` | `int \| None` | `2` | Worker coordinator overflow; `None` inherits `max_overflow` |
 | `worker_child_pool_min_size` | `int` | `0` | Minimum connections kept by each child worker process |
 | `worker_child_pool_max_size` | `int` | `2` | Maximum connections allowed per child worker process |
 | `worker_child_pool_check` | `bool` | `True` | Health-check child pool connections on checkout; one round trip per checkout, disable alongside `pool_pre_ping` on high-RTT links |
@@ -732,7 +734,7 @@ horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N]
 |---|---|---|
 | `--processes` | `1` | Worker process count |
 | `--loglevel` | `INFO` | Log level |
-| `--max-claim-batch` | `2` | Max tasks per queue per claim pass |
+| `--max-claim-batch` | `0` | Max tasks per queue per claim pass; 0 = auto |
 | `--max-claim-per-worker` | `0` | Max claimed per worker; 0 = auto |
 | `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 2`, or `0` to disable); forces `spawn`. See [Child process recycling](#child-process-recycling) |
 | `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB (CPython-only, forces `spawn`); fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
@@ -759,8 +761,8 @@ horsies check <module> [--live] [--loglevel LEVEL]
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--enable-actions]
-horsies web --database-url "postgresql+psycopg://..." [--session-database-url URL]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--loglevel INFO]
+horsies web --database-url "postgresql+psycopg://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
 Serves the monitoring dashboard (requires the `web` extra). Fail-closed:

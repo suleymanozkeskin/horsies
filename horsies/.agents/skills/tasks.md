@@ -280,7 +280,7 @@ await my_task.with_options(retention_class_key=None).send_async(**kwargs)
 await my_task.with_options(retention_class_key='standard_30d').send_async(**kwargs)
 ```
 
-**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
+**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`, `.schedule_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
 ### Task Expiry Lifecycle
 
@@ -314,7 +314,7 @@ Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `Su
 
 ## `TaskHandle[T]`
 
-Returned by successful `.send()` / `.send_async()` / `.schedule()`.
+Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()`.
 
 ```python
 task_id: str  # UUID, stable across retries of the same send
@@ -458,7 +458,7 @@ RetryPolicy.exponential(
 
 ### Jitter
 
-`jitter=True` (default) randomizes each delay by ±25%. Prevents thundering herd. Disable only in tests.
+`jitter=True` (default) adds a random 0–25% to each delay; it never shortens a delay. Prevents thundering herd. Disable only in tests.
 
 ### `auto_retry_for` valid values
 
