@@ -233,7 +233,7 @@ node_b_recover: TaskNode[str] = TaskNode(
 )
 ```
 
-The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. Without `allow_failed_deps`, the task never executes on upstream failure — no error handling code is needed.
+The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. An err still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 ### PAUSE Semantics (Cooperative Stop)
 
@@ -257,7 +257,7 @@ When a task fails with `on_error="pause"`:
   expected, not a fault.
 
 **Never-resumed pauses can be bounded by policy.** `paused_workflow_auto_cancel_after`
-(a `timedelta` on `RecoveryConfig`, default `None` = disabled) expires a
+(a `timedelta` on `AppConfig.retention`, default `None` = disabled) expires a
 workflow that has been PAUSED longer than the configured age, recording the
 policy name and age on the run's `error` column. No deployment changes
 behavior without declaring the rule.
@@ -534,10 +534,11 @@ Workflow tasks honor the same retry policies configured on the `@task` decorator
 from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
 @app.task(
+    "fetch_data",
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
-        auto_retry_for=["TASK_EXCEPTION", "NETWORK_ERROR"],
+        auto_retry_for=["UNHANDLED_EXCEPTION", "NETWORK_ERROR"],
     ),
 )
 def fetch_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:

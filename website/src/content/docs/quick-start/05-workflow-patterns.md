@@ -72,6 +72,7 @@ def start_order_workflow(
         tasks=nodes,
         output=output_node,
         on_error=OnError.FAIL,
+        definition_key="myapp.order_workflow.v1",
     )
     reveal_type(workflow)  # WorkflowSpec
 
@@ -126,6 +127,7 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
         name='sync_all_warehouses',
         tasks=nodes,
         output=last_node,
+        definition_key='myapp.sync_all_warehouses.v1',
     )
     reveal_type(workflow)  # WorkflowSpec
 
@@ -210,6 +212,7 @@ def fulfillment_workflow(order: Order) -> None:
         ],
         output=node_tracking,
         on_error=OnError.FAIL,
+        definition_key="myapp.fulfillment.v1",
     )
     reveal_type(workflow)  # WorkflowSpec
 
@@ -247,6 +250,7 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
         name=f"tracking_{shipment_id}",
         tasks=[node_fetch, node_update, node_notify],
         output=node_notify,
+        definition_key="myapp.shipment_tracking.v1",
     )
     reveal_type(workflow)  # WorkflowSpec
 
@@ -297,6 +301,7 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
         tasks=[node_web, node_store, node_phone, node_aggregate],
         output=node_aggregate,
         on_error=OnError.FAIL,
+        definition_key='myapp.returns_processing.v1',
     )
     reveal_type(workflow)  # WorkflowSpec
 

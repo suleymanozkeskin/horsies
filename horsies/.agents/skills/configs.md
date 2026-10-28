@@ -27,9 +27,6 @@ app = Horsies(config=AppConfig(
 string validates at runtime, but strict type checkers reject it — wrap with
 `pydantic.SecretStr` explicitly.
 
-```python
-```
-
 ### Fields
 
 | Field | Type | Default | Description |
@@ -145,8 +142,8 @@ config = PostgresConfig(
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `database_url` | `str` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
-| `session_database_url` | `str | None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
+| `database_url` | `SecretStr` | required | Must start with `"postgresql+psycopg"` (HRS-203 otherwise) |
+| `session_database_url` | `SecretStr \| None` | `None` | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
 | `pgbouncer_transaction_mode` | `bool` | `False` | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
 | `pool_size` | `int` | `5` | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | Extra connections beyond pool_size |
@@ -275,7 +272,7 @@ class QueueMode(Enum):
 ### DEFAULT
 
 - Single `"default"` queue.
-- No `queue_name` on `@app.task(...)` — passing one raises HRS-103.
+- No `queue_name` on `@app.task(...)` — passing one raises HRS-200.
 
 ### CUSTOM
 
@@ -285,7 +282,9 @@ class QueueMode(Enum):
 ## CustomQueueConfig
 
 ```python
-from horsies import CustomQueueConfig
+from pydantic import SecretStr
+
+from horsies import AppConfig, CustomQueueConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
@@ -293,7 +292,9 @@ config = AppConfig(
         CustomQueueConfig(name="critical", priority=1, max_concurrency=10),
         CustomQueueConfig(name="background", priority=50, max_concurrency=3),
     ],
-    broker=PostgresConfig(database_url="..."),
+    broker=PostgresConfig(
+        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+    ),
 )
 ```
 
@@ -346,6 +347,7 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `finalizing_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms a completed child may remain finalizing before recovery |
 | `crashed_worker_recovery_grace_ms` | `int` | `10_000` | 0–1hr | Grace before recovering a terminal workflow task whose progression was not applied; `0` disables; not heartbeat-coupled |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
+| `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `auto_terminate_orphaned_workflow_tasks` is `True` |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
@@ -381,7 +383,7 @@ The 2x factor ensures a task can miss one full heartbeat cycle without being inc
 Runs on `check_interval_ms` cadence:
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` and live parent worker state suppress this recovery.
-3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old heartbeat, worker_state, and terminal rows based on retention settings; a deleted task's `task_attempts` history is purged in the same statement. Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
+3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
 **CPU/GIL-heavy tasks:** Increase `running_stale_threshold_ms`. GIL-bound tasks may not send heartbeats at the configured interval. Rule of thumb: >= 3–5x worst-case heartbeat gap. The stale threshold is based on missing runner heartbeats, not total task duration.
 
@@ -406,7 +408,63 @@ Setting any of these on `RecoveryConfig` fails at construction naming
 | `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
 | `retention_classes` | `tuple[RetentionClassConfig, ...]` | `()` | keys: safe identifiers, not library-owned, no repeats; durations positive | Additional finite retention classes this deployment declares (key + duration); the maintenance owner registers each at startup and every pass, and tasks are sent into one via `with_options(retention_class_key=...)`. Classes are immutable: re-declaring a key with a different duration is refused at startup. `duration` is a minimum — leaves span one day, so a row survives between `duration` and `duration + 1 day` |
-| `queue_retention` | `dict[str, timedelta \| None]` | `{}` | queue names: safe identifiers; durations positive and whole seconds; derived key <=18 chars | Per-queue retention: maps a queue name to how long a task sent on it keeps its history record, or `None` for forever. Derives a class `q_<queue>_<duration>` (largest exact unit: `7d`, `36h`, `90m`, `45s`) and registers it with the declared ones. The duration is IN the key, so remapping mints a NEW class and records enqueued under the old mapping age out under it. `q_` is reserved: a `retention_classes` key may not use the prefix. Resolution is at the send and snapshotted on the row -- an explicit `retention_class_key` (including `standard_30d`) beats the mapping; omitting it takes the mapping. A queue with no entry is unchanged (30-day default). The class key is spliced into relation names, so the 18-char bound leaves roughly 13 characters of queue name; configuration refuses a longer one with the arithmetic |
+| `queue_retention` | `dict[str, timedelta \| None]` | `{}` | see [`queue_retention`](#queue_retention) | Per-queue retention class; see [`queue_retention`](#queue_retention) |
+
+### `queue_retention`
+
+Maps a queue name to how long a task sent on that queue keeps its
+history record. `None` keeps the record forever. A queue with no entry
+keeps the 30-day default class (`standard_30d`).
+
+```python
+from datetime import timedelta
+
+from pydantic import SecretStr
+
+from horsies import (
+    AppConfig,
+    CustomQueueConfig,
+    PostgresConfig,
+    QueueMode,
+    RetentionConfig,
+)
+
+config = AppConfig(
+    queue_mode=QueueMode.CUSTOM,
+    custom_queues=[
+        CustomQueueConfig(name="emails"),
+        CustomQueueConfig(name="audit"),
+    ],
+    broker=PostgresConfig(
+        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
+    ),
+    retention=RetentionConfig(
+        queue_retention={
+            "emails": timedelta(days=7),  # derives class q_emails_7d
+            "audit": None,  # keeps records forever
+        },
+    ),
+)
+```
+
+Rules (HRS-216 when a rule fails):
+
+- Each key must be a configured queue: a `custom_queues` name in `CUSTOM`
+  mode, or `"default"` in `DEFAULT` mode.
+- Queue names must be safe identifiers. Durations must be positive and
+  whole seconds.
+- A mapping derives the class `q_<queue>_<duration>`. The duration uses
+  the largest exact unit: `7d`, `36h`, `90m`, `45s`. The derived class is
+  registered with the declared `retention_classes`.
+- The duration is IN the key. A changed duration mints a NEW class.
+  Records enqueued under the old mapping age out under the old class.
+- `q_` is reserved. A `retention_classes` key cannot use the prefix.
+- The class is resolved at the send and snapshotted on the row. An
+  explicit `retention_class_key` (including `standard_30d`) beats the
+  mapping. A send without it takes the mapping.
+- The derived key has a limit of 18 characters, because it is spliced
+  into relation names. This leaves roughly 13 characters of queue name.
+  Configuration refuses a longer one with the arithmetic.
 
 
 ## WorkerResilienceConfig

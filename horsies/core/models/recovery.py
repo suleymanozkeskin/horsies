@@ -71,11 +71,8 @@ class RecoveryConfig(BaseModel):
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
-    - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
-    - terminal_record_retention_hours: Keep terminal WORKFLOW rows for this long (None disables cleanup);
-      terminal task rows live in the task-history archive and age by retention class
-    - retention_sweep_interval_s: Seconds between retention sweep passes
-    - retention_delete_batch_size: Rows per retention DELETE batch
+
+    Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
 
     auto_requeue_stale_claimed: bool = Field(
