@@ -8,6 +8,19 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-10-28
+
+### Upgrade notes
+
+- **No schema change.** The schema stays at v51.
+- **Code that reads `PostgresBroker.session_factory`, `.async_engine` or
+  `.listener` must change.** Call `await broker.select_resources()` on the
+  event loop that uses the resources, and match its `Ok` or
+  `Err(EventLoopLimit)`.
+- **An exhaustive `match` on `BrokerErrorCode`, `TaskSendErrorCode`,
+  `WorkflowStartErrorCode`, `HandleErrorCode`, `MonitoringQueryErrorCode`,
+  `TaskActionErrorCode` or `RetrievalCode` needs an `EVENT_LOOP_LIMIT` case.**
+
 ### Changed
 
 - **Sync workflow calls stop when the broker's sync runner stops.** After
