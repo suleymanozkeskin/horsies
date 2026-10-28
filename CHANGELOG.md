@@ -8,6 +8,57 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **Breaking: a sync call inside a running event loop returns
+  `ASYNC_CONTEXT`.** Code that makes a sync call from a coroutine or a
+  Jupyter cell must call the `*_async` form. Before, the call blocked that
+  loop until the broker answered.
+- **An exhaustive `match` on `BrokerErrorCode`, `WorkflowStartErrorCode`,
+  `HandleErrorCode` or `RetrievalCode` needs an `ASYNC_CONTEXT` case.**
+- **`ASYNC_CONTEXT` is now a reserved built-in code
+  (`RetrievalCode.ASYNC_CONTEXT`).** An `exception_mapper` or
+  `default_unhandled_error_code` value `ASYNC_CONTEXT` fails `horsies check`
+  with `HRS-212`, and `TaskError(error_code='ASYNC_CONTEXT')` is refused.
+
+### Changed
+
+- **Every sync facade fails closed on a thread that runs an event loop.** It
+  returns `ASYNC_CONTEXT` in its own error type, runs nothing, and does not
+  start the broker's sync runner:
+  - `BrokerErrorCode` for `PostgresBroker.enqueue()`, `.get_task_info()`,
+    `.get_raw_result_record()` and `.close()`, for `app.get_result()`,
+    `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`,
+    `app.ping_workers()`, `app.list_worker_states()`,
+    `app.get_worker_state()` and `app.get_worker_state_history()`, and for
+    `TaskHandle.info()`.
+  - `RetrievalCode`, not cached, for `TaskHandle.get()`,
+    `WorkflowHandle.get()` and `WorkflowHandle.result_for()`. A
+    `TaskHandle` that already holds its result still returns it.
+  - `HandleErrorCode` for the sync `WorkflowHandle` methods `status()`,
+    `results()`, `tasks()`, `cancel()`, `pause()` and `resume()`, and for
+    `pause_workflow_sync()` / `resume_workflow_sync()`.
+  - `WorkflowStartErrorCode` for `spec.start()` and `spec.retry_start()`.
+    `retry_start()` does not accept `ASYNC_CONTEXT`; call
+    `await spec.start_async()`.
+
+  `send()`, `schedule()` and their sync retries already returned
+  `TaskSendErrorCode.ASYNC_CONTEXT`. A broker `ASYNC_CONTEXT` that reaches
+  `send()` keeps that code instead of becoming `ENQUEUE_FAILED`.
+- **Sync `close()` inside a running event loop closes nothing.** It returns
+  `ASYNC_CONTEXT`, and the sync runner keeps its state. Before, it ran on the
+  sync runner, returned `CLOSE_FAILED` after 5 s when that loop had made
+  broker calls, and then stopped the runner.
+- **`app.check(live=True)` inside a running event loop reports `HRS-217`
+  (`CHECK_LIVE_ASYNC_CONTEXT`)** and does not connect. Before, it reported
+  `BROKER_INVALID_URL` (`HRS-203`), which named the wrong cause.
+
+### Fixed
+
+- **`close_async()` does not block its event loop while it stops the sync
+  runner.** The stop joins the runner thread for up to 2 s; it now runs on a
+  worker thread through `asyncio.to_thread()`.
+
 ## [0.5.5] - 2026-10-28
 
 ### Upgrade notes

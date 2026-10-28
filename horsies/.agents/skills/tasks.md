@@ -150,6 +150,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 - `RESULT_NOT_AVAILABLE` — result cache never set
 - `RESULT_NOT_READY` — result not ready yet
 - `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
+- `ASYNC_CONTEXT` — sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
 
 ### `OutcomeCode`
 
@@ -383,6 +384,7 @@ class TaskSendError:
 | Code | Retryable | When |
 |---|---|---|
 | `SEND_SUPPRESSED` | No | `.send()` called during worker import/discovery |
+| `ASYNC_CONTEXT` | No | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
 | `VALIDATION_FAILED` | No | Serialization failed, invalid queue, or cross-method retry attempted |
 | `ENQUEUE_FAILED` | Yes | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry |
 | `PAYLOAD_MISMATCH` | No | Retry payload SHA doesn't match — payload was altered between send and retry |
@@ -645,6 +647,20 @@ loop.run_until_complete(my_task.send_async(value="test"))
 
 # CORRECT — asyncio.run() closes its loop, so the next call releases its set
 asyncio.run(my_task.send_async(value="test"))
+```
+
+### Sync calls inside a coroutine or a Jupyter cell → `ASYNC_CONTEXT`
+
+```python
+# WRONG — on a thread that runs an event loop, each sync call returns ASYNC_CONTEXT
+async def report(handle: TaskHandle[str]) -> None:
+    send_r = my_task.send(value="test")      # Err(ASYNC_CONTEXT), nothing enqueued
+    result = handle.get(timeout_ms=5000)     # TaskError(ASYNC_CONTEXT), not cached
+
+# CORRECT — use the *_async forms
+async def report() -> None:
+    handle = (await my_task.send_async(value="test")).unwrap()
+    result = await handle.get_async(timeout_ms=5000)
 ```
 
 ### `WAIT_TIMEOUT` is not a terminal failure

@@ -89,6 +89,9 @@ class ErrorCode(str, Enum):
     CONFIG_INVALID_CHILD_HOOK = 'HRS-214'
     CONFIG_INVALID_KEEPALIVE = 'HRS-215'
     CONFIG_INVALID_RETENTION = 'HRS-216'
+    # check(live=True) was called on a thread that runs an event loop; the
+    # live connectivity check did not run.
+    CHECK_LIVE_ASYNC_CONTEXT = 'HRS-217'
 
     # Registry (HRS-300-HRS-399)
     TASK_NOT_REGISTERED = 'HRS-300'

@@ -87,6 +87,10 @@ class BrokerErrorCode(str, Enum):
     # loops, and this call ran on a new one. Nothing ran. It clears when one
     # of those loops closes.
     EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
+    # A sync facade was called on a thread that runs an event loop. Its
+    # wait would stall that loop, so nothing ran. Repeating the sync call
+    # on that thread returns the same error; call the ``*_async`` form.
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 @dataclass(slots=True, frozen=True)

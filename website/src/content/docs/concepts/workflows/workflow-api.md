@@ -78,6 +78,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
 | `INTERNAL_FAILED` | No | Sync bridge or unexpected exception |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.start_async()`; `retry_start()` does not accept this code |
 
 **Usage:**
 

@@ -59,6 +59,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
+from horsies.core.utils.loop_runner import (
+    async_context_message,
+    in_running_event_loop,
+)
 from horsies.core.codec.json_io import loads_json
 from horsies.core.types.result import is_err
 
@@ -894,7 +898,27 @@ class Horsies:
 
         Uses a short-lived async engine/session to avoid mutating the app's
         long-lived broker/session pool inside an ephemeral asyncio.run loop.
+        On a thread that runs an event loop, ``asyncio.run`` cannot start, so
+        the check reports ``CHECK_LIVE_ASYNC_CONTEXT`` and connects to nothing.
         """
+        if in_running_event_loop():
+            return [
+                _no_location(
+                    ConfigurationError(
+                        message='live broker check cannot run inside a running event loop',
+                        code=ErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
+                        notes=[
+                            'check(live=True) was called on a thread that runs an '
+                            'event loop; the connectivity check did not run',
+                        ],
+                        help_text=(
+                            'call check(live=True) from sync code, or from async '
+                            'code use: await asyncio.to_thread(app.check, live=True)'
+                        ),
+                    )
+                )
+            ]
+
         import asyncio
 
         import psycopg
@@ -1215,7 +1239,13 @@ class Horsies:
         task_id: str,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
-        """Synchronous version of ``get_result_async``."""
+        """Synchronous version of ``get_result_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_result')
         broker = self.get_broker()
         try:
             return broker.run_sync(
@@ -1341,7 +1371,13 @@ class Horsies:
         include_failed_reason: bool = False,
         include_attempts: bool = False,
     ) -> 'BrokerResult[TaskInfo | None]':
-        """Synchronous version of ``get_task_info_async``."""
+        """Synchronous version of ``get_task_info_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_task_info')
         broker = self.get_broker()
         try:
             return broker.run_sync(
@@ -1384,14 +1420,36 @@ class Horsies:
             exception=exc,
         ))
 
+    def _async_context_err(self, label: str) -> 'BrokerResult[Any]':
+        """Refuse a sync facade called inside a running event loop. Nothing ran."""
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
+        from horsies.core.types.result import Err
+
+        return Err(BrokerOperationError(
+            code=BrokerErrorCode.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'app.{label}()', f'app.{label}_async(...)',
+            ),
+            retryable=False,
+        ))
+
     async def ping_database_async(self) -> 'BrokerResult[DatabasePing]':
         """Probe Postgres reachability + latency through the live pool."""
         return await self.get_broker().ping_database_async()
 
     def ping_database(self) -> 'BrokerResult[DatabasePing]':
-        """Synchronous version of ``ping_database_async``."""
+        """Synchronous version of ``ping_database_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.brokers.result_types import BrokerErrorCode
 
+        if in_running_event_loop():
+            return self._async_context_err('ping_database')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.ping_database_async)
@@ -1425,9 +1483,15 @@ class Horsies:
         timeout_seconds: float = 2.0,
         min_responses: int | None = None,
     ) -> 'BrokerResult[list[WorkerPong]]':
-        """Synchronous version of ``ping_workers_async``."""
+        """Synchronous version of ``ping_workers_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.brokers.result_types import BrokerErrorCode
 
+        if in_running_event_loop():
+            return self._async_context_err('ping_workers')
         broker = self.get_broker()
         try:
             return broker.run_sync(
@@ -1448,9 +1512,15 @@ class Horsies:
         return await self.get_broker().list_worker_states_async()
 
     def list_worker_states(self) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``list_worker_states_async``."""
+        """Synchronous version of ``list_worker_states_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.brokers.result_types import BrokerErrorCode
 
+        if in_running_event_loop():
+            return self._async_context_err('list_worker_states')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.list_worker_states_async)
@@ -1470,9 +1540,15 @@ class Horsies:
         self,
         worker_id: str,
     ) -> 'BrokerResult[WorkerStateSnapshot | None]':
-        """Synchronous version of ``get_worker_state_async``."""
+        """Synchronous version of ``get_worker_state_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.brokers.result_types import BrokerErrorCode
 
+        if in_running_event_loop():
+            return self._async_context_err('get_worker_state')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.get_worker_state_async, worker_id)
@@ -1498,9 +1574,15 @@ class Horsies:
         *,
         limit: int | None = None,
     ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Synchronous version of ``get_worker_state_history_async``."""
+        """Synchronous version of ``get_worker_state_history_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.brokers.result_types import BrokerErrorCode
 
+        if in_running_event_loop():
+            return self._async_context_err('get_worker_state_history')
         broker = self.get_broker()
         try:
             return broker.run_sync(

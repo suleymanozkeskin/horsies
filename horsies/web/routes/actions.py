@@ -117,10 +117,26 @@ def _task_action_failed(error: TaskActionError) -> _Outcome:
 
 
 def _handle_failed(error: HandleOperationError) -> _Outcome:
-    """Map a workflow primitive's failure onto its response."""
-    if error.code is HandleErrorCode.WORKFLOW_NOT_FOUND:
-        return _Outcome(status_code=404, content={'detail': error.message})
-    return _Outcome(status_code=503, content={'detail': error.message})
+    """Map a workflow primitive's failure onto its response.
+
+    The routes call only async workflow primitives, so ``ASYNC_CONTEXT``
+    (returned by sync facades only) fails an assertion.
+    """
+    match error.code:
+        case HandleErrorCode.WORKFLOW_NOT_FOUND:
+            return _Outcome(status_code=404, content={'detail': error.message})
+        case (
+            HandleErrorCode.DB_OPERATION_FAILED
+            | HandleErrorCode.LOOP_RUNNER_FAILED
+            | HandleErrorCode.INTERNAL_FAILED
+            | HandleErrorCode.EVENT_LOOP_LIMIT
+        ):
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleErrorCode.ASYNC_CONTEXT:
+            raise AssertionError(
+                f'web workflow action for workflow {error.workflow_id} got '
+                'ASYNC_CONTEXT; the routes call only async workflow primitives',
+            )
 
 
 def _respond(route: str, entity_id: str, outcome: _Outcome) -> JSONResponse:

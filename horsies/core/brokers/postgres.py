@@ -90,7 +90,11 @@ from horsies.core.utils.db import (
     register_identity_text_reads,
     register_session_settings,
 )
-from horsies.core.utils.loop_runner import LoopRunner
+from horsies.core.utils.loop_runner import (
+    LoopRunner,
+    async_context_message,
+    in_running_event_loop,
+)
 from horsies.core.utils.url import to_psycopg_url
 
 if TYPE_CHECKING:
@@ -128,6 +132,22 @@ def _loop_limit_err(
         BrokerOperationError(
             code=BrokerErrorCode.EVENT_LOOP_LIMIT,
             message=f'{operation}: {loop_limit.describe()}',
+            retryable=False,
+        )
+    )
+
+
+def _async_context_err(
+    sync_call: str, async_call: str,
+) -> Err[BrokerOperationError]:
+    """Build the broker error for a sync facade called inside a running event loop.
+
+    Nothing ran, and the sync runner was not started.
+    """
+    return Err(
+        BrokerOperationError(
+            code=BrokerErrorCode.ASYNC_CONTEXT,
+            message=async_context_message(sync_call, async_call),
             retryable=False,
         )
     )
@@ -2806,8 +2826,14 @@ class PostgresBroker:
         """Synchronous wrapper around ``get_raw_result_record_async``.
 
         Runs the async path on the broker's background event loop via
-        ``LoopRunner``.
+        ``LoopRunner``. On a thread that runs an event loop it returns
+        ``Err(ASYNC_CONTEXT)`` and does no I/O.
         """
+        if in_running_event_loop():
+            return _async_context_err(
+                'PostgresBroker.get_raw_result_record()',
+                'broker.get_raw_result_record_async(...)',
+            )
         try:
             return self.run_sync(
                 self.get_raw_result_record_async, task_id, timeout_ms,
@@ -2862,6 +2888,8 @@ class PostgresBroker:
         ]
         # If sync APIs started the LoopRunner, close_async should also tear it down
         # when called from any thread except the loop-runner thread itself.
+        # stop() joins the runner thread (up to 2 s), so it runs on a worker
+        # thread and this loop keeps running during the join.
         loop_thread = self._loop_runner._thread
         if (
             self._loop_runner._started
@@ -2869,7 +2897,7 @@ class PostgresBroker:
             and threading.current_thread() is not loop_thread
         ):
             try:
-                self._loop_runner.stop()
+                await asyncio.to_thread(self._loop_runner.stop)
             except Exception as exc:
                 errors.append(exc)
         if errors:
@@ -3744,7 +3772,15 @@ class PostgresBroker:
         retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
     ) -> BrokerResult[str]:
-        """Synchronous task submission (runs enqueue_async in background loop)."""
+        """Synchronous task submission (runs enqueue_async in background loop).
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and writes nothing.
+        """
+        if in_running_event_loop():
+            return _async_context_err(
+                'PostgresBroker.enqueue()', 'broker.enqueue_async(...)',
+            )
         try:
             return self.run_sync(
                 self.enqueue_async,
@@ -4135,7 +4171,16 @@ class PostgresBroker:
         include_failed_reason: bool = False,
         include_attempts: bool = False,
     ) -> BrokerResult[TaskInfo | None]:
-        """Synchronous wrapper for get_task_info_async()."""
+        """Synchronous wrapper for get_task_info_async().
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return _async_context_err(
+                'PostgresBroker.get_task_info()',
+                'broker.get_task_info_async(...)',
+            )
         try:
             return self.run_sync(
                 self.get_task_info_async,
@@ -4152,7 +4197,16 @@ class PostgresBroker:
             )
 
     def close(self) -> BrokerResult[None]:
-        """Synchronous cleanup (runs close_async in background loop)."""
+        """Synchronous cleanup (runs close_async in background loop).
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and closes nothing: no resource set closes and the sync runner keeps
+        its state. Use ``await close_async()`` there.
+        """
+        if in_running_event_loop():
+            return _async_context_err(
+                'PostgresBroker.close()', 'broker.close_async()',
+            )
         try:
             return self.run_sync(self.close_async)
         except Exception as exc:

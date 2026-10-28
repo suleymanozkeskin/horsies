@@ -21,7 +21,11 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from horsies.core.logging import get_logger
-from horsies.core.utils.loop_runner import LoopRunnerError
+from horsies.core.utils.loop_runner import (
+    LoopRunnerError,
+    async_context_message,
+    in_running_event_loop,
+)
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
@@ -253,6 +257,22 @@ def _event_loop_limit_task_result(
         err=TaskError(
             error_code=RetrievalCode.EVENT_LOOP_LIMIT,
             message=f'workflow {workflow_id}: {loop_limit.describe()}',
+        ),
+    )
+
+
+def _async_context_task_result(operation: str) -> TaskResult[Any, TaskError]:
+    """Build a TaskResult with ASYNC_CONTEXT for a sync fold-strategy call.
+
+    Nothing ran. The result is not cached anywhere: the ``*_async`` form
+    reads the value.
+    """
+    return TaskResult(
+        err=TaskError(
+            error_code=RetrievalCode.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'WorkflowHandle.{operation}()', f'handle.{operation}_async(...)',
+            ),
         ),
     )
 
@@ -547,6 +567,11 @@ class WorkflowHandle(Generic[OutT]):
     **Fold strategy** (get, result_for):
     Returns ``TaskResult[T, TaskError]``. Infrastructure errors fold into
     ``TaskResult(err=TaskError(BROKER_ERROR, ...))``.
+
+    Every sync method called on a thread that runs an event loop returns
+    ``ASYNC_CONTEXT`` (``HandleErrorCode`` for the wrap strategy,
+    ``RetrievalCode`` for the fold strategy) and runs nothing. Use the
+    ``*_async`` form there.
     """
 
     workflow_id: str
@@ -579,7 +604,21 @@ class WorkflowHandle(Generic[OutT]):
         operation: str,
         *args: Any,
     ) -> HandleResult[_T]:
-        """Sync bridge for wrap-strategy async methods."""
+        """Sync bridge for wrap-strategy async methods.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and runs nothing.
+        """
+        if in_running_event_loop():
+            return Err(HandleOperationError(
+                code=HandleErrorCode.ASYNC_CONTEXT,
+                message=async_context_message(
+                    f'WorkflowHandle.{operation}()',
+                    f'handle.{operation}_async(...)',
+                ),
+                retryable=False,
+                workflow_id=self.workflow_id,
+            ))
         try:
             return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
@@ -606,9 +645,19 @@ class WorkflowHandle(Generic[OutT]):
     def _sync_task_result_call(
         self,
         coro_fn: Callable[..., Coroutine[Any, Any, TaskResult[_T, TaskError]]],
+        operation: str,
         *args: Any,
     ) -> TaskResult[_T, TaskError]:
-        """Sync bridge for fold-strategy async methods."""
+        """Sync bridge for fold-strategy async methods.
+
+        On a thread that runs an event loop it returns an ``ASYNC_CONTEXT``
+        result and runs nothing.
+        """
+        if in_running_event_loop():
+            return cast(
+                'TaskResult[_T, TaskError]',
+                _async_context_task_result(operation),
+            )
         try:
             return self.broker.run_sync(coro_fn, *args)
         except asyncio.CancelledError:
@@ -675,7 +724,7 @@ class WorkflowHandle(Generic[OutT]):
             If output task specified: that task's TaskResult
             Otherwise: TaskResult containing dict of terminal task results
         """
-        return self._sync_task_result_call(self.get_async, timeout_ms)
+        return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
 
     async def get_async(
         self, timeout_ms: int | None = None,
@@ -729,6 +778,12 @@ class WorkflowHandle(Generic[OutT]):
                             error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
                         case HandleErrorCode.EVENT_LOOP_LIMIT:
                             error_code = RetrievalCode.EVENT_LOOP_LIMIT
+                        case HandleErrorCode.ASYNC_CONTEXT:
+                            raise AssertionError(
+                                'WorkflowHandle.get_async status read for workflow '
+                                f'{self.workflow_id} returned ASYNC_CONTEXT; only a '
+                                'sync facade returns it, and this read is async',
+                            )
                         case _:
                             error_code = OperationalErrorCode.BROKER_ERROR
                     return cast(
@@ -999,7 +1054,9 @@ class WorkflowHandle(Generic[OutT]):
                 # Task hasn't completed yet - wait or check later
                 pass
         """
-        return self._sync_task_result_call(self.result_for_async, node)
+        return self._sync_task_result_call(
+            self.result_for_async, 'result_for', node,
+        )
 
     async def result_for_async(
         self, node: TaskNode[OkT] | NodeKey[OkT],

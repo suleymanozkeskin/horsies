@@ -565,6 +565,7 @@ class TestErrorCode:
             ErrorCode.CONFIG_INVALID_RESILIENCE,
             ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
             ErrorCode.CONFIG_INVALID_RETENTION,
+            ErrorCode.CHECK_LIVE_ASYNC_CONTEXT,
         ]
         for code in config_codes:
             # HRS-200-HRS-299 range
