@@ -665,8 +665,8 @@ class ReaperMixin:
         logs every check_interval_ms forever.
 
         Raises:
-            AssertionError: the broker's resources are in use by another
-                event loop. This is a programmer error. The loop ends, and
+            AssertionError: the broker already serves its limit of event
+                loops. This is a programmer error. The loop ends, and
                 the worker treats a dead service loop as fatal.
         """
         if not self.cfg.recovery_config:
@@ -717,13 +717,14 @@ class ReaperMixin:
                     temp_broker.app = self._app
 
             # Selected once for the life of this loop. Either broker above
-            # lives on this event loop, so a conflict is a programmer error.
+            # serves this event loop, so reaching the loop limit is a
+            # programmer error.
             # It is raised before the pass loop: that loop's handler logs
             # and continues.
             match await temp_broker.select_resources():
-                case Err(conflict):
+                case Err(loop_limit):
                     raise AssertionError(
-                        f'reaper loop broker resources: {conflict.describe()}',
+                        f'reaper loop broker resources: {loop_limit.describe()}',
                     )
                 case Ok(resources):
                     pass

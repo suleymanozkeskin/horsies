@@ -149,6 +149,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 - `WORKFLOW_NOT_FOUND` — workflow ID does not exist
 - `RESULT_NOT_AVAILABLE` — result cache never set
 - `RESULT_NOT_READY` — result not ready yet
+- `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
 
 ### `OutcomeCode`
 
@@ -386,6 +387,7 @@ class TaskSendError:
 | `ENQUEUE_FAILED` | Yes | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry |
 | `PAYLOAD_MISMATCH` | No | Retry payload SHA doesn't match — payload was altered between send and retry |
 | `PAYLOAD_TOO_LARGE` | No | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
+| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
 
 ### `TaskSendPayload`
 
@@ -632,6 +634,17 @@ def t() -> TaskResult[str, TaskError]: ...
 # CORRECT — @app.task must be applied to the raw function
 @app.task("t")
 def t() -> TaskResult[str, TaskError]: ...
+```
+
+### Open event loops that are never closed → `EVENT_LOOP_LIMIT`
+
+```python
+# WRONG — every call leaves one more open loop; the sixth gets EVENT_LOOP_LIMIT
+loop = asyncio.new_event_loop()
+loop.run_until_complete(my_task.send_async(value="test"))
+
+# CORRECT — asyncio.run() closes its loop, so the next call releases its set
+asyncio.run(my_task.send_async(value="test"))
 ```
 
 ### `WAIT_TIMEOUT` is not a terminal failure

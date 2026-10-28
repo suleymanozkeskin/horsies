@@ -159,13 +159,13 @@ class SchemaProbe:
     async def _read(self) -> SchemaStatus | None:
         """Read the stored version, or None when the read fails.
 
-        A read fails on a database error, or when another open event loop
-        holds the broker's async resources. Neither is a verdict about the
+        A read fails on a database error, or when the broker already serves
+        its limit of open event loops. Neither is a verdict about the
         schema; the warning log names the cause.
         """
         match await self._broker.select_resources():
-            case Err(conflict):
-                logger.warning(f'Schema version probe failed: {conflict.describe()}')
+            case Err(loop_limit):
+                logger.warning(f'Schema version probe failed: {loop_limit.describe()}')
                 return None
             case Ok(resources):
                 pass

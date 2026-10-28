@@ -28,7 +28,7 @@ from horsies.core.scheduler.validation import (
 )
 from horsies.core.types.result import Err, Ok, is_err
 from tests.broker_resources_support import (
-    attach_conflict,
+    attach_loop_limit,
     attach_resources,
     fake_resources,
 )
@@ -1073,7 +1073,7 @@ class TestSchedulerStart:
         with pytest.raises(RuntimeError, match='Schema initialization failed'):
             await scheduler.start()
 
-    async def test_event_loop_conflict_raises_before_schema_init(self) -> None:
+    async def test_event_loop_limit_raises_before_schema_init(self) -> None:
         """A broker whose resources serve another loop stops start(); nothing runs."""
         config = ScheduleConfig(
             schedules=[
@@ -1086,7 +1086,7 @@ class TestSchedulerStart:
         )
         app = _make_app(schedule_config=config)
         broker = _make_broker_mock()
-        conflict = attach_conflict(broker)
+        loop_limit = attach_loop_limit(broker)
         app.get_broker = MagicMock(return_value=broker)
         scheduler = Scheduler(app)
 
@@ -1094,7 +1094,7 @@ class TestSchedulerStart:
             await scheduler.start()
 
         assert str(raised.value) == (
-            f'Scheduler start failed: {conflict.describe()}'
+            f'Scheduler start failed: {loop_limit.describe()}'
         )
         broker.ensure_schema_initialized.assert_not_awaited()
         assert scheduler.state_manager is None

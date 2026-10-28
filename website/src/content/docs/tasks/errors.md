@@ -67,6 +67,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
+| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
 
 #### OutcomeCode
 
@@ -102,6 +103,7 @@ Terminal outcome codes for tasks and workflows.
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | No |
 | `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | No |
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
+| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this call ran on a new one; nothing ran; clears when one of those loops closes | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
@@ -132,6 +134,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue (transient) | Yes |
 | `PAYLOAD_MISMATCH` | Retry payload SHA does not match -- payload was altered between send and retry | No |
+| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | No |
 
 `ENQUEUE_FAILED` errors carry a `TaskSendPayload` with an `enqueue_sha` field. Pass the error to `.retry_send(error)` or `.retry_send_async(error)` to replay the exact payload. The SHA guarantees same-payload idempotency.
 

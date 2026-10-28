@@ -121,9 +121,9 @@ class Scheduler:
         schema is ready or will succeed on first attempt.
 
         Raises:
-            RuntimeError: the broker's resources are in use by another open
-                event loop, or schema initialization failed (broker Err
-                unwrapped).
+            RuntimeError: the broker already serves its limit of open event
+                loops and this is a new one, or schema initialization failed
+                (broker Err unwrapped).
             HorsiesError: broker construction failed (``get_broker``).
             RegistryError | ConfigurationError: schedule validation failed.
                 All propagate through run_forever to the CLI boundary —
@@ -134,9 +134,9 @@ class Scheduler:
 
         self.broker = self.app.get_broker()
         match await self.broker.select_resources():
-            case Err(conflict):
+            case Err(loop_limit):
                 raise RuntimeError(
-                    f'Scheduler start failed: {conflict.describe()}',
+                    f'Scheduler start failed: {loop_limit.describe()}',
                 )
             case Ok(resources):
                 pass

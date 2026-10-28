@@ -112,7 +112,7 @@ def _task_action_failed(error: TaskActionError) -> _Outcome:
             )
         case TaskActionErrorCode.DB_OPERATION_FAILED:
             return _Outcome(status_code=503, content={'detail': error.message})
-        case TaskActionErrorCode.EVENT_LOOP_CONFLICT:
+        case TaskActionErrorCode.EVENT_LOOP_LIMIT:
             return _Outcome(status_code=503, content={'detail': error.message})
 
 

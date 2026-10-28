@@ -880,9 +880,9 @@ class Worker(
                 case broker:
                     await broker.validate_worker_database_paths()
             match await broker.select_resources():
-                case Err(conflict):
+                case Err(loop_limit):
                     raise AssertionError(
-                        f'worker broker resources: {conflict.describe()}'
+                        f'worker broker resources: {loop_limit.describe()}'
                     )
                 case Ok(resources):
                     pass

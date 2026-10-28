@@ -38,11 +38,11 @@ async def _initialize_session_broker(
     *,
     seed_history: bool = False,
 ) -> None:
-    """Initialize and bind listener ownership to the session loop.
+    """Initialize the schema and start the session loop's listener.
 
-    Sync facades subsequently fall back to polling instead of claiming the
-    shared listener from their LoopRunner. Session-loop listener tests then
-    receive the same uncontaminated owner regardless of collection order.
+    The broker keeps one resource set per event loop: session-loop tests use
+    this set and its listener, and each function-loop test gets its own set,
+    released at the next call after its loop closes.
 
     The PgBouncer-only lane has no default PostgreSQL service on port 5432.
     Its marked smoke test constructs and initializes a dedicated split-URL

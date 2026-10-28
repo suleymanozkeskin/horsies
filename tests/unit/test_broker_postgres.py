@@ -37,6 +37,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
+from tests.broker_resources_support import pin_resources, resources_of
 
 
 # ---------------------------------------------------------------------------
@@ -84,14 +85,19 @@ def _orphan_scan_stats(rows: int, candidates: int) -> MagicMock:
     return result
 
 
+def _pinned(broker: Any) -> Any:
+    """The mocked resource set that ``_make_broker`` pinned for every loop."""
+    return broker._build_resources()
+
+
 def _set_resources(broker: Any, **parts: Any) -> None:
-    """Replace parts of the broker's resource set (white-box test helper)."""
-    broker._resources = dataclasses.replace(broker._resources, **parts)
+    """Replace parts of the pinned resource set (white-box test helper)."""
+    pin_resources(broker, dataclasses.replace(_pinned(broker), **parts))
 
 
 def _listener_of(broker: Any) -> Any:
-    """The listener inside the broker's resource set."""
-    match broker._resources.listener:
+    """The listener inside the pinned resource set."""
+    match _pinned(broker).listener:
         case ListenerEnabled(listener=listener):
             return listener
         case ListenerDisabled():
@@ -125,6 +131,8 @@ def _make_broker(database_url: str = 'postgresql+psycopg://u:p@localhost/db') ->
         from horsies.core.brokers.postgres import PostgresBroker
 
         broker = PostgresBroker(config)
+        # Build the mocked set under the patches; every loop gets it.
+        pin_resources(broker, broker._build_resources())
         # Mark as initialized to skip real DB setup
         broker._initialized = True
 
@@ -318,9 +326,9 @@ class TestPostgresBrokerPgBouncerWiring:
         context = MagicMock()
         context.__aenter__ = AsyncMock(return_value=connection)
         context.__aexit__ = AsyncMock(return_value=None)
-        broker._resources.engine.connect.return_value = context
+        _pinned(broker).engine.connect.return_value = context
         _set_resources(broker, partition_maintenance=MagicMock())
-        broker._resources.partition_maintenance.connect.return_value = context
+        _pinned(broker).partition_maintenance.connect.return_value = context
 
         with (
             patch(
@@ -415,7 +423,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 session_database_url=session_url,
                 pgbouncer_transaction_mode=True,
             )
-            PostgresBroker(config)
+            PostgresBroker(config)._build_resources()
 
         assert mock_engine.call_count == 2
         assert mock_engine.call_args_list[0].args[0] == database_url
@@ -497,7 +505,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(broker._resources)
+            await broker._ensure_initialized(await resources_of(broker))
 
         assert mock_engine.call_args_list[0].args[0] == database_url
         assert mock_engine.call_args_list[1].args[0] == session_url
@@ -557,7 +565,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 database_url='postgresql+psycopg://u:p@localhost/db',
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(broker._resources)
+            await broker._ensure_initialized(await resources_of(broker))
 
         lock_calls = [
             call for call in lock_connection.execute.await_args_list
@@ -626,7 +634,7 @@ class TestPostgresBrokerPgBouncerWiring:
                 pgbouncer_transaction_mode=True,
             )
             broker = PostgresBroker(config)
-            await broker._ensure_initialized(broker._resources)
+            await broker._ensure_initialized(await resources_of(broker))
 
         lock_keys = [
             call.args[1][0]
@@ -745,9 +753,10 @@ class TestPostgresBrokerPgBouncerWiring:
                 PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db'),
                 assume_initialized=True,
             )
+            resources = broker._build_resources()
 
         assert broker._initialized is True
-        assert isinstance(broker._resources.listener, ListenerDisabled)
+        assert isinstance(resources.listener, ListenerDisabled)
         mock_listener_cls.assert_not_called()
 
 
@@ -1561,7 +1570,7 @@ def _setup_session_returning(
     fetchall: list[Any] | None = None,
     fetchone: Any = None,
 ) -> AsyncMock:
-    """Configure broker._resources.session_factory to return a result with given rows."""
+    """Configure the pinned session_factory to return a result with given rows."""
     mock_result = MagicMock()
     mock_result.fetchall.return_value = fetchall if fetchall is not None else []
     mock_result.fetchone.return_value = fetchone
@@ -1694,7 +1703,7 @@ class TestPingWorkers:
             database_url='postgresql+psycopg://u:p@localhost/db'
         )
         broker = PostgresBroker(config, assume_initialized=True)
-        assert isinstance(broker._resources.listener, ListenerDisabled)
+        assert isinstance((await resources_of(broker)).listener, ListenerDisabled)
 
         result = await broker.ping_workers_async(timeout_seconds=1.0)
 
@@ -2950,13 +2959,25 @@ class TestCloseAsync:
             call_order.append('engine_dispose')
 
         _listener_of(broker).close = mock_listener_close
-        broker._resources.engine.dispose = mock_engine_dispose
+        _pinned(broker).engine.dispose = mock_engine_dispose
+        await resources_of(broker)  # build this loop's set
 
         result = await broker.close_async()
 
         assert is_ok(result)
         assert result.ok_value is None
         assert call_order == ['listener_close', 'engine_dispose']
+
+    @pytest.mark.asyncio
+    async def test_close_async_without_a_built_set_closes_nothing(self) -> None:
+        """A broker that never made a call holds no set, so close touches nothing."""
+        broker = _make_broker()
+
+        result = await broker.close_async()
+
+        assert is_ok(result)
+        _listener_of(broker).close.assert_not_awaited()
+        _pinned(broker).engine.dispose.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_close_async_stops_loop_runner_when_started_externally(self) -> None:
@@ -3161,7 +3182,7 @@ class TestSchemaVersionInitialization:
             broker = PostgresBroker(
                 PostgresConfig(database_url='postgresql+psycopg://u:p@localhost/db')
             )
-            await broker._ensure_initialized(broker._resources)
+            await broker._ensure_initialized(await resources_of(broker))
 
         assert len(conn.execute.await_args_list) == 2
         assert conn.execute.await_args_list[0].args == (
@@ -3346,7 +3367,8 @@ class TestCloseAsyncErrorPaths:
             dispose_called = True
 
         _listener_of(broker).close = failing_listener_close
-        broker._resources.engine.dispose = tracking_engine_dispose
+        _pinned(broker).engine.dispose = tracking_engine_dispose
+        await resources_of(broker)  # build this loop's set
 
         result = await broker.close_async()
 

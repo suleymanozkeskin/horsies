@@ -158,16 +158,20 @@ class PostgresListener:
         self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
 
     def _bind_or_validate_loop(self) -> None:
-        """Bind to first caller loop and reject cross-loop access thereafter."""
+        """Bind to the first caller loop; a later call from another loop is a defect.
+
+        The broker builds one listener per event loop, so a call from a loop
+        other than the owner fails an assertion instead of a catalog error.
+        """
         current_loop = asyncio.get_running_loop()
         if self._owner_loop is None:
             self._owner_loop = current_loop
             return
-        if self._owner_loop is not current_loop:
-            raise RuntimeError(
-                'PostgresListener is bound to a different event loop. '
-                'Do not share a broker/listener instance across async loop and sync LoopRunner contexts.'
-            )
+        assert self._owner_loop is current_loop, (
+            'PostgresListener used from an event loop other than its owner '
+            f'loop: owner {self._owner_loop!r}, caller {current_loop!r}. '
+            'Each event loop needs its own listener.'
+        )
 
     def _remove_local_subscription(
         self, channel_name: str, q: Optional[Queue[Notify]]
@@ -199,7 +203,7 @@ class PostgresListener:
         Safe to call multiple times.
 
         Returns Ok(None) on success, Err(BrokerOperationError) on connection failure.
-        Raises RuntimeError if called from a non-owner event loop (programming error).
+        A call from a non-owner event loop fails an assertion (programming error).
         """
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
@@ -315,6 +319,7 @@ class PostgresListener:
                 torn down concurrently (close/health reset run without
                 self._lock) between ensure and this check — same exposure
                 the bare assert had, now explicit and -O-proof.
+                listen/listen_many/listen_payload fold it to Err.
         """
         if self._dispatcher_conn is None or self._dispatcher_conn.closed:
             conn_r = await self._ensure_connections()
@@ -532,7 +537,7 @@ class PostgresListener:
 
         Raises
         ------
-        RuntimeError
+        AssertionError
             If called from a non-owner event loop (programming error, not wrapped).
 
         Notes
@@ -580,7 +585,9 @@ class PostgresListener:
                 self._subs[channel_name].add(q)
                 self._start_health_monitor_if_needed()
                 return Ok(q)
-        except (OperationalError, InterfaceError, OSError) as exc:
+        except (OperationalError, InterfaceError, OSError, RuntimeError) as exc:
+            # RuntimeError: _ensure_dispatcher_connection found the dispatcher
+            # connection torn down by a concurrent reset.
             return Err(
                 BrokerOperationError(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
@@ -601,7 +608,7 @@ class PostgresListener:
         single-value waits on busy channels (e.g. one task_id on task_done).
 
         Returns Ok(queue) on success, Err(BrokerOperationError) on failure.
-        Raises RuntimeError if called from a non-owner event loop.
+        A call from a non-owner event loop fails an assertion.
         """
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
@@ -637,7 +644,9 @@ class PostgresListener:
                 self._payload_subs[(channel_name, payload)].add(q)
                 self._start_health_monitor_if_needed()
                 return Ok(q)
-        except (OperationalError, InterfaceError, OSError) as exc:
+        except (OperationalError, InterfaceError, OSError, RuntimeError) as exc:
+            # RuntimeError: _ensure_dispatcher_connection found the dispatcher
+            # connection torn down by a concurrent reset.
             return Err(
                 BrokerOperationError(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
@@ -682,7 +691,7 @@ class PostgresListener:
         Returns Ok(queues) in the same order as *channel_names*,
         or Err(BrokerOperationError) on connection or SQL failure.
 
-        Raises RuntimeError if called from a non-owner event loop.
+        A call from a non-owner event loop fails an assertion.
         """
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
@@ -729,7 +738,9 @@ class PostgresListener:
                     queues.append(q)
                 self._start_health_monitor_if_needed()
                 return Ok(queues)
-        except (OperationalError, InterfaceError, OSError) as exc:
+        except (OperationalError, InterfaceError, OSError, RuntimeError) as exc:
+            # RuntimeError: _ensure_dispatcher_connection found the dispatcher
+            # connection torn down by a concurrent reset.
             return Err(
                 BrokerOperationError(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
@@ -801,8 +812,10 @@ class PostgresListener:
         Stop the dispatcher, health monitor and close the notification connection.
         Safe to call more than once.
 
-        If called from a non-owner loop, close is handed off to the owner loop
-        to avoid cross-loop task/connection misuse during teardown.
+        From a non-owner loop: when the owner loop is closed, the listener is
+        released on the running loop (``release_after_owner_loop_closed``);
+        otherwise the close is handed off to the owner loop, to avoid
+        cross-loop task and connection use during teardown.
 
         Raises:
             Exception: _close_impl itself is best-effort total, but the
@@ -826,25 +839,47 @@ class PostgresListener:
         if self._owner_loop is not None and self._owner_loop is not current_loop:
             owner_loop = self._owner_loop
             if owner_loop.is_closed():
-                logger.warning(
-                    'Skipping listener close from non-owner loop: owner loop already closed'
-                )
+                await self.release_after_owner_loop_closed()
                 return
             close_coro = self._close_impl()
             try:
                 fut = asyncio.run_coroutine_threadsafe(close_coro, owner_loop)
             except RuntimeError:
+                # The owner loop closed after the check above.
                 close_coro.close()
-                logger.warning(
-                    'Owner loop not running during cross-loop close; falling back to local best-effort cleanup'
-                )
-                await self._close_impl()
+                await self.release_after_owner_loop_closed()
                 return
             await asyncio.wrap_future(fut)
             return
 
         self._bind_or_validate_loop()
         await self._close_impl()
+
+    async def release_after_owner_loop_closed(self) -> None:
+        """Release this listener after its owner event loop closed.
+
+        The dispatcher and health tasks belong to the closed loop, which can
+        never run them again, so they are dropped without ``cancel()``. The
+        two connections close on the running loop: a psycopg close is local
+        work (``PQfinish``) and needs no event loop. Local bookkeeping is
+        cleared, so the listener can bind to a new loop.
+
+        Precondition: the owner loop is closed, or the listener never bound
+        to a loop. Breaking it is a programming error and fails an assertion.
+        Total otherwise: connection close failures are contained.
+        """
+        owner_loop = self._owner_loop
+        assert owner_loop is None or owner_loop.is_closed(), (
+            f'release_after_owner_loop_closed called while the owner loop '
+            f'{owner_loop!r} is open; close() it on that loop instead'
+        )
+        self._health_check_task = None
+        self._dispatcher_task = None
+        await self._close_connections()
+        self._subs.clear()
+        self._payload_subs.clear()
+        self._listen_channels.clear()
+        self._owner_loop = None
 
     async def _close_impl(self) -> None:
         """Stop the dispatcher, health monitor and close the notification connection.

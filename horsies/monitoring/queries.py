@@ -1,9 +1,9 @@
 """Read queries backing the monitoring UI.
 
 Every query takes the broker, selects its resources once, opens one
-session, and returns a ``MonitoringResult``. When the broker's resources are
-in use by another open event loop, the query returns ``EVENT_LOOP_CONFLICT``
-and runs nothing. ``SQLAlchemyError`` is caught at the session boundary and
+session, and returns a ``MonitoringResult``. When the broker already holds
+resource sets for its limit of open event loops and the query runs on a new
+one, the query returns ``EVENT_LOOP_LIMIT`` and runs nothing. ``SQLAlchemyError`` is caught at the session boundary and
 mapped to ``MonitoringQueryError``; nothing else is caught. A row that does
 not exist is ``Ok(None)``, not an error.
 
@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.resources import EventLoopConflict
+from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.models.task_pg import (
     ScheduleStateModel,
     TaskAttemptModel,
@@ -316,14 +316,14 @@ def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
     )
 
 
-def _conflict_err(
-    operation: str, conflict: EventLoopConflict,
+def _loop_limit_err(
+    operation: str, loop_limit: EventLoopLimit,
 ) -> Err[MonitoringQueryError]:
-    """The broker's resources are in use by another event loop. Nothing ran."""
+    """The broker already serves its limit of event loops. Nothing ran."""
     return Err(
         MonitoringQueryError(
-            code=MonitoringQueryErrorCode.EVENT_LOOP_CONFLICT,
-            message=f'{operation}: {conflict.describe()}',
+            code=MonitoringQueryErrorCode.EVENT_LOOP_LIMIT,
+            message=f'{operation}: {loop_limit.describe()}',
             retryable=False,
         )
     )
@@ -845,8 +845,8 @@ async def task_stats(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('task stats query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('task stats query', loop_limit)
         case Ok(resources):
             pass
 
@@ -914,8 +914,8 @@ async def task_facets(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('task facets query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('task facets query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1091,8 +1091,8 @@ async def task_breakdown(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('task breakdown query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('task breakdown query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1355,8 +1355,8 @@ async def list_tasks(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('task list query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('task list query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1444,8 +1444,8 @@ async def get_task_detail(
     ).where(WorkflowTaskModel.task_id == task_id)
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('task detail query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('task detail query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1535,8 +1535,8 @@ async def list_workflow_names(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('workflow names query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('workflow names query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1574,8 +1574,8 @@ async def list_workflow_runs(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('workflow runs query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('workflow runs query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1608,8 +1608,8 @@ async def get_workflow_run(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('workflow run detail query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('workflow run detail query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1711,8 +1711,8 @@ async def get_workflow_node(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('workflow node detail query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('workflow node detail query', loop_limit)
         case Ok(resources):
             pass
 
@@ -1781,8 +1781,8 @@ async def list_schedules(
     )
 
     match await broker.select_resources():
-        case Err(conflict):
-            return _conflict_err('schedule state query', conflict)
+        case Err(loop_limit):
+            return _loop_limit_err('schedule state query', loop_limit)
         case Ok(resources):
             pass
 

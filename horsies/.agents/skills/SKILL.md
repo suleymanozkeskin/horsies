@@ -334,11 +334,13 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 ### Error Code Enums
 
-- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`
-- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `EVENT_LOOP_LIMIT`
+- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`
+- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent.
+
+`EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
 
 ## CLI
 

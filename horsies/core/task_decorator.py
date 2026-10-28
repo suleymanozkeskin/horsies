@@ -1221,8 +1221,8 @@ def create_task_wrapper(
         match broker_err.code:
             case BrokerErrorCode.PAYLOAD_MISMATCH:
                 code, retryable = TaskSendErrorCode.PAYLOAD_MISMATCH, False
-            case BrokerErrorCode.EVENT_LOOP_CONFLICT:
-                code, retryable = TaskSendErrorCode.EVENT_LOOP_CONFLICT, False
+            case BrokerErrorCode.EVENT_LOOP_LIMIT:
+                code, retryable = TaskSendErrorCode.EVENT_LOOP_LIMIT, False
             case (
                 BrokerErrorCode.SCHEMA_INIT_FAILED
                 | BrokerErrorCode.ENQUEUE_FAILED

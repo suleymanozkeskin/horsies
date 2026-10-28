@@ -38,7 +38,7 @@ from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
 from tests.broker_resources_support import (
-    attach_conflict,
+    attach_loop_limit,
     attach_resources,
     fake_resources,
 )
@@ -1737,7 +1737,7 @@ class TestRunWorkerResourceSelection:
     @patch('horsies.core.cli.to_psycopg_url', autospec=True, return_value='psycopg://x')
     @patch('horsies.core.cli.setup_logging', autospec=True)
     @patch('horsies.core.cli.discover_app', autospec=True)
-    async def test_event_loop_conflict_crashes_loud(
+    async def test_event_loop_limit_crashes_loud(
         self,
         mock_discover: MagicMock,
         _mock_logging: MagicMock,
@@ -1746,7 +1746,7 @@ class TestRunWorkerResourceSelection:
         mock_worker_cls: MagicMock,
     ) -> None:
         broker = _make_mock_broker()
-        conflict = attach_conflict(broker)
+        loop_limit = attach_loop_limit(broker)
         mock_discover.return_value = (_make_mock_app(), 'app', 'my.mod', '/project')
 
         with pytest.raises(AssertionError) as raised:
@@ -1755,7 +1755,7 @@ class TestRunWorkerResourceSelection:
             )
 
         assert str(raised.value) == (
-            f'worker broker resources: {conflict.describe()}'
+            f'worker broker resources: {loop_limit.describe()}'
         )
         mock_worker_cls.assert_not_called()
         broker.close_async.assert_awaited_once()

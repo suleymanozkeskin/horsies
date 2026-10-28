@@ -82,10 +82,10 @@ class RetrievalCode(str, Enum):
     WORKFLOW_NOT_FOUND = 'WORKFLOW_NOT_FOUND'
     RESULT_NOT_AVAILABLE = 'RESULT_NOT_AVAILABLE'
     RESULT_NOT_READY = 'RESULT_NOT_READY'
-    # The broker's async resources are in use by another open event loop, so
-    # this loop cannot read the value now. Never cached: it clears when that
-    # loop closes.
-    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
+    # The broker already holds resource sets for its limit of open event
+    # loops, so this new loop cannot read the value now. Never cached: it
+    # clears when one of those loops closes.
+    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
 
 
 class OutcomeCode(str, Enum):

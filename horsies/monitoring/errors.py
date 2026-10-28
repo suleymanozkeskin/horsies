@@ -1,7 +1,7 @@
 """Typed error payload for the monitoring query API.
 
 A monitoring read fails when the database operation fails, or when the
-broker's async resources are in use by another open event loop. An absent
+broker already serves its limit of open event loops. An absent
 row is not an error: those queries return ``Ok(None)`` so callers branch on
 data, not on exceptions.
 """
@@ -18,9 +18,10 @@ class MonitoringQueryErrorCode(str, Enum):
     """Failure category for a monitoring read."""
 
     DB_OPERATION_FAILED = 'DB_OPERATION_FAILED'
-    # The broker's async resources are in use by another open event loop.
-    # Nothing ran. It clears when that loop closes.
-    EVENT_LOOP_CONFLICT = 'EVENT_LOOP_CONFLICT'
+    # The broker already holds resource sets for its limit of open event
+    # loops, and this call ran on a new one. Nothing ran. It clears when one
+    # of those loops closes.
+    EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +33,7 @@ class MonitoringQueryError:
         message: which query failed, plus the cause
         retryable: whether the failure is a transient connection error
         exception: the exception that caused it; None for
-            ``EVENT_LOOP_CONFLICT``, where no query ran
+            ``EVENT_LOOP_LIMIT``, where no query ran
     """
 
     code: MonitoringQueryErrorCode
