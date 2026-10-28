@@ -467,3 +467,35 @@ def test_close_async_stops_the_runner_on_another_thread(app: Horsies) -> None:
     assert stop_inside_loop is False
     assert broker._loop_runner._started is False
     assert broker._loop_runner._thread is None
+
+
+# =============================================================================
+# run_sync: a call from a thread that runs an event loop is a defect
+# =============================================================================
+
+
+async def _answer() -> int:
+    return 42
+
+
+def test_run_sync_inside_running_loop_fails_an_assertion(app: Horsies) -> None:
+    broker = app.get_broker()
+
+    with pytest.raises(AssertionError, match='run_sync\\(_answer\\)'):
+        _inside_loop(lambda: broker.run_sync(_answer))
+
+    _assert_nothing_ran(broker)
+
+
+def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
+    """A loop that is set on the thread but does not run does not trip it."""
+    broker = app.get_broker()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(asyncio.sleep(0))
+
+        assert broker.run_sync(_answer) == 42
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()

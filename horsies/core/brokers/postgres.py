@@ -963,12 +963,24 @@ class PostgresBroker:
 
         Every sync facade calls this, so a broker has one sync event loop.
         It blocks the calling thread, so it must not run inside an event loop.
+        Every sync facade returns ``ASYNC_CONTEXT`` before it calls this on
+        a thread that runs an event loop, so a call from such a thread is a
+        defect: a facade without that check.
 
         Raises:
+            AssertionError: the calling thread runs an event loop. Nothing
+                ran, and the runner was not started.
             LoopRunnerError: the runner is stopped, or scheduling onto its
                 loop failed.
             Exception: the coroutine's own exception, unchanged.
         """
+        if in_running_event_loop():
+            raise AssertionError(
+                f'PostgresBroker.run_sync({coro_fn.__name__}) was called on '
+                f'thread {threading.current_thread().name!r}, which runs an '
+                'event loop; every sync facade must return ASYNC_CONTEXT '
+                'before it calls run_sync',
+            )
         return self._loop_runner.call(coro_fn, *args, **kwargs)
 
     def _runtime_session_settings(self) -> SessionSettings:

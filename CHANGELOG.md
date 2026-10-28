@@ -52,6 +52,9 @@ and there is no migration contract between pre-1.0 versions.
 - **`app.check(live=True)` inside a running event loop reports `HRS-217`
   (`CHECK_LIVE_ASYNC_CONTEXT`)** and does not connect. Before, it reported
   `BROKER_INVALID_URL` (`HRS-203`), which named the wrong cause.
+- **`PostgresBroker.run_sync()` fails an assertion when it is called on a
+  thread that runs an event loop.** Nothing runs, and the sync runner does
+  not start. Before, it blocked that loop until the call completed.
 
 ### Fixed
 
