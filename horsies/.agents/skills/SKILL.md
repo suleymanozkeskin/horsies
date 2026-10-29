@@ -101,7 +101,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-Only `ENQUEUE_FAILED` (transient) errors are retryable:
+`retryable` is `True` only for `ENQUEUE_FAILED` (transient). The retry methods also accept `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors. For a key conflict, `err.detail.owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
 ```python
 match my_task.send(**kwargs):
@@ -334,7 +334,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 ### Error Code Enums
 
-- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `EVENT_LOOP_LIMIT`
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `EVENT_LOOP_LIMIT`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`
 

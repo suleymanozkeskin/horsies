@@ -180,12 +180,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - task_id: str | None (None for SEND_SUPPRESSED, VALIDATION_FAILED)
 - payload: TaskSendPayload | None (serialized envelope for idempotent retry)
 - exception: BaseException | None (original cause)
+- detail: IdempotencyKeyOwner | None (IdempotencyKeyOwner(owner_task_id) for IDEMPOTENCY_KEY_CONFLICT; None otherwise)
 
 ### TaskSendErrorCode (enum)
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
 - ENQUEUE_FAILED: broker/database failure during enqueue (transient, retryable)
-- PAYLOAD_MISMATCH: retry payload SHA does not match (payload altered)
+- PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; detail names the owner task; the retry methods accept it
 - EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
 
 ### TaskSendPayload (frozen dataclass)

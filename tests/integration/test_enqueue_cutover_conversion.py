@@ -25,6 +25,7 @@ from horsies.core.history.identity.uuid7 import mint_task_id, uuid7_birth_at
 from horsies.core.history.rerun.input_envelope import (
     encode_input_envelope_v1,
 )
+from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import current_resources
@@ -297,11 +298,11 @@ class TestKeyedEnqueue:
 
         second_binding = await enqueue_keyed(broker, existing, second_key)
 
+        # Same command, different key: the sent payload differs from the
+        # original send, so this is a payload mismatch, not a key conflict.
         assert is_err(second_binding)
-        assert (
-            second_binding.err_value.code
-            is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
-        )
+        assert second_binding.err_value.code is BrokerErrorCode.PAYLOAD_MISMATCH
+        assert second_binding.err_value.detail is None
         async with current_resources(broker).session_factory() as session:
             reservations = int(
                 (
@@ -363,6 +364,9 @@ class TestKeyedEnqueue:
         assert (
             conflicted.err_value.code
             is BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+        )
+        assert conflicted.err_value.detail == IdempotencyKeyOwner(
+            owner_task_id=first.task_id,
         )
         async with current_resources(broker).session_factory() as session:
             orphan = (

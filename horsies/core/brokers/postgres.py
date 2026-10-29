@@ -46,6 +46,7 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
+from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
@@ -2160,6 +2161,9 @@ class PostgresBroker:
                                     ),
                                     retryable=False,
                                     exception=None,
+                                    detail=IdempotencyKeyOwner(
+                                        owner_task_id=owner,
+                                    ),
                                 )
                             )
                         case ReservationApplied():
@@ -2277,7 +2281,7 @@ class PostgresBroker:
             await session.rollback()
             return Err(
                 BrokerOperationError(
-                    code=BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
                     message=(
                         f'task_id {task_id} for {task_name} is already bound '
                         'to a different idempotency key'

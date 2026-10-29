@@ -113,6 +113,7 @@ from .core.brokers.result_types import (
     BrokerOperationError,
     BrokerResult,
 )
+from .core.types.error_detail import IdempotencyKeyOwner
 from .core.models.health import (
     DatabasePing,
     WorkerPong,
@@ -242,6 +243,7 @@ __all__ = [
     'TaskSendPayload',
     'TaskSendError',
     'TaskSendResult',
+    'IdempotencyKeyOwner',
     # Broker result types
     'BrokerErrorCode',
     'BrokerOperationError',
