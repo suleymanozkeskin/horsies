@@ -126,7 +126,7 @@ For unit tests, call tasks directly:
 
 ```python
 def test_my_task():
-    result = my_task("test_input")  # Direct call, no queue
+    result = my_task(x=10, y=20)  # Direct call, no queue
 
     assert result.is_ok()
     assert result.ok_value == "expected_output"

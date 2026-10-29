@@ -22,13 +22,13 @@ spec = app.workflow(
     output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
     success_policy: SuccessPolicy | None = None,
     *,
-    definition_key: str,  # required stable key
+    definition_key: str | None = None,  # required; None raises HRS-016
 ) -> WorkflowSpec[OutT] | WorkflowSpec[WorkflowTerminalResults]
 ```
 
 - When `output` is provided: returns `WorkflowSpec[OutT]` typed to that node's ok-type.
 - When `output=None`: returns `WorkflowSpec[WorkflowTerminalResults]` — `handle.get()` returns `TaskResult[dict[str, TaskResult | None], TaskError]` where `.ok` is `{node_id: TaskResult | None, ...}`.
-- Resolves queue/priority for each `TaskNode` using app config; raises HRS-014/HRS-015 if unregistered.
+- Resolves queue/priority for each `TaskNode` using app config. A queue that is not in app config raises HRS-103 (`CUSTOM` mode) or HRS-200 (`DEFAULT` mode).
 - Attaches broker and `resend_on_transient_err` from app config automatically.
 - `definition_key` is required for top-level workflows built with `app.workflow()` and is used for persistence/runtime lookup.
 
@@ -63,7 +63,7 @@ Best for static, reusable DAGs.
 
 ### Parameterized builds — `build_with()`
 
-Override `build_with()` to accept runtime parameters:
+Override `build_with()` to accept runtime parameters. This is the child-workflow form. The engine calls `build_with()` when it enqueues a `SubWorkflowNode`, and binds queue and priority for the child nodes at that time:
 
 ```python
 class ChildPipeline(WorkflowDefinition[ProcessedData]):
@@ -78,8 +78,11 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
             name=cls.name, tasks=[fetch, process], output=process,
         )
 
-spec = ChildPipeline.build_with(app, source_url="https://...")
+# In a parent workflow. The engine calls build_with() when it enqueues this node.
+child = SubWorkflowNode(workflow_def=ChildPipeline, kwargs={"source_url": "https://..."})
 ```
+
+A `WorkflowSpec(...)` built directly has no broker and no bound queue or priority. Do not start it as a top-level workflow: `start()` returns `BROKER_NOT_CONFIGURED`. For a top-level workflow, use `app.workflow()` or `build(app)`.
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
@@ -293,7 +296,8 @@ appearing during a pause are expected, not a fault.
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
 - `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`.
-- `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code='WORKFLOW_PAUSED'))`.
+- `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
+- `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 
 ### `result_for()` semantics
@@ -333,7 +337,7 @@ PENDING → RUNNING → COMPLETED | FAILED | PAUSED | CANCELLED
 **`PAUSED` is NOT terminal** — workflow can resume.
 
 `CANCELLED` means someone decided; `EXPIRED` means time ran out. A workflow
-PAUSED longer than `RecoveryConfig.paused_workflow_auto_cancel_after`
+PAUSED longer than `AppConfig.retention.paused_workflow_auto_cancel_after`
 (a `timedelta`, default `None` = disabled) is expired by policy, with the
 policy name and age recorded on the run's `error`. An expired child
 propagates to its parent exactly as a cancelled one. **Exhaustive matches
@@ -407,7 +411,7 @@ class WorkflowContext(BaseModel):
     task_index: int
     task_name: str
 
-    def result_for(self, node: TaskNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
+    def result_for(self, node: TaskNode[T] | SubWorkflowNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
     def has_result(self, node: TaskNode | SubWorkflowNode) -> bool
     def summary_for(self, node: SubWorkflowNode[T]) -> SubWorkflowSummary[T]
     def has_summary(self, node: SubWorkflowNode) -> bool
@@ -455,7 +459,7 @@ class NodeKey(Generic[OkT]):
 
 - Obtained via `node.key()` (raises if `node_id` is None).
 - Accepted by `WorkflowContext.result_for()` and `WorkflowHandle.result_for()`.
-- Useful for string-based lookup: `NodeKey("my_workflow:0")`.
+- Useful for string-based lookup of a node with an explicit `node_id`: `TaskNode(fn=fetch_data, node_id="fetch")` → `NodeKey("fetch")`.
 
 ## SubWorkflowSummary
 
@@ -510,10 +514,12 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 - Receiving function parameter must be typed `TaskResult[T, TaskError]`.
 - Upstream must be in `waits_for` (HRS-008). Keys must not overlap with `kwargs` (HRS-021).
 - Positional args not supported on workflow nodes (HRS-026).
+- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 ```python
 @app.task("process")
 def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
+    # With the defaults, this branch runs only on a decode failure.
     if data.is_err():
         return TaskResult(err=data.err_value)
     return TaskResult(ok=str(data.ok_value))
@@ -538,8 +544,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
 | HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
 | HRS-013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
-| HRS-014 | `WORKFLOW_UNRESOLVED_QUEUE` | Queue not registered |
-| HRS-015 | `WORKFLOW_UNRESOLVED_PRIORITY` | Priority unresolvable |
+| HRS-014 | `WORKFLOW_UNRESOLVED_QUEUE` | A `TaskNode` has `queue=None` at start (spec not built by `app.workflow()`) |
+| HRS-015 | `WORKFLOW_UNRESOLVED_PRIORITY` | A `TaskNode` has `priority=None` at start (spec not built by `app.workflow()`) |
 | HRS-016 | `WORKFLOW_NO_DEFINITION_KEY` | Workflow definition/spec missing `definition_key` |
 | HRS-017 | `WORKFLOW_DUPLICATE_DEFINITION_KEY` | Two definitions share the same `definition_key` |
 | HRS-018 | `WORKFLOW_SUBWORKFLOW_APP_MISSING` | No app when subworkflow enqueues |

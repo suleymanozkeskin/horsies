@@ -790,12 +790,12 @@ async def _build_enqueued_task_params(
 
     # Warn-only payload guardrail: this is the args_from injection point,
     # where an upstream task's result envelope becomes this task's kwargs
-    # — the likeliest producer of oversized payloads. Rejecting a
-    # mid-workflow node needs a designed node-failure path (a size limit
-    # must not strand a running workflow), so reject semantics for
-    # workflow nodes are deferred; see the P1b follow-on ledger entry.
+    # — the likeliest producer of oversized payloads. Workflow nodes warn
+    # and never reject: no node-failure path exists for a size refusal,
+    # and a size limit must not strand a running workflow. The
+    # reject_bytes result of enforce_payload_policy is therefore discarded.
     if broker is not None and broker.app is not None:
-        enforce_payload_policy(
+        _ = enforce_payload_policy(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',

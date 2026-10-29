@@ -21,7 +21,7 @@ Adjust to your needs.
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
 | Retrieval errors | `handle.get()` | `WAIT_TIMEOUT`, `BROKER_ERROR` | No |
-| Execution errors | Task raised exception or returned invalid value | `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
+| Execution errors | Task raised an exception, returned `None`, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
 
 ### When to Handle Errors
@@ -46,7 +46,7 @@ from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
     retry_policy=RetryPolicy.exponential(
         base_seconds=30,
         max_retries=3,
-        auto_retry_for=["TASK_EXCEPTION", "RATE_LIMITED"],
+        auto_retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
     ),
 )
 def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
