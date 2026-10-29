@@ -119,7 +119,7 @@ The old flat `LibraryErrorCode` enum has been split into 4 families. The umbrell
 Infra-level failures during task execution, brokering, or worker processing:
 
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
-- `TASK_EXCEPTION` — task returned `None` or raised a checked exception
+- `TASK_EXCEPTION` — task returned `None` instead of `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`). A raised exception in task code gives `UNHANDLED_EXCEPTION`, not `TASK_EXCEPTION`
 - `WORKER_CRASHED` — worker process died during execution
 - `BROKER_ERROR` — DB/broker failure during result retrieval
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
@@ -190,8 +190,9 @@ async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHa
 
 # Enqueue with delay
 def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
+async def schedule_async(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
-# Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule)
+# Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule/.schedule_async)
 def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention_class_key: str | None = <unset>) -> TaskSendOptions[P, T]
 # retention_class_key's default is absence, not 'standard_30d': omitting it
 # takes the queue's mapping, while naming 'standard_30d' overrides one.
@@ -202,6 +203,7 @@ async def retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]
 
 # Replay failed schedule with stored payload (ENQUEUE_FAILED only)
 def retry_schedule(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
+async def retry_schedule_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
 
 # Workflow node builder (returns NodeFactory, call with task kwargs to get TaskNode)
 def node(
@@ -223,7 +225,7 @@ def node(
 
 ## `TaskSendOptions[P, T]` — Per-Send Options
 
-Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, and `.schedule()` with overridden options applied to this specific send.
+Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with overridden options applied to this specific send.
 
 ```python
 # Set a per-send start deadline: a task not started by then becomes EXPIRED and never runs
@@ -233,6 +235,7 @@ opts = my_task.with_options(good_until=deadline)
 opts.send(**kwargs)              # sync
 await opts.send_async(**kwargs)  # async
 opts.schedule(60, **kwargs)      # delayed
+await opts.schedule_async(60, **kwargs)  # delayed, async
 ```
 
 **`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
@@ -277,7 +280,7 @@ await my_task.with_options(retention_class_key=None).send_async(**kwargs)
 await my_task.with_options(retention_class_key='standard_30d').send_async(**kwargs)
 ```
 
-**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
+**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`, `.schedule_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
 ### Task Expiry Lifecycle
 
@@ -311,7 +314,7 @@ Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `Su
 
 ## `TaskHandle[T]`
 
-Returned by successful `.send()` / `.send_async()` / `.schedule()`.
+Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()`.
 
 ```python
 task_id: str  # UUID, stable across retries of the same send
@@ -441,24 +444,26 @@ RetryPolicy.exponential(
     max_retries: int,
     auto_retry_for: list[str | BuiltInTaskCode],        # required
     jitter: bool = True,
+    max_delay_seconds: int | None = None,              # cap on each delay; None = no cap
 )
 ```
 
 ### Validation rules
 
-- `fixed`: `len(intervals)` must equal `max_retries`
-- `exponential`: `len(intervals)` must be exactly `1`
-- `auto_retry_for` entries must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected
-- Each interval: 1–86400 seconds. Max retries: 1–20.
+- `fixed`: `intervals` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
+- `exponential`: `base_seconds` is 1–86400. `max_retries` is 1–20.
+- `max_delay_seconds` (`exponential` only): `None` or an integer >= 1. The cap applies last, after backoff and jitter.
+- `auto_retry_for` must have at least 1 entry. Each entry must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected.
+- A rule violation raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call.
 
 ### Jitter
 
-`jitter=True` (default) randomizes each delay by ±25%. Prevents thundering herd. Disable only in tests.
+`jitter=True` (default) adds a random 0–25% to each delay; it never shortens a delay. Prevents thundering herd. Disable only in tests.
 
 ### `auto_retry_for` valid values
 
 - User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
-- `BuiltInTaskCode` members: `OperationalErrorCode.UNHANDLED_EXCEPTION`, `RetrievalCode.WAIT_TIMEOUT`, etc.
+- `BuiltInTaskCode` members that a task failure produces, for example `OperationalErrorCode.UNHANDLED_EXCEPTION`, `OperationalErrorCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
 - Plain strings matching `^[A-Z][A-Z0-9_]*$`
 
 Retries only trigger when the error code on the stored result matches and `retry_count < max_retries`.
@@ -600,14 +605,14 @@ my_task.send(cfg=Config(value=42))
 ### Forgetting `TaskResult` wrapper
 
 ```python
-# WRONG — returns raw value, causes TASK_EXCEPTION at runtime
+# WRONG — returns raw value, fails with UNHANDLED_EXCEPTION (AttributeError) at runtime
 @app.task("bad")
-def bad(*, x: int) -> TaskResult[dict, TaskError]:
+def bad(*, x: int) -> TaskResult[dict[str, int], TaskError]:
     return {"x": x}
 
 # CORRECT
 @app.task("good")
-def good(*, x: int) -> TaskResult[dict, TaskError]:
+def good(*, x: int) -> TaskResult[dict[str, int], TaskError]:
     return TaskResult(ok={"x": x})
 ```
 

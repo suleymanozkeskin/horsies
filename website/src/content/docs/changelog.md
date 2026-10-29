@@ -12,6 +12,19 @@ there is no migration contract between pre-1.0 versions.
 
 ## Unreleased
 
+### Fixed
+
+- **The agent skills in the wheel and the docs state the codes and
+  signatures that the code uses.** A raised exception in a task gives
+  `UNHANDLED_EXCEPTION`; `TASK_EXCEPTION` means the task returned `None`.
+  An `auto_retry_for` that lists only `TASK_EXCEPTION` does not retry a
+  raised exception, so the examples now list `UNHANDLED_EXCEPTION`. The
+  skills also list `schedule_async` and `retry_schedule_async`, state the
+  `RetryPolicy` constructor rules, type the broker URLs as `SecretStr`, put
+  `paused_workflow_auto_cancel_after` on `AppConfig.retention`, and give
+  `HandleResult` as the return type of `WorkflowHandle.status()` and
+  `.tasks()`.
+
 ## 0.5.5 — 2026-10-28
 
 ### Upgrade notes

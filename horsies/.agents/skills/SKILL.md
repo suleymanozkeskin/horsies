@@ -223,10 +223,10 @@ task sends and workflow starts.
 ## WorkflowHandle
 
 ```python
-handle.status()          # WorkflowStatus
+handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
 handle.get(timeout_ms=N) # TaskResult (blocks for output node)
 handle.results()         # HandleResult[dict[str, TaskResult]] — unwrap before use
-handle.tasks()           # list[WorkflowTaskInfo]
+handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
 handle.cancel()          # cancel workflow
 handle.pause()           # pause (RUNNING -> PAUSED)
 handle.resume()          # resume (PAUSED -> RUNNING)

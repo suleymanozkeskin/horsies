@@ -66,16 +66,14 @@ class RecoveryConfig(BaseModel):
     - running_stale_threshold_ms: Milliseconds without heartbeat before RUNNING task is stale
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
+    - phase2_quarantine_after_attempts: Recovery passes an unresolvable phase-2 pending row may retain before it is quarantined
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
     - claimer_heartbeat_interval_ms: How often CLAIMED tasks send heartbeats
     - worker_state_snapshot_interval_ms: How often each worker persists a monitoring snapshot row
-    - worker_state_retention_hours: Keep worker_state rows for this long (None disables cleanup)
-    - terminal_record_retention_hours: Keep terminal WORKFLOW rows for this long (None disables cleanup);
-      terminal task rows live in the task-history archive and age by retention class
-    - retention_sweep_interval_s: Seconds between retention sweep passes
-    - retention_delete_batch_size: Rows per retention DELETE batch
+
+    Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
 
     auto_requeue_stale_claimed: bool = Field(
@@ -167,14 +165,14 @@ class RecoveryConfig(BaseModel):
     runner_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
         description=(
-            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (5s-2min); '
+            'How often RUNNING tasks send heartbeats from inside the task process in milliseconds (1s-2min); '
             'increase stale thresholds for CPU/GIL-heavy tasks to avoid false positives'
         ),
     )
 
     claimer_heartbeat_interval_ms: Annotated[int, Field(ge=1_000, le=120_000)] = Field(
         default=30_000,  # 30 seconds
-        description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (5s-2min)',
+        description='How often worker sends heartbeats for CLAIMED tasks in milliseconds (1s-2min)',
     )
 
     worker_state_snapshot_interval_ms: Annotated[int, Field(ge=1_000, le=300_000)] = Field(
