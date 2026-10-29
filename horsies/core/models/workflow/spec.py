@@ -35,6 +35,10 @@ from horsies.core.errors import (
     raise_collected,
 )
 from horsies.core.types.result import is_err
+from horsies.core.utils.loop_runner import (
+    async_context_message,
+    in_running_event_loop,
+)
 
 from .enums import OutT, OnError
 from .nodes import (
@@ -1503,7 +1507,9 @@ class WorkflowSpec(Generic[OutT]):
 
         Returns:
             ``Ok(WorkflowHandle)`` on success,
-            ``Err(WorkflowStartError)`` on failure.
+            ``Err(WorkflowStartError)`` on failure. On a thread that runs an
+            event loop: ``Err(ASYNC_CONTEXT)``, nothing written; use
+            ``start_async()`` there.
         """
         if self.broker is None:
             import uuid as _uuid
@@ -1521,6 +1527,9 @@ class WorkflowSpec(Generic[OutT]):
                 workflow_name=self.name,
                 workflow_id=workflow_id or str(_uuid.uuid4()),
             ))
+
+        if in_running_event_loop():
+            return self._async_context_start_err(workflow_id, 'start')
 
         # Import here to avoid circular imports
         from horsies.core.workflows.engine import start_workflow
@@ -1573,6 +1582,33 @@ class WorkflowSpec(Generic[OutT]):
             resend_on_transient_err=self.resend_on_transient_err,
         )
 
+    def _async_context_start_err(
+        self, workflow_id: str | None, operation: str,
+    ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
+        """Refuse a sync start called inside a running event loop.
+
+        Nothing was written. The message names the async form of
+        ``operation`` (``start`` or ``retry_start``).
+        """
+        import uuid as _uuid
+
+        from horsies.core.workflows.start_types import (
+            WorkflowStartError as _WSE,
+            WorkflowStartErrorCode as _WSEC,
+        )
+        from horsies.core.types.result import Err as _Err
+
+        return _Err(_WSE(
+            code=_WSEC.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'WorkflowSpec.{operation}() of workflow {self.name!r}',
+                f'spec.{operation}_async(...)',
+            ),
+            retryable=False,
+            workflow_name=self.name,
+            workflow_id=workflow_id or str(_uuid.uuid4()),
+        ))
+
     def _validate_start_retry(
         self, error: 'WorkflowStartError',
     ) -> 'WorkflowStartResult[str]':
@@ -1624,11 +1660,15 @@ class WorkflowSpec(Generic[OutT]):
 
         Returns:
             ``Ok(WorkflowHandle)`` on success,
-            ``Err(WorkflowStartError)`` on failure.
+            ``Err(WorkflowStartError)`` on failure. On a thread that runs an
+            event loop, a valid retry returns ``Err(ASYNC_CONTEXT)`` and
+            writes nothing; use ``retry_start_async()`` there.
         """
         v = self._validate_start_retry(error)
         if is_err(v):
             return v  # type: ignore[return-value]
+        if in_running_event_loop():
+            return self._async_context_start_err(v.ok_value, 'retry_start')
         return self.start(workflow_id=v.ok_value)
 
     async def retry_start_async(

@@ -25,7 +25,8 @@ and there is no migration contract between pre-1.0 versions.
 
 - **Every sync facade fails closed on a thread that runs an event loop.** It
   returns `ASYNC_CONTEXT` in its own error type, runs nothing, and does not
-  start the broker's sync runner:
+  start the broker's sync runner. The message names the `*_async` form of the
+  function that was called:
   - `BrokerErrorCode` for `PostgresBroker.enqueue()`, `.get_task_info()`,
     `.get_raw_result_record()` and `.close()`, for `app.get_result()`,
     `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`,

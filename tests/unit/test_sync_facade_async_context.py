@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable, Generator
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -45,6 +45,7 @@ from horsies.core.utils.loop_runner import LoopRunner, in_running_event_loop
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
+    start_workflow,
 )
 from horsies.core.workflows.start_types import (
     WorkflowStartError,
@@ -176,7 +177,7 @@ def test_task_handle_info_returns_async_context(app: Horsies) -> None:
 
     assert is_err(result)
     assert result.err_value.code is BrokerErrorCode.ASYNC_CONTEXT
-    assert 'get_task_info_async' in result.err_value.message
+    assert 'await handle.info_async(' in result.err_value.message
     _assert_nothing_ran(app.get_broker())
 
 
@@ -192,7 +193,7 @@ def test_task_handle_get_returns_async_context_and_does_not_cache_it(
 
     assert inside.is_err()
     assert inside.unwrap_err().error_code is RetrievalCode.ASYNC_CONTEXT
-    assert 'get_raw_result_record_async' in (inside.unwrap_err().message or '')
+    assert 'await handle.get_async(' in (inside.unwrap_err().message or '')
     _assert_nothing_ran(broker)
     # A later sync get() outside the loop reads the broker again.
     with patch.object(
@@ -384,7 +385,7 @@ def test_spec_start_returns_async_context(app: Horsies) -> None:
     assert result.err_value.retryable is False
     assert result.err_value.workflow_name == 'async_context_wf'
     assert result.err_value.workflow_id == WORKFLOW_ID
-    assert 'start_async' in result.err_value.message
+    assert 'await spec.start_async(' in result.err_value.message
     _assert_nothing_ran(app.get_broker())
 
 
@@ -422,6 +423,33 @@ def test_spec_retry_start_refuses_an_async_context_error(app: Horsies) -> None:
     assert is_err(result)
     assert result.err_value.code is WorkflowStartErrorCode.VALIDATION_FAILED
     _assert_nothing_ran(app.get_broker())
+
+
+def test_start_workflow_returns_async_context(app: Horsies) -> None:
+    """The standalone sync start names its own async form."""
+    spec = _spec(app)
+
+    result = _inside_loop(lambda: start_workflow(spec, app.get_broker(), WORKFLOW_ID))
+
+    assert is_err(result)
+    assert result.err_value.code is WorkflowStartErrorCode.ASYNC_CONTEXT
+    assert 'await start_workflow_async(' in result.err_value.message
+    _assert_nothing_ran(app.get_broker())
+
+
+def test_task_handle_result_mapping_asserts_on_async_context(app: Horsies) -> None:
+    """get() refuses the loop before the broker call, so the mapping never sees it."""
+    handle: TaskHandle[int] = TaskHandle(
+        TASK_ID, app=app, broker_mode=True, ok_type=int,
+    )
+    broker_result = Err(BrokerOperationError(
+        code=BrokerErrorCode.ASYNC_CONTEXT,
+        message='refused',
+        retryable=False,
+    ))
+
+    with pytest.raises(AssertionError, match='TaskHandle result read'):
+        handle._record_to_task_result(broker_result, None)
 
 
 # =============================================================================
@@ -546,3 +574,106 @@ def test_run_sync_call_site_reraises_an_assertion(app: Horsies, site: str) -> No
         RUN_SYNC_SITES[site](app, broker)
 
     run_sync.assert_called_once()
+
+
+# =============================================================================
+# The ASYNC_CONTEXT message names the async form of the called function
+# =============================================================================
+
+
+def _failed_start() -> WorkflowStartError:
+    return WorkflowStartError(
+        code=WorkflowStartErrorCode.ENQUEUE_FAILED,
+        message='connection lost',
+        retryable=True,
+        workflow_name='async_context_wf',
+        workflow_id=WORKFLOW_ID,
+    )
+
+
+def _task_handle(app: Horsies) -> TaskHandle[int]:
+    return TaskHandle(TASK_ID, app=app, broker_mode=True, ok_type=int)
+
+
+def _workflow_result_for(app: Horsies) -> TaskResult[Any, TaskError]:
+    node: NodeKey[Any] = NodeKey('node-1')
+    return _workflow_handle(app.get_broker()).result_for(node)
+
+
+ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
+    'PostgresBroker.get_raw_result_record': (
+        lambda app: app.get_broker().get_raw_result_record(TASK_ID, 0),
+        'broker.get_raw_result_record_async(',
+    ),
+    'PostgresBroker.enqueue': (
+        lambda app: app.get_broker().enqueue('echo', task_id=TASK_ID, enqueue_sha='sha'),
+        'broker.enqueue_async(',
+    ),
+    'PostgresBroker.get_task_info': (
+        lambda app: app.get_broker().get_task_info(TASK_ID),
+        'broker.get_task_info_async(',
+    ),
+    'PostgresBroker.close': (lambda app: app.get_broker().close(), 'broker.close_async('),
+    **{
+        f'Horsies.{name}': (call, f'app.{name}_async(')
+        for name, call in APP_CALLS.items()
+    },
+    'TaskHandle.get': (lambda app: _task_handle(app).get(), 'handle.get_async('),
+    'TaskHandle.info': (lambda app: _task_handle(app).info(), 'handle.info_async('),
+    **{
+        f'WorkflowHandle.{name}': (
+            lambda app, name=name: getattr(_workflow_handle(app.get_broker()), name)(),
+            f'handle.{name}_async(',
+        )
+        for name in ('status', 'results', 'tasks', 'cancel', 'pause', 'resume')
+    },
+    'WorkflowHandle.get': (
+        lambda app: _workflow_handle(app.get_broker()).get(timeout_ms=0),
+        'handle.get_async(',
+    ),
+    'WorkflowHandle.result_for': (_workflow_result_for, 'handle.result_for_async('),
+    'pause_workflow_sync': (
+        lambda app: pause_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        'pause_workflow(broker, workflow_id)',
+    ),
+    'resume_workflow_sync': (
+        lambda app: resume_workflow_sync(app.get_broker(), WORKFLOW_ID),
+        'resume_workflow(broker, workflow_id)',
+    ),
+    'WorkflowSpec.start': (lambda app: _spec(app).start(WORKFLOW_ID), 'spec.start_async('),
+    'WorkflowSpec.retry_start': (
+        lambda app: _spec(app).retry_start(_failed_start()),
+        'spec.retry_start_async(',
+    ),
+    'start_workflow': (
+        lambda app: start_workflow(_spec(app), app.get_broker(), WORKFLOW_ID),
+        'start_workflow_async(',
+    ),
+}
+
+
+def _refusal_message(result: object) -> str:
+    """The ASYNC_CONTEXT message of an Err or of a TaskResult error."""
+    match result:
+        case TaskResult():
+            task_error = cast('TaskResult[Any, TaskError]', result).unwrap_err()
+            assert task_error.error_code is RetrievalCode.ASYNC_CONTEXT
+            return task_error.message or ''
+        case Err(
+            BrokerOperationError() | HandleOperationError() | WorkflowStartError() as error
+        ):
+            assert error.code.value == 'ASYNC_CONTEXT'
+            return error.message
+        case _:
+            raise AssertionError(f'expected an ASYNC_CONTEXT result, got {result!r}')
+
+
+@pytest.mark.parametrize('entry_point', list(ASYNC_TWINS))
+def test_async_context_message_names_the_async_form_of_the_call(
+    app: Horsies, entry_point: str,
+) -> None:
+    call, twin = ASYNC_TWINS[entry_point]
+
+    message = _refusal_message(_inside_loop(lambda: call(app)))
+
+    assert f'Use `await {twin}' in message

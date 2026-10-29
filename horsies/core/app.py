@@ -1073,9 +1073,15 @@ class Horsies:
         task_id: str,
         timeout_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
-        """Synchronous version of ``get_raw_result_async``."""
+        """Synchronous version of ``get_raw_result_async``.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
         from horsies.core.types.result import Err, Ok, is_err
 
+        if in_running_event_loop():
+            return self._async_context_err('get_raw_result')
         broker = self.get_broker()
         record_result = broker.get_raw_result_record(task_id, timeout_ms)
         if is_err(record_result):

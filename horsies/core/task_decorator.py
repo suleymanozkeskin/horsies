@@ -50,7 +50,10 @@ from horsies.core.models.retention import (
     resolve_queue_retention_class,
 )
 from horsies.core.utils.db import is_retryable_connection_error
-from horsies.core.utils.loop_runner import in_running_event_loop
+from horsies.core.utils.loop_runner import (
+    async_context_message,
+    in_running_event_loop,
+)
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
@@ -372,9 +375,9 @@ class TaskHandle(Generic[T]):
         - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
           (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
           two strict-serde codes when surfaced by the broker layer;
-          ``RetrievalCode.EVENT_LOOP_LIMIT`` at the event loop limit and
-          ``RetrievalCode.ASYNC_CONTEXT`` for a sync call inside a running
-          event loop, both never cached).
+          ``RetrievalCode.EVENT_LOOP_LIMIT`` at the event loop limit, never
+          cached). A broker ``ASYNC_CONTEXT`` fails an assertion: ``get()``
+          refuses a running event loop before it calls the broker.
         - ``Ok(None)`` → ``TASK_NOT_FOUND``.
         - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
         - ``Ok(record)`` with non-terminal status (timeout fired) →
@@ -393,9 +396,9 @@ class TaskHandle(Generic[T]):
             code = broker_err.code
             # The strict-serde codes are properties of the stored payload /
             # handle, so they are cached. A generic broker error is
-            # transient, and EVENT_LOOP_LIMIT and ASYNC_CONTEXT are
-            # properties of the calling loop or thread: caching any of them
-            # would replay it after the condition cleared.
+            # transient, and EVENT_LOOP_LIMIT is a property of the calling
+            # loop: caching either would replay it after the condition
+            # cleared.
             err_code: BuiltInTaskCode
             cache: bool
             match code:
@@ -408,7 +411,12 @@ class TaskHandle(Generic[T]):
                 case BrokerErrorCode.EVENT_LOOP_LIMIT:
                     err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
                 case BrokerErrorCode.ASYNC_CONTEXT:
-                    err_code, cache = RetrievalCode.ASYNC_CONTEXT, False
+                    raise AssertionError(
+                        f'TaskHandle result read for task {self.task_id} got '
+                        'ASYNC_CONTEXT; get() refuses a running event loop '
+                        'before the broker call, and get_async() reads through '
+                        'an async call',
+                    )
                 case (
                     BrokerErrorCode.SCHEMA_INIT_FAILED
                     | BrokerErrorCode.ENQUEUE_FAILED
@@ -564,6 +572,10 @@ class TaskHandle(Generic[T]):
         """
         Get the task result (blocking).
 
+        A broker-backed handle without its result returns
+        ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that runs an
+        event loop; use ``get_async()`` there.
+
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
@@ -583,6 +595,16 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
+            if in_running_event_loop():
+                return self._error_result(
+                    error_code=RetrievalCode.ASYNC_CONTEXT,
+                    message=async_context_message(
+                        f'TaskHandle.get() for task {self.task_id}',
+                        'handle.get_async(...)',
+                    ),
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
             broker = self._app.get_broker()
             try:
                 broker_result = broker.get_raw_result_record(
@@ -673,7 +695,8 @@ class TaskHandle(Generic[T]):
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure or precondition failure.
+        Err(BrokerOperationError) on infrastructure or precondition failure,
+        and Err(ASYNC_CONTEXT) on a thread that runs an event loop.
         """
         if not self._broker_mode or not self._app:
             return Err(BrokerOperationError(
@@ -681,6 +704,15 @@ class TaskHandle(Generic[T]):
                 message=(
                     'TaskHandle.info() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
+                ),
+                retryable=False,
+            ))
+        if in_running_event_loop():
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.ASYNC_CONTEXT,
+                message=async_context_message(
+                    f'TaskHandle.info() for task {self.task_id}',
+                    'handle.info_async(...)',
                 ),
                 retryable=False,
             ))

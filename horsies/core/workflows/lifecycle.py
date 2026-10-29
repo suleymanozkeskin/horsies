@@ -807,6 +807,8 @@ def start_workflow(
     Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
     writes nothing; ``retry_start`` does not accept that error.
+    ``WorkflowSpec.start()`` and ``retry_start()`` check first, so their
+    message names their own async form.
 
     Args:
         spec: The workflow specification.
@@ -829,7 +831,8 @@ def start_workflow(
         return Err(WorkflowStartError(
             code=WorkflowStartErrorCode.ASYNC_CONTEXT,
             message=async_context_message(
-                f'start of workflow {spec.name!r}', 'spec.start_async(...)',
+                f'start_workflow() of workflow {spec.name!r}',
+                'start_workflow_async(...)',
             ),
             retryable=False,
             workflow_name=spec.name,
