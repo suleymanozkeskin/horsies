@@ -103,7 +103,7 @@ async def test_timeout_fails_task_and_worker_survives(
         # The SIGKILL broke the process pool; the worker restarts it and
         # must still execute new work.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = follow_up.get(timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
         assert result.is_ok()
         assert result.ok_value == 42
 
@@ -176,7 +176,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
 
         # The load-bearing assertion: the worker survived the drain.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = follow_up.get(timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
         assert result.is_ok()
         assert result.ok_value == 42
 
@@ -235,6 +235,6 @@ async def test_pool_breaker_storm_does_not_kill_worker(
             }
 
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
-        result = follow_up.get(timeout_ms=30_000)
+        result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
         assert result.is_ok()
         assert result.ok_value == 42
