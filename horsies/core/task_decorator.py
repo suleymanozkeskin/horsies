@@ -371,9 +371,10 @@ class TaskHandle(Generic[T]):
         Folds:
         - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
           (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
-          two strict-serde codes when surfaced by the broker layer, and
+          two strict-serde codes when surfaced by the broker layer;
+          ``RetrievalCode.EVENT_LOOP_LIMIT`` at the event loop limit and
           ``RetrievalCode.ASYNC_CONTEXT`` for a sync call inside a running
-          event loop, never cached).
+          event loop, both never cached).
         - ``Ok(None)`` → ``TASK_NOT_FOUND``.
         - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
         - ``Ok(record)`` with non-terminal status (timeout fired) →
@@ -392,8 +393,9 @@ class TaskHandle(Generic[T]):
             code = broker_err.code
             # The strict-serde codes are properties of the stored payload /
             # handle, so they are cached. A generic broker error is
-            # transient, and ASYNC_CONTEXT is a property of the call site:
-            # caching either would replay it after the condition cleared.
+            # transient, and EVENT_LOOP_LIMIT and ASYNC_CONTEXT are
+            # properties of the calling loop or thread: caching any of them
+            # would replay it after the condition cleared.
             err_code: BuiltInTaskCode
             cache: bool
             match code:
@@ -403,6 +405,8 @@ class TaskHandle(Generic[T]):
                     err_code, cache = (
                         OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True,
                     )
+                case BrokerErrorCode.EVENT_LOOP_LIMIT:
+                    err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
                 case BrokerErrorCode.ASYNC_CONTEXT:
                     err_code, cache = RetrievalCode.ASYNC_CONTEXT, False
                 case (
@@ -420,7 +424,6 @@ class TaskHandle(Generic[T]):
                     | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
                     | BrokerErrorCode.NO_BROKER
                     | BrokerErrorCode.INVALID_TASK_OPTIONS
-                    | BrokerErrorCode.EVENT_LOOP_LIMIT
                 ):
                     err_code, cache = OperationalErrorCode.BROKER_ERROR, False
                 case _ as unreachable:

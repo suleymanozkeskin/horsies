@@ -68,6 +68,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **`TaskHandle.get_async()` at the event loop limit returns
+  `RetrievalCode.EVENT_LOOP_LIMIT`, not cached.** In 0.5.5 it returned
+  `OperationalErrorCode.BROKER_ERROR`, with `broker_code` `EVENT_LOOP_LIMIT`
+  in `data`. `WorkflowHandle.get_async()` already returned
+  `RetrievalCode.EVENT_LOOP_LIMIT`. The sync `TaskHandle.get()` runs on the
+  sync runner loop, which never reaches the limit.
 - **`close_async()` does not block its event loop while it stops the sync
   runner.** The stop joins the runner thread for up to 2 s; it now runs on a
   worker thread through `asyncio.to_thread()`.
