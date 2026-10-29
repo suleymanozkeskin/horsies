@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -2670,7 +2671,7 @@ class TestWorkflowStartErrors:
             'call',
             side_effect=LoopRunnerError('No running event loop'),
         ):
-            r = start_workflow(spec, broker)
+            r = await asyncio.to_thread(start_workflow, spec, broker)
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
@@ -2702,7 +2703,7 @@ class TestWorkflowStartErrors:
             'call',
             side_effect=RuntimeError('Unexpected runner call failure'),
         ):
-            r = start_workflow(spec, broker)
+            r = await asyncio.to_thread(start_workflow, spec, broker)
 
         assert is_err(r)
         assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -469,7 +470,7 @@ class TestSubworkflowIntegration:
 
         # result_for must decode via the workflow's definition_key (int),
         # not the colliding task's str type.
-        decoded = handle.result_for(node_child.key())
+        decoded = await asyncio.to_thread(handle.result_for, node_child.key())
         assert decoded.is_ok(), f'expected Ok(int), got {decoded}'
         assert decoded.unwrap() == 42
 

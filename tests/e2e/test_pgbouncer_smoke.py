@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from tests.e2e.helpers.assertions import assert_ok, start_ok_sync, unwrap_send
+from tests.e2e.helpers.assertions import assert_ok, start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.pgbouncer_utils import isolated_pgbouncer_database, skip_if_pgbouncer_disabled
 
@@ -70,7 +70,7 @@ async def test_worker_processes_task_and_workflow_through_pgbouncer_split_urls()
                     task_handle = unwrap_send(await pgbouncer_tasks.double.send_async(value=21))
                     assert_ok(await task_handle.get_async(timeout_ms=15000), 42)
 
-                    workflow_handle = start_ok_sync(pgbouncer_workflows.spec_smoke)
+                    workflow_handle = await start_ok_in_thread(pgbouncer_workflows.spec_smoke)
                     assert_ok(await workflow_handle.get_async(timeout_ms=15000), 42)
             finally:
                 await instance_pgbouncer.broker.close_async()

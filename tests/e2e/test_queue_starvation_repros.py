@@ -15,7 +15,7 @@ from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import start_ok_sync
+from tests.e2e.helpers.assertions import start_ok_in_thread
 from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import wait_for_workflow_completion
@@ -139,13 +139,14 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
         ready_check=_make_ready_check(queues_custom.high_task),
     ):
         high_ids = [
-            custom_broker.enqueue(
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='high',
                 task_id=str(uuid4()),
                 enqueue_sha=f'high-{idx}',
                 kwargs_json=json.dumps({'duration_ms': 3000}),
-            ).unwrap()
+            )).unwrap()
             for idx in range(10)
         ]
 
@@ -154,13 +155,14 @@ async def test_lower_priority_queue_backfills_when_high_queue_is_capped(
         )
 
         normal_ids = [
-            custom_broker.enqueue(
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='normal',
                 task_id=str(uuid4()),
                 enqueue_sha=f'normal-{idx}',
                 kwargs_json=json.dumps({'duration_ms': 1000}),
-            ).unwrap()
+            )).unwrap()
             for idx in range(2)
         ]
 
@@ -187,7 +189,7 @@ async def test_wide_fanin_join_does_not_create_orphaned_join_tasks(
         processes=8,
         ready_check=_make_ready_check(healthcheck),
     ):
-        handle = start_ok_sync(wf_tasks.spec_wide_fanin_join)
+        handle = await start_ok_in_thread(wf_tasks.spec_wide_fanin_join)
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory,
             handle.workflow_id,

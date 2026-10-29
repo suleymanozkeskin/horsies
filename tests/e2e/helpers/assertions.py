@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 import pytest
@@ -14,12 +15,17 @@ from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err, is_ok
 
 
-def start_ok_sync(
+async def start_ok_in_thread(
     spec: WorkflowSpec[Any],
     workflow_id: str | None = None,
 ) -> WorkflowHandle[Any]:
-    """Unwrap sync start result or fail test with error details."""
-    r = spec.start(workflow_id)
+    """Start with the sync ``spec.start()`` and unwrap it, or fail the test.
+
+    The sync start blocks its thread, and on the test's event-loop thread it
+    returns ASYNC_CONTEXT. It runs on a worker thread, so the e2e suite
+    keeps its coverage of the sync start path.
+    """
+    r = await asyncio.to_thread(spec.start, workflow_id)
     if is_err(r):
         pytest.fail(f'spec.start() failed: {r.err_value}')
     return r.ok_value

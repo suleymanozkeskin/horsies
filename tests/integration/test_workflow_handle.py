@@ -497,7 +497,7 @@ class TestWorkflowHandleResults:
         await _complete_task(session, broker, handle.workflow_id, 1, TaskResult(ok=20))
 
         result_a = await handle.result_for_async(node_a.key())
-        result_b = handle.result_for(node_b)
+        result_b = await asyncio.to_thread(handle.result_for, node_b)
 
         assert result_a.unwrap() == 10
         assert result_b.unwrap() == 20

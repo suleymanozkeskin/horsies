@@ -155,13 +155,14 @@ async def test_multi_worker_distribution(broker: PostgresBroker) -> None:
     ):
         # Enqueue slow tasks to force overlap and spread across workers
         task_ids = [
-            broker.enqueue(
+            (await asyncio.to_thread(
+                broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -218,13 +219,14 @@ async def test_cluster_wide_cap(cluster_cap_broker: PostgresBroker) -> None:
     ):
         # Enqueue slow tasks (use cluster_cap-specific task)
         task_ids = [
-            cluster_cap_broker.enqueue(
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -281,13 +283,14 @@ async def test_per_queue_concurrency_cap(custom_broker: PostgresBroker) -> None:
     ):
         # Enqueue slow tasks to the high queue (use custom-specific task)
         task_ids = [
-            custom_broker.enqueue(
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name=queue_name,
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -391,13 +394,14 @@ async def test_softcap_db_ledger_race_single_execution(
         timeout=20.0,
         ready_check=_make_ready_check(instance_softcap.healthcheck),
     ):
-        blocker_task_id = softcap_broker.enqueue(
+        blocker_task_id = (await asyncio.to_thread(
+            softcap_broker.enqueue,
             task_name='e2e_softcap_blocker',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
             kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
-        ).unwrap()
+        )).unwrap()
         await wait_for_status(
             current_resources(softcap_broker).session_factory,
             blocker_task_id,
@@ -405,13 +409,14 @@ async def test_softcap_db_ledger_race_single_execution(
             timeout_s=10.0,
         )
 
-        ledger_task_id = softcap_broker.enqueue(
+        ledger_task_id = (await asyncio.to_thread(
+            softcap_broker.enqueue,
             task_name='e2e_softcap_db_ledger',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
             kwargs_json=json.dumps({'token': token}),
-        ).unwrap()
+        )).unwrap()
 
         await _wait_for_claimed_owner(
             current_resources(softcap_broker).session_factory,
@@ -499,13 +504,14 @@ async def test_stale_running_marked_failed_on_crash(
         ready_check=_make_ready_check(instance_recovery.healthcheck),
     ) as worker_proc:
         # Enqueue a long-running task
-        task_id = recovery_broker.enqueue(
+        task_id = (await asyncio.to_thread(
+            recovery_broker.enqueue,
             task_name='e2e_recovery_slow',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-        ).unwrap()
+        )).unwrap()
 
         # Wait until task reaches RUNNING
         await wait_for_status(
@@ -561,12 +567,13 @@ async def test_stale_claimed_requeued_and_completed(
     dead_worker_id = 'dead_worker_00000000'
 
     # Enqueue a simple task
-    task_id = recovery_broker.enqueue(
+    task_id = (await asyncio.to_thread(
+        recovery_broker.enqueue,
         task_name='e2e_recovery_healthcheck',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
-    ).unwrap()
+    )).unwrap()
 
     # Manually set the row to CLAIMED with a stale timestamp, simulating a
     # worker that died before executing the task
@@ -632,12 +639,13 @@ async def test_cluster_cap_not_leaked_on_failure(
     ):
         # Phase 1: Enqueue always-failing tasks
         fail_ids = [
-            cluster_cap_broker.enqueue(
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_fail',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_failing)
         ]
 
@@ -657,13 +665,14 @@ async def test_cluster_cap_not_leaked_on_failure(
 
         # Phase 2: Enqueue slow tasks — these must be able to run if cap was freed
         slow_ids = [
-            cluster_cap_broker.enqueue(
+            (await asyncio.to_thread(
+                cluster_cap_broker.enqueue,
                 task_name='e2e_cluster_cap_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_slow)
         ]
 
@@ -773,23 +782,25 @@ async def test_per_queue_caps_independent_across_queues(
     ):
         # Enqueue tasks to both queues
         high_ids = [
-            custom_broker.enqueue(
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='high',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
         normal_ids = [
-            custom_broker.enqueue(
+            (await asyncio.to_thread(
+                custom_broker.enqueue,
                 task_name='e2e_custom_slow',
                 queue_name='normal',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks_per_queue)
         ]
 
@@ -853,25 +864,27 @@ async def test_queue_priority_ordering(custom_broker: PostgresBroker) -> None:
 
     # Enqueue low-priority tasks FIRST
     low_ids = [
-        custom_broker.enqueue(
+        (await asyncio.to_thread(
+            custom_broker.enqueue,
             task_name='e2e_custom_slow',
             queue_name='low',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-        ).unwrap()
+        )).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
 
     # Enqueue high-priority tasks SECOND
     high_ids = [
-        custom_broker.enqueue(
+        (await asyncio.to_thread(
+            custom_broker.enqueue,
             task_name='e2e_custom_slow',
             queue_name='high',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
             kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-        ).unwrap()
+        )).unwrap()
         for _ in range(num_tasks_per_queue)
     ]
 
@@ -939,13 +952,14 @@ async def test_single_worker_crash_remaining_continue(
         ready_check=_make_ready_check(basic_tasks.healthcheck),
     ) as workers:
         task_ids = [
-            broker.enqueue(
+            (await asyncio.to_thread(
+                broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(num_tasks)
         ]
 
@@ -1022,13 +1036,14 @@ async def test_concurrent_enqueue_during_processing(
     ):
         # First batch
         batch1_ids = [
-            broker.enqueue(
+            (await asyncio.to_thread(
+                broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(batch_size)
         ]
 
@@ -1042,13 +1057,14 @@ async def test_concurrent_enqueue_during_processing(
 
         # Enqueue second batch mid-flight
         batch2_ids = [
-            broker.enqueue(
+            (await asyncio.to_thread(
+                broker.enqueue,
                 task_name='e2e_slow',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'duration_ms': task_duration_ms}),
-            ).unwrap()
+            )).unwrap()
             for _ in range(batch_size)
         ]
 
@@ -1151,13 +1167,14 @@ async def test_softcap_expired_claim_requeued(
             token = 'softcap_expired_claim'
 
             # Enqueue 1 softcap idempotent task (short duration — speed not needed here)
-            task_id = softcap_broker.enqueue(
+            task_id = (await asyncio.to_thread(
+                softcap_broker.enqueue,
                 task_name='e2e_softcap_slow_idempotent',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
                 kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),
-            ).unwrap()
+            )).unwrap()
 
             # Manually set to CLAIMED with an already-expired lease and a dead worker
             async with current_resources(softcap_broker).session_factory() as session:
@@ -1247,13 +1264,14 @@ async def test_softcap_owner_transition_after_worker_crash(
                 timeout=20.0,
                 ready_check=_make_ready_check(instance_softcap.healthcheck),
             ) as worker_a_proc:
-                blocker_task_id = softcap_broker.enqueue(
+                blocker_task_id = (await asyncio.to_thread(
+                    softcap_broker.enqueue,
                     task_name='e2e_softcap_blocker',
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
                     kwargs_json=json.dumps({'duration_ms': blocker_duration_ms}),
-                ).unwrap()
+                )).unwrap()
                 await wait_for_status(
                     current_resources(softcap_broker).session_factory,
                     blocker_task_id,
@@ -1261,13 +1279,14 @@ async def test_softcap_owner_transition_after_worker_crash(
                     timeout_s=10.0,
                 )
 
-                task_id = softcap_broker.enqueue(
+                task_id = (await asyncio.to_thread(
+                    softcap_broker.enqueue,
                     task_name='e2e_softcap_slow_idempotent',
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
                     kwargs_json=json.dumps({'token': token, 'duration_ms': 100}),
-                ).unwrap()
+                )).unwrap()
 
                 first_owner = await _wait_for_claimed_owner(
                     current_resources(softcap_broker).session_factory,
