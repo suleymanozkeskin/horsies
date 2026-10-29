@@ -201,6 +201,39 @@ has its own set.
   result is `CLOSE_FAILED` with the loop's thread in the message, and the
   close stays scheduled on that loop. A later call builds a new set.
 
+### Async Code and Jupyter
+
+A sync call blocks its thread until the sync runner loop completes the call.
+On a thread that runs an event loop, this wait stops every coroutine on that
+loop. Coroutines and Jupyter notebook cells run on such a thread.
+
+On such a thread, a sync call returns `ASYNC_CONTEXT` in the error type of
+that call. Nothing runs, and the sync runner does not start.
+
+| Sync call | Returns |
+|---|---|
+| `send()`, `schedule()`, `retry_send()`, `retry_schedule()` | `TaskSendErrorCode.ASYNC_CONTEXT`; the error keeps the payload for `retry_send_async()` / `retry_schedule_async()` |
+| `app.get_result()`, `app.get_raw_result()`, `app.get_task_info()`, `app.ping_database()`, `app.ping_workers()`, `app.list_worker_states()`, `app.get_worker_state()`, `app.get_worker_state_history()`, `TaskHandle.info()`, `broker.enqueue()`, `broker.get_task_info()`, `broker.get_raw_result_record()`, `broker.close()` | `BrokerErrorCode.ASYNC_CONTEXT` |
+| `TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()` | A result with `RetrievalCode.ASYNC_CONTEXT`, not cached |
+| `WorkflowHandle.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()`, `pause_workflow_sync()`, `resume_workflow_sync()` | `HandleErrorCode.ASYNC_CONTEXT` |
+| `spec.start()`, `spec.retry_start()` | `WorkflowStartErrorCode.ASYNC_CONTEXT` |
+| `app.check(live=True)` | `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`); the live check does not connect |
+
+On such a thread, use the `*_async` form:
+
+```python
+# In a coroutine or a notebook cell
+handle = (await my_task.send_async(value=1)).unwrap()
+result = await handle.get_async(timeout_ms=5000)
+```
+
+- A `TaskHandle` that already holds its result returns it from `get()`,
+  because that call does not wait.
+- `retry_start()` does not accept `ASYNC_CONTEXT`. Call
+  `await spec.start_async()`.
+- To run a sync call from async code, run it on a thread without an event
+  loop, for example `await asyncio.to_thread(app.check, live=True)`.
+
 ### Connection Ceiling
 
 Each set can open:
@@ -234,9 +267,8 @@ loop.run_until_complete(broker.ping_database_async())
 asyncio.run(broker.ping_database_async())
 ```
 
-**Don't call sync `close()` inside a coroutine whose loop made broker calls.**
-That loop's set cannot close while the coroutine blocks the loop, so the
-result is `CLOSE_FAILED` after 5 s. Use `await broker.close_async()`.
+**Don't call sync `close()` inside a coroutine.** It returns `ASYNC_CONTEXT`
+and closes nothing. Use `await broker.close_async()`.
 
 ## Multiple Components
 

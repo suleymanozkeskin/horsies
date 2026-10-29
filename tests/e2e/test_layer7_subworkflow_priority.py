@@ -28,7 +28,7 @@ from horsies.core.codec.json_io import dumps_json
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import start_ok_sync, unwrap_send
+from tests.e2e.helpers.assertions import start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.db import wait_for_all_terminal, wait_for_status
 from tests.e2e.tasks import priority_binding as pb
 from tests.e2e.tasks.instance_priority_binding import app  # noqa: F401
@@ -94,20 +94,21 @@ async def test_subworkflow_child_binds_queue_priority_and_claim_order(
         ready_check=_ready_check(),
     ):
         # 1. Occupy the single serial slot so scrape + direct queue behind it.
-        blocker_id = broker.enqueue(
+        blocker_id = (await asyncio.to_thread(
+            broker.enqueue,
             task_name='pb_blocker',
             queue_name='serial',
             task_id=str(uuid4()),
             enqueue_sha=f'pb-blocker-{uuid4().hex[:8]}',
             kwargs_json=dumps_json({'duration_ms': 6000}).unwrap(),
-        ).unwrap()
+        )).unwrap()
         await wait_for_status(
             current_resources(broker).session_factory, blocker_id, 'RUNNING', timeout_s=15.0,
         )
 
         # 2. Start the parent subworkflow; the worker expands it via the child's
         #    direct build_with, enqueuing pb_scrape on serial (behind blocker).
-        start_ok_sync(pb.spec_priority_parent)
+        await start_ok_in_thread(pb.spec_priority_parent)
         scrape_id = await _wait_for_task_row(broker, 'pb_scrape')
 
         # 3. Direct-send a task on serial AFTER scrape exists (later enqueued_at).

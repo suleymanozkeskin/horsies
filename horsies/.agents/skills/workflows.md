@@ -209,10 +209,11 @@ class WorkflowStartError:
 | `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
 | `INTERNAL_FAILED` | No | Sync bridge or unexpected exception |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.start_async()` |
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` accept only `ENQUEUE_FAILED` errors. Other codes return `Err(VALIDATION_FAILED)`. Best-effort idempotent by `workflow_id` (not payload-verified).
+`retry_start()` / `retry_start_async()` accept only `ENQUEUE_FAILED` errors. Other codes, `ASYNC_CONTEXT` included, return `Err(VALIDATION_FAILED)`. Best-effort idempotent by `workflow_id` (not payload-verified).
 
 ### Auto-retry
 
@@ -323,6 +324,7 @@ class HandleOperationError:
 | `LOOP_RUNNER_FAILED` | No | Sync bridge failure |
 | `INTERNAL_FAILED` | No | Unexpected exception |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 ## Enums
 

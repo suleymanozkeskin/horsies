@@ -12,6 +12,31 @@ class LoopRunnerError(RuntimeError):
     """Infrastructure failure in the sync->async bridge."""
 
 
+def in_running_event_loop() -> bool:
+    """True when called from a thread with a running asyncio event loop.
+
+    A sync facade blocks its calling thread until the broker's runner
+    loop completes the call. On a thread that runs an event loop, that
+    wait stalls every coroutine on the loop, so the sync facades fail
+    closed with ``ASYNC_CONTEXT`` there (the ``*_async`` variants are the
+    correct call). A loop that exists but does not run does not count.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def async_context_message(sync_call: str, async_call: str) -> str:
+    """The ``ASYNC_CONTEXT`` message: what was refused, why, and what to call."""
+    return (
+        f'sync {sync_call} was called inside a running event loop; its '
+        f'blocking wait would stall the loop, so nothing ran. Use '
+        f'`await {async_call}` instead.'
+    )
+
+
 class LoopRunner:
     """Run async callables from sync code on a dedicated event loop thread."""
 

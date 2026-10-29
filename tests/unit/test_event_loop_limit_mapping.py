@@ -12,7 +12,7 @@ import uuid
 from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from pydantic import SecretStr
@@ -30,8 +30,8 @@ from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle_types import HandleErrorCode
-from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.types.result import Err, is_err, is_ok
+from horsies.core.task_decorator import TaskHandle, create_task_wrapper
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.monitoring.task_actions import (
     TaskActionError,
     TaskActionErrorCode,
@@ -251,3 +251,25 @@ class TestRealBrokerAtTheLimit:
 
         assert is_err(result)
         assert result.err_value.code is TaskActionErrorCode.EVENT_LOOP_LIMIT
+
+    def test_task_handle_get_async(self, at_limit: _AtLimit) -> None:
+        """TaskHandle folds the limit into RetrievalCode, as WorkflowHandle does."""
+        handle: TaskHandle[int] = TaskHandle(
+            str(uuid.uuid4()), app=at_limit.app, broker_mode=True, ok_type=int,
+        )
+
+        at_limit_result = at_limit.run(handle.get_async(timeout_ms=0))
+
+        assert at_limit_result.is_err()
+        error = at_limit_result.unwrap_err()
+        assert error.error_code is RetrievalCode.EVENT_LOOP_LIMIT
+        assert LIMIT_TEXT in (error.message or '')
+        # Not cached: the next get_async() reads the broker again.
+        with patch.object(
+            at_limit.broker,
+            'get_raw_result_record_async',
+            AsyncMock(return_value=Ok(None)),
+        ) as read:
+            later = at_limit.run(handle.get_async(timeout_ms=0))
+        read.assert_awaited_once()
+        assert later.unwrap_err().error_code is RetrievalCode.TASK_NOT_FOUND

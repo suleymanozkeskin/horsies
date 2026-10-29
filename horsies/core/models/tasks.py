@@ -86,6 +86,10 @@ class RetrievalCode(str, Enum):
     # loops, so this new loop cannot read the value now. Never cached: it
     # clears when one of those loops closes.
     EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
+    # A sync get() was called on a thread that runs an event loop, so this
+    # call site cannot wait for the value. Never cached: the ``*_async``
+    # form, or a sync call from a thread without a running loop, reads it.
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 class OutcomeCode(str, Enum):

@@ -34,6 +34,10 @@ class WorkflowStartErrorCode(str, Enum):
     - ``EVENT_LOOP_LIMIT``: the broker already holds resource sets for its
       limit of open event loops, and this call ran on a new one; nothing was
       written; clears when one of those loops closes
+    - ``ASYNC_CONTEXT``: sync ``start()`` was called on a thread that runs
+      an event loop; its wait would stall that loop, so nothing was
+      written; call ``await spec.start_async()``. ``retry_start`` does
+      not accept it
     """
 
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
@@ -41,6 +45,7 @@ class WorkflowStartErrorCode(str, Enum):
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
     INTERNAL_FAILED = 'INTERNAL_FAILED'
     EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 @dataclass(slots=True, frozen=True)

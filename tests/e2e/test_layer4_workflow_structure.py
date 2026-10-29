@@ -34,7 +34,7 @@ from horsies.core.models.workflow import TaskNode
 from horsies.core.models.tasks import TaskError, TaskResult
 
 from horsies.core.types.result import is_ok
-from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_sync, unwrap_send
+from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_in_thread, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -91,7 +91,7 @@ async def _wait_until(
 async def test_linear_workflow(broker: PostgresBroker) -> None:
     """Tasks execute in sequence, each waits for predecessor."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_linear)
+        handle = await start_ok_in_thread(wf_tasks.spec_linear)
 
         # Use DB polling to wait for completion
         status = await wait_for_workflow_completion(
@@ -134,7 +134,7 @@ async def test_linear_workflow(broker: PostgresBroker) -> None:
 async def test_linear_status_transitions(broker: PostgresBroker) -> None:
     """Verify workflow_task DB records have correct timestamps."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_linear)
+        handle = await start_ok_in_thread(wf_tasks.spec_linear)
 
         # Use DB polling to wait for completion
         status = await wait_for_workflow_completion(
@@ -162,7 +162,7 @@ async def test_linear_status_transitions(broker: PostgresBroker) -> None:
 async def test_fanout_parallel_execution(broker: PostgresBroker) -> None:
     """Parallel tasks execute concurrently after root (DB polling proof)."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanout)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanout)
 
         # Poll for concurrent RUNNING tasks while workflow executes
         # Fan-out tasks take 500ms each, so poll for ~2 seconds
@@ -209,7 +209,7 @@ async def test_fanout_parallel_execution(broker: PostgresBroker) -> None:
 async def test_fanout_sequential_with_single_process(broker: PostgresBroker) -> None:
     """Fan-out tasks execute sequentially when only 1 process available."""
     with run_worker(DEFAULT_INSTANCE, processes=1, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanout)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanout)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -232,7 +232,7 @@ async def test_fanout_sequential_with_single_process(broker: PostgresBroker) -> 
 async def test_fanin_waits_for_all(broker: PostgresBroker) -> None:
     """Aggregator waits for all parallel tasks to complete."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanin)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanin)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -272,7 +272,7 @@ async def test_fanin_aggregator_pending_during_execution(
     but not all. If delays are too short, the observation window may be missed.
     """
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanin)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanin)
 
         async def _agg_pending_while_roots_running() -> bool:
             db_tasks = await get_workflow_tasks(
@@ -310,7 +310,7 @@ async def test_fanin_aggregator_pending_during_execution(
 async def test_diamond_structure(broker: PostgresBroker) -> None:
     """Diamond pattern executes correctly with proper dependency ordering."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_diamond)
+        handle = await start_ok_in_thread(wf_tasks.spec_diamond)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -351,7 +351,7 @@ async def test_diamond_waits_for_slow_branch(broker: PostgresBroker) -> None:
     the slow-branch timing guarantee specifically.
     """
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_diamond)
+        handle = await start_ok_in_thread(wf_tasks.spec_diamond)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -390,7 +390,7 @@ async def test_diamond_waits_for_slow_branch(broker: PostgresBroker) -> None:
 async def test_complex_dag(broker: PostgresBroker) -> None:
     """Complex DAG with multiple parallel levels executes correctly."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_complex)
+        handle = await start_ok_in_thread(wf_tasks.spec_complex)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -450,7 +450,7 @@ async def test_complex_dag(broker: PostgresBroker) -> None:
 async def test_explicit_output_task(broker: PostgresBroker) -> None:
     """WorkflowHandle.get() returns explicit output task result."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_output)
+        handle = await start_ok_in_thread(wf_tasks.spec_output)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -459,7 +459,7 @@ async def test_explicit_output_task(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get result via sync handle.get() - should work after workflow completes
-        result = handle.get(timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
         assert_ok(result)
 
         # Should return node_output_final's result directly (not dict of terminals)
@@ -473,7 +473,7 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
     """Without explicit output, get() returns dict of terminal task results."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
         # spec_fanout has no output= set, so returns dict of terminal results
-        handle = start_ok_sync(wf_tasks.spec_fanout)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanout)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -482,7 +482,7 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get result via sync handle.get() - should work after workflow completes
-        result = handle.get(timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
         assert_ok(result)
 
         # Returns dict keyed by node_id
@@ -567,7 +567,7 @@ async def test_workflow_task_expires_before_claim(broker: PostgresBroker) -> Non
     )
 
     # Start workflow (this enqueues the root task immediately)
-    handle = start_ok_sync(spec_expiring)
+    handle = await start_ok_in_thread(spec_expiring)
 
     # Wait until task has definitely expired before starting worker.
     await _wait_until(
@@ -619,7 +619,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
     )
 
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(spec_valid)
+        handle = await start_ok_in_thread(spec_valid)
 
         # Wait for workflow completion via DB polling
         status = await wait_for_workflow_completion(
@@ -643,7 +643,7 @@ async def test_workflow_task_completes_before_expiry(broker: PostgresBroker) -> 
 async def test_single_node_workflow(broker: PostgresBroker) -> None:
     """Minimal workflow with exactly one task completes and returns output."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_single_node)
+        handle = await start_ok_in_thread(wf_tasks.spec_single_node)
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -660,7 +660,7 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
         assert task['started_at'] is not None
         assert task['completed_at'] is not None
 
-        result = handle.get(timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
         assert_ok(result)
         output = result.unwrap()
         # Default terminal results: dict keyed by node_id
@@ -683,7 +683,7 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
 async def test_linear_failure_cascades_to_skip(broker: PostgresBroker) -> None:
     """When mid-chain task fails, downstream tasks are SKIPPED."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_linear_fail_mid)
+        handle = await start_ok_in_thread(wf_tasks.spec_linear_fail_mid)
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -714,14 +714,14 @@ async def test_handle_get_returns_error_on_failed_workflow(
 ) -> None:
     """handle.get() returns err with first failed task's error_code."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_linear_fail_mid)
+        handle = await start_ok_in_thread(wf_tasks.spec_linear_fail_mid)
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
         )
         assert status == 'FAILED'
 
-        result = handle.get(timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
         assert_err(result, 'MID_FAIL')
 
 
@@ -735,7 +735,7 @@ async def test_handle_get_returns_error_on_failed_workflow(
 async def test_fanout_one_branch_fails(broker: PostgresBroker) -> None:
     """Independent branches are not affected by sibling failure."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanout_one_fail)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanout_one_fail)
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -768,7 +768,7 @@ async def test_fanout_one_branch_fails(broker: PostgresBroker) -> None:
 async def test_fanin_one_dep_fails_skips_aggregator(broker: PostgresBroker) -> None:
     """Aggregator is SKIPPED when any dependency fails (default join=all)."""
     with run_worker(DEFAULT_INSTANCE, processes=4, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_fanin_one_fail)
+        handle = await start_ok_in_thread(wf_tasks.spec_fanin_one_fail)
 
         status = await wait_for_workflow_completion(
             current_resources(broker).session_factory, handle.workflow_id, timeout_s=15.0,
@@ -804,7 +804,7 @@ async def test_fanin_one_dep_fails_skips_aggregator(broker: PostgresBroker) -> N
 async def test_workflow_cancellation(broker: PostgresBroker) -> None:
     """Cancelling a running workflow SKIPs remaining tasks."""
     with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
-        handle = start_ok_sync(wf_tasks.spec_slow_linear)
+        handle = await start_ok_in_thread(wf_tasks.spec_slow_linear)
 
         # Poll until first task (A, 200ms) completes
         async def _a_completed() -> bool:
@@ -819,7 +819,7 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
         assert a_done, 'Task A did not complete before cancel'
 
         # Cancel the workflow while B (1000ms) is running or pending
-        cancel_r = handle.cancel()
+        cancel_r = await asyncio.to_thread(handle.cancel)
         assert is_ok(cancel_r), 'cancel should succeed'
 
         status = await wait_for_workflow_completion(
@@ -834,7 +834,7 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
                 'SKIPPED', 'COMPLETED', 'RUNNING',
             ), f"Task {task['task_index']} has unexpected status: {task['status']}"
 
-        result = handle.get(timeout_ms=2000)
+        result = await asyncio.to_thread(handle.get, timeout_ms=2000)
         assert_err(result, 'WORKFLOW_CANCELLED')
 
 
@@ -849,7 +849,7 @@ async def test_handle_get_timeout(broker: PostgresBroker) -> None:
     """handle.get() returns WAIT_TIMEOUT when workflow does not complete."""
     _ = broker  # Fixture ensures DB schema is initialized
     # Start workflow WITHOUT a worker — tasks stay non-terminal
-    handle = start_ok_sync(wf_tasks.spec_slow_linear)
+    handle = await start_ok_in_thread(wf_tasks.spec_slow_linear)
 
-    result = handle.get(timeout_ms=200)
+    result = await asyncio.to_thread(handle.get, timeout_ms=200)
     assert_err(result, 'WAIT_TIMEOUT')

@@ -805,6 +805,10 @@ def start_workflow(
     Inner async ``Err`` passes through unchanged.
     Bridge infrastructure failures are returned as ``INTERNAL_FAILED``.
     Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
+    writes nothing; ``retry_start`` does not accept that error.
+    ``WorkflowSpec.start()`` and ``retry_start()`` check first, so their
+    message names their own async form.
 
     Args:
         spec: The workflow specification.
@@ -816,9 +820,24 @@ def start_workflow(
     Returns:
         ``Ok(WorkflowHandle)`` on success, ``Err(WorkflowStartError)`` on failure.
     """
-    from horsies.core.utils.loop_runner import LoopRunnerError
+    from horsies.core.utils.loop_runner import (
+        LoopRunnerError,
+        async_context_message,
+        in_running_event_loop,
+    )
 
     wf_id = workflow_id or str(uuid.uuid4())
+    if in_running_event_loop():
+        return Err(WorkflowStartError(
+            code=WorkflowStartErrorCode.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'start_workflow() of workflow {spec.name!r}',
+                'start_workflow_async(...)',
+            ),
+            retryable=False,
+            workflow_name=spec.name,
+            workflow_id=wf_id,
+        ))
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
     try:
         return broker.run_sync(
@@ -838,6 +857,8 @@ def start_workflow(
             workflow_id=wf_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(WorkflowStartError(
             code=WorkflowStartErrorCode.INTERNAL_FAILED,
@@ -1030,6 +1051,8 @@ def pause_workflow_sync(
     Inner async ``Err`` passes through unchanged.
     Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
     Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
+    changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1040,8 +1063,22 @@ def pause_workflow_sync(
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
         ``Err(...)`` on failure — see ``HandleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import LoopRunnerError
+    from horsies.core.utils.loop_runner import (
+        LoopRunnerError,
+        async_context_message,
+        in_running_event_loop,
+    )
 
+    if in_running_event_loop():
+        return Err(HandleOperationError(
+            code=HandleErrorCode.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'pause_workflow_sync for workflow {workflow_id}',
+                'pause_workflow(broker, workflow_id)',
+            ),
+            retryable=False,
+            workflow_id=workflow_id,
+        ))
     try:
         return broker.run_sync(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
@@ -1052,6 +1089,8 @@ def pause_workflow_sync(
             workflow_id=workflow_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.INTERNAL_FAILED,
@@ -1350,6 +1389,8 @@ def resume_workflow_sync(
     Inner async ``Err`` passes through unchanged.
     Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
     Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
+    changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1360,8 +1401,22 @@ def resume_workflow_sync(
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
         ``Err(...)`` on failure — see ``HandleErrorCode``.
     """
-    from horsies.core.utils.loop_runner import LoopRunnerError
+    from horsies.core.utils.loop_runner import (
+        LoopRunnerError,
+        async_context_message,
+        in_running_event_loop,
+    )
 
+    if in_running_event_loop():
+        return Err(HandleOperationError(
+            code=HandleErrorCode.ASYNC_CONTEXT,
+            message=async_context_message(
+                f'resume_workflow_sync for workflow {workflow_id}',
+                'resume_workflow(broker, workflow_id)',
+            ),
+            retryable=False,
+            workflow_id=workflow_id,
+        ))
     try:
         return broker.run_sync(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
@@ -1372,6 +1427,8 @@ def resume_workflow_sync(
             workflow_id=workflow_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.INTERNAL_FAILED,

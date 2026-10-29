@@ -34,6 +34,10 @@ class HandleErrorCode(str, Enum):
     # loops, and this call ran on a new one. Nothing ran. It clears when one
     # of those loops closes.
     EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
+    # A sync handle method was called on a thread that runs an event loop.
+    # Its wait would stall that loop, so nothing ran. Call the ``*_async``
+    # form.
+    ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 
 
 @dataclass(slots=True, frozen=True)

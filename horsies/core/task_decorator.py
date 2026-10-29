@@ -50,6 +50,10 @@ from horsies.core.models.retention import (
     resolve_queue_retention_class,
 )
 from horsies.core.utils.db import is_retryable_connection_error
+from horsies.core.utils.loop_runner import (
+    async_context_message,
+    in_running_event_loop,
+)
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
@@ -132,21 +136,6 @@ type RetentionChoice = str | None | _UnsetRetention
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
 _SEND_RETRY_MAX_MS: Final[int] = 2000
-
-
-def _in_running_event_loop() -> bool:
-    """True when called from a thread with a running asyncio event loop.
-
-    The sync send/schedule executors are blocking DB round trips; running
-    them inline on an event loop stalls every coroutine on it. They fail
-    closed with ``ASYNC_CONTEXT`` instead (the ``*_async`` variants are the
-    correct call there).
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return False
-    return True
 
 
 class FromNodeMarker:
@@ -385,7 +374,10 @@ class TaskHandle(Generic[T]):
         Folds:
         - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
           (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
-          two strict-serde codes when surfaced by the broker layer).
+          two strict-serde codes when surfaced by the broker layer;
+          ``RetrievalCode.EVENT_LOOP_LIMIT`` at the event loop limit, never
+          cached). A broker ``ASYNC_CONTEXT`` fails an assertion: ``get()``
+          refuses a running event loop before it calls the broker.
         - ``Ok(None)`` → ``TASK_NOT_FOUND``.
         - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
         - ``Ok(record)`` with non-terminal status (timeout fired) →
@@ -402,20 +394,54 @@ class TaskHandle(Generic[T]):
         if _is_err(broker_result):
             broker_err = broker_result.err_value
             code = broker_err.code
-            if code == BrokerErrorCode.NO_TYPE_AVAILABLE:
-                err_code: BuiltInTaskCode = ContractCode.NO_TYPE_AVAILABLE
-            elif code == BrokerErrorCode.INVALID_JSON_PAYLOAD:
-                err_code = OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-            else:
-                err_code = OperationalErrorCode.BROKER_ERROR
+            # The strict-serde codes are properties of the stored payload /
+            # handle, so they are cached. A generic broker error is
+            # transient, and EVENT_LOOP_LIMIT is a property of the calling
+            # loop: caching either would replay it after the condition
+            # cleared.
+            err_code: BuiltInTaskCode
+            cache: bool
+            match code:
+                case BrokerErrorCode.NO_TYPE_AVAILABLE:
+                    err_code, cache = ContractCode.NO_TYPE_AVAILABLE, True
+                case BrokerErrorCode.INVALID_JSON_PAYLOAD:
+                    err_code, cache = (
+                        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True,
+                    )
+                case BrokerErrorCode.EVENT_LOOP_LIMIT:
+                    err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
+                case BrokerErrorCode.ASYNC_CONTEXT:
+                    raise AssertionError(
+                        f'TaskHandle result read for task {self.task_id} got '
+                        'ASYNC_CONTEXT; get() refuses a running event loop '
+                        'before the broker call, and get_async() reads through '
+                        'an async call',
+                    )
+                case (
+                    BrokerErrorCode.SCHEMA_INIT_FAILED
+                    | BrokerErrorCode.ENQUEUE_FAILED
+                    | BrokerErrorCode.PAYLOAD_MISMATCH
+                    | BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
+                    | BrokerErrorCode.TASK_INFO_QUERY_FAILED
+                    | BrokerErrorCode.MONITORING_QUERY_FAILED
+                    | BrokerErrorCode.DB_PING_FAILED
+                    | BrokerErrorCode.WORKER_PING_FAILED
+                    | BrokerErrorCode.CLEANUP_FAILED
+                    | BrokerErrorCode.CLOSE_FAILED
+                    | BrokerErrorCode.LISTENER_START_FAILED
+                    | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
+                    | BrokerErrorCode.NO_BROKER
+                    | BrokerErrorCode.INVALID_TASK_OPTIONS
+                ):
+                    err_code, cache = OperationalErrorCode.BROKER_ERROR, False
+                case _ as unreachable:
+                    assert_never(unreachable)
             return self._error_result(
                 error_code=err_code,
                 message=broker_err.message,
                 data={'task_id': self.task_id, 'broker_code': code.value},
                 exception=broker_err.exception,
-                # A generic broker error is transient; the strict-serde
-                # codes are properties of the stored payload / handle.
-                cache=err_code is not OperationalErrorCode.BROKER_ERROR,
+                cache=cache,
             )
         record = broker_result.ok_value
         if record is None:
@@ -546,6 +572,10 @@ class TaskHandle(Generic[T]):
         """
         Get the task result (blocking).
 
+        A broker-backed handle without its result returns
+        ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that runs an
+        event loop; use ``get_async()`` there.
+
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
@@ -565,6 +595,16 @@ class TaskHandle(Generic[T]):
                     return result
 
         if self._broker_mode and self._app:
+            if in_running_event_loop():
+                return self._error_result(
+                    error_code=RetrievalCode.ASYNC_CONTEXT,
+                    message=async_context_message(
+                        f'TaskHandle.get() for task {self.task_id}',
+                        'handle.get_async(...)',
+                    ),
+                    data={'task_id': self.task_id},
+                    cache=False,
+                )
             broker = self._app.get_broker()
             try:
                 broker_result = broker.get_raw_result_record(
@@ -655,7 +695,8 @@ class TaskHandle(Generic[T]):
         """Fetch metadata for this task from the broker.
 
         Returns Ok(TaskInfo) if found, Ok(None) if not found,
-        Err(BrokerOperationError) on infrastructure or precondition failure.
+        Err(BrokerOperationError) on infrastructure or precondition failure,
+        and Err(ASYNC_CONTEXT) on a thread that runs an event loop.
         """
         if not self._broker_mode or not self._app:
             return Err(BrokerOperationError(
@@ -663,6 +704,15 @@ class TaskHandle(Generic[T]):
                 message=(
                     'TaskHandle.info() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
+                ),
+                retryable=False,
+            ))
+        if in_running_event_loop():
+            return Err(BrokerOperationError(
+                code=BrokerErrorCode.ASYNC_CONTEXT,
+                message=async_context_message(
+                    f'TaskHandle.info() for task {self.task_id}',
+                    'handle.info_async(...)',
                 ),
                 retryable=False,
             ))
@@ -1228,6 +1278,8 @@ def create_task_wrapper(
                     TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT,
                     False,
                 )
+            case BrokerErrorCode.ASYNC_CONTEXT:
+                code, retryable = TaskSendErrorCode.ASYNC_CONTEXT, False
             case (
                 BrokerErrorCode.SCHEMA_INIT_FAILED
                 | BrokerErrorCode.ENQUEUE_FAILED
@@ -1264,7 +1316,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core sync send logic. Used by send() and retry_send()."""
-        if _in_running_event_loop():
+        if in_running_event_loop():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.ASYNC_CONTEXT,
                 message=(
@@ -1432,7 +1484,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core sync schedule logic. Used by schedule() and retry_schedule()."""
-        if _in_running_event_loop():
+        if in_running_event_loop():
             return Err(TaskSendError(
                 code=TaskSendErrorCode.ASYNC_CONTEXT,
                 message=(

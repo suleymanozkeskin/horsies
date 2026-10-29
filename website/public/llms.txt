@@ -87,7 +87,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
 - ContractCode: RETURN_TYPE_MISMATCH, PYDANTIC_HYDRATION_ERROR, WORKFLOW_CTX_MISSING_ID
-- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, EVENT_LOOP_LIMIT
+- RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, WORKFLOW_PAUSED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
@@ -109,7 +109,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Err(BrokerOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, EVENT_LOOP_LIMIT
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran and the sync runner did not start; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
 - EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
@@ -189,6 +190,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
 - IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; detail names the owner task; the retry methods accept it
 - EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
+- ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int
@@ -355,7 +357,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed with categorized error
 - WorkflowStartError fields: code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str), exception (BaseException | None)
-- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, INTERNAL_FAILED, EVENT_LOOP_LIMIT
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, INTERNAL_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
 - Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
 
@@ -492,7 +494,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Task definition (HRS-100-HRS-103):
   - HRS-100 TASK_NO_RETURN_TYPE, HRS-101 TASK_INVALID_RETURN_TYPE
   - HRS-102 TASK_INVALID_OPTIONS, HRS-103 TASK_INVALID_QUEUE
-- Config/broker (HRS-200-HRS-212):
+- Config/broker (HRS-200-HRS-299):
   - HRS-200 CONFIG_INVALID_QUEUE_MODE, HRS-201 CONFIG_INVALID_CLUSTER_CAP
   - HRS-202 CONFIG_INVALID_PREFETCH, HRS-203 BROKER_INVALID_URL
   - HRS-204 CONFIG_INVALID_RECOVERY, HRS-205 CONFIG_INVALID_SCHEDULE
@@ -500,6 +502,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - HRS-208 CONFIG_INVALID_RESILIENCE, HRS-209 CONFIG_INVALID_EXCEPTION_MAPPER
   - HRS-210 MODULE_EXEC_ERROR, HRS-211 BROKER_INIT_FAILED
   - HRS-212 CHECK_RESERVED_CODE_COLLISION (exception_mapper/default_unhandled_error_code collides with built-in code)
+  - HRS-217 CHECK_LIVE_ASYNC_CONTEXT (check(live=True) called inside a running event loop; the live check did not run)
 - Registry (HRS-300-HRS-301):
   - HRS-300 TASK_NOT_REGISTERED, HRS-301 TASK_DUPLICATE_NAME
 
