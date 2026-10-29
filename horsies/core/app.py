@@ -1251,6 +1251,8 @@ class Horsies:
             return broker.run_sync(
                 self.get_result_async, task_id, timeout_ms,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             from horsies.core.brokers.result_types import (
                 BrokerErrorCode,
@@ -1387,6 +1389,8 @@ class Horsies:
                 include_failed_reason=include_failed_reason,
                 include_attempts=include_attempts,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             from horsies.core.brokers.result_types import (
                 BrokerErrorCode,
@@ -1453,6 +1457,8 @@ class Horsies:
         broker = self.get_broker()
         try:
             return broker.run_sync(self.ping_database_async)
+        except AssertionError:
+            raise
         except Exception as exc:
             return self._sync_bridge_err(
                 BrokerErrorCode.DB_PING_FAILED, 'ping_database', exc
@@ -1500,6 +1506,8 @@ class Horsies:
                 timeout_seconds=timeout_seconds,
                 min_responses=min_responses,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return self._sync_bridge_err(
                 BrokerErrorCode.WORKER_PING_FAILED, 'ping_workers', exc
@@ -1524,6 +1532,8 @@ class Horsies:
         broker = self.get_broker()
         try:
             return broker.run_sync(self.list_worker_states_async)
+        except AssertionError:
+            raise
         except Exception as exc:
             return self._sync_bridge_err(
                 BrokerErrorCode.MONITORING_QUERY_FAILED, 'list_worker_states', exc
@@ -1552,6 +1562,8 @@ class Horsies:
         broker = self.get_broker()
         try:
             return broker.run_sync(self.get_worker_state_async, worker_id)
+        except AssertionError:
+            raise
         except Exception as exc:
             return self._sync_bridge_err(
                 BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state', exc
@@ -1588,6 +1600,8 @@ class Horsies:
             return broker.run_sync(
                 self.get_worker_state_history_async, worker_id, limit=limit
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return self._sync_bridge_err(
                 BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state_history', exc

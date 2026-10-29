@@ -969,7 +969,9 @@ class PostgresBroker:
 
         Raises:
             AssertionError: the calling thread runs an event loop. Nothing
-                ran, and the runner was not started.
+                ran, and the runner was not started. Every sync facade
+                re-raises an AssertionError from this call, also one that the
+                coroutine raised, instead of returning it as an Err.
             LoopRunnerError: the runner is stopped, or scheduling onto its
                 loop failed.
             Exception: the coroutine's own exception, unchanged.
@@ -2850,6 +2852,8 @@ class PostgresBroker:
             return self.run_sync(
                 self.get_raw_result_record_async, task_id, timeout_ms,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.TASK_INFO_QUERY_FAILED,
@@ -3812,6 +3816,8 @@ class PostgresBroker:
                 retention_class_key=retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.ENQUEUE_FAILED,
@@ -4201,6 +4207,8 @@ class PostgresBroker:
                 include_failed_reason=include_failed_reason,
                 include_attempts=include_attempts,
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.TASK_INFO_QUERY_FAILED,
@@ -4221,6 +4229,8 @@ class PostgresBroker:
             )
         try:
             return self.run_sync(self.close_async)
+        except AssertionError:
+            raise
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.CLOSE_FAILED,

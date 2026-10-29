@@ -631,6 +631,8 @@ class WorkflowHandle(Generic[OutT]):
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
+        except AssertionError:
+            raise
         except Exception as exc:
             return Err(HandleOperationError(
                 code=HandleErrorCode.INTERNAL_FAILED,
@@ -667,6 +669,8 @@ class WorkflowHandle(Generic[OutT]):
                 'TaskResult[_T, TaskError]',
                 _broker_task_error(f'Loop runner failed: {exc}'),
             )
+        except AssertionError:
+            raise
         except Exception as exc:
             return cast(
                 'TaskResult[_T, TaskError]',

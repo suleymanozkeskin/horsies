@@ -854,6 +854,8 @@ def start_workflow(
             workflow_id=wf_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(WorkflowStartError(
             code=WorkflowStartErrorCode.INTERNAL_FAILED,
@@ -1084,6 +1086,8 @@ def pause_workflow_sync(
             workflow_id=workflow_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.INTERNAL_FAILED,
@@ -1420,6 +1424,8 @@ def resume_workflow_sync(
             workflow_id=workflow_id,
             exception=exc,
         ))
+    except AssertionError:
+        raise
     except Exception as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.INTERNAL_FAILED,

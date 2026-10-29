@@ -59,6 +59,12 @@ there is no migration contract between pre-1.0 versions.
 - **`PostgresBroker.run_sync()` fails an assertion when it is called on a
   thread that runs an event loop.** Nothing runs, and the sync runner does
   not start. Before, it blocked that loop until the call completed.
+- **A sync facade re-raises an `AssertionError` from the sync bridge.** This
+  covers the `run_sync()` assertion and an assertion that fails inside the
+  called coroutine. Before, the facade returned it as its bridge failure: an
+  `Err` with `TASK_INFO_QUERY_FAILED`, `ENQUEUE_FAILED`, `CLOSE_FAILED`,
+  `DB_PING_FAILED`, `WORKER_PING_FAILED`, `MONITORING_QUERY_FAILED` or
+  `INTERNAL_FAILED`, or a `BROKER_ERROR` result.
 
 ### Fixed
 

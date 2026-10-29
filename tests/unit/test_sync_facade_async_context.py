@@ -499,3 +499,50 @@ def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
     finally:
         asyncio.set_event_loop(None)
         loop.close()
+
+
+# =============================================================================
+# Every run_sync call site re-raises an AssertionError
+# =============================================================================
+
+
+def _workflow_handle(broker: PostgresBroker) -> WorkflowHandle[Any]:
+    return WorkflowHandle(workflow_id=WORKFLOW_ID, broker=broker)
+
+
+RUN_SYNC_SITES: dict[str, Callable[[Horsies, PostgresBroker], Any]] = {
+    'broker.get_raw_result_record': lambda app, broker: broker.get_raw_result_record(TASK_ID, 0),
+    'broker.enqueue': lambda app, broker: broker.enqueue(
+        'echo', task_id=TASK_ID, enqueue_sha='sha',
+    ),
+    'broker.get_task_info': lambda app, broker: broker.get_task_info(TASK_ID),
+    'broker.close': lambda app, broker: broker.close(),
+    'app.get_result': lambda app, broker: app.get_result(TASK_ID, 0),
+    'app.get_task_info': lambda app, broker: app.get_task_info(TASK_ID),
+    'app.ping_database': lambda app, broker: app.ping_database(),
+    'app.ping_workers': lambda app, broker: app.ping_workers(),
+    'app.list_worker_states': lambda app, broker: app.list_worker_states(),
+    'app.get_worker_state': lambda app, broker: app.get_worker_state('worker-1'),
+    'app.get_worker_state_history': lambda app, broker: app.get_worker_state_history('worker-1'),
+    'WorkflowHandle.status': lambda app, broker: _workflow_handle(broker).status(),
+    'WorkflowHandle.get': lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
+    'start_workflow': lambda app, broker: _spec(app).start(WORKFLOW_ID),
+    'pause_workflow_sync': lambda app, broker: pause_workflow_sync(broker, WORKFLOW_ID),
+    'resume_workflow_sync': lambda app, broker: resume_workflow_sync(broker, WORKFLOW_ID),
+}
+
+
+@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
+def test_run_sync_call_site_reraises_an_assertion(app: Horsies, site: str) -> None:
+    """A defect in the bridge propagates; it is not folded into an Err."""
+    broker = app.get_broker()
+
+    with (
+        patch.object(
+            broker, 'run_sync', side_effect=AssertionError('stub defect'),
+        ) as run_sync,
+        pytest.raises(AssertionError, match='stub defect'),
+    ):
+        RUN_SYNC_SITES[site](app, broker)
+
+    run_sync.assert_called_once()
