@@ -1273,12 +1273,16 @@ def create_task_wrapper(
                 code, retryable = TaskSendErrorCode.PAYLOAD_MISMATCH, False
             case BrokerErrorCode.EVENT_LOOP_LIMIT:
                 code, retryable = TaskSendErrorCode.EVENT_LOOP_LIMIT, False
+            case BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT:
+                code, retryable = (
+                    TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+                    False,
+                )
             case BrokerErrorCode.ASYNC_CONTEXT:
                 code, retryable = TaskSendErrorCode.ASYNC_CONTEXT, False
             case (
                 BrokerErrorCode.SCHEMA_INIT_FAILED
                 | BrokerErrorCode.ENQUEUE_FAILED
-                | BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
                 | BrokerErrorCode.TASK_INFO_QUERY_FAILED
                 | BrokerErrorCode.MONITORING_QUERY_FAILED
                 | BrokerErrorCode.DB_PING_FAILED
@@ -1302,6 +1306,7 @@ def create_task_wrapper(
             task_id=task_id,
             payload=payload,
             exception=broker_err.exception,
+            detail=broker_err.detail,
         ))
 
     # ---- Core send/schedule helpers ----
@@ -2206,24 +2211,27 @@ def create_task_wrapper(
     ) -> TaskSendResult[tuple[str, TaskSendPayload]]:
         """Validate a TaskSendError for retry eligibility.
 
-        Accepts ``ENQUEUE_FAILED`` (broker/transient failure) and
+        Accepts ``ENQUEUE_FAILED`` (broker/transient failure),
         ``ASYNC_CONTEXT`` (sync entry point hit a running loop — the error
         still carries the prepared payload so ``retry_*_async`` can complete
-        the same dispatch). Returns Ok((task_id, payload)) or
-        Err(TaskSendError(VALIDATION_FAILED)).
+        the same dispatch) and ``IDEMPOTENCY_KEY_CONFLICT`` (the key clears
+        when its reservation ends; the caller decides when to retry).
+        Returns Ok((task_id, payload)) or Err(TaskSendError(VALIDATION_FAILED)).
         """
         match error.code:
             case (
                 TaskSendErrorCode.ENQUEUE_FAILED
                 | TaskSendErrorCode.ASYNC_CONTEXT
+                | TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
             ):
                 pass
             case _:
                 return Err(TaskSendError(
                     code=TaskSendErrorCode.VALIDATION_FAILED,
                     message=(
-                        f'retry is only valid for ENQUEUE_FAILED or '
-                        f'ASYNC_CONTEXT errors, got {error.code!r}'
+                        f'retry is only valid for ENQUEUE_FAILED, '
+                        f'ASYNC_CONTEXT or IDEMPOTENCY_KEY_CONFLICT errors, '
+                        f'got {error.code!r}'
                     ),
                     retryable=False,
                 ))

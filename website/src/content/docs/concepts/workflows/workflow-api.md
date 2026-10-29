@@ -31,10 +31,12 @@ Use this page for the exact method signatures and return types used by workflows
 For cases where you have a `WorkflowSpec` and a `PostgresBroker` separately (e.g., in tests or custom orchestration), use the module-level functions:
 
 ```python
+import uuid
+
 from horsies import start_workflow, start_workflow_async
 
-# Sync
-result = start_workflow(spec, broker, workflow_id="custom-id")
+# Sync. A supplied workflow_id must be a UUID string; other values fail with HRS-032.
+result = start_workflow(spec, broker, workflow_id=str(uuid.uuid4()))
 
 # Async
 result = await start_workflow_async(spec, broker)

@@ -37,7 +37,7 @@ Errors from task execution, broker, and worker internals.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `UNHANDLED_EXCEPTION` | Uncaught exception in task code, wrapped to `UNHANDLED_EXCEPTION` by library  | Yes, if in `auto_retry_for` |
-| `TASK_EXCEPTION` | Task raised exception or returned invalid value | Yes, if in `auto_retry_for` |
+| `TASK_EXCEPTION` | Task returned `None` instead of a `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`). A raised exception in task code gives `UNHANDLED_EXCEPTION` | Yes, if in `auto_retry_for` |
 | `WORKER_CRASHED` | Worker process died during execution | Yes, if in `auto_retry_for` |
 | `BROKER_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
@@ -94,7 +94,8 @@ Terminal outcome codes for tasks and workflows.
 | ---- | ----------- | --------- |
 | `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
 | `ENQUEUE_FAILED` | Enqueue or schedule path failed | Yes when the underlying broker error is retryable |
-| `PAYLOAD_MISMATCH` | Retry payload SHA does not match the original enqueue payload | No |
+| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send | No |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; `detail` is an `IdempotencyKeyOwner` that names the owner task | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
 | `MONITORING_QUERY_FAILED` | Monitoring or worker-state query failed | Varies |
 | `DB_PING_FAILED` | `ping_database` reachability probe failed | Varies |
@@ -126,6 +127,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `task_id` | `str \| None` | Generated task ID (`None` for `SEND_SUPPRESSED`, `VALIDATION_FAILED`) |
 | `payload` | `TaskSendPayload \| None` | Serialized envelope for idempotent retry |
 | `exception` | `BaseException \| None` | The original cause, if any |
+| `detail` | `IdempotencyKeyOwner \| None` | `IdempotencyKeyOwner(owner_task_id)` for `IDEMPOTENCY_KEY_CONFLICT`; `None` for every other code |
 
 #### TaskSendErrorCode
 
@@ -135,7 +137,8 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; error carries payload so `retry_*_async(err)` can complete the same dispatch (or call the `*_async` entry point with the original args) | No |
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue | No |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue (transient) | Yes |
-| `PAYLOAD_MISMATCH` | Retry payload SHA does not match -- payload was altered between send and retry | No |
+| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | No |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `detail` is an `IdempotencyKeyOwner` that names the owner task. The retry methods accept it; a retry after the reservation ends is accepted | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | No |
 
 `ENQUEUE_FAILED` errors carry a `TaskSendPayload` with an `enqueue_sha` field. Pass the error to `.retry_send(error)` or `.retry_send_async(error)` to replay the exact payload. The SHA guarantees same-payload idempotency.

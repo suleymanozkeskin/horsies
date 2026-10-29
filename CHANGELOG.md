@@ -23,6 +23,21 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
+  whose idempotency key is reserved by another task with a different
+  command returns this code instead of `ENQUEUE_FAILED`. `err.detail` is an
+  `IdempotencyKeyOwner`, and its `owner_task_id` names the task that holds
+  the key. The retry methods accept the error; a retry after the
+  reservation ends is accepted. `retryable` is `False`. An exhaustive
+  `match` on `TaskSendErrorCode` needs an `IDEMPOTENCY_KEY_CONFLICT` case.
+- **`TaskSendError` and `BrokerOperationError` have a new field, `detail`.**
+  It is an `IdempotencyKeyOwner` for `IDEMPOTENCY_KEY_CONFLICT` and `None`
+  for every other code. An error built with a code and a detail that do
+  not agree fails an assertion.
+- **A retry that changes the idempotency key of a sent task id returns
+  `PAYLOAD_MISMATCH`.** Before, it returned `ENQUEUE_FAILED`, which the
+  retry methods accept, and a retry of it could not succeed while the task
+  row was live.
 - **Every sync facade fails closed on a thread that runs an event loop.** It
   returns `ASYNC_CONTEXT` in its own error type, runs nothing, and does not
   start the broker's sync runner. The message names the `*_async` form of the
@@ -65,6 +80,16 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The agent skills in the wheel and the docs state the codes and
+  signatures that the code uses.** A raised exception in a task gives
+  `UNHANDLED_EXCEPTION`; `TASK_EXCEPTION` means the task returned `None`.
+  An `auto_retry_for` that lists only `TASK_EXCEPTION` does not retry a
+  raised exception, so the examples now list `UNHANDLED_EXCEPTION`. The
+  skills also list `schedule_async` and `retry_schedule_async`, state the
+  `RetryPolicy` constructor rules, type the broker URLs as `SecretStr`, put
+  `paused_workflow_auto_cancel_after` on `AppConfig.retention`, and give
+  `HandleResult` as the return type of `WorkflowHandle.status()` and
+  `.tasks()`.
 - **`TaskHandle.get_async()` at the event loop limit returns
   `RetrievalCode.EVENT_LOOP_LIMIT`, not cached.** In 0.5.5 it returned
   `OperationalErrorCode.BROKER_ERROR`, with `broker_code` `EVENT_LOOP_LIMIT`

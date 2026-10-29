@@ -101,7 +101,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-Only `ENQUEUE_FAILED` (transient) errors are retryable:
+`retryable` is `True` only for `ENQUEUE_FAILED` (transient). The retry methods also accept `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors. For a key conflict, `err.detail.owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
 ```python
 match my_task.send(**kwargs):
@@ -223,10 +223,10 @@ task sends and workflow starts.
 ## WorkflowHandle
 
 ```python
-handle.status()          # WorkflowStatus
+handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
 handle.get(timeout_ms=N) # TaskResult (blocks for output node)
 handle.results()         # HandleResult[dict[str, TaskResult]] — unwrap before use
-handle.tasks()           # list[WorkflowTaskInfo]
+handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
 handle.cancel()          # cancel workflow
 handle.pause()           # pause (RUNNING -> PAUSED)
 handle.resume()          # resume (PAUSED -> RUNNING)
@@ -334,7 +334,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 ### Error Code Enums
 
-- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `EVENT_LOOP_LIMIT`
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 

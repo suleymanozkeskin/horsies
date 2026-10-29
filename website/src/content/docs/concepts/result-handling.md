@@ -76,7 +76,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | Code | When |
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
-| `TASK_EXCEPTION` | Task function threw an exception |
+| `TASK_EXCEPTION` | Task returned `None` instead of a `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`) |
 | `WORKER_CRASHED` | Worker process died (detected via heartbeat) |
 | `BROKER_ERROR` | Broker failed while retrieving the result |
 | `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |

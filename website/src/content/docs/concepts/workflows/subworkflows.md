@@ -38,6 +38,9 @@ def fetch_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
 
 @app.task(task_name="transform")
 def transform(*, raw: TaskResult[dict[str, JsonValue], TaskError]) -> TaskResult[str, TaskError]:
+    # With the defaults, a failed `fetch` makes this node SKIPPED, so this branch
+    # runs only on a decode failure. An upstream err also arrives with
+    # allow_failed_deps=True, join="any", or join="quorum".
     if raw.is_err():
         return TaskResult(err=raw.err_value)
     return TaskResult(ok=str(raw.ok_value))
@@ -90,7 +93,7 @@ start_result = await spec.start_async()
 handle = start_result.ok_value
 
 # Wait for completion
-result = await handle.get()  # TaskResult[bool, TaskError]
+result = await handle.get_async()  # TaskResult[bool, TaskError]
 
 if result.is_ok():
     print(f"Pipeline succeeded: {result.ok_value}")
@@ -957,7 +960,7 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
         *_args: Any,
         **_kwargs: Any,
     ) -> WorkflowSpec:
-        fetch = TaskNode(fn=fetch_from_api, kwargs={'source_url': source_url})
+        fetch = TaskNode(fn=fetch_from_api, kwargs={'url': source_url})
         process = TaskNode(
             fn=parse_and_validate,
             waits_for=[fetch],
@@ -1022,7 +1025,7 @@ async def run_pipeline():
     start_result = await spec.start_async()
     handle = start_result.ok_value
 
-    result = await handle.get()
+    result = await handle.get_async()
 
     if result.is_ok():
         report = result.ok_value

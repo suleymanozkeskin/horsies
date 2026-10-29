@@ -8,14 +8,15 @@ making web request, local will cost you less tokens and greater knowledgebase at
 > PostgreSQL-backed background task queue and workflow engine for Python.
 > Docs: https://suleymanozkeskin.github.io/horsies
 > Source: https://github.com/suleymanozkeskin/horsies
-> All public symbols: from horsies import <name>
+> All public symbols: `from horsies import <name>`
 
 ## Agent Skills (Repository Guidance)
 - In source checkouts, skills live under: `horsies/.agents/skills/`
 - `SKILL.md` -> quick orientation and routing
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-031 validation
-- `configs.md` -> AppConfig, queues, recovery/resilience, scheduling, CLI/runtime settings
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-032 validation
+- `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
+- `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
 
 ## Quick Reference
@@ -180,12 +181,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - task_id: str | None (None for SEND_SUPPRESSED, VALIDATION_FAILED)
 - payload: TaskSendPayload | None (serialized envelope for idempotent retry)
 - exception: BaseException | None (original cause)
+- detail: IdempotencyKeyOwner | None (IdempotencyKeyOwner(owner_task_id) for IDEMPOTENCY_KEY_CONFLICT; None otherwise)
 
 ### TaskSendErrorCode (enum)
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
 - ENQUEUE_FAILED: broker/database failure during enqueue (transient, retryable)
-- PAYLOAD_MISMATCH: retry payload SHA does not match (payload altered)
+- PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; detail names the owner task; the retry methods accept it
 - EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
 
@@ -563,13 +566,22 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = {COMPLETED, FAILED, SKIPPED}
 
 ### CLI Commands
-- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N]`
+- `horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N] [--max-claim-per-worker N] [--max-tasks-per-child N] [--max-memory-per-child-mb N]`
+  - `--max-tasks-per-child N` — recycle each child process after N tasks (default 100; `>= 2`, or `0` to disable; forces the `spawn` start method)
+  - `--max-memory-per-child-mb N` — recycle a child after its own RSS reaches N MB (default off; positive int; CPython-only; forces `spawn`; the worker refuses to start if N is at or below the warmed child baseline)
+  - When both are set, a child is recycled when either limit is reached
 - `horsies scheduler <module> [--loglevel LEVEL]`
 - `horsies check <module> [--live] [--loglevel LEVEL]`
+- `horsies web <module> [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header HEADER] [--enable-actions] [--loglevel LEVEL]` — serve the monitoring web UI (requires the `horsies[web]` extra)
+  - `horsies web --database-url URL [--session-database-url URL] [--pgbouncer-transaction-mode] [...]` — monitor a database without importing an app module (registry-less)
+  - Pass either `<module>` or `--database-url`, not both
+  - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
+  - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
+  - `--enable-actions` allows cancel/retry/pause/resume
 - `horsies get-docs [--output DIR]` — fetch docs locally for AI agents (default: .horsies-docs/)
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
-- Exit codes: 0 = success, 1 = error
+- Exit codes: 0 = success, 1 = error, 2 = bad invocation (argument error)
 - Signals: SIGTERM/SIGINT for graceful shutdown (workers wait for running tasks)
 - Both worker and scheduler run app.check() at startup; fail with ValidationReport if errors
 
@@ -584,6 +596,7 @@ Each entry: Title -- summary -> URL
 - Defining Workflows -- DAG-based workflows -> /horsies/quick-start/03-defining-workflows/
 - Scheduling -- recurring schedules -> /horsies/quick-start/04-scheduling/
 - Workflow Patterns -- real-world patterns -> /horsies/quick-start/05-workflow-patterns/
+- Showcase Application -- runnable demo app that uses every horsies capability against a real database -> /horsies/quick-start/06-showcase/
 
 ### Concepts
 - Architecture -- system design and data flow -> /horsies/concepts/architecture/
@@ -608,16 +621,29 @@ Each entry: Title -- summary -> URL
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
 - Broker Config -- PostgresConfig connection -> /horsies/configuration/broker-config/
+- Remote PostgreSQL -- remote or managed PostgreSQL, connection budget, pooled multi-worker setups, health-check tuning -> /horsies/configuration/remote-postgres/
 - Recovery Config -- stale task detection -> /horsies/configuration/recovery-config/
+- Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
 
 ### Workers
 - Worker Architecture -- process pool model -> /horsies/workers/worker-architecture/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
+- Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
 
 ### Monitoring
 - Syce Overview -- TUI monitoring dashboard -> /horsies/monitoring/syce-overview/
+- Worker & Database Health -- active liveness probes, typed worker-state snapshots -> /horsies/monitoring/worker-health/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
+- Web UI Overview -- browser dashboard in the horsies[web] extra -> /horsies/monitoring/web-ui-overview/
+- Web UI Deployment & Authentication -- mounted and standalone modes, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
+- Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
+
+### Operations
+- Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
+
+### Troubleshooting
+- PgBouncer Troubleshooting -- transaction pooling issues with horsies and Syce -> /horsies/troubleshooting/pgbouncer/
 
 ### Scheduling
 - Scheduler Overview -- how scheduler enqueues -> /horsies/scheduling/scheduler-overview/
@@ -633,7 +659,16 @@ Each entry: Title -- summary -> URL
 
 ### Internals
 - Database Schema -- PostgreSQL tables -> /horsies/internals/database-schema/
+- Operational Indexes -- opt-in DDL for history queries the shipped schema does not index -> /horsies/internals/operational-indexes/
+- Performance -- measured per-statement latencies of the hot path -> /horsies/internals/performance/
 - Serialization -- JSON codec for args/results -> /horsies/internals/serialization/
+
+### Migrations
+- Migrating to 0.1.2 -- strict-serde breaking changes from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
+- Migrating to 0.5.0 and 0.5.2 -- live/history split (schema v34), offline cutover, offline schema v35 upgrade -> /horsies/migrations/migration-to-0-5-0/
+
+### Changelog
+- Changelog -- notable changes per release -> /horsies/changelog/
 
 ## Keyword Index
 
@@ -692,3 +727,18 @@ get-docs, AI agent, local docs, offline docs -> /horsies/cli/
 agent skills, SKILL.md, tasks.md, workflows.md, configs.md, horsies/.agents/skills -> /horsies/cli/
 discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
 slugify, node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
+showcase, demo app, example application -> /horsies/quick-start/06-showcase/
+remote PostgreSQL, managed PostgreSQL, connection budget, PgBouncer pooling, health checks -> /horsies/configuration/remote-postgres/
+RetentionConfig, retention class, retention_class_key, queue_retention, partitions -> /horsies/configuration/retention-config/
+on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
+ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, liveness -> /horsies/monitoring/worker-health/
+web UI, horsies[web], dashboard, horsies web -> /horsies/monitoring/web-ui-overview/
+create_monitoring_app, trusted-header, authentication, mounted mode, standalone mode -> /horsies/monitoring/web-ui-deployment/
+cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions -> /horsies/monitoring/action-semantics/
+autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
+PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/
+operational indexes, history queries, opt-in DDL -> /horsies/internals/operational-indexes/
+performance, latency, hot path, statement cost -> /horsies/internals/performance/
+migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
+migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
+changelog, release notes, breaking changes -> /horsies/changelog/
