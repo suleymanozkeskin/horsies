@@ -1054,6 +1054,43 @@ class TestCreateTaskWrapperValidation:
 
         assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
 
+    def test_async_function_rejected(self) -> None:
+        """An `async def` task function is refused with HRS-106, and the notes name it."""
+
+        async def async_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+        assert any("'async_fn'" in note for note in exc_info.value.notes)
+
+    def test_async_generator_function_rejected(self) -> None:
+        """An `async def` task function that yields is refused with HRS-106."""
+
+        async def async_gen_fn(*, x: int):  # type: ignore[no-untyped-def]
+            yield TaskResult(ok=x)
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_gen_fn, app, 'test.async_gen_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+
+    def test_async_function_check_runs_before_return_type_check(self) -> None:
+        """An `async def` without a return annotation gets HRS-106, not HRS-100."""
+
+        async def async_fn(*, x: int):  # type: ignore[no-untyped-def]
+            return x
+
+        app = _make_app()
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            create_task_wrapper(async_fn, app, 'test.async_fn')  # type: ignore[arg-type]
+
+        assert exc_info.value.code == ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED
+
 
 # =============================================================================
 # create_task_wrapper — wrapped_function execution paths

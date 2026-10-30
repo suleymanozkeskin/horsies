@@ -36,6 +36,8 @@ app = Horsies(config)
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
 
+Every config model refuses unknown keys. This includes the nested models (`PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `RetentionClassConfig`, `WorkerResilienceConfig`, `ScheduleConfig`) and the schedule patterns. A misspelled field raises `ValidationError` with the type `extra_forbidden`.
+
 ## Queue Mode Configuration
 
 ### DEFAULT Mode

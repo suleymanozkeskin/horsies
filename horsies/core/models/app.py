@@ -26,7 +26,7 @@ import os
 
 
 class AppConfig(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True, extra='forbid')
 
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None

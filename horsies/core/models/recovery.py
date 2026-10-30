@@ -2,7 +2,7 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, Self, cast
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -75,6 +75,8 @@ class RecoveryConfig(BaseModel):
 
     Retention fields live on `AppConfig.retention` (`RetentionConfig`).
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     auto_requeue_stale_claimed: bool = Field(
         default=True,

@@ -12,6 +12,7 @@ and environment variables.
 
 Root configuration passed to `Horsies(config=AppConfig(...))`.
 Pydantic `BaseModel`, frozen after construction.
+Every config model (`AppConfig`, `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `RetentionClassConfig`, `WorkerResilienceConfig`, `ScheduleConfig`, `TaskSchedule` and the schedule patterns) refuses unknown keys: a misspelled field raises `ValidationError` with the type `extra_forbidden`.
 
 ```python
 from pydantic import SecretStr

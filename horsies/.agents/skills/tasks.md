@@ -38,6 +38,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 - Return type annotation present and is `TaskResult[T, TaskError]` — missing raises `HRS-100`, wrong type raises `HRS-101`.
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
+- The function must be sync (`def`). An `async def` function, also one that yields, is rejected — `HRS-106`. Async task support is not available.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
