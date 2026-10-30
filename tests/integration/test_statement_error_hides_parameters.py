@@ -21,7 +21,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.task_send_types import TaskSendErrorCode
+from horsies.core.models.task_send_types import TaskSendEnqueueFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from tests.integration.test_task_history_schema_emission import (
@@ -76,9 +76,9 @@ async def test_failed_enqueue_hides_the_task_arguments(
 
     assert is_err(sent), sent
     error = sent.err_value
-    assert error.code is TaskSendErrorCode.ENQUEUE_FAILED
+    assert isinstance(error, TaskSendEnqueueFailed)
     assert 'canceling statement due to lock timeout' in error.message
     assert 'INSERT INTO horsies_tasks' in error.message
     assert ARGUMENT_MARKER not in error.message
-    assert error.exception is not None
+    assert isinstance(error.exception, BaseException)
     assert ARGUMENT_MARKER not in str(error.exception)
