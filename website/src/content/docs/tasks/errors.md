@@ -348,7 +348,6 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Missing required parameters for task or subworkflow |
 | HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | kwargs and args_from share one or more keys |
 | HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Subworkflow params passed but build_with is not overridden |
-| HRS-023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Subworkflow build_with binding error (duplicate param binding) |
 | HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | args_from source result type doesn't match target parameter |
 | HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Output node type doesn't match WorkflowSpec generic |
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Positional args are not supported for workflow nodes |
@@ -368,6 +367,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-102 | `TASK_INVALID_OPTIONS` | Invalid task options |
 | HRS-103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
 | HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is already decorated by another app instance |
+| HRS-106 | `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` | Task function is defined with `async def`; task functions must be sync |
 
 ### Configuration (HRS-200-HRS-299)
 

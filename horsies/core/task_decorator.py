@@ -1077,6 +1077,20 @@ def create_task_wrapper(
             help_text='remove inner decorators and apply @app.task() directly to the raw function',
         )
 
+    # The worker calls the task function synchronously. An async function
+    # returns a coroutine or an async generator, so every run would fail.
+    if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+        raise TaskDefinitionError(
+            message='task function must be a sync function',
+            code=ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED,
+            location=fn_location,
+            notes=[
+                f"function '{fn.__name__}' is defined with `async def`",
+                'async task functions are not supported',
+            ],
+            help_text='define the task with `def`; async task support is not available',
+        )
+
     hints = get_type_hints(fn)
 
     # Validate that return type is TaskResult[*, TaskError]

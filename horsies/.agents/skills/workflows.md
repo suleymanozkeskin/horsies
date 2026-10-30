@@ -87,7 +87,6 @@ A `WorkflowSpec(...)` built directly has no broker and no bound queue or priorit
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
 - `definition_key` is auto-populated via ContextVar when returning a `WorkflowSpec` from `build_with()`; manual setting is unnecessary.
-- Signature must accept `*_args` and `**_kwargs` beyond declared params (HRS-023 otherwise).
 
 ### `@app.workflow_builder` decorator
 
@@ -555,7 +554,6 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-020 | `WORKFLOW_MISSING_REQUIRED_PARAMS` | Required param not in kwargs or args_from |
 | HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | Same key in kwargs and args_from |
 | HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
-| HRS-023 | `WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` | Bad build_with() signature |
 | HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible TaskResult type |
 | HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or concrete `WorkflowDefinition[T]` has no `Meta.output` |
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |

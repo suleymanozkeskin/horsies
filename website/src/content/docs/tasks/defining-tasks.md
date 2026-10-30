@@ -9,7 +9,7 @@ tags: [tasks, decorator, definition]
 
 Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. For argument serialization rules, see `sending-tasks`.
 
-**Note:** Task functions must be synchronous (`def`). `async def` task functions are not supported yet. Use `.send_async()` / `.get_async()` on the producer side for non-blocking I/O.
+**Note:** Task functions must be synchronous (`def`). `@app.task()` refuses an `async def` task function with `HRS-106`. Use `.send_async()` / `.get_async()` on the producer side for non-blocking I/O.
 
 ## How To
 

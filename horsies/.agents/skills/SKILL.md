@@ -71,6 +71,7 @@ def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
 ```
 
 Every task must return `TaskResult[T, TaskError]`.
+Task functions are sync (`def`). `@app.task()` refuses an `async def` function with `HRS-106`. Async task support is not available; use `.send_async()` and `.get_async()` on the producer side.
 Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
 
 Register task modules for worker discovery:

@@ -1,11 +1,13 @@
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.errors import ConfigurationError, ErrorCode
 
 
 class PostgresConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     _ENGINE_KWARG_EXCLUDES: ClassVar[set[str]] = {
         'database_url',
         'session_database_url',

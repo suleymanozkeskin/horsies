@@ -1,7 +1,7 @@
 # horsies/core/models/payload.py
 from __future__ import annotations
 from typing import Annotated, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class PayloadPolicy(BaseModel):
@@ -22,6 +22,8 @@ class PayloadPolicy(BaseModel):
       is never destroyed over size; results warn only). None (default)
       disables rejection.
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     warn_bytes: Annotated[Optional[int], Field(ge=1)] = Field(
         default=1_048_576,  # 1 MiB

@@ -49,6 +49,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
 - resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- Every config model (AppConfig, its nested configs, ScheduleConfig and the schedule patterns) refuses unknown keys: ValidationError type extra_forbidden
 
 ### PostgresConfig
 - database_url: str (must start with "postgresql+psycopg://")
@@ -134,6 +135,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### @app.task Decorator
 - Decorated function must return TaskResult[T, TaskError]
+- Decorated function must be sync (def); an async def function raises HRS-106 at definition time
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T]
@@ -491,7 +493,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - HRS-013 WORKFLOW_INVALID_JOIN, HRS-014 WORKFLOW_UNRESOLVED_QUEUE, HRS-015 WORKFLOW_UNRESOLVED_PRIORITY
   - HRS-018 WORKFLOW_SUBWORKFLOW_APP_MISSING, HRS-019 WORKFLOW_INVALID_KWARG_KEY
   - HRS-020 WORKFLOW_MISSING_REQUIRED_PARAMS, HRS-021 WORKFLOW_KWARGS_ARGS_FROM_OVERLAP
-  - HRS-022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH, HRS-023 WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING
+  - HRS-022 WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH
   - HRS-024 WORKFLOW_ARGS_FROM_TYPE_MISMATCH, HRS-025 WORKFLOW_OUTPUT_TYPE_MISMATCH
   - HRS-026 WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
   - HRS-027 WORKFLOW_CHECK_CASES_REQUIRED, HRS-028 WORKFLOW_CHECK_CASE_INVALID
@@ -499,6 +501,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Task definition (HRS-100-HRS-103):
   - HRS-100 TASK_NO_RETURN_TYPE, HRS-101 TASK_INVALID_RETURN_TYPE
   - HRS-102 TASK_INVALID_OPTIONS, HRS-103 TASK_INVALID_QUEUE
+  - HRS-106 TASK_ASYNC_FUNCTION_NOT_SUPPORTED
 - Config/broker (HRS-200-HRS-299):
   - HRS-200 CONFIG_INVALID_QUEUE_MODE, HRS-201 CONFIG_INVALID_CLUSTER_CAP
   - HRS-202 CONFIG_INVALID_PREFETCH, HRS-203 BROKER_INVALID_URL

@@ -19,7 +19,7 @@ from typing import Annotated, Final, Self
 
 from datetime import timedelta
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from horsies.core.errors import (
     ConfigurationError,
@@ -180,12 +180,16 @@ class RetentionClassConfig(BaseModel):
     partition granularity allows.
     """
 
+    model_config = ConfigDict(extra='forbid')
+
     key: str
     duration: timedelta
 
 
 class RetentionConfig(BaseModel):
     """How long records live, and how their storage is kept ahead."""
+
+    model_config = ConfigDict(extra='forbid')
 
     worker_state_retention_hours: Annotated[
         int | None, Field(ge=1, le=24 * 365),
