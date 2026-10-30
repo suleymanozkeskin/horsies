@@ -84,6 +84,10 @@ and there is no migration contract between pre-1.0 versions.
   `echo=True` logs. Before, the error text held up to 300 characters of each
   value, which included task arguments and results. The values stay in the
   exception's `params` attribute.
+- **The worker's finalize error log does not print the task result.** The
+  three log lines for a finalize stage that fails print the result's length
+  as `result_json_chars` in place of `result_json_str`. The retry still
+  reads the full result from the error data.
 
 ### Fixed
 

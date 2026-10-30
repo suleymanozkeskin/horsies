@@ -155,6 +155,27 @@ def _refused_retry_command(
     return command
 
 
+def _finalize_data_for_log(data: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return finalize error ``data`` for a log line, without the task result.
+
+    ``data['outcome']['result_json_str']`` is the encoded task result, kept
+    for the phase-1 replay. The returned copy holds its length as
+    ``result_json_chars`` in its place. ``data`` itself is not changed. Data
+    without an outcome result is returned as it is.
+    """
+    match data:
+        case {'outcome': {'result_json_str': str() as result_json_str} as outcome}:
+            loggable_outcome: dict[str, Any] = {
+                key: value
+                for key, value in outcome.items()
+                if key != 'result_json_str'
+            }
+            loggable_outcome['result_json_chars'] = len(result_json_str)
+            return {**data, 'outcome': loggable_outcome}
+        case _:
+            return data
+
+
 class FinalizeMixin:
     """Two-phase finalize pipeline with bounded stage retries."""
 
@@ -1236,7 +1257,7 @@ class FinalizeMixin:
             max_attempts = _FINALIZE_PARENT_MAX_RETRIES
         else:
             logger.error(
-                f'Finalize error ({task_id}) stage={stage}: {err.message}; data={err.data}'
+                f'Finalize error ({task_id}) stage={stage}: {err.message}; data={_finalize_data_for_log(err.data)}'
             )
             return
 
@@ -1251,7 +1272,7 @@ class FinalizeMixin:
             # not claim anything about the task's fate.
             logger.error(
                 f'Finalize stage will not be re-attempted ({task_id}) '
-                f'stage={stage}: {err.message}; data={err.data}'
+                f'stage={stage}: {err.message}; data={_finalize_data_for_log(err.data)}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
             return
@@ -1259,7 +1280,7 @@ class FinalizeMixin:
         if attempts >= max_attempts:
             logger.critical(
                 f'Finalize retries exhausted for task {task_id} stage={stage} after {attempts} attempts: '
-                f'{err.message}; data={err.data}'
+                f'{err.message}; data={_finalize_data_for_log(err.data)}'
             )
             self._clear_finalize_retry_attempts(task_id, stage)
             return
