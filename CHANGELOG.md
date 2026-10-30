@@ -40,7 +40,10 @@ and there is no migration contract between pre-1.0 versions.
   `data` no longer has `actual_value`, and `exception` is `None`. `data`
   adds `actual_type` and `validation_error_count`. Each
   `validation_errors` entry holds only `loc`, `msg` and `type`, at most 10
-  entries.
+  entries. A returned value that fails its declared type and is not
+  JSON-encodable now stores `RETURN_TYPE_MISMATCH`. Before, the mismatch
+  error carried the value, could not be encoded, and the worker stored
+  `WORKER_SERIALIZATION_ERROR`.
 
 ### Changed
 

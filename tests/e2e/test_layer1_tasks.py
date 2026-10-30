@@ -774,13 +774,19 @@ def test_worker_resolution_error(broker: PostgresBroker, app: Horsies) -> None:
 
 
 @pytest.mark.e2e
-def test_unserializable_result() -> None:
-    """L1.7.2: Unserializable result returns WORKER_SERIALIZATION_ERROR."""
+def test_unencodable_return_value_is_a_type_mismatch() -> None:
+    """L1.7.2: A returned value that fails its declared type and is not
+    JSON-encodable stores RETURN_TYPE_MISMATCH. The stored error names the
+    actual type, not the value, so it encodes."""
     with run_worker(
         DEFAULT_INSTANCE, ready_check=_make_ready_check(basic_tasks.healthcheck)
     ):
         result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
-        assert_err(result, expected_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR)
+        assert_err(result, expected_code=ContractCode.RETURN_TYPE_MISMATCH)
+        err = result.err_value
+        assert 'TaskResult(ok=<function>)' in (err.message or '')
+        assert 'identity' not in (err.message or '')
+        assert 'identity' not in json.dumps(err.data)
 
 
 @pytest.mark.e2e

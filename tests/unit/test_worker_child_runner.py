@@ -1060,8 +1060,9 @@ class TestRunTaskEntryErrorPaths:
         existing catch ``except (StrictJsonError, ValidationError)``
         did not cover it. The exception escaped and was wrapped as a
         generic ``TASK_EXCEPTION`` by an outer handler, masking the
-        real cause (encoder mismatch). The fix adds
-        ``PydanticSerializationError`` to both encode-time catch tuples.
+        real cause (encoder mismatch). The codec now raises
+        ``ValueValidationError`` for it, and both encode-time catches
+        name that type.
         """
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
