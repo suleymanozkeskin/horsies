@@ -1,8 +1,7 @@
-"""Typed details that some error codes carry.
+"""Typed values that several error catalogs share.
 
-A detail is a plain value type. ``BrokerOperationError`` and
-``TaskSendError`` carry the same detail value, so the type lives here and
-neither error catalog depends on the other.
+Each value is a plain frozen type. The type lives here so that no error
+catalog depends on another one.
 """
 
 from __future__ import annotations
@@ -22,3 +21,13 @@ class IdempotencyKeyOwner:
     """
 
     owner_task_id: str
+
+
+@dataclass(slots=True, frozen=True)
+class NoCause:
+    """No Python exception caused this failure: a check or a comparison found it.
+
+    It has no fields, so every instance is equal and ``case NoCause():``
+    matches it. Match on the cause field before a ``raise ... from``, an
+    ``exc_info=`` or an error tracker call.
+    """
