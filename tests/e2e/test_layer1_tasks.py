@@ -23,7 +23,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.errors import ConfigurationError
 from horsies.core.types.result import is_ok, is_err
-from horsies.core.models.task_send_types import TaskSendResult, TaskSendErrorCode
+from horsies.core.models.task_send_types import TaskSendResult, TaskSendSuppressed
 from sqlalchemy import text
 
 from tests.e2e.conftest import compute_test_enqueue_sha
@@ -1131,8 +1131,7 @@ def test_send_suppressed() -> None:
         send_result = basic_tasks.simple_task.send(x=5)
         assert is_err(send_result)
         err = send_result.err_value
-        assert err.code == TaskSendErrorCode.SEND_SUPPRESSED
-        assert err.retryable is False
+        assert isinstance(err, TaskSendSuppressed)
     finally:
         os.environ.pop('TASKLIB_SUPPRESS_SENDS', None)
 

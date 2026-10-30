@@ -107,13 +107,22 @@ from .core.models.task_send_types import (
     TaskSendPayload,
     TaskSendError,
     TaskSendResult,
+    TaskSendRetryable,
+    TaskSendSuppressed,
+    TaskSendAsyncContext,
+    TaskSendValidationFailed,
+    TaskSendEnqueueFailed,
+    TaskSendPayloadMismatch,
+    TaskSendPayloadTooLarge,
+    TaskSendIdempotencyKeyConflict,
+    TaskSendEventLoopLimit,
 )
 from .core.brokers.result_types import (
     BrokerErrorCode,
     BrokerOperationError,
     BrokerResult,
 )
-from .core.types.error_detail import IdempotencyKeyOwner
+from .core.types.error_detail import IdempotencyKeyOwner, NoCause
 from .core.models.health import (
     DatabasePing,
     WorkerPong,
@@ -243,7 +252,17 @@ __all__ = [
     'TaskSendPayload',
     'TaskSendError',
     'TaskSendResult',
+    'TaskSendRetryable',
+    'TaskSendSuppressed',
+    'TaskSendAsyncContext',
+    'TaskSendValidationFailed',
+    'TaskSendEnqueueFailed',
+    'TaskSendPayloadMismatch',
+    'TaskSendPayloadTooLarge',
+    'TaskSendIdempotencyKeyConflict',
+    'TaskSendEventLoopLimit',
     'IdempotencyKeyOwner',
+    'NoCause',
     # Broker result types
     'BrokerErrorCode',
     'BrokerOperationError',

@@ -8,7 +8,9 @@ Two states reach the broker's key check with different retry conditions:
   ends.
 - The task id already exists with the same command but a different key.
   The sent payload differs from the original send, so the send returns
-  ``PAYLOAD_MISMATCH``, and the retry methods refuse it.
+  ``PAYLOAD_MISMATCH``. The retry methods do not accept that variant: it
+  is not a ``TaskSendRetryable``, so a retry of it fails type checking,
+  and at run time it fails an assertion.
 """
 
 from __future__ import annotations
@@ -20,8 +22,11 @@ from uuid import uuid4
 import pytest
 
 from horsies.core.app import Horsies
-from horsies.core.models.task_send_types import TaskSendErrorCode
-from horsies.core.types.error_detail import IdempotencyKeyOwner
+from horsies.core.models.task_send_types import (
+    TaskSendAsyncContext,
+    TaskSendIdempotencyKeyConflict,
+    TaskSendPayloadMismatch,
+)
 from horsies.core.types.result import is_err, is_ok
 from tests.integration.conftest import make_simple_task
 
@@ -45,21 +50,18 @@ class TestKeyReservedByAnotherTask:
 
         assert is_err(conflict)
         error = conflict.err_value
-        assert error.code is TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-        assert error.retryable is False
-        assert error.detail == IdempotencyKeyOwner(
-            owner_task_id=first.ok_value.task_id,
-        )
+        assert isinstance(error, TaskSendIdempotencyKeyConflict)
+        assert error.owner_task_id == first.ok_value.task_id
         # The retry is accepted and reaches the broker; the reservation is
         # still active, so the broker returns the same conflict.
         retried = await echo.retry_send_async(error)
         assert is_err(retried)
-        assert retried.err_value.code is TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-        assert retried.err_value.detail == error.detail
+        assert isinstance(retried.err_value, TaskSendIdempotencyKeyConflict)
+        assert retried.err_value.owner_task_id == error.owner_task_id
 
 
 class TestTaskIdBoundToAnotherKey:
-    async def test_changed_key_on_retry_is_payload_mismatch_and_refused(
+    async def test_changed_key_on_retry_is_payload_mismatch(
         self, app: Horsies,
     ) -> None:
         echo = _echo(app)
@@ -68,7 +70,7 @@ class TestTaskIdBoundToAnotherKey:
         # without sending it; the async retry sends it.
         prepared = echo.with_options(idempotency_key=first_key).send(value=1)
         assert is_err(prepared)
-        assert prepared.err_value.code is TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(prepared.err_value, TaskSendAsyncContext)
         assert prepared.err_value.payload is not None
         assert is_ok(await echo.retry_send_async(prepared.err_value))
         changed_key = dataclasses.replace(
@@ -82,9 +84,5 @@ class TestTaskIdBoundToAnotherKey:
         mismatch = await echo.retry_send_async(changed_key)
 
         assert is_err(mismatch)
-        assert mismatch.err_value.code is TaskSendErrorCode.PAYLOAD_MISMATCH
+        assert isinstance(mismatch.err_value, TaskSendPayloadMismatch)
         assert mismatch.err_value.task_id == prepared.err_value.task_id
-        assert mismatch.err_value.detail is None
-        refused = await echo.retry_send_async(mismatch.err_value)
-        assert is_err(refused)
-        assert refused.err_value.code is TaskSendErrorCode.VALIDATION_FAILED

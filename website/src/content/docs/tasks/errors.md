@@ -115,33 +115,68 @@ Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVA
 
 ### Send Errors (TaskSendResult)
 
-Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, and `.schedule()`. These are separate from `TaskResult` -- they indicate that enqueuing the task itself failed, not that task execution failed.
+Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`. These are separate from `TaskResult` -- they indicate that enqueuing the task itself failed, not that task execution failed.
 
 #### TaskSendError
 
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](./sending-tasks#retrying-failed-sends).
+
+| Variant | `code` | Fields |
+| ------- | ------ | ------ |
+| `TaskSendSuppressed` | `SEND_SUPPRESSED` | `message` |
+| `TaskSendAsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` |
+| `TaskSendValidationFailed` | `VALIDATION_FAILED` | `message`, `exception` |
+| `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `exception` |
+| `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
+| `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
+| `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` |
+| `TaskSendEventLoopLimit` | `EVENT_LOOP_LIMIT` | `message` |
+
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `code` | `TaskSendErrorCode` | Failure category |
 | `message` | `str` | Human-readable description |
-| `retryable` | `bool` | Whether the caller can retry with the same payload |
-| `task_id` | `str \| None` | Generated task ID (`None` for `SEND_SUPPRESSED`, `VALIDATION_FAILED`) |
-| `payload` | `TaskSendPayload \| None` | Serialized envelope for idempotent retry |
-| `exception` | `BaseException \| None` | The original cause, if any |
-| `detail` | `IdempotencyKeyOwner \| None` | `IdempotencyKeyOwner(owner_task_id)` for `IDEMPOTENCY_KEY_CONFLICT`; `None` for every other code |
+| `task_id` | `str` | Task id of the prepared send |
+| `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
+| `retryable` | `bool` | Driver classification of the cause: `True` when the condition may clear, for example a lost connection |
+| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `size_bytes` | `int` | Length of the serialized kwargs |
+| `limit_bytes` | `int` | The configured `payload.reject_bytes` |
+
+The repr of a variant shows its class name and its other fields. `payload`, `message` and `exception` are not in the repr.
+
+`NoCause` is not an exception. Match on `exception` before `raise ... from`, `exc_info=` or an error tracker call:
+
+```python
+import logging
+
+from horsies import NoCause, TaskSendEnqueueFailed
+
+logger = logging.getLogger(__name__)
+
+
+def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
+    match err.exception:
+        case NoCause():
+            logger.error('enqueue failed: %s', err.message)
+        case cause:
+            logger.error('enqueue failed: %s', err.message, exc_info=cause)
+```
 
 #### TaskSendErrorCode
 
-| Code | Description | Retryable |
-| ---- | ----------- | --------- |
-| `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | No |
-| `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; error carries payload so `retry_*_async(err)` can complete the same dispatch (or call the `*_async` entry point with the original args) | No |
-| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue | No |
-| `ENQUEUE_FAILED` | Broker/database failure during enqueue (transient) | Yes |
-| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | No |
-| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `detail` is an `IdempotencyKeyOwner` that names the owner task. The retry methods accept it; a retry after the reservation ends is accepted | No |
-| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | No |
+| Code | Description | Retry methods |
+| ---- | ----------- | ------------- |
+| `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
+| `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
+| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
+| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist | Accepted |
+| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
+| `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
+| `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | Refused |
 
-`ENQUEUE_FAILED` errors carry a `TaskSendPayload` with an `enqueue_sha` field. Pass the error to `.retry_send(error)` or `.retry_send_async(error)` to replay the exact payload. The SHA guarantees same-payload idempotency.
+`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload` with an `enqueue_sha` field, and the retry methods send that exact payload again. The SHA guarantees same-payload idempotency.
 
 #### Workflow Errors
 

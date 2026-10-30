@@ -31,7 +31,7 @@ from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.task_send_types import TaskSendErrorCode
+from horsies.core.models.task_send_types import TaskSendAsyncContext
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
@@ -249,8 +249,7 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
     result = wrapper.send(x=1)
 
     assert is_err(result)
-    assert result.err_value.code is TaskSendErrorCode.ASYNC_CONTEXT
-    assert result.err_value.retryable is False
+    assert isinstance(result.err_value, TaskSendAsyncContext)
     assert result.err_value.payload is not None
 
 

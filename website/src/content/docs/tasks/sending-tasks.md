@@ -41,7 +41,7 @@ async def my_endpoint():
 The sync variants are blocking database round trips, so calling them from a
 running event loop would stall every coroutine on it. They fail closed
 instead: `.send()`, `.schedule()`, `.retry_send()`, and `.retry_schedule()`
-called inside a running loop return `Err(TaskSendError(ASYNC_CONTEXT))`
+called inside a running loop return `Err(TaskSendAsyncContext)`
 without touching the broker. The error carries the prepared `task_id` and
 payload — complete the dispatch with `.retry_send_async(err)` /
 `.retry_schedule_async(err)`, or call `.send_async` / `.schedule_async` with
@@ -220,9 +220,9 @@ Use only for **unit testing**. For production, always use `.send()` or `.send_as
 **Don't call `.send()` at module level.**
 
 ```python
-# Wrong - returns Err(TaskSendError(SEND_SUPPRESSED)) during worker import
+# Wrong - returns Err(TaskSendSuppressed) during worker import
 # tasks.py
-result = my_task.send(name="test")  # Err(SEND_SUPPRESSED)
+result = my_task.send(name="test")  # Err(TaskSendSuppressed)
 
 # Correct - call from functions/endpoints
 def process():
@@ -245,25 +245,27 @@ my_task.send(connection_url=str(db_connection.url))
 
 ## Retrying Failed Sends
 
-When `.send()` fails with `ENQUEUE_FAILED` (a transient broker error), use the retry methods to replay the exact same payload without re-supplying arguments. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
+When `.send()` fails with `TaskSendEnqueueFailed` (a broker or database error), use the retry methods to replay the exact same payload without re-supplying arguments. The `enqueue_sha` on the stored `TaskSendPayload` guarantees the retry carries the identical serialized payload.
 
 ```python
-from horsies import Ok, Err
+from horsies import Err, Ok, TaskSendEnqueueFailed, TaskSendIdempotencyKeyConflict
 
 match my_task.send(name="alice", count=3):
     case Ok(handle):
         result = handle.get()
-    case Err(err) if err.retryable:
+    case Err(TaskSendEnqueueFailed(retryable=True) as err):
         match my_task.retry_send(err):
             case Ok(handle):
                 result = handle.get()
             case Err(retry_err):
                 print(f"Retry failed: {retry_err.code}")
+    case Err(TaskSendIdempotencyKeyConflict(owner_task_id=owner)):
+        print(f"Key is held by task {owner}")
     case Err(err):
         print(f"Permanent failure: {err.code}")
 ```
 
-Retry methods only accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors. Passing `SEND_SUPPRESSED`, `VALIDATION_FAILED`, or `PAYLOAD_MISMATCH` returns `Err(TaskSendError(VALIDATION_FAILED))`.
+The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext` or `TaskSendIdempotencyKeyConflict`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error.
 
 ### Automatic Retry via Config
 
@@ -350,11 +352,11 @@ afterwards. A retry replays the class its original send chose, so editing
 
 ### `.retry_send(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed send using the stored payload from the error. Only valid for `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors.
+Retry a failed send using the stored payload from the error.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `error` | `TaskSendError` | The error from a previous `.send()` call |
+| `error` | `TaskSendRetryable` | The error from a previous `.send()` call |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
@@ -364,11 +366,11 @@ Async variant of `.retry_send()`.
 
 ### `.retry_schedule(error) -> TaskSendResult[TaskHandle[T]]`
 
-Retry a failed schedule using the stored payload. Only valid for `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors that originated from `.schedule()`.
+Retry a failed schedule using the stored payload. The error must come from `.schedule()` or `.schedule_async()`.
 
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
-| `error` | `TaskSendError` | The error from a previous `.schedule()` call |
+| `error` | `TaskSendRetryable` | The error from a previous `.schedule()` call |
 
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
@@ -391,26 +393,11 @@ Use `is_ok(result)` / `is_err(result)` from `horsies` as type-narrowing guards.
 
 ### `TaskSendError`
 
-| Field | Type | Description |
-| ----- | ---- | ----------- |
-| `code` | `TaskSendErrorCode` | Failure category |
-| `message` | `str` | Human-readable description |
-| `retryable` | `bool` | Whether the caller can retry with the same payload |
-| `task_id` | `str \| None` | Generated task ID (`None` for `SEND_SUPPRESSED`, `VALIDATION_FAILED`) |
-| `payload` | `TaskSendPayload \| None` | Serialized envelope for replay (`None` when no serialization happened) |
-| `exception` | `BaseException \| None` | The original cause, if any |
-| `detail` | `IdempotencyKeyOwner \| None` | `IdempotencyKeyOwner(owner_task_id)` for `IDEMPOTENCY_KEY_CONFLICT`; `None` for every other code |
+A union with one frozen variant per `TaskSendErrorCode` member; each variant has only the fields of its failure. The variants, their fields and `NoCause` are in the [Errors Reference](./errors#tasksenderror).
 
 ### `TaskSendErrorCode`
 
-| Code | Description | Retryable |
-| ---- | ----------- | --------- |
-| `SEND_SUPPRESSED` | Send suppressed during worker import/discovery | No |
-| `ASYNC_CONTEXT` | Sync send/schedule called inside a running event loop; complete via `retry_*_async(err)` or the `*_async` entry point | No |
-| `VALIDATION_FAILED` | Argument serialization or validation failed | No |
-| `ENQUEUE_FAILED` | Broker/database failure during enqueue | Yes |
-| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send (the payload was altered) | No |
-| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `detail` is an `IdempotencyKeyOwner` that names the owner task. The retry methods accept it; a retry after the reservation ends is accepted | No |
+The codes, and which of them the retry methods accept, are in the [Errors Reference](./errors#tasksenderrorcode).
 
 ### `TaskHandle[T]`
 

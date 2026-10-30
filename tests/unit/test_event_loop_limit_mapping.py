@@ -25,7 +25,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.monitoring.errors import MonitoringQueryErrorCode
 from horsies.monitoring.queries import list_workflow_names
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.task_send_types import TaskSendErrorCode
+from horsies.core.models.task_send_types import TaskSendEventLoopLimit
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow import NodeKey
@@ -79,8 +79,7 @@ def test_send_maps_broker_loop_limit_to_send_loop_limit() -> None:
     result = wrapper.send(x=1)
 
     assert is_err(result)
-    assert result.err_value.code is TaskSendErrorCode.EVENT_LOOP_LIMIT
-    assert result.err_value.retryable is False
+    assert isinstance(result.err_value, TaskSendEventLoopLimit)
     assert result.err_value.message == LIMIT_MESSAGE
 
 
@@ -224,8 +223,7 @@ class TestRealBrokerAtTheLimit:
         result = at_limit.run(echo.send_async(x=1))
 
         assert is_err(result)
-        assert result.err_value.code is TaskSendErrorCode.EVENT_LOOP_LIMIT
-        assert result.err_value.retryable is False
+        assert isinstance(result.err_value, TaskSendEventLoopLimit)
 
     def test_workflow_handle_wrap_and_fold(self, at_limit: _AtLimit) -> None:
         handle: WorkflowHandle[Any] = WorkflowHandle(
