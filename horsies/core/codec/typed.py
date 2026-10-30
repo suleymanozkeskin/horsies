@@ -18,12 +18,17 @@ import math
 import types
 from typing import Any, Union, cast, get_args, get_origin
 
-from pydantic import BaseModel, TypeAdapter
+from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic_core import PydanticSerializationError
 
 from horsies.core.codec.json_value import (
     JsonValue,
     StrictJsonError,
     _validate_json_native,
+)
+from horsies.core.codec.validation_errors import (
+    ValueValidationError,
+    validation_summary,
 )
 from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
 
@@ -31,6 +36,7 @@ from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
 __all__ = [
     'Json',
     'TypeAnnotation',
+    'ValueValidationError',
     'decode_task_error',
     'decode_task_result',
     'decode_value',
@@ -153,7 +159,12 @@ def _get_adapter(expected_type: TypeAnnotation) -> TypeAdapter[Any]:
 # ---------------------------------------------------------------------------
 
 
-def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
+def encode_value(
+    value: object,
+    expected_type: TypeAnnotation,
+    *,
+    location: tuple[str, ...] = (),
+) -> Json:
     """Encode `value` to a JSON-shaped Python value under `expected_type`.
 
     Pipeline:
@@ -179,6 +190,8 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     Args:
         value: The Python value to encode.
         expected_type: The declared type (Pydantic-acceptable annotation).
+        location: Written in front of each failing location in the
+            refusal text, for example the kwarg name.
 
     Returns:
         A JSON-shaped Python value (a `Json`).
@@ -186,14 +199,14 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
             or reserved-key smuggling.
-        pydantic.ValidationError: when `value` doesn't satisfy
-            `expected_type`.
+        ValueValidationError: when `value` doesn't satisfy `expected_type`,
+            or pydantic cannot serialize the validated value. The text holds
+            no input value.
     """
     _apply_json_value_fence(value, expected_type)
     adapter = _get_adapter(expected_type)
-    validated = adapter.validate_python(value)
-    dumped = adapter.dump_python(validated, mode='json')
-    dumped_json = cast(Json, dumped)
+    validated = _validate(adapter, value, location)
+    dumped_json = _dump(adapter, validated)
     _scan_wire_json(dumped_json)
     if _is_task_error_type(expected_type):
         # TaskError's own `error_code` field legitimately emits
@@ -206,7 +219,12 @@ def encode_value(value: object, expected_type: TypeAnnotation) -> Json:
     return dumped_json
 
 
-def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
+def decode_value(
+    json_value: Json,
+    expected_type: TypeAnnotation,
+    *,
+    location: tuple[str, ...] = (),
+) -> object:
     """Decode a JSON-shaped value into a typed Python value.
 
     Assumes `json_value` came from `json.loads(s,
@@ -223,21 +241,51 @@ def decode_value(json_value: Json, expected_type: TypeAnnotation) -> object:
     Args:
         json_value: The JSON-shaped input.
         expected_type: The declared type.
+        location: Written in front of each failing location in the
+            refusal text, for example the kwarg name.
 
     Returns:
         The decoded Python value.
 
     Raises:
         StrictJsonError: on reserved-key collision in user-positioned data.
-        pydantic.ValidationError: when `json_value` doesn't satisfy
-            `expected_type`.
+        ValueValidationError: when `json_value` doesn't satisfy
+            `expected_type`. The text holds no input value.
     """
     if _is_task_error_type(expected_type):
         _scan_task_error_user_fields(json_value)
     else:
         _scan_reserved_keys(json_value)
     adapter = _get_adapter(expected_type)
-    return adapter.validate_python(json_value)
+    return _validate(adapter, json_value, location)
+
+
+def _validate(
+    adapter: TypeAdapter[Any],
+    value: object,
+    location: tuple[str, ...],
+) -> object:
+    """`adapter.validate_python(value)`; a refusal raises `ValueValidationError`.
+
+    The error is raised outside the `except` block, so it has no
+    `__context__` that holds the pydantic error and its input.
+    """
+    try:
+        return adapter.validate_python(value)
+    except ValidationError as error:
+        failure = ValueValidationError(validation_summary(error, location))
+    raise failure
+
+
+def _dump(adapter: TypeAdapter[Any], validated: object) -> Json:
+    """`adapter.dump_python(validated, mode='json')`; a failure raises
+    `ValueValidationError` with the pydantic text. That text names types;
+    text that a custom serializer raises is kept as written."""
+    try:
+        return cast(Json, adapter.dump_python(validated, mode='json'))
+    except PydanticSerializationError as error:
+        failure = ValueValidationError(f'serialization failed: {error}')
+    raise failure
 
 
 def encode_task_result(
@@ -284,7 +332,7 @@ def encode_task_result(
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
             or reserved-key smuggling inside ok / err payloads.
-        pydantic.ValidationError: when the carried value doesn't satisfy
+        ValueValidationError: when the carried value doesn't satisfy
             its declared shape.
     """
     if result.is_err():
@@ -326,7 +374,7 @@ def encode_task_error(err: TaskError) -> Json:
         concrete runtime type.
 
     Raises:
-        StrictJsonError / pydantic.ValidationError: on reserved-key
+        StrictJsonError / ValueValidationError: on reserved-key
             smuggling inside ``err.data`` or schema violations
             (same surfaces as ``encode_value``).
     """
@@ -364,7 +412,7 @@ def decode_task_error(err_slot: Json) -> TaskError:
     Raises:
         StrictJsonError: on reserved-key smuggling inside the err
             payload.
-        pydantic.ValidationError: when the payload doesn't satisfy the
+        ValueValidationError: when the payload doesn't satisfy the
             chosen concrete class.
     """
     if (
@@ -467,7 +515,7 @@ def decode_task_result(
     Raises:
         StrictJsonError: on envelope shape failure or reserved-key
             smuggling inside ok / err payloads.
-        pydantic.ValidationError: when the payload doesn't satisfy the
+        ValueValidationError: when the payload doesn't satisfy the
             declared shape.
     """
     envelope = validate_task_result_envelope(raw)

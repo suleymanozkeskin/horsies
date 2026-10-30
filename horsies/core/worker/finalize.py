@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, Optional, assert_never, cast
 
-from pydantic import ValidationError
 from sqlalchemy import text
 
 from horsies.core.codec.json_io import SerializationError, loads_json
@@ -29,6 +28,7 @@ from horsies.core.codec.typed import (
     decode_task_result,
     validate_task_result_envelope,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.history.identity.uuid7 import UUID
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
@@ -536,7 +536,7 @@ class FinalizeMixin:
                         try:
                             err_value = decode_task_error(err_slot)
                             tr = TaskResult(err=err_value)
-                        except (StrictJsonError, ValidationError) as exc:
+                        except (StrictJsonError, ValueValidationError) as exc:
                             _decode_err = exc
                     else:
                         source_task = (
@@ -560,7 +560,7 @@ class FinalizeMixin:
                                     _loads_r.ok_value,
                                     source_ok_type,
                                 )
-                            except (StrictJsonError, ValidationError) as exc:
+                            except (StrictJsonError, ValueValidationError) as exc:
                                 _decode_err = exc
                 if _decode_err is not None:
                     decode_failure = f'Result decode failed: {_decode_err}'
@@ -1163,7 +1163,7 @@ class FinalizeMixin:
         if err_slot is not None:
             try:
                 err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return Err(
                     self._make_finalize_error(
                         task_id=task_id,
@@ -1208,7 +1208,7 @@ class FinalizeMixin:
             )
         try:
             decoded_tr = decode_task_result(loads_r.ok_value, source_ok_type)
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return Err(
                 self._make_finalize_error(
                     task_id=task_id,

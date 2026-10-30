@@ -56,6 +56,8 @@ Errors from type/schema validation and structural contracts.
 | `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
+`RETURN_TYPE_MISMATCH` does not store the returned value. `message` names the variant, the actual type, the expected type and the failing fields. `data` holds `variant`, `expected_type`, `actual_type`, `validation_errors` (at most 10 entries, each with `loc`, `msg` and `type`) and `validation_error_count`. `exception` is `None`.
+
 #### RetrievalCode
 
 Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the result, not task execution failures.
@@ -85,6 +87,18 @@ Terminal outcome codes for tasks and workflows.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
+
+### Validation Failure Text
+
+When a value fails pydantic validation, the library writes each failure as `<loc>: <msg> [<type>]`. Error messages, stored `TaskError` fields, flattened exceptions and log lines use this text. It names the field, the message and the error type. It does not contain the value.
+
+- The text shows at most 10 failures, then `(+N more)`.
+- For a task kwarg, `<loc>` starts with the kwarg name.
+- When a message template uses a value from the input, the library writes `<input>` in its place. Example: `Input tag '<input>' found using 'kind' does not match any of the expected tags: 'cat', 'dog'`.
+- Text that your own validator writes is kept as written. This applies to `value_error`, `assertion_error` and custom `PydanticCustomError` types. Do not put input values into validator messages that must not be stored.
+- A key from the input can be part of `<loc>` in two cases: the validated type is a dict or a mapping, or contains one; or a model, `TypedDict` or dataclass with `extra='forbid'` refuses the key.
+
+The cause object follows the same rule. Where the library catches a pydantic `ValidationError`, it keeps a `ValueValidationError` with the same text instead (`horsies.core.codec.ValueValidationError`, a subclass of `SerializationError` and of `ValueError`). For example, `TaskSendValidationFailed.exception` is a `ValueValidationError` when a kwarg fails its declared type. When task code raises a `ValidationError`, the stored `TaskError` keeps the same text in `message` and in the `repr` and `traceback` of the flattened exception.
 
 ### Broker Errors (BrokerResult)
 
@@ -162,6 +176,8 @@ def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
         case cause:
             logger.error('enqueue failed: %s', err.message, exc_info=cause)
 ```
+
+For a validation failure, the cause names the field, the message and the type, not the value. Text from your own validators is kept as written ([Validation Failure Text](#validation-failure-text)).
 
 #### TaskSendErrorCode
 

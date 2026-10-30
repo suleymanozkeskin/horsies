@@ -14,6 +14,7 @@ J. Workflow injection deserialization errors in _run_task_entry
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from contextlib import contextmanager
@@ -1873,6 +1874,126 @@ class TestStartHeartbeatThread:
         assert thread.daemon is True
         assert 'heartbeat' in thread.name
         thread.join(timeout=2)
+
+
+# ===================================================================
+# Q. Refusal text in the child holds no input values
+# ===================================================================
+
+
+_INPUT_MARKER = 'child-marker-8b2f'
+
+
+def _typed_count_task(*, count: int) -> TaskResult[int, TaskError]:
+    return TaskResult(ok=count)
+
+
+@pytest.mark.unit
+class TestRunTaskEntryRefusalTextHoldsNoInput:
+    """A decode or encode refusal stores the field, the message and the type,
+    never the refused value."""
+
+    def _assert_no_marker(
+        self,
+        payload: str,
+        reason: str | None,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        assert reason is not None and 'SerializationError' in reason
+        assert _INPUT_MARKER not in payload
+        assert _INPUT_MARKER not in reason
+        assert _INPUT_MARKER not in caplog.text
+
+    def test_kwargs_decode_refusal(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task._original_fn = _typed_count_task
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+        _run_entry_defaults['kwargs_json'] = json.dumps({'count': _INPUT_MARKER})
+
+        with caplog.at_level(logging.DEBUG), _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        self._assert_no_marker(payload, reason, caplog)
+        assert 'count: Input should be a valid integer' in payload
+
+    def test_args_from_decode_refusal(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        source_task = MagicMock()
+        source_task.task_ok_type = int
+        mock_task = MagicMock()
+        mock_task.task_ok_type = str
+
+        def _task_lookup(name: str) -> Any:
+            return source_task if name == 'upstream_task' else mock_task
+
+        mock_app.tasks.__getitem__ = MagicMock(side_effect=_task_lookup)
+        mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
+        _run_entry_defaults['kwargs_json'] = json.dumps({
+            'upstream': {
+                '__h_taskresult_envelope__': True,
+                'source_task_name': 'upstream_task',
+                'inner': {'__h_task_result__': True, 'ok': _INPUT_MARKER, 'err': None},
+            },
+        })
+
+        with caplog.at_level(logging.DEBUG), _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        self._assert_no_marker(payload, reason, caplog)
+
+    def test_task_call_raises_validation_error(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from pydantic import TypeAdapter, ValidationError
+
+        with pytest.raises(ValidationError) as refused:
+            TypeAdapter(int).validate_python(_INPUT_MARKER)
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock(side_effect=refused.value)
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with caplog.at_level(logging.DEBUG), _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is None
+        assert _INPUT_MARKER not in payload
+        assert _INPUT_MARKER not in caplog.text
+        assert 'ValidationError: Input should be a valid integer' in payload
+
+    def test_result_encode_refusal(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = int
+        mock_task.return_value = TaskResult(ok=_INPUT_MARKER)
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with caplog.at_level(logging.DEBUG), _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        self._assert_no_marker(payload, reason, caplog)
 
 
 # ===================================================================

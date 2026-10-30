@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pydantic import ValidationError
 
 from horsies.core.codec.json_io import Json, SerdeResult, dumps_json
+from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.models.tasks import RetryPolicy, TaskOptions
 from horsies.core.types.result import Err, Ok, Result
 
@@ -41,14 +42,6 @@ class InvalidRetryPolicy:
     detail: str
 
 
-def _validation_detail(error: ValidationError) -> str:
-    return '; '.join(
-        f"{'.'.join(str(part) for part in item['loc']) or 'retry_policy'}: "
-        f"{item['msg']}"
-        for item in error.errors()
-    )
-
-
 def stored_max_retries(options: Json) -> Result[int, InvalidRetryPolicy]:
     """The `max_retries` value that enqueue stores for decoded task options.
 
@@ -71,5 +64,5 @@ def stored_max_retries(options: Json) -> Result[int, InvalidRetryPolicy]:
     try:
         validated = RetryPolicy.model_validate(policy, strict=True)
     except ValidationError as error:
-        return Err(InvalidRetryPolicy(_validation_detail(error)))
+        return Err(InvalidRetryPolicy(validation_summary(error)))
     return Ok(validated.max_retries)

@@ -19,8 +19,6 @@ from typing import Any, Optional, Tuple, assert_never, cast
 from psycopg import Connection, Cursor
 from psycopg.rows import namedtuple_row
 
-from pydantic import ValidationError
-from pydantic_core import PydanticSerializationError
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -37,6 +35,7 @@ from horsies.core.codec.typed import (
     decode_task_result,
     encode_task_result,
 )
+from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 
 
 # Engine transport keys (strict-serde §8). Pinned here so the worker
@@ -1113,7 +1112,7 @@ def _run_task_entry(
         underlying_fn = underlying_task_fn(task)
         try:
             kwargs = decode_kwargs(underlying_fn, raw_kwargs)
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return _serialization_error_response(
                 task_name,
                 SerializationError(
@@ -1171,7 +1170,7 @@ def _run_task_entry(
                 )
             try:
                 kwargs[key] = decode_task_result(inner, source_ok_type)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
@@ -1266,7 +1265,7 @@ def _run_task_entry(
                         results_by_id[node_id] = decode_task_result(
                             envelope, source_ok_type,
                         )
-                    except (StrictJsonError, ValidationError) as exc:
+                    except (StrictJsonError, ValueValidationError) as exc:
                         results_by_id[node_id] = TaskResult(
                             err=TaskError(
                                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -1348,11 +1347,7 @@ def _run_task_entry(
         if isinstance(out, TaskResult):
             try:
                 envelope = encode_task_result(out, ok_type)
-            except (
-                StrictJsonError,
-                ValidationError,
-                PydanticSerializationError,
-            ) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
@@ -1379,11 +1374,7 @@ def _run_task_entry(
         wrapped: TaskResult[Any, TaskError] = TaskResult(ok=out)
         try:
             envelope = encode_task_result(wrapped, ok_type)
-        except (
-            StrictJsonError,
-            ValidationError,
-            PydanticSerializationError,
-        ) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return _serialization_error_response(
                 task_name,
                 SerializationError(
@@ -1397,12 +1388,12 @@ def _run_task_entry(
         return (True, ser.ok_value, None)
 
     except BaseException as e:
-        logger.error(f'Task exception: {task_name}: {e}')
+        logger.error(f'Task exception: {task_name}: {exception_text(e)}')
         # If the task raised an exception, we wrap it in a TaskError
         tr = TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message=f'{type(e).__name__}: {e}',
+                message=f'{type(e).__name__}: {exception_text(e)}',
                 data={'task_name': task_name},
                 exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
             )

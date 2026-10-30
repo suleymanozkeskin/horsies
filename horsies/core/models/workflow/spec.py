@@ -18,7 +18,6 @@ from typing import (
     cast,
 )
 
-from pydantic import ValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
@@ -27,6 +26,7 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.typed import decode_value, encode_value
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import (
     ErrorCode,
     SourceLocation,
@@ -462,7 +462,7 @@ class WorkflowSpec(Generic[OutT]):
                     continue
                 try:
                     encoded = encode_value(value, binding.annotation)
-                except (StrictJsonError, ValidationError) as exc:
+                except (StrictJsonError, ValueValidationError) as exc:
                     report.add(WorkflowValidationError(
                         message=(
                             'TaskNode/SubWorkflowNode kwarg value failed '
@@ -481,7 +481,7 @@ class WorkflowSpec(Generic[OutT]):
                     continue
                 try:
                     decoded = decode_value(encoded, binding.annotation)
-                except (StrictJsonError, ValidationError) as exc:
+                except (StrictJsonError, ValueValidationError) as exc:
                     report.add(WorkflowValidationError(
                         message=(
                             'TaskNode/SubWorkflowNode kwarg value failed '

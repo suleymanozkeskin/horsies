@@ -28,12 +28,13 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from horsies.core.codec.json_value import (
     JsonValue,
     StrictJsonError,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.codec.typed import (
     Json,
     _get_adapter,  # pyright: ignore[reportPrivateUsage]
@@ -684,7 +685,7 @@ class TestScanReservedKeysDirect:
 
 
 # ---------------------------------------------------------------------------
-# Decode-side: ValidationError for type mismatch
+# Decode-side: ValueValidationError for type mismatch
 # ---------------------------------------------------------------------------
 
 
@@ -698,19 +699,19 @@ class TestEncodeValidation:
     """
 
     def test_dict_for_str_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             encode_value({'not': 'a string'}, str)
 
     def test_int_for_str_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             encode_value(123, str)
 
     def test_list_for_str_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             encode_value(['a', 'b'], str)
 
     def test_missing_required_model_field_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             encode_value(cast(object, {'name': 'Alice'}), _User)
 
     def test_harmless_coercion_preserved(self) -> None:
@@ -732,11 +733,11 @@ class TestEncodeValidation:
 
 class TestDecodeValidation:
     def test_decode_type_mismatch_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             decode_value(cast(Json, 'not-an-int'), int)
 
     def test_decode_missing_required_field_raises(self) -> None:
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValueValidationError):
             decode_value(cast(Json, {'name': 'Alice'}), _User)
 
 

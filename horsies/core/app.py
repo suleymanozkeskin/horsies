@@ -64,6 +64,7 @@ from horsies.core.utils.loop_runner import (
     in_running_event_loop,
 )
 from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
@@ -376,7 +377,7 @@ class Horsies:
                     message=f'invalid task options',
                     code=ErrorCode.TASK_INVALID_OPTIONS,
                     location=fn_location,
-                    notes=[f"task '{fn.__name__}'", str(e)],
+                    notes=[f"task '{fn.__name__}'", exception_text(e)],
                     help_text='check task decorator arguments',
                 )
 
@@ -885,7 +886,7 @@ class Horsies:
                         ConfigurationError(
                             message='invalid retry_policy metadata',
                             code=ErrorCode.TASK_INVALID_OPTIONS,
-                            notes=[f"task '{task_name}'", str(exc)],
+                            notes=[f"task '{task_name}'", exception_text(exc)],
                             help_text='ensure retry_policy matches RetryPolicy schema',
                         )
                     )
@@ -1126,7 +1127,6 @@ class Horsies:
         )
         from horsies.core.types.result import Err, Ok, is_err
         from horsies.core.types.status import TaskStatus
-        from pydantic import ValidationError
 
         broker = self.get_broker()
         record_result = await broker.get_raw_result_record_async(
@@ -1211,7 +1211,7 @@ class Horsies:
         if err_slot is not None:
             try:
                 err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                     message=f'TaskError decode failed for {task_id}: {exc}',
@@ -1233,7 +1233,7 @@ class Horsies:
             ))
         try:
             return Ok(decode_task_result(raw, ok_type))
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                 message=f'decode_task_result failed for {task_id}: {exc}',
@@ -1298,7 +1298,6 @@ class Horsies:
             validate_task_result_envelope,
         )
         from horsies.core.types.result import Err, Ok, is_err
-        from pydantic import ValidationError
 
         broker = self.get_broker()
         info_result = await broker.get_task_info_async(
@@ -1337,7 +1336,7 @@ class Horsies:
         if err_slot is not None:
             try:
                 err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                     message=(
@@ -1359,7 +1358,7 @@ class Horsies:
             return Ok(info)
         try:
             decoded = decode_task_result(info.raw_result, ok_type)
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return Err(BrokerOperationError(
                 code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
                 message=(

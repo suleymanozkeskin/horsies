@@ -248,7 +248,7 @@ def encode_kwargs(
         StrictJsonError: on unknown kwarg name, user-supplied
             engine-injected name, user-supplied TaskResult-typed kwarg,
             or kwarg without a type annotation.
-        pydantic.ValidationError: when a value doesn't satisfy its
+        ValueValidationError: when a value doesn't satisfy its
             declared type.
     """
     resolved = resolve_hints_and_sig(task_fn)
@@ -273,7 +273,7 @@ def encode_kwargs(
             # Single source of truth via the shared resolver — keeps
             # encode_kwargs and snapshot validation from drifting.
             raise StrictJsonError(binding.error_message or '')
-        encoded[key] = encode_value(value, binding.annotation)
+        encoded[key] = encode_value(value, binding.annotation, location=(key,))
     return encoded
 
 
@@ -323,7 +323,7 @@ def decode_kwargs(
     Raises:
         StrictJsonError: on unknown kwarg name on the wire, or kwarg
             without a type annotation.
-        pydantic.ValidationError: when a raw value doesn't satisfy its
+        ValueValidationError: when a raw value doesn't satisfy its
             declared type.
     """
     resolved = resolve_hints_and_sig(task_fn)
@@ -356,7 +356,7 @@ def decode_kwargs(
             # after decode_kwargs returns.
             decoded[key] = raw_value
             continue
-        decoded[key] = decode_value(raw_value, annot)
+        decoded[key] = decode_value(raw_value, annot, location=(key,))
     return decoded
 
 
@@ -436,7 +436,7 @@ def encode_subworkflow_kwargs(
     Raises:
         StrictJsonError: on unknown / TaskResult-typed / unannotated kwargs,
             or non-JSON-native values supplied to an opaque ``**params``.
-        pydantic.ValidationError: when a typed value doesn't satisfy its
+        ValueValidationError: when a typed value doesn't satisfy its
             declared annotation.
     """
     from horsies.core.codec.json_value import JsonValue
@@ -446,7 +446,7 @@ def encode_subworkflow_kwargs(
     if resolved is None:
         # ``inspect.signature`` failed — test scaffolding only; treat
         # every value as ``JsonValue`` (strict).
-        return {k: encode_value(v, JsonValue) for k, v in kwargs.items()}
+        return {k: encode_value(v, JsonValue, location=(k,)) for k, v in kwargs.items()}
     hints, sig = resolved
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     encoded: dict[str, Json] = {}
@@ -465,13 +465,13 @@ def encode_subworkflow_kwargs(
                     f'engine populates it via args_from. SubWorkflowNode '
                     f'must not supply a static value',
                 )
-            encoded[key] = encode_value(value, annot)
+            encoded[key] = encode_value(value, annot, location=(key,))
             continue
         if accepts_var_kw:
             # Opaque ``**params: Any`` catch-all — JSON-native only.
             # This also catches static kwargs whose key happens to be
             # the VAR_POSITIONAL / VAR_KEYWORD param name itself.
-            encoded[key] = encode_value(value, JsonValue)
+            encoded[key] = encode_value(value, JsonValue, location=(key,))
             continue
         raise StrictJsonError(
             f'unknown kwarg {key!r} for build_with of '
@@ -499,7 +499,7 @@ def decode_subworkflow_kwargs(
     Raises:
         StrictJsonError: on unknown / TaskResult-typed / unannotated
             wire kwargs, or non-JSON-native values under opaque ``**params``.
-        pydantic.ValidationError: when a wire value doesn't satisfy its
+        ValueValidationError: when a wire value doesn't satisfy its
             declared annotation.
     """
     from horsies.core.codec.json_value import JsonValue
@@ -507,7 +507,7 @@ def decode_subworkflow_kwargs(
     build_with = _resolve_build_with(workflow_def)
     resolved = resolve_hints_and_sig(build_with)
     if resolved is None:
-        return {k: decode_value(v, JsonValue) for k, v in raw_kwargs.items()}
+        return {k: decode_value(v, JsonValue, location=(k,)) for k, v in raw_kwargs.items()}
     hints, sig = resolved
     accepts_var_kw = _signature_accepts_var_keyword(sig)
     decoded: dict[str, Any] = {}
@@ -526,10 +526,10 @@ def decode_subworkflow_kwargs(
                     f'SubWorkflowNode kwargs must not carry args_from '
                     f'values',
                 )
-            decoded[key] = decode_value(raw_value, annot)
+            decoded[key] = decode_value(raw_value, annot, location=(key,))
             continue
         if accepts_var_kw:
-            decoded[key] = decode_value(raw_value, JsonValue)
+            decoded[key] = decode_value(raw_value, JsonValue, location=(key,))
             continue
         raise StrictJsonError(
             f'unknown kwarg {key!r} on the wire for build_with of '

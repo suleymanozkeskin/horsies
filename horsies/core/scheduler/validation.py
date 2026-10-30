@@ -13,12 +13,12 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING
 
-from pydantic import ValidationError as _PydanticValidationError
 from zoneinfo import ZoneInfo
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -160,7 +160,7 @@ def _serializable_error(
     task_fn = underlying_task_fn(task)
     try:
         encoded = encode_kwargs(task_fn, schedule.kwargs)
-    except (StrictJsonError, _PydanticValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         return ConfigurationError(
             message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
             code=ErrorCode.CONFIG_INVALID_SCHEDULE,

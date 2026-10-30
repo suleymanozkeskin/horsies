@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from typing import Final
 
-from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.lifecycle.commands import AbandonNodesOfPausedWorkflows
@@ -34,6 +33,7 @@ from horsies.core.codec.kwargs import (
 from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
@@ -113,7 +113,7 @@ def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
     underlying = underlying_task_fn(task.fn)
     try:
         return dict(encode_kwargs(underlying, task.kwargs))
-    except (StrictJsonError, _PydanticValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         raise SerializationError(
             f'Failed to encode kwargs for node {task.name}: {exc}',
         ) from exc

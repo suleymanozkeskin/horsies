@@ -16,15 +16,23 @@ pull in ``traceback`` formatting.
 from __future__ import annotations
 
 import traceback as tb
-from typing import Any
+from typing import Any, Final
+
+from pydantic import ValidationError
 
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.validation_errors import exception_text, validation_summary
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import FlattenedException, TaskError, TaskResult
 from horsies.core.types.result import is_err
 
 
-__all__ = ['flatten_exception', 'serialize_error_payload', 'FALLBACK_ERROR_JSON']
+__all__ = [
+    'FALLBACK_ERROR_JSON',
+    'MAX_EXCEPTION_CHAIN_LINKS',
+    'flatten_exception',
+    'serialize_error_payload',
+]
 
 logger = get_logger('error_payload')
 
@@ -72,20 +80,161 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     return result.ok_value
 
 
+MAX_EXCEPTION_CHAIN_LINKS: Final = 64
+"""Exceptions that ``flatten_exception`` visits in a chain and in group members."""
+
+_CAUSE_SEPARATOR: Final = (
+    '\nThe above exception was the direct cause of the following exception:\n\n'
+)
+_CONTEXT_SEPARATOR: Final = (
+    '\nDuring handling of the above exception, another exception occurred:\n\n'
+)
+_GROUP_MEMBERS_NOT_SHOWN: Final = (
+    '(sub-exceptions not shown: they hold a validation error)\n'
+)
+
+
 def flatten_exception(exc: BaseException) -> FlattenedException:
     """Convert a live ``BaseException`` to a wire-safe ``FlattenedException``.
 
     The shape extends the legacy ``_exception_to_json`` triple
     (``type`` / ``message`` / ``traceback``) with ``module`` and
-    ``repr`` for class disambiguation. ``traceback`` is the high-value
-    diagnostic field — preserved exactly as
-    ``''.join(traceback.format_exception(...))`` so downstream tooling
-    that grew up on the legacy shape keeps working.
+    ``repr`` for class disambiguation. ``traceback`` is
+    ``''.join(traceback.format_exception(...))`` when the printed chain
+    holds no pydantic ``ValidationError``.
+
+    A pydantic ``ValidationError`` text holds the refused input. Where one
+    is ``exc``, a link of its printed chain, or a member of an exception
+    group, ``message``, ``repr`` and that part of ``traceback`` use the
+    validation summary instead. The walk visits at most
+    ``MAX_EXCEPTION_CHAIN_LINKS`` exceptions; past the bound it treats the
+    rest as holding a validation error.
     """
     return FlattenedException(
         type=type(exc).__name__,
         module=type(exc).__module__,
-        message=str(exc),
-        repr=repr(exc),
-        traceback=''.join(tb.format_exception(type(exc), exc, exc.__traceback__)),
+        message=exception_text(exc),
+        repr=_repr_without_input(exc),
+        traceback=_traceback_without_input(exc),
     )
+
+
+def _repr_without_input(exc: BaseException) -> str:
+    match exc:
+        case ValidationError():
+            return f'{type(exc).__name__}({validation_summary(exc)!r})'
+        case BaseExceptionGroup() if _reaches_validation_error(exc):
+            return f'{type(exc).__name__}({str(exc)!r})'
+        case _:
+            return repr(exc)
+
+
+def _traceback_without_input(exc: BaseException) -> str:
+    if not _reaches_validation_error(exc):
+        return ''.join(tb.format_exception(type(exc), exc, exc.__traceback__))
+    links = _printed_chain(exc)
+    blocks: list[str] = []
+    if len(links) == MAX_EXCEPTION_CHAIN_LINKS and _next_link(links[-1][0]) is not None:
+        blocks.append(
+            f'(older chained exceptions not shown: the chain has more than '
+            f'{MAX_EXCEPTION_CHAIN_LINKS} links)\n',
+        )
+    for link, separator in reversed(links):
+        blocks.append(_link_text(link))
+        if separator is not None:
+            blocks.append(separator)
+    return ''.join(blocks)
+
+
+def _printed_chain(exc: BaseException) -> list[tuple[BaseException, str | None]]:
+    """The links that ``traceback.format_exception`` prints, newest first.
+
+    Each link carries the separator that is printed after it. The walk stops
+    at a repeated link (as the standard formatter does) or at the bound.
+    """
+    links: list[tuple[BaseException, str | None]] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    separator: str | None = None
+    for _ in range(MAX_EXCEPTION_CHAIN_LINKS):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        links.append((current, separator))
+        match _next_link(current):
+            case None:
+                current = None
+            case (older, older_separator):
+                current, separator = older, older_separator
+    return links
+
+
+def _next_link(exc: BaseException) -> tuple[BaseException, str] | None:
+    match (exc.__cause__, exc.__context__, exc.__suppress_context__):
+        case (BaseException() as cause, _, _):
+            return (cause, _CAUSE_SEPARATOR)
+        case (None, BaseException() as context, False):
+            return (context, _CONTEXT_SEPARATOR)
+        case _:
+            return None
+
+
+def _reaches_validation_error(exc: BaseException) -> bool:
+    """True when a printed chain link or a group member, at any depth, is a
+    pydantic ``ValidationError``. True also when the bound stops the walk
+    with exceptions left to visit."""
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    for _ in range(MAX_EXCEPTION_CHAIN_LINKS):
+        if not pending:
+            return False
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, ValidationError):
+            return True
+        match _next_link(current):
+            case None:
+                pass
+            case (older, _):
+                pending.append(older)
+        match current:
+            case BaseExceptionGroup():
+                pending.extend(current.exceptions)
+            case _:
+                pass
+    return bool(pending)
+
+
+def _link_text(link: BaseException) -> str:
+    match link:
+        case ValidationError():
+            return _header_only_text(link, validation_summary(link))
+        case BaseExceptionGroup() if _reaches_validation_error(link):
+            return _header_only_text(link, str(link)) + _GROUP_MEMBERS_NOT_SHOWN
+        case _:
+            return ''.join(
+                tb.format_exception(type(link), link, link.__traceback__, chain=False),
+            )
+
+
+def _header_only_text(link: BaseException, text: str) -> str:
+    """The frames of ``link`` and one ``<type>: <text>`` line."""
+    frames = (
+        ['Traceback (most recent call last):\n', *tb.format_tb(link.__traceback__)]
+        if link.__traceback__ is not None
+        else []
+    )
+    return ''.join([*frames, f'{_type_label(link)}: {text}\n'])
+
+
+def _type_label(exc: BaseException) -> str:
+    """The type name as ``traceback`` prints it."""
+    module = type(exc).__module__
+    qualname = type(exc).__qualname__
+    match module:
+        case '__main__' | 'builtins':
+            return qualname
+        case _:
+            return f'{module}.{qualname}'
