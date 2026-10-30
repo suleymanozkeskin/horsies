@@ -83,6 +83,11 @@ def _every_variant() -> list[TaskSendError]:
     ]
 
 
+def _refused_variants() -> list[TaskSendError]:
+    accepted = set(get_args(TaskSendRetryable.__value__))
+    return [error for error in _every_variant() if type(error) not in accepted]
+
+
 def _make_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
@@ -211,3 +216,28 @@ class TestEnqueueFailedCause:
         assert result.err_value.exception is cause
         assert result.err_value.retryable is False
         assert result.err_value.payload.task_name == 'test.good_fn'
+
+
+@pytest.mark.unit
+class TestRetryRefusesOtherVariants:
+    """A caller without a type checker can pass a refused variant."""
+
+    def test_the_fixture_has_five_refused_variants(self) -> None:
+        assert len(_refused_variants()) == 5
+
+    @pytest.mark.parametrize(
+        'error', _refused_variants(), ids=lambda error: type(error).__name__,
+    )
+    def test_retry_send_fails_an_assertion_that_names_the_variant(
+        self, error: TaskSendError,
+    ) -> None:
+        app = _make_app()
+
+        with pytest.raises(AssertionError) as raised:
+            _wrapper(app).retry_send(error)
+
+        text = str(raised.value)
+        assert f'got: {type(error).__name__}(' in text
+        assert PAYLOAD_MARKER not in text
+        assert MESSAGE_MARKER not in text
+        app.get_broker.assert_not_called()

@@ -9,7 +9,8 @@ Two states reach the broker's key check with different retry conditions:
 - The task id already exists with the same command but a different key.
   The sent payload differs from the original send, so the send returns
   ``PAYLOAD_MISMATCH``. The retry methods do not accept that variant: it
-  is not a ``TaskSendRetryable``, so a retry of it fails type checking.
+  is not a ``TaskSendRetryable``, so a retry of it fails type checking,
+  and at run time it fails an assertion.
 """
 
 from __future__ import annotations

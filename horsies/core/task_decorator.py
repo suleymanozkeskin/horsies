@@ -1738,7 +1738,8 @@ def create_task_wrapper(
                 limit_bytes = app.config.payload.reject_bytes
                 # enforce_payload_policy reports a size only above a set limit.
                 assert limit_bytes is not None, (
-                    'payload size reported without payload.reject_bytes'
+                    f'payload size of {task_name} reported without '
+                    'payload.reject_bytes'
                 )
                 return Err(TaskSendPayloadTooLarge(
                     message=(
@@ -2209,10 +2210,21 @@ def create_task_wrapper(
 
         The parameter type admits ``TaskSendEnqueueFailed``,
         ``TaskSendAsyncContext`` and ``TaskSendIdempotencyKeyConflict``; each
-        carries its task id and payload. Refused: a payload of another task,
-        a payload without a delay when ``require_delay``, and a payload with
-        a delay when ``reject_delay``. Returns ``Ok((task_id, payload))``.
+        carries its task id and payload. Another variant, passed by a caller
+        without a type checker, fails an assertion that names it. Refused: a
+        payload of another task, a payload without a delay when
+        ``require_delay``, and a payload with a delay when ``reject_delay``.
+        Returns ``Ok((task_id, payload))``.
         """
+        match error:
+            case (
+                TaskSendEnqueueFailed()
+                | TaskSendAsyncContext()
+                | TaskSendIdempotencyKeyConflict()
+            ):
+                pass
+            case _ as refused:
+                assert_never(refused)
         if error.payload.task_name != task_name:
             return Err(TaskSendValidationFailed(
                 message=(

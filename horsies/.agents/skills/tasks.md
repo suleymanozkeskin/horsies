@@ -199,10 +199,12 @@ def with_options(*, good_until: datetime | None = None, idempotency_key: str | N
 # takes the queue's mapping, while naming 'standard_30d' overrides one.
 
 # Replay failed send with stored payload; another variant is a type error
+# (and fails an assertion at run time)
 def retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 async def retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 
 # Replay failed schedule with stored payload; another variant is a type error
+# (and fails an assertion at run time)
 def retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 async def retry_schedule_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 

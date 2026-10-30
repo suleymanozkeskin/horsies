@@ -185,7 +185,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
 - TaskSendEventLoopLimit: message
 - exception: BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
-- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error
+- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
 
 ### TaskSendErrorCode (enum)
 - SEND_SUPPRESSED: send suppressed during worker import/discovery

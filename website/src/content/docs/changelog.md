@@ -107,9 +107,10 @@ there is no migration contract between pre-1.0 versions.
   it before `raise ... from`, `exc_info=` or an error tracker call.
 - **The retry methods take a `TaskSendRetryable`**
   (`TaskSendEnqueueFailed | TaskSendAsyncContext |
-  TaskSendIdempotencyKeyConflict`). Another variant is a type error. Before,
-  the methods returned `VALIDATION_FAILED` at run time for another code or
-  for an error without a payload; that run-time check is removed.
+  TaskSendIdempotencyKeyConflict`). Another variant is a type error, and at
+  run time it fails an assertion that names the variant. Before, the
+  methods returned `VALIDATION_FAILED` for another code or for an error
+  without a payload.
 
 ### Fixed
 
