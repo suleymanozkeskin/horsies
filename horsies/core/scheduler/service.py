@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, assert_never
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
@@ -25,7 +25,12 @@ from pydantic import ValidationError as _PydanticValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
 from horsies.core.codec.json_io import dumps_json
-from horsies.core.codec.payload_guard import enforce_payload_policy
+from horsies.core.codec.payload_guard import (
+    PayloadOverLimit,
+    PayloadWithinLimit,
+    check_payload_size,
+    warn_if_payload_large,
+)
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.worker.worker import import_by_path
@@ -931,24 +936,34 @@ class Scheduler:
             # every fire — the warn rate-limit collapses that to one line
             # and the reject surfaces per-slot through the schedule's
             # normal enqueue-failure logging.
-            oversize = enforce_payload_policy(
+            warn_if_payload_large(
                 self.app.config.payload,
                 task_name=schedule.task_name,
                 kind='kwargs',
                 encoded_len=len(kwargs_json),
             )
-            if oversize is not None:
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
-                    message=(
-                        f"kwargs payload for schedule '{schedule.name}' is "
-                        f'{oversize} bytes, exceeding payload.reject_bytes='
-                        f'{self.app.config.payload.reject_bytes}; slot not '
-                        f'enqueued'
-                    ),
-                    retryable=False,
-                    exception=None,
-                ))
+            match check_payload_size(
+                self.app.config.payload,
+                encoded_len=len(kwargs_json),
+            ):
+                case PayloadWithinLimit():
+                    pass
+                case PayloadOverLimit(
+                    size_bytes=size_bytes,
+                    limit_bytes=limit_bytes,
+                ):
+                    return Err(BrokerOperationError(
+                        code=BrokerErrorCode.ENQUEUE_FAILED,
+                        message=(
+                            f"kwargs payload for schedule '{schedule.name}' is "
+                            f'{size_bytes} bytes, exceeding payload.reject_bytes='
+                            f'{limit_bytes}; slot not enqueued'
+                        ),
+                        retryable=False,
+                        exception=None,
+                    ))
+                case _ as unreachable:
+                    assert_never(unreachable)
 
         # Deterministic sent_at — same slot produces same SHA across ticks.
         sent_at = slot_time

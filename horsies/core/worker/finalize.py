@@ -23,7 +23,7 @@ from sqlalchemy import text
 
 from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.payload_guard import enforce_payload_policy
+from horsies.core.codec.payload_guard import warn_if_payload_large
 from horsies.core.codec.typed import (
     decode_task_error,
     decode_task_result,
@@ -319,7 +319,7 @@ class FinalizeMixin:
         # Warn-only: results are never rejected over size (the work is
         # done; destroying it would convert a size concern into data loss).
         if self._app is not None:
-            enforce_payload_policy(
+            warn_if_payload_large(
                 self._app.config.payload,
                 task_name=task_name,
                 kind='result',
