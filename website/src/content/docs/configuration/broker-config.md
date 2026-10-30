@@ -36,7 +36,7 @@ broker = PostgresConfig(
 | `tcp_keepalives_interval` | `int` | 10 | Seconds between keepalive probes (libpq `keepalives_interval`) |
 | `tcp_keepalives_count` | `int` | 3 | Unacknowledged probes before the connection is dropped (libpq `keepalives_count`) |
 | `tcp_user_timeout_ms` | `int` | 30000 | Milliseconds that sent data may stay unacknowledged before the connection is closed (libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](remote-postgres) |
-| `echo` | `bool` | `False` | Echo SQL statements to logs |
+| `echo` | `bool` | `False` | Echo SQL statements to logs. Bound values are not shown |
 | `pool_recycle` | `int` | 1800 | Recycle connections after N seconds |
 
 ## Connection URL Format

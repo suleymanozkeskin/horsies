@@ -81,6 +81,13 @@ there is no migration contract between pre-1.0 versions.
   `Err` with `TASK_INFO_QUERY_FAILED`, `ENQUEUE_FAILED`, `CLOSE_FAILED`,
   `DB_PING_FAILED`, `WORKER_PING_FAILED`, `MONITORING_QUERY_FAILED` or
   `INTERNAL_FAILED`, or a `BROKER_ERROR` result.
+- **Statement errors do not show bound values.** The broker's engines are
+  created with `hide_parameters=True`. A failed statement shows
+  `[SQL parameters hidden due to hide_parameters=True]` in place of its
+  values in `err.message`, in `str(err.exception)`, in tracebacks, and in
+  `echo=True` logs. Before, the error text held up to 300 characters of each
+  value, which included task arguments and results. The values stay in the
+  exception's `params` attribute.
 
 ### Fixed
 
