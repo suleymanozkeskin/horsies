@@ -31,7 +31,7 @@ from horsies.core.codec.kwargs import (
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
-from horsies.core.codec.payload_guard import enforce_payload_policy
+from horsies.core.codec.payload_guard import warn_if_payload_large
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
@@ -792,10 +792,10 @@ async def _build_enqueued_task_params(
     # where an upstream task's result envelope becomes this task's kwargs
     # — the likeliest producer of oversized payloads. Workflow nodes warn
     # and never reject: no node-failure path exists for a size refusal,
-    # and a size limit must not strand a running workflow. The
-    # reject_bytes result of enforce_payload_policy is therefore discarded.
+    # and a size limit must not strand a running workflow. So this site
+    # does not check reject_bytes.
     if broker is not None and broker.app is not None:
-        _ = enforce_payload_policy(
+        warn_if_payload_large(
             broker.app.config.payload,
             task_name=task_name,
             kind='kwargs',
