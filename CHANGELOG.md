@@ -20,20 +20,27 @@ and there is no migration contract between pre-1.0 versions.
   (`RetrievalCode.ASYNC_CONTEXT`).** An `exception_mapper` or
   `default_unhandled_error_code` value `ASYNC_CONTEXT` fails `horsies check`
   with `HRS-212`, and `TaskError(error_code='ASYNC_CONTEXT')` is refused.
+- **Breaking: `TaskSendError` is a union of eight frozen variants, one per
+  `TaskSendErrorCode` member.** Code that reads `err.task_id`,
+  `err.payload`, `err.retryable` or `err.exception` on a send error must
+  match on the variant first; pyright reports each site.
+  `TaskSendError(code=..., ...)` in tests becomes a variant constructor.
+  `isinstance(err, TaskSendError)` is not valid on a type alias; match on
+  the variants.
 
 ### Changed
 
 - **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
   whose idempotency key is reserved by another task with a different
-  command returns this code instead of `ENQUEUE_FAILED`. `err.detail` is an
-  `IdempotencyKeyOwner`, and its `owner_task_id` names the task that holds
-  the key. The retry methods accept the error; a retry after the
-  reservation ends is accepted. `retryable` is `False`. An exhaustive
-  `match` on `TaskSendErrorCode` needs an `IDEMPOTENCY_KEY_CONFLICT` case.
-- **`TaskSendError` and `BrokerOperationError` have a new field, `detail`.**
-  It is an `IdempotencyKeyOwner` for `IDEMPOTENCY_KEY_CONFLICT` and `None`
-  for every other code. An error built with a code and a detail that do
-  not agree fails an assertion.
+  command returns `TaskSendIdempotencyKeyConflict` instead of
+  `ENQUEUE_FAILED`. Its `owner_task_id` names the task that holds the key.
+  The retry methods accept the error; a retry after the reservation ends
+  is accepted. An exhaustive `match` on `TaskSendErrorCode` needs an
+  `IDEMPOTENCY_KEY_CONFLICT` case.
+- **`BrokerOperationError` has a new field, `detail`.** It is an
+  `IdempotencyKeyOwner` for `IDEMPOTENCY_KEY_CONFLICT` and `None` for every
+  other code. An error built with a code and a detail that do not agree
+  fails an assertion.
 - **A retry that changes the idempotency key of a sent task id returns
   `PAYLOAD_MISMATCH`.** Before, it returned `ENQUEUE_FAILED`, which the
   retry methods accept, and a retry of it could not succeed while the task
@@ -77,6 +84,28 @@ and there is no migration contract between pre-1.0 versions.
   `Err` with `TASK_INFO_QUERY_FAILED`, `ENQUEUE_FAILED`, `CLOSE_FAILED`,
   `DB_PING_FAILED`, `WORKER_PING_FAILED`, `MONITORING_QUERY_FAILED` or
   `INTERNAL_FAILED`, or a `BROKER_ERROR` result.
+- **The `TaskSendError` variants:** `TaskSendSuppressed(message)`,
+  `TaskSendAsyncContext(task_id, payload, message)`,
+  `TaskSendValidationFailed(message, exception)`,
+  `TaskSendEnqueueFailed(task_id, payload, message, retryable, exception)`,
+  `TaskSendPayloadMismatch(task_id, payload, message)`,
+  `TaskSendPayloadTooLarge(message, size_bytes, limit_bytes)`,
+  `TaskSendIdempotencyKeyConflict(task_id, payload, message, owner_task_id)`
+  and `TaskSendEventLoopLimit(message)`. `err.code` is a class variable on
+  each variant and keeps its `TaskSendErrorCode` value. Only
+  `TaskSendEnqueueFailed` has `retryable`. `VALIDATION_FAILED` and
+  `PAYLOAD_TOO_LARGE` errors carry no task id; `PAYLOAD_TOO_LARGE` carries
+  the size and the limit as fields. The repr shows the class name and the
+  other fields; `payload`, `message` and `exception` are not in it.
+- **`exception` is `BaseException | NoCause`** on `TaskSendValidationFailed`
+  and `TaskSendEnqueueFailed`. `NoCause()` is the value when a check found
+  the failure without a Python exception; before, it was `None`. Match on
+  it before `raise ... from`, `exc_info=` or an error tracker call.
+- **The retry methods take a `TaskSendRetryable`**
+  (`TaskSendEnqueueFailed | TaskSendAsyncContext |
+  TaskSendIdempotencyKeyConflict`). Another variant is a type error. Before,
+  the methods returned `VALIDATION_FAILED` at run time for another code or
+  for an error without a payload; that run-time check is removed.
 
 ### Fixed
 

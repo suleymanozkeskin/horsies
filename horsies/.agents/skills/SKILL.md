@@ -101,13 +101,13 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-`retryable` is `True` only for `ENQUEUE_FAILED` (transient). The retry methods also accept `ASYNC_CONTEXT` and `IDEMPOTENCY_KEY_CONFLICT` errors. For a key conflict, `err.detail.owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
 ```python
 match my_task.send(**kwargs):
     case Ok(handle):
         ...
-    case Err(err) if err.retryable:
+    case Err(TaskSendEnqueueFailed(retryable=True) as err):
         match my_task.retry_send(err):
             case Ok(handle):
                 ...
@@ -338,11 +338,11 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 
-`retryable=True` means transient (DB connection blip). `retryable=False` means permanent.
+`retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
 
 `EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
 
-`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False`; `RetrievalCode.ASYNC_CONTEXT` is not cached; `retry_start()` does not accept it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `retry_start()` does not accept it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ## CLI
 

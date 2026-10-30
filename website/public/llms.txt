@@ -144,9 +144,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
 - .with_options(*, good_until=None) -> TaskSendOptions[P, T] (per-send options builder)
-- .retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
-- .retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (async retry)
-- .retry_schedule(error: TaskSendError) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
+- .retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
+- .retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (async retry)
+- .retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
 - .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
 - .task_name -> str
 
@@ -174,21 +174,26 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
 
-### TaskSendError
-- code: TaskSendErrorCode
-- message: str (human-readable description)
-- retryable: bool (True only for ENQUEUE_FAILED)
-- task_id: str | None (None for SEND_SUPPRESSED, VALIDATION_FAILED)
-- payload: TaskSendPayload | None (serialized envelope for idempotent retry)
-- exception: BaseException | None (original cause)
-- detail: IdempotencyKeyOwner | None (IdempotencyKeyOwner(owner_task_id) for IDEMPOTENCY_KEY_CONFLICT; None otherwise)
+### TaskSendError (union, one frozen variant per TaskSendErrorCode member)
+- Match on the variant; err.code (class variable) names its member; payload, message and exception are not in the repr
+- TaskSendSuppressed: message
+- TaskSendAsyncContext: task_id, payload, message
+- TaskSendValidationFailed: message, exception
+- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, driver classification), exception
+- TaskSendPayloadMismatch: task_id, payload, message
+- TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
+- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
+- TaskSendEventLoopLimit: message
+- exception: BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
+- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error
 
 ### TaskSendErrorCode (enum)
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue (transient, retryable)
+- ENQUEUE_FAILED: broker/database failure during enqueue; retryable is the driver classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
-- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; detail names the owner task; the retry methods accept it
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
+- PAYLOAD_TOO_LARGE: serialized kwargs exceed payload.reject_bytes; nothing was enqueued
 - EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
 

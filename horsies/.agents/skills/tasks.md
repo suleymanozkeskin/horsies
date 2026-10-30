@@ -198,13 +198,13 @@ def with_options(*, good_until: datetime | None = None, idempotency_key: str | N
 # retention_class_key's default is absence, not 'standard_30d': omitting it
 # takes the queue's mapping, while naming 'standard_30d' overrides one.
 
-# Replay failed send with stored payload (ENQUEUE_FAILED, ASYNC_CONTEXT, IDEMPOTENCY_KEY_CONFLICT)
-def retry_send(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
-async def retry_send_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
+# Replay failed send with stored payload; another variant is a type error
+def retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
+async def retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 
-# Replay failed schedule with stored payload (ENQUEUE_FAILED, ASYNC_CONTEXT, IDEMPOTENCY_KEY_CONFLICT)
-def retry_schedule(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
-async def retry_schedule_async(error: TaskSendError) -> TaskSendResult[TaskHandle[T]]
+# Replay failed schedule with stored payload; another variant is a type error
+def retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
+async def retry_schedule_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
 
 # Workflow node builder (returns NodeFactory, call with task kwargs to get TaskNode)
 def node(
@@ -245,8 +245,8 @@ await opts.schedule_async(60, **kwargs)  # delayed, async
 enqueue reserves the key together with a canonical fingerprint of the request:
 a resend under the same key with the same request is a replay and creates zero
 rows; a resend under the same key with a *different* request returns
-`Err(IDEMPOTENCY_KEY_CONFLICT)`. Its `detail` is an `IdempotencyKeyOwner`:
-`owner_task_id` names the task that holds the key. While the owner task is
+`Err(TaskSendIdempotencyKeyConflict)`. Its `owner_task_id` names the task
+that holds the key. While the owner task is
 live, the key stays reserved. After the owner task finishes, the key clears
 when the reservation window (24 h by default) has passed. The retry methods
 accept the error. A retry that changes the key of a sent task id returns
@@ -376,30 +376,38 @@ type TaskSendResult[T] = Result[T, TaskSendError]
 
 ### `TaskSendError`
 
+One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `exception` are not in the repr.
+
 ```python
-@dataclass(slots=True, frozen=True)
-class TaskSendError:
-    code: TaskSendErrorCode
-    message: str
-    retryable: bool
-    task_id: str | None         # None for SEND_SUPPRESSED; may be set or None for VALIDATION_FAILED
-    payload: TaskSendPayload | None  # None when no serialization happened
-    exception: BaseException | None
-    detail: IdempotencyKeyOwner | None  # IdempotencyKeyOwner(owner_task_id) for IDEMPOTENCY_KEY_CONFLICT; None otherwise
+type TaskSendError = (
+    TaskSendSuppressed               # message
+    | TaskSendAsyncContext           # task_id, payload, message
+    | TaskSendValidationFailed       # message, exception
+    | TaskSendEnqueueFailed          # task_id, payload, message, retryable, exception
+    | TaskSendPayloadMismatch        # task_id, payload, message
+    | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
+    | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id
+    | TaskSendEventLoopLimit         # message
+)
+type TaskSendRetryable = (
+    TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict
+)
 ```
+
+`exception` is `BaseException | NoCause`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
 
 ### `TaskSendErrorCode`
 
-| Code | Retryable | When |
+| Code | Retry methods | When |
 |---|---|---|
-| `SEND_SUPPRESSED` | No | `.send()` called during worker import/discovery |
-| `ASYNC_CONTEXT` | No | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
-| `VALIDATION_FAILED` | No | Serialization failed, invalid queue, or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Yes | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry |
-| `PAYLOAD_MISMATCH` | No | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
-| `IDEMPOTENCY_KEY_CONFLICT` | No (retry methods accept it) | The idempotency key is reserved by another task with a different command; nothing was enqueued. `detail` is an `IdempotencyKeyOwner` that names the owner task. The retry methods accept it; a retry after the reservation ends is accepted |
-| `PAYLOAD_TOO_LARGE` | No | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
+| `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
+| `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
+| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, or cross-method retry attempted |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry; `retryable` is the driver classification |
+| `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
+| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
+| `PAYLOAD_TOO_LARGE` | Refused | Serialized kwargs exceeded `payload.reject_bytes` (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
+| `EVENT_LOOP_LIMIT` | Refused | The broker serves its limit of open event loops (5, plus its sync runner loop) and this send ran on a new one; nothing was enqueued — close loops that are done |
 
 ### `TaskSendPayload`
 
@@ -421,7 +429,7 @@ Pre-serialized at send time. Never construct manually — created by the library
 match my_task.send(**kwargs):
     case Ok(handle):
         result = handle.get(timeout_ms=5000)
-    case Err(err) if err.retryable:
+    case Err(TaskSendEnqueueFailed(retryable=True) as err):
         match my_task.retry_send(err):
             case Ok(handle):
                 result = handle.get(timeout_ms=5000)
@@ -523,9 +531,9 @@ Only invoked for unhandled exceptions. If the task returns `TaskResult(err=...)`
 
 ## Serialization Rules
 
-Serialization happens at `.send()` time, before enqueueing. Failure returns `Err(TaskSendError(VALIDATION_FAILED))` — task is never enqueued.
+Serialization happens at `.send()` time, before enqueueing. Failure returns `Err(TaskSendValidationFailed)` — task is never enqueued.
 
-Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above `warn_bytes` (default 1 MiB) a rate-limited warning fires; above `reject_bytes` (off by default) the send returns `Err(TaskSendError(PAYLOAD_TOO_LARGE))` and nothing is enqueued. See `configs.md`.
+Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above `warn_bytes` (default 1 MiB) a rate-limited warning fires; above `reject_bytes` (off by default) the send returns `Err(TaskSendPayloadTooLarge)` (with `size_bytes` and `limit_bytes`) and nothing is enqueued. See `configs.md`.
 
 ### Supported types
 
@@ -722,6 +730,9 @@ from horsies import (
     RetryPolicy,
     # Send types
     TaskHandle, TaskSendOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendRetryable, NoCause, TaskSendSuppressed, TaskSendAsyncContext, TaskSendValidationFailed,
+    TaskSendEnqueueFailed, TaskSendPayloadMismatch, TaskSendPayloadTooLarge,
+    TaskSendIdempotencyKeyConflict, TaskSendEventLoopLimit,
     # Exception mapper
     ExceptionMapper,
     # Status
