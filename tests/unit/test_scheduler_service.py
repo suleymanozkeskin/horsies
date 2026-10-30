@@ -2493,7 +2493,7 @@ class TestEnqueueScheduledTask:
         )
 
         assert is_err(result)
-        assert 'payload.reject_bytes' in result.err_value.message
+        assert 'payload.reject_bytes=256' in result.err_value.message
         scheduler.broker.enqueue_async.assert_not_awaited()
 
     async def test_no_broker_raises_runtime_error(self) -> None:
