@@ -20,7 +20,10 @@ from horsies.core.types.result import Ok, Err
 from horsies.core.defaults import DEFAULT_CLAIM_LEASE_MS
 import logging
 
-from horsies.core.worker.finalize import _PersistedTaskOutcome
+from horsies.core.worker.finalize import (
+    _PersistedTaskOutcome,
+    _finalize_data_for_log,
+)
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.worker.worker import (
@@ -1733,6 +1736,64 @@ class TestHandleFinalizeError:
             assert (
                 delay == expected
             ), f'attempt {attempt_no}: expected {expected}s, got {delay}s'
+
+
+@pytest.mark.unit
+class TestFinalizeErrorLogOmitsResult:
+    """Finalize error log lines carry the result length, not the result."""
+
+    _LOGGER_NAME = 'horsies.worker'
+    _RESULT_MARKER = 'result-marker-7f3c'
+
+    def _outcome_data(self) -> dict[str, Any]:
+        return {
+            'exception_type': 'OperationalError',
+            'outcome': {
+                'ok': True,
+                'result_json_str': f'{{"ok": "{self._RESULT_MARKER}"}}',
+                'failed_reason': None,
+            },
+        }
+
+    @pytest.mark.parametrize(
+        ('stage', 'retryable', 'prior_attempts'),
+        [
+            ('phase99_unknown', True, 0),
+            (_FINALIZE_STAGE_PHASE1, False, 0),
+            (_FINALIZE_STAGE_PHASE1, True, _FINALIZE_PHASE1_MAX_RETRIES),
+        ],
+        ids=['unknown_stage', 'not_reattempted', 'retries_exhausted'],
+    )
+    @pytest.mark.asyncio
+    async def test_log_line_has_result_length_not_result(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        stage: str,
+        retryable: bool,
+        prior_attempts: int,
+    ) -> None:
+        worker = _make_worker()
+        worker._spawn_background = MagicMock()  # type: ignore[assignment]
+        err = _make_finalize_error(
+            stage=stage, retryable=retryable, data=self._outcome_data(),
+        )
+        worker._finalize_retry_attempts[(err.task_id, stage)] = prior_attempts
+        result_chars = len(self._outcome_data()['outcome']['result_json_str'])
+        with caplog.at_level(logging.ERROR, logger=self._LOGGER_NAME):
+            await worker._handle_finalize_error(err)
+
+        assert err.task_id in caplog.text
+        assert self._RESULT_MARKER not in caplog.text
+        assert f"'result_json_chars': {result_chars}" in caplog.text
+        # The replay reads the result from the error data, so it stays.
+        assert err.data == self._outcome_data()
+        assert worker._spawn_background.call_count == 0
+
+    def test_data_without_outcome_result_is_returned_as_is(self) -> None:
+        data: dict[str, Any] = {'task_id': 'task-fe-1'}
+
+        assert _finalize_data_for_log(data) is data
+        assert _finalize_data_for_log(None) is None
 
 
 # ---------------------------------------------------------------------------

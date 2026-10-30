@@ -284,11 +284,23 @@ class PostgresConfig(BaseModel):
         return args
 
     def sqlalchemy_engine_kwargs(self) -> dict[str, Any]:
-        """Return only kwargs accepted by SQLAlchemy's engine constructor."""
-        return self.model_dump(
-            exclude=self._ENGINE_KWARG_EXCLUDES,
-            exclude_none=True,
-        )
+        """Return only kwargs accepted by SQLAlchemy's engine constructor.
+
+        ``hide_parameters=True`` is fixed: bound values are task arguments
+        and results, so statement error text and ``echo`` logs show the
+        statement without them. The flag changes the text only; the
+        exception's ``params`` attribute still holds the values. Postgres's
+        own error text is not affected: a constraint violation's
+        ``DETAIL: Failing row contains (...)`` shows column values, each cut
+        to 64 bytes.
+        """
+        return {
+            **self.model_dump(
+                exclude=self._ENGINE_KWARG_EXCLUDES,
+                exclude_none=True,
+            ),
+            'hide_parameters': True,
+        }
 
     def worker_runtime_config(self) -> 'PostgresConfig':
         """Return a broker config with worker-specific parent pool sizing."""
