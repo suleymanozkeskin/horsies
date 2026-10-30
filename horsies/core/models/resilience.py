@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Self
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies.core.errors import ConfigurationError, ErrorCode, ValidationReport, raise_collected
 
 
@@ -13,6 +13,8 @@ class WorkerResilienceConfig(BaseModel):
     Controls retry/backoff for transient database failures and the fallback
     polling interval when NOTIFY is silent.
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     db_retry_initial_ms: Annotated[int, Field(ge=100, le=60_000)] = Field(
         default=500,

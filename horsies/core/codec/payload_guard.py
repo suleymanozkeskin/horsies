@@ -1,17 +1,22 @@
 # horsies/core/codec/payload_guard.py
 """Payload-size guardrail applied at the encode boundaries.
 
-Producers call :func:`enforce_payload_policy` with the length of the
-already-serialized JSON string; the check is one integer comparison. The
-warning is rate-limited to once per (task_name, kind) per process so a
-task that persistently ships oversized payloads warns once instead of on
-every enqueue. Rejection semantics belong to the caller: this module
-reports the violation, the producer decides how to fail.
+Producers pass the length of the already-serialized JSON string; each
+check is one integer comparison.
+
+- :func:`warn_if_payload_large` logs the warning for ``warn_bytes``. The
+  warning is rate-limited to once per (task_name, kind) per process, so a
+  task that persistently ships oversized payloads warns once instead of on
+  every enqueue.
+- :func:`check_payload_size` compares the length with ``reject_bytes`` and
+  returns a :data:`PayloadSizeCheck`. It does not log. The producer decides
+  how to fail on :class:`PayloadOverLimit`.
 """
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Literal
 
 from horsies.core.logging import get_logger
 from horsies.core.models.payload import PayloadPolicy
@@ -30,18 +35,33 @@ def reset_payload_warnings() -> None:
     _warned.clear()
 
 
-def enforce_payload_policy(
+@dataclass(slots=True, frozen=True)
+class PayloadWithinLimit:
+    """The payload is not larger than ``reject_bytes``, or no limit is set."""
+
+
+@dataclass(slots=True, frozen=True)
+class PayloadOverLimit:
+    """The payload is larger than ``reject_bytes``."""
+
+    size_bytes: int
+    limit_bytes: int
+
+
+type PayloadSizeCheck = PayloadWithinLimit | PayloadOverLimit
+
+
+def warn_if_payload_large(
     policy: PayloadPolicy,
     *,
     task_name: str,
     kind: PayloadKind,
     encoded_len: int,
-) -> Optional[int]:
-    """Apply the payload policy to one serialized payload.
+) -> None:
+    """Log the payload-size warning when ``encoded_len`` exceeds ``policy.warn_bytes``.
 
-    Emits the rate-limited warning when ``encoded_len`` exceeds
-    ``policy.warn_bytes``. Returns ``encoded_len`` when it exceeds
-    ``policy.reject_bytes`` (the caller fails closed), ``None`` otherwise.
+    Logs once per (task_name, kind) per process. ``warn_bytes=None`` disables
+    the warning. Does not read ``reject_bytes``.
     """
     if policy.warn_bytes is not None and encoded_len > policy.warn_bytes:
         key = (task_name, kind)
@@ -59,6 +79,22 @@ def enforce_payload_policy(
                 encoded_len,
                 policy.warn_bytes,
             )
-    if policy.reject_bytes is not None and encoded_len > policy.reject_bytes:
-        return encoded_len
-    return None
+
+
+def check_payload_size(
+    policy: PayloadPolicy,
+    *,
+    encoded_len: int,
+) -> PayloadSizeCheck:
+    """Compare one serialized payload length with ``policy.reject_bytes``.
+
+    The limit is exclusive: a length equal to ``reject_bytes`` is within the
+    limit. ``reject_bytes=None`` gives ``PayloadWithinLimit``. Does not log.
+    """
+    match policy.reject_bytes:
+        case None:
+            return PayloadWithinLimit()
+        case int() as limit_bytes if encoded_len > limit_bytes:
+            return PayloadOverLimit(size_bytes=encoded_len, limit_bytes=limit_bytes)
+        case int():
+            return PayloadWithinLimit()

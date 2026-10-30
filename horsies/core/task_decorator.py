@@ -31,7 +31,12 @@ from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.json_io import dumps_json
-from horsies.core.codec.payload_guard import enforce_payload_policy
+from horsies.core.codec.payload_guard import (
+    PayloadOverLimit,
+    PayloadWithinLimit,
+    check_payload_size,
+    warn_if_payload_large,
+)
 from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.codec.typed import (
     TypeAnnotation,
@@ -1079,6 +1084,20 @@ def create_task_wrapper(
             help_text='remove inner decorators and apply @app.task() directly to the raw function',
         )
 
+    # The worker calls the task function synchronously. An async function
+    # returns a coroutine or an async generator, so every run would fail.
+    if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn):
+        raise TaskDefinitionError(
+            message='task function must be a sync function',
+            code=ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED,
+            location=fn_location,
+            notes=[
+                f"function '{fn.__name__}' is defined with `async def`",
+                'async task functions are not supported',
+            ],
+            help_text='define the task with `def`; async task support is not available',
+        )
+
     hints = get_type_hints(fn)
 
     # Validate that return type is TaskResult[*, TaskError]
@@ -1740,30 +1759,35 @@ def create_task_wrapper(
                 ))
             kwargs_json = kwargs_r.ok_value
 
-            oversize = enforce_payload_policy(
+            warn_if_payload_large(
                 app.config.payload,
                 task_name=task_name,
                 kind='kwargs',
                 encoded_len=len(kwargs_json),
             )
-            if oversize is not None:
-                limit_bytes = app.config.payload.reject_bytes
-                # enforce_payload_policy reports a size only above a set limit.
-                assert limit_bytes is not None, (
-                    f'payload size of {task_name} reported without '
-                    'payload.reject_bytes'
-                )
-                return Err(TaskSendPayloadTooLarge(
-                    message=(
-                        f'kwargs payload for {task_name} is {oversize} bytes, '
-                        f'exceeding payload.reject_bytes='
-                        f'{limit_bytes}; nothing was '
-                        f'enqueued. Pass a reference to external storage or '
-                        f'raise the limit.'
-                    ),
-                    size_bytes=oversize,
+            match check_payload_size(
+                app.config.payload,
+                encoded_len=len(kwargs_json),
+            ):
+                case PayloadWithinLimit():
+                    pass
+                case PayloadOverLimit(
+                    size_bytes=size_bytes,
                     limit_bytes=limit_bytes,
-                ))
+                ):
+                    return Err(TaskSendPayloadTooLarge(
+                        message=(
+                            f'kwargs payload for {task_name} is {size_bytes} bytes, '
+                            f'exceeding payload.reject_bytes='
+                            f'{limit_bytes}; nothing was '
+                            f'enqueued. Pass a reference to external storage or '
+                            f'raise the limit.'
+                        ),
+                        size_bytes=size_bytes,
+                        limit_bytes=limit_bytes,
+                    ))
+                case _ as unreachable:
+                    assert_never(unreachable)
 
         sha = enqueue_fingerprint(
             task_name=task_name,

@@ -48,6 +48,14 @@ there is no migration contract between pre-1.0 versions.
   JSON-encodable now stores `RETURN_TYPE_MISMATCH`. Before, the mismatch
   error carried the value, could not be encoded, and the worker stored
   `WORKER_SERIALIZATION_ERROR`.
+- **Breaking: `@app.task()` refuses an `async def` task function with
+  `HRS-106` (`TASK_ASYNC_FUNCTION_NOT_SUPPORTED`).** Define task functions
+  with `def`. Before, such a task registered and failed on every run.
+- **Breaking: every config model refuses unknown keys.** `AppConfig`, its
+  nested configs, `ScheduleConfig` and the schedule patterns raise
+  `ValidationError` with the type `extra_forbidden` for a key that is not a
+  field. Before, the key was dropped with no error. Remove or correct the
+  key.
 
 ### Changed
 
@@ -151,6 +159,25 @@ there is no migration contract between pre-1.0 versions.
   `ValidationError` in the printed chain or in an exception group. A key
   from the input can still be part of `<loc>`: for a dict or mapping
   type, and for a key that `extra='forbid'` refuses.
+- **`ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED` (`HRS-106`) is a new
+  member.** Registration refuses an `async def` function, also one that
+  yields. The check runs before the return-type checks, so an `async def`
+  without a return annotation gets `HRS-106`, not `HRS-100`. `horsies
+  check` reports it.
+- **The config models set `extra='forbid'`:** `AppConfig`,
+  `PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`,
+  `RetentionClassConfig`, `RetentionConfig`, `WorkerResilienceConfig`,
+  `ScheduleConfig`, and the schedule pattern models (`IntervalSchedule`,
+  `HourlySchedule`, `DailySchedule`, `WeeklySchedule`, `MonthlySchedule`,
+  `CronSchedule` and its field and day models). `TaskSchedule` already
+  refused unknown keys.
+
+### Removed
+
+- **`ErrorCode.WORKFLOW_SUBWORKFLOW_BUILD_WITH_BINDING` (`HRS-023`).** No
+  code raised it. The number is retired and is not used again. The skill
+  rule that `build_with()` must accept `*_args` and `**_kwargs` is removed;
+  no such check exists.
 
 ### Fixed
 

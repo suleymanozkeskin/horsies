@@ -2,7 +2,7 @@
 from enum import Enum
 from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class QueueMode(Enum):
@@ -23,6 +23,8 @@ class CustomQueueConfig(BaseModel):
         ``cluster_wide_cap=None``. ``0`` is valid and pauses claiming from
         the queue. Negative values are rejected.
     """
+
+    model_config = ConfigDict(extra='forbid')
 
     name: str
     priority: int = Field(default=1, ge=1, le=100)
