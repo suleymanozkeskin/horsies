@@ -37,7 +37,7 @@ from horsies.core.models.retention import (
     RetentionClassConfig,
     RetentionConfig,
 )
-from horsies.core.models.task_send_types import TaskSendErrorCode
+from horsies.core.models.task_send_types import TaskSendValidationFailed
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err, is_ok
 from tests.broker_resources_support import current_resources
@@ -230,7 +230,7 @@ class TestRetentionClassAtEnqueue:
         ).send_async(x=3)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'no_such_class' in result.err_value.message
         async with current_resources(broker).engine.connect() as connection:
             after = (
@@ -299,7 +299,7 @@ class TestRetentionClassAtEnqueue:
         ).send_async(x=8)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'it_not_declared' in result.err_value.message
         assert DECLARED_KEY in result.err_value.message, (
             'the refusal should name what this deployment does declare'
@@ -331,4 +331,4 @@ class TestRetentionClassAtEnqueue:
             'a process that does not declare the class must refuse it, '
             'even though the same database already holds rows in it'
         )
-        assert refused.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(refused.err_value, TaskSendValidationFailed)

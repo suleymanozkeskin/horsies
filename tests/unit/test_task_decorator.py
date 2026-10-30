@@ -36,9 +36,14 @@ from horsies.core.task_decorator import (
 )
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
-    TaskSendError,
-    TaskSendErrorCode,
+    TaskSendAsyncContext,
+    TaskSendEnqueueFailed,
+    TaskSendIdempotencyKeyConflict,
     TaskSendPayload,
+    TaskSendPayloadMismatch,
+    TaskSendPayloadTooLarge,
+    TaskSendSuppressed,
+    TaskSendValidationFailed,
 )
 from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Err, Ok, is_ok, is_err
@@ -1238,10 +1243,7 @@ class TestCreateTaskWrapperSend:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
-        assert result.err_value.retryable is False
-        assert result.err_value.task_id is None
-        assert result.err_value.payload is None
+        assert isinstance(result.err_value, TaskSendSuppressed)
 
     def test_send_queue_validation_failure_returns_validation_error(self) -> None:
         """Queue validation error returns Err(VALIDATION_FAILED)."""
@@ -1258,8 +1260,8 @@ class TestCreateTaskWrapperSend:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        assert result.err_value.retryable is False
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, ConfigurationError)
 
     def test_send_success_returns_ok_with_handle(self) -> None:
         """Successful send returns Ok(TaskHandle) with broker_mode=True."""
@@ -1317,7 +1319,7 @@ class TestCreateTaskWrapperSend:
         result = wrapper.with_options(good_until=naive_deadline).send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'timezone-aware' in result.err_value.message
         broker.enqueue.assert_not_called()
 
@@ -1365,7 +1367,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         err = result.err_value
-        assert err.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(err, TaskSendEnqueueFailed)
         assert err.retryable is True
         assert err.task_id is not None
         assert err.payload is not None
@@ -1437,8 +1439,7 @@ class TestSendRetentionClass:
         ).send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        assert result.err_value.retryable is False
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'no_such_class' in result.err_value.message
         broker.enqueue.assert_not_called()
 
@@ -1465,7 +1466,7 @@ class TestSendRetentionClass:
         )
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue_async.assert_not_called()
 
 
@@ -1498,9 +1499,9 @@ class TestSendPayloadGuardrail:
 
         assert is_err(result)
         err = result.err_value
-        assert err.code == TaskSendErrorCode.PAYLOAD_TOO_LARGE
-        assert err.retryable is False
-        assert err.task_id is not None
+        assert isinstance(err, TaskSendPayloadTooLarge)
+        assert err.size_bytes > 1024
+        assert err.limit_bytes == 256
         broker.enqueue.assert_not_called()
 
     def test_send_over_warn_bytes_warns_once_and_succeeds(
@@ -1564,7 +1565,7 @@ class TestCreateTaskWrapperSendAsync:
         result = await wrapper.send_async(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
+        assert isinstance(result.err_value, TaskSendSuppressed)
 
     @pytest.mark.asyncio
     async def test_send_async_success(self) -> None:
@@ -1630,7 +1631,7 @@ class TestCreateTaskWrapperSendAsync:
         result = await wrapper.send_async(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
@@ -1649,7 +1650,7 @@ class TestCreateTaskWrapperSendAsync:
 
         assert is_err(result)
         err = result.err_value
-        assert err.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(err, TaskSendEnqueueFailed)
         assert err.retryable is False
         assert isinstance(err.exception, RuntimeError)
 
@@ -1669,7 +1670,7 @@ class TestCreateTaskWrapperSendAsync:
         result = await wrapper.send_async(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
 
 
 # =============================================================================
@@ -1692,7 +1693,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.SEND_SUPPRESSED
+        assert isinstance(result.err_value, TaskSendSuppressed)
 
     def test_schedule_success(self) -> None:
         """Successful schedule returns broker-mode handle with delay."""
@@ -1760,7 +1761,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(result.err_value, TaskSendEnqueueFailed)
 
     def test_schedule_queue_validation_failure(self) -> None:
         """Queue validation error in schedule returns VALIDATION_FAILED."""
@@ -1777,7 +1778,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(60, x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
 
     def test_schedule_negative_delay_rejected(self) -> None:
         """A negative delay is rejected before reaching the broker."""
@@ -1793,7 +1794,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(-5, x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
     def test_schedule_zero_delay_allowed(self) -> None:
@@ -1826,7 +1827,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(None, x=1)  # type: ignore[arg-type]
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
     def test_schedule_string_delay_rejected(self) -> None:
@@ -1843,7 +1844,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule('5', x=1)  # type: ignore[arg-type]
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
     def test_schedule_bool_delay_rejected(self) -> None:
@@ -1860,7 +1861,7 @@ class TestCreateTaskWrapperSchedule:
         for bad in (True, False):
             result = wrapper.schedule(bad, x=1)  # type: ignore[arg-type]
             assert is_err(result), bad
-            assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+            assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
     def test_schedule_float_delay_rejected(self) -> None:
@@ -1877,7 +1878,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.schedule(2.5, x=1)  # type: ignore[arg-type]
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
     def test_with_options_schedule_negative_delay_rejected(self) -> None:
@@ -1894,7 +1895,7 @@ class TestCreateTaskWrapperSchedule:
         result = wrapper.with_options().schedule(-1, x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
 
@@ -1908,7 +1909,7 @@ def _make_enqueue_failed_error(
     task_name: str = 'test.good_fn',
     task_id: str = 'retry-id-1',
     enqueue_delay_seconds: int | None = None,
-) -> TaskSendError:
+) -> TaskSendEnqueueFailed:
     """Build an ENQUEUE_FAILED error with full payload for retry tests."""
     from datetime import datetime, timezone
     payload = TaskSendPayload(
@@ -1923,12 +1924,11 @@ def _make_enqueue_failed_error(
         task_options=None,
         enqueue_sha='abc123',
     )
-    return TaskSendError(
-        code=TaskSendErrorCode.ENQUEUE_FAILED,
-        message='db gone',
-        retryable=True,
+    return TaskSendEnqueueFailed(
         task_id=task_id,
         payload=payload,
+        message='db gone',
+        retryable=True,
         exception=ConnectionError('db gone'),
     )
 
@@ -1978,84 +1978,6 @@ class TestRetrySend:
         assert call_kwargs['task_id'] == 'retry-id-1'
         assert call_kwargs['enqueue_sha'] == 'abc123'
 
-    def test_retry_send_only_accepts_enqueue_failed(self) -> None:
-        """retry_send rejects non-ENQUEUE_FAILED codes with VALIDATION_FAILED."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = TaskSendError(
-            code=TaskSendErrorCode.PAYLOAD_MISMATCH,
-            message='sha mismatch',
-            retryable=False,
-        )
-        result = wrapper.retry_send(error)
-
-        assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        assert 'only valid for ENQUEUE_FAILED' in result.err_value.message
-
-    def test_retry_send_rejects_send_suppressed(self) -> None:
-        """retry_send rejects SEND_SUPPRESSED errors."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = TaskSendError(
-            code=TaskSendErrorCode.SEND_SUPPRESSED,
-            message='suppressed',
-            retryable=False,
-        )
-        result = wrapper.retry_send(error)
-
-        assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-
-    def test_retry_send_no_payload_returns_validation_error(self) -> None:
-        """retry_send without payload on error returns VALIDATION_FAILED."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = TaskSendError(
-            code=TaskSendErrorCode.ENQUEUE_FAILED,
-            message='db gone',
-            retryable=True,
-            task_id='retry-id-1',
-            payload=None,
-        )
-        result = wrapper.retry_send(error)
-
-        assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        assert 'no payload or task_id' in result.err_value.message
-
-    def test_retry_send_no_task_id_returns_validation_error(self) -> None:
-        """retry_send without task_id on error returns VALIDATION_FAILED."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = TaskSendError(
-            code=TaskSendErrorCode.ENQUEUE_FAILED,
-            message='db gone',
-            retryable=True,
-            task_id=None,
-            payload=_make_enqueue_failed_error().payload,
-        )
-        result = wrapper.retry_send(error)
-
-        assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-
     def test_retry_send_cross_task_returns_validation_error(self) -> None:
         """retry_send rejects errors from a different task."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
@@ -2068,7 +1990,7 @@ class TestRetrySend:
         result = wrapper.retry_send(error)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'cross-task retry' in result.err_value.message
 
     def test_retry_schedule_reuses_task_id_and_delay(self) -> None:
@@ -2102,7 +2024,7 @@ class TestRetrySend:
         result = wrapper.retry_schedule(error)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'missing enqueue_delay_seconds' in result.err_value.message
 
     def test_retry_send_rejects_scheduled_payload(self) -> None:
@@ -2117,7 +2039,7 @@ class TestRetrySend:
         result = wrapper.retry_send(error)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'use retry_schedule instead' in result.err_value.message
 
     @pytest.mark.asyncio
@@ -2133,7 +2055,7 @@ class TestRetrySend:
         result = await wrapper.retry_send_async(error)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(result.err_value, TaskSendValidationFailed)
         assert 'use retry_schedule instead' in result.err_value.message
 
 
@@ -2189,7 +2111,7 @@ class TestAutoRetry:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert broker.enqueue.call_count == 4  # 1 initial + 3 retries
 
     def test_send_with_resend_on_transient_err_false_no_retry(self) -> None:
@@ -2231,7 +2153,7 @@ class TestAutoRetry:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
+        assert isinstance(result.err_value, TaskSendPayloadMismatch)
         assert broker.enqueue.call_count == 1
 
     def test_exception_from_broker_classified_as_retryable_for_connection_error(self) -> None:
@@ -2269,7 +2191,7 @@ class TestAutoRetry:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert not result.err_value.retryable
         assert broker.enqueue.call_count == 1  # no retry
 
@@ -2284,7 +2206,7 @@ class TestPayloadMismatchClassification:
     """Ensure PAYLOAD_MISMATCH is classified by BrokerErrorCode, not message text."""
 
     def test_mismatch_classified_by_code_not_message(self) -> None:
-        """Broker PAYLOAD_MISMATCH code maps to TaskSendErrorCode.PAYLOAD_MISMATCH
+        """Broker PAYLOAD_MISMATCH code maps to TaskSendPayloadMismatch
         regardless of message wording."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
@@ -2303,8 +2225,7 @@ class TestPayloadMismatchClassification:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.PAYLOAD_MISMATCH
-        assert not result.err_value.retryable
+        assert isinstance(result.err_value, TaskSendPayloadMismatch)
 
     def test_enqueue_failed_not_promoted_to_mismatch(self) -> None:
         """Broker ENQUEUE_FAILED with 'sha mismatch' in message stays ENQUEUE_FAILED
@@ -2327,7 +2248,7 @@ class TestPayloadMismatchClassification:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+        assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert result.err_value.retryable
 
 
@@ -2354,10 +2275,9 @@ class TestIdempotencyKeyConflictClassification:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert result.err_value.code is TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
-        assert result.err_value.retryable is False
-        assert result.err_value.detail == owner
-        assert result.err_value.payload is not None
+        assert isinstance(result.err_value, TaskSendIdempotencyKeyConflict)
+        assert result.err_value.owner_task_id == owner.owner_task_id
+        assert result.err_value.payload.task_name == 'test.good_fn'
 
     def test_retry_send_accepts_the_conflict(self) -> None:
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
@@ -2369,13 +2289,11 @@ class TestIdempotencyKeyConflictClassification:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
         enqueue_failed = _make_enqueue_failed_error()
-        conflict = TaskSendError(
-            code=TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT,
-            message='idempotency key is reserved by task owner-task-1',
-            retryable=False,
+        conflict = TaskSendIdempotencyKeyConflict(
             task_id=enqueue_failed.task_id,
             payload=enqueue_failed.payload,
-            detail=IdempotencyKeyOwner(owner_task_id='owner-task-1'),
+            message='idempotency key is reserved by task owner-task-1',
+            owner_task_id='owner-task-1',
         )
 
         result = wrapper.retry_send(conflict)
@@ -2798,7 +2716,7 @@ def _failed_send_error(
     broker: MagicMock,
     *,
     schedule_delay: int | None = None,
-) -> TaskSendError:
+) -> TaskSendEnqueueFailed:
     """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
     broker.enqueue.side_effect = ValueError('boom')
     if schedule_delay is None:
@@ -2807,7 +2725,7 @@ def _failed_send_error(
         res = task.schedule(schedule_delay, value=1)
     broker.enqueue.side_effect = None
     assert is_err(res)
-    assert res.err_value.code == TaskSendErrorCode.ENQUEUE_FAILED
+    assert isinstance(res.err_value, TaskSendEnqueueFailed)
     return res.err_value
 
 
@@ -2824,8 +2742,7 @@ class TestAsyncContextGuard:
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
-        assert res.err_value.retryable is False
+        assert isinstance(res.err_value, TaskSendAsyncContext)
         assert 'send_async' in res.err_value.message
         broker.enqueue.assert_not_called()
 
@@ -2838,7 +2755,7 @@ class TestAsyncContextGuard:
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(res.err_value, TaskSendAsyncContext)
         assert 'schedule_async' in res.err_value.message
         broker.enqueue.assert_not_called()
 
@@ -2851,7 +2768,7 @@ class TestAsyncContextGuard:
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(res.err_value, TaskSendAsyncContext)
         broker.enqueue.assert_not_called()
 
     def test_retry_send_inside_event_loop_returns_async_context(self) -> None:
@@ -2864,7 +2781,7 @@ class TestAsyncContextGuard:
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(res.err_value, TaskSendAsyncContext)
         # The guarded error keeps the payload so the caller can still
         # retry via the async variant.
         assert res.err_value.payload is not None
@@ -2880,7 +2797,7 @@ class TestAsyncContextGuard:
 
         guarded = asyncio.run(call_inside_loop())
         assert is_err(guarded)
-        assert guarded.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(guarded.err_value, TaskSendAsyncContext)
         assert guarded.err_value.task_id is not None
         assert guarded.err_value.payload is not None
 
@@ -2902,7 +2819,7 @@ class TestAsyncContextGuard:
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(res.err_value, TaskSendAsyncContext)
 
     def test_retry_schedule_async_completes_async_context_error(self) -> None:
         """ASYNC_CONTEXT from sync schedule completes via retry_schedule_async
@@ -2915,7 +2832,7 @@ class TestAsyncContextGuard:
 
         guarded = asyncio.run(call_inside_loop())
         assert is_err(guarded)
-        assert guarded.err_value.code == TaskSendErrorCode.ASYNC_CONTEXT
+        assert isinstance(guarded.err_value, TaskSendAsyncContext)
         assert guarded.err_value.task_id is not None
         assert guarded.err_value.payload is not None
         assert guarded.err_value.payload.enqueue_delay_seconds == 7
@@ -2974,7 +2891,7 @@ class TestScheduleAsync:
 
         res = asyncio.run(task.schedule_async(-1, value=1))
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(res.err_value, TaskSendValidationFailed)
         broker.enqueue_async.assert_not_awaited()
 
     def test_schedule_async_rejects_bool_delay(self) -> None:
@@ -2983,7 +2900,7 @@ class TestScheduleAsync:
 
         res = asyncio.run(task.schedule_async(True, value=1))  # type: ignore[arg-type]
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(res.err_value, TaskSendValidationFailed)
         broker.enqueue_async.assert_not_awaited()
 
     def test_schedule_async_zero_delay_allowed(self) -> None:
@@ -3021,4 +2938,4 @@ class TestScheduleAsync:
 
         res = asyncio.run(task.retry_schedule_async(failed))
         assert is_err(res)
-        assert res.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        assert isinstance(res.err_value, TaskSendValidationFailed)
