@@ -73,7 +73,7 @@ TaskResult(err=TaskError(...))    # failure
 
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter`. A mismatch produces `TaskResult(err=TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. Returning `None` instead of `TaskResult` produces `TASK_EXCEPTION`.
 
 ## `TaskError`
 
@@ -398,6 +398,8 @@ type TaskSendRetryable = (
 ```
 
 `exception` is `BaseException | NoCause`. `NoCause()` means a check found the failure without a Python exception. `NoCause` is not an exception: match on `exception` before `raise ... from`, `exc_info=` or an error tracker call.
+
+Validation failure text never contains the refused value: each failure is `<loc>: <msg> [<type>]`, at most 10, and a message part that comes from the input is `<input>`. Text that your own validators write is kept as written. A kwarg that fails its declared type gives `TaskSendValidationFailed.exception` as a `ValueValidationError` (`horsies.core.codec`), not a pydantic `ValidationError`. A key from the input can be part of `<loc>` for a dict or mapping type, and for a key that `extra='forbid'` refuses.
 
 ### `TaskSendErrorCode`
 

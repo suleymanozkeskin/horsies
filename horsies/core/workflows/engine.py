@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
@@ -43,6 +42,7 @@ from horsies.core.codec.typed import (
     encode_value,
     validate_task_result_envelope,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES, TaskStatus
@@ -219,7 +219,7 @@ def _decode_stored_task_result(
         )
     try:
         return decode_task_result(deser, ok_type)
-    except (StrictJsonError, _PydanticValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -292,7 +292,7 @@ def _decode_err_only(
         return None
     try:
         decoded_err = decode_task_error(err_slot)
-    except (StrictJsonError, _PydanticValidationError):
+    except (StrictJsonError, ValueValidationError):
         return None
     if not isinstance(decoded_err, TaskError):
         return None
@@ -742,7 +742,7 @@ async def _build_enqueued_task_params(
                         inner = encode_task_result(
                             dep_result, source_ok_type,
                         )
-                    except (StrictJsonError, _PydanticValidationError) as exc:
+                    except (StrictJsonError, ValueValidationError) as exc:
                         return Err(_EnqueueBuildError(
                 (
                                 f'encode_task_result failed for '
@@ -947,7 +947,7 @@ async def enqueue_subworkflow_task(
         kwargs: dict[str, Any] = decode_subworkflow_kwargs(
             workflow_def, raw_kwargs_dict,
         )
-    except (StrictJsonError, _PydanticValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         await _fail_enqueued_task(
             session,
             workflow_id,
@@ -1149,7 +1149,7 @@ async def enqueue_subworkflow_task(
                 encoded_child_sub_kwargs = encode_subworkflow_kwargs(
                     child_sub.workflow_def, child_sub.kwargs,
                 )
-            except (StrictJsonError, _PydanticValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     (
@@ -1265,7 +1265,7 @@ async def enqueue_subworkflow_task(
                 encoded_child_task_kwargs = dict(
                     encode_kwargs(child_task_underlying_fn, child_task.kwargs),
                 )
-            except (StrictJsonError, _PydanticValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 await _fail_enqueued_task(
                     session, workflow_id, task_index,
                     (
@@ -1570,7 +1570,7 @@ async def _build_workflow_context_data(
             results_by_id[node_id] = encode_task_result(
                 result, source_ok_type,
             )
-        except (StrictJsonError, _PydanticValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             logger.warning(
                 f'encode_task_result failed for ctx node {node_id!r}: '
                 f'{exc}; storing null'

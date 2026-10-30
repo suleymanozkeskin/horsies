@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from horsies.core.codec.json_io import dumps_json, loads_json
+from horsies.core.codec.validation_errors import validation_summary
 from horsies.core.logging import get_logger
 from horsies.core.models.health import (
     WorkerPingRequest,
@@ -157,7 +158,7 @@ class HealthMixin:
         try:
             request = WorkerPingRequest.model_validate(body)
         except ValidationError as e:
-            logger.warning('Discarding invalid ping payload: %s', e)
+            logger.warning('Discarding invalid ping payload: %s', validation_summary(e))
             return
 
         if (

@@ -20,7 +20,6 @@ from horsies.core.scheduler.validation import collect_schedule_errors
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
-from pydantic import ValidationError as _PydanticValidationError
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
@@ -31,6 +30,7 @@ from horsies.core.codec.payload_guard import (
     check_payload_size,
     warn_if_payload_large,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.worker.worker import import_by_path
@@ -915,7 +915,7 @@ class Scheduler:
             task_fn = underlying_task_fn(task)
             try:
                 encoded_kwargs = encode_kwargs(task_fn, schedule.kwargs)
-            except (StrictJsonError, _PydanticValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return Err(BrokerOperationError(
                     code=BrokerErrorCode.ENQUEUE_FAILED,
                     message=f"Failed to encode kwargs for schedule '{schedule.name}': {exc}",

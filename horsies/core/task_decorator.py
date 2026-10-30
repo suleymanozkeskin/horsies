@@ -48,6 +48,13 @@ from horsies.core.codec.signature_check import (
     SignatureValidationError,
     check_task_signature,
 )
+from horsies.core.codec.validation_errors import (
+    ValueValidationError,
+    exception_text,
+    validation_error_entries,
+    validation_summary,
+    without_validation_input,
+)
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
 from horsies.core.models.retention import (
     RetentionConfig,
@@ -550,7 +557,7 @@ class TaskHandle(Generic[T]):
         if err_slot is not None:
             try:
                 err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return self._error_result(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                     message=f'Failed to decode TaskError: {exc}',
@@ -576,7 +583,7 @@ class TaskHandle(Generic[T]):
             )
         try:
             decoded = decode_task_result(raw, self.ok_type)
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return self._error_result(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'decode_task_result failed: {exc}',
@@ -1183,20 +1190,24 @@ def create_task_wrapper(
                     # Validate err value against E
                     err_type_adapter.validate_python(result.err)
             except ValidationError as ve:
-                # Type validation failed - return error result
+                # Type validation failed - return error result. The text and
+                # the data name types and failing fields, never the value.
                 variant = 'ok' if result.is_ok() else 'err'
                 expected_type = ok_type if result.is_ok() else err_type
-                actual_value = result.ok if result.is_ok() else result.err
+                actual_type = type(result.ok if result.is_ok() else result.err).__name__
                 return TaskResult(
                     err=TaskError(
-                        exception=ve,
                         error_code=ContractCode.RETURN_TYPE_MISMATCH,
-                        message=f'Task {fn.__name__} returned TaskResult({variant}={actual_value!r}) but expected type {expected_type}',
+                        message=(
+                            f'Task {fn.__name__} returned TaskResult({variant}=<{actual_type}>) '
+                            f'but expected type {expected_type}: {validation_summary(ve)}'
+                        ),
                         data={
                             'variant': variant,
                             'expected_type': str(expected_type),
-                            'actual_value': str(actual_value),
-                            'validation_errors': ve.errors(),
+                            'actual_type': actual_type,
+                            'validation_errors': validation_error_entries(ve),
+                            'validation_error_count': ve.error_count(),
                         },
                     )
                 )
@@ -1234,7 +1245,7 @@ def create_task_wrapper(
                 err=TaskError(
                     exception=e,
                     error_code=resolved_code,
-                    message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {str(e)}',
+                    message=f'Unhandled exception in task {fn.__name__}: {type(e).__name__}: {exception_text(e)}',
                     data={'exception_type': type(e).__name__},
                 )
             )
@@ -1276,9 +1287,10 @@ def create_task_wrapper(
                 timeout_ms=task_options.timeout_ms if task_options else None,
             )
         except Exception as exc:
+            cause = without_validation_input(exc)
             return Err(TaskSendValidationFailed(
-                message=f'Invalid send options for {task_name}: {exc}',
-                exception=exc,
+                message=f'Invalid send options for {task_name}: {cause}',
+                exception=cause,
             ))
 
         opts_result = serialize_task_options(send_options)
@@ -1734,7 +1746,7 @@ def create_task_wrapper(
         if kwargs_dict:
             try:
                 encoded_kwargs = encode_kwargs(fn, kwargs_dict)
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to encode kwargs for {task_name}: {exc}',
                     exception=exc,

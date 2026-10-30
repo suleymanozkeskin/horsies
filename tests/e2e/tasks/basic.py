@@ -197,7 +197,8 @@ def unserializable_result_task() -> TaskResult[int, TaskError]:
 
     Exists to drive RETURN_TYPE_MISMATCH error-handling tests: the runtime
     `ok_type_adapter.validate_python` rejects the callable against the
-    declared `int` slot, returning an Err.
+    declared `int` slot, returning an Err. The Err names the actual type,
+    not the callable, so the worker can encode and store it.
     """
 
     def identity(x: Any) -> Any:

@@ -51,6 +51,7 @@ from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_max_retries
+from horsies.core.codec.validation_errors import exception_text, without_validation_input
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
@@ -114,13 +115,17 @@ def _broker_err(
     message: str,
     exc: BaseException,
 ) -> Err[BrokerOperationError]:
-    """Build an Err with retryable classification from the raw exception."""
+    """Build an Err with retryable classification from the raw exception.
+
+    A pydantic ``ValidationError`` cause is stored in its form without input
+    values (``without_validation_input``).
+    """
     return Err(
         BrokerOperationError(
             code=code,
             message=message,
             retryable=is_retryable_connection_error(exc),
-            exception=exc,
+            exception=without_validation_input(exc),
         )
     )
 
@@ -3110,7 +3115,7 @@ class PostgresBroker:
         except Exception as exc:
             return _broker_err(
                 BrokerErrorCode.WORKER_PING_FAILED,
-                f'ping_workers failed: {exc}',
+                f'ping_workers failed: {exception_text(exc)}',
                 exc,
             )
         finally:
@@ -3156,7 +3161,7 @@ class PostgresBroker:
         try:
             payload = WorkerPongPayload.model_validate(body)
         except Exception as exc:
-            self.logger.warning('Discarding invalid pong payload: %s', exc)
+            self.logger.warning('Discarding invalid pong payload: %s', exception_text(exc))
             return None
         if payload.correlation_id != correlation_id:
             return None

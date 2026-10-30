@@ -14,6 +14,7 @@ from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
+    ValueValidationError,
     decode_task_error,
     decode_task_result,
     decode_value,
@@ -28,6 +29,7 @@ __all__ = [
     'JsonValue',
     'StrictJsonError',
     'TypeAnnotation',
+    'ValueValidationError',
     'decode_task_error',
     'decode_task_result',
     'decode_value',

@@ -27,6 +27,23 @@ and there is no migration contract between pre-1.0 versions.
   `TaskSendError(code=..., ...)` in tests becomes a variant constructor.
   `isinstance(err, TaskSendError)` is not valid on a type alias; match on
   the variants.
+- **Breaking: the codec raises `ValueValidationError`, not pydantic
+  `ValidationError`.** `encode_value`, `decode_value` and the task-result
+  and kwargs functions in `horsies.core.codec` raise `ValueValidationError`
+  when a value fails its declared type, or when pydantic cannot serialize
+  it. It is a subclass of `SerializationError` and of `ValueError`, so
+  `except ValueError` still catches it; `except ValidationError` around
+  these calls must catch `ValueValidationError`.
+  `TaskSendValidationFailed.exception` is a `ValueValidationError` for a
+  kwarg that fails its declared type.
+- **Breaking: `RETURN_TYPE_MISMATCH` does not store the returned value.**
+  `data` no longer has `actual_value`, and `exception` is `None`. `data`
+  adds `actual_type` and `validation_error_count`. Each
+  `validation_errors` entry holds only `loc`, `msg` and `type`, at most 10
+  entries. A returned value that fails its declared type and is not
+  JSON-encodable now stores `RETURN_TYPE_MISMATCH`. Before, the mismatch
+  error carried the value, could not be encoded, and the worker stored
+  `WORKER_SERIALIZATION_ERROR`.
 - **Breaking: `@app.task()` refuses an `async def` task function with
   `HRS-106` (`TASK_ASYNC_FUNCTION_NOT_SUPPORTED`).** Define task functions
   with `def`. Before, such a task registered and failed on every run.
@@ -126,6 +143,18 @@ and there is no migration contract between pre-1.0 versions.
   run time it fails an assertion that names the variant. Before, the
   methods returned `VALIDATION_FAILED` for another code or for an error
   without a payload.
+- **Validation failure text does not contain the refused value.** Before,
+  the text of a pydantic `ValidationError`, with each input value, went
+  into stored `TaskError` messages and data, the attempt error text,
+  workflow node errors, log lines and returned errors. Now each failure is
+  `<loc>: <msg> [<type>]`, at most 10 per error, then `(+N more)`. A
+  message part that comes from the input is written as `<input>`; text
+  that a validator writes is kept as written. For a task kwarg, `<loc>`
+  starts with the kwarg name. A flattened `TaskError.exception` uses the
+  same text in `message`, `repr` and the traceback, for each
+  `ValidationError` in the printed chain or in an exception group. A key
+  from the input can still be part of `<loc>`: for a dict or mapping
+  type, and for a key that `extra='forbid'` refuses.
 - **`ErrorCode.TASK_ASYNC_FUNCTION_NOT_SUPPORTED` (`HRS-106`) is a new
   member.** Registration refuses an `async def` function, also one that
   yields. The check runs before the return-type checks, so an `async def`

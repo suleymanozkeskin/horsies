@@ -13,9 +13,9 @@ from typing import Any, get_args
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic import ValidationError
 
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -159,14 +159,21 @@ class TestValidationFailedCause:
         assert 'positional' in result.err_value.message
         app.get_broker.assert_not_called()
 
-    def test_kwargs_that_fail_their_type_keep_the_validation_error(self) -> None:
+    def test_kwargs_that_fail_their_type_give_a_cause_without_input(self) -> None:
         app = _make_app()
+        marker = 'send-marker-7f3a'
 
-        result = _wrapper(app).send(x='not an int')
+        result = _wrapper(app).send(x=marker)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ValidationError)
+        err = result.err_value
+        assert isinstance(err, TaskSendValidationFailed)
+        assert isinstance(err.exception, ValueValidationError)
+        assert err.exception.__context__ is None
+        assert err.exception.__cause__ is None
+        assert '[int_parsing]' in err.message
+        assert marker not in err.message
+        assert marker not in str(err.exception)
         app.get_broker.assert_not_called()
 
 

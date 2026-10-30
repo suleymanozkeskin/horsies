@@ -12,7 +12,7 @@ import dataclasses
 import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1791,6 +1791,30 @@ class TestPingWorkers:
         assert is_ok(result)
         assert [p.worker_id for p in result.ok_value] == ['w1']
         assert elapsed < 2.0, 'should return on first pong, not wait the 5s window'
+
+    @pytest.mark.asyncio
+    async def test_refused_request_field_gives_text_and_cause_without_value(self) -> None:
+        """A request field that fails validation names the field, not the value."""
+        from horsies.core.codec.validation_errors import ValueValidationError
+
+        marker = 'ping-marker-41d0'
+        broker = _make_broker()
+        reply_queue: asyncio.Queue[Any] = asyncio.Queue()
+        _listener_of(broker).listen = AsyncMock(return_value=Ok(reply_queue))
+        _listener_of(broker).unsubscribe = AsyncMock()
+
+        result = await broker.ping_workers_async(
+            target_worker_id=cast(Any, {'secret': marker}),
+            timeout_seconds=1.0,
+        )
+
+        assert is_err(result)
+        err = result.err_value
+        assert err.code == BrokerErrorCode.WORKER_PING_FAILED
+        assert 'target_worker_id: Input should be a valid string' in err.message
+        assert marker not in err.message
+        assert isinstance(err.exception, ValueValidationError)
+        assert marker not in str(err.exception)
 
 
 # ---------------------------------------------------------------------------

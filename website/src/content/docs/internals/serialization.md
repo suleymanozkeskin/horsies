@@ -65,7 +65,7 @@ Each `results_by_id` entry is itself a `__h_task_result__` envelope; the consume
 
 The worker calls `encode_task_result(result, ok_type)` after the user function returns. The codec:
 
-1. Validates `result.ok` against `ok_type` via `TypeAdapter` (raises `ValidationError` / `PydanticSerializationError` on shape mismatch).
+1. Validates `result.ok` against `ok_type` via `TypeAdapter` (raises `ValueValidationError` on shape mismatch or serializer failure; the text holds no input value).
 2. Emits the envelope.
 3. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (`type`, `module`, `message`, `repr`, `traceback`).
 
@@ -211,7 +211,7 @@ Encode a `TaskResult[T, TaskError]` to the wire envelope.
 | `result` | `TaskResult[T, TaskError]` | Domain result returned by the task |
 | `ok_type` | `TypeAnnotation` | Declared `T` from the task signature |
 
-**Raises:** `pydantic.ValidationError` or `PydanticSerializationError` if `result.ok` does not match `ok_type`; `StrictJsonError` for non-JSON-serializable structures.
+**Raises:** `ValueValidationError` if `result.ok` does not match `ok_type` or pydantic cannot serialize it; `StrictJsonError` for non-JSON-serializable structures. `ValueValidationError` (`horsies.core.codec`) is a `SerializationError` and a `ValueError`; its text names each failing field, the message and the error type, not the value.
 
 ### `decode_task_result(envelope, ok_type) -> TaskResult[T, TaskError]`
 

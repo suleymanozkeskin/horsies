@@ -34,7 +34,6 @@ from horsies.core.brokers.resources import (
     ListenerDisabled,
     ListenerEnabled,
 )
-from pydantic import ValidationError
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.lifecycle.commands import CancelNodesOfCancelledWorkflow
 from horsies.core.lifecycle.outcomes import (
@@ -53,6 +52,7 @@ from horsies.core.codec.typed import (
     decode_task_error,
     decode_task_result,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import (
     TaskResult,
     TaskError,
@@ -339,7 +339,7 @@ def _decode_per_task_envelope(
         )
     try:
         return decode_task_result(loaded, source_ok_type)
-    except (StrictJsonError, ValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -431,7 +431,7 @@ def _decode_workflow_envelope(
         # would drop them.
         try:
             err = decode_task_error(err_slot)
-        except (StrictJsonError, ValidationError) as exc:
+        except (StrictJsonError, ValueValidationError) as exc:
             return TaskResult(
                 err=TaskError(
                     error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -511,7 +511,7 @@ def _decode_workflow_envelope(
                 decoded_results[node_id] = decode_task_result(
                     per_node_envelope, source_ok_type,
                 )
-            except (StrictJsonError, ValidationError) as exc:
+            except (StrictJsonError, ValueValidationError) as exc:
                 decoded_results[node_id] = TaskResult(
                     err=TaskError(
                         error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -538,7 +538,7 @@ def _decode_workflow_envelope(
         )
     try:
         return decode_task_result(raw, out_type)
-    except (StrictJsonError, ValidationError) as exc:
+    except (StrictJsonError, ValueValidationError) as exc:
         return TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
