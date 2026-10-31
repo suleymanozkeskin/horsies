@@ -176,7 +176,8 @@ _SEND_RETRY_MAX_MS: Final[int] = 2000
 
 # The send variants that a broker error maps to.
 type _BrokerSendError = (
-    TaskSendEnqueueFailed
+    TaskSendValidationFailed
+    | TaskSendEnqueueFailed
     | TaskSendPayloadMismatch
     | TaskSendIdempotencyKeyConflict
     | TaskSendEventLoopLimit
@@ -1327,13 +1328,21 @@ def create_task_wrapper(
                     message=message,
                 )
             case (
+                BrokerInvalidTaskOptions(message=message, exception=exception)
+                | BrokerInvalidInput(message=message, exception=exception)
+            ):
+                # Refused before the write: resending the same payload is
+                # refused again, so the retry methods must not accept it.
+                return TaskSendValidationFailed(
+                    message=message,
+                    exception=exception,
+                )
+            case (
                 BrokerOperationFailed()
                 | BrokerEnqueueFailed()
                 | BrokerNotAttached()
                 | BrokerNoTypeAvailable()
                 | BrokerInvalidJsonPayload()
-                | BrokerInvalidTaskOptions()
-                | BrokerInvalidInput()
                 | BrokerLoopRunnerFailed()
                 | BrokerListenerDisabled()
             ):

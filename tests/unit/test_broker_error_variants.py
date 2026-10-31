@@ -42,6 +42,7 @@ from horsies.core.models.task_send_types import (
     TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
     TaskSendPayloadMismatch,
+    TaskSendValidationFailed,
 )
 from horsies.core.models.tasks import (
     BuiltInTaskCode,
@@ -211,6 +212,8 @@ SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
     BrokerEventLoopLimit: TaskSendEventLoopLimit,
     BrokerIdempotencyKeyConflict: TaskSendIdempotencyKeyConflict,
     BrokerAsyncContext: TaskSendAsyncContext,
+    BrokerInvalidTaskOptions: TaskSendValidationFailed,
+    BrokerInvalidInput: TaskSendValidationFailed,
 }
 
 
@@ -244,6 +247,24 @@ class TestSendMapping:
         assert isinstance(send_error, TaskSendEnqueueFailed)
         assert send_error.retryable is error.retryable
         assert send_error.exception == broker_error_cause(error)
+
+    @pytest.mark.parametrize('cause', [RuntimeError('cause'), NoCause()], ids=repr)
+    @pytest.mark.parametrize(
+        'variant',
+        [BrokerInvalidTaskOptions, BrokerInvalidInput],
+        ids=lambda v: v.__name__,
+    )
+    def test_a_refused_input_keeps_the_cause(
+        self,
+        variant: type[BrokerInvalidTaskOptions] | type[BrokerInvalidInput],
+        cause: BaseException | NoCause,
+    ) -> None:
+        send_error = _send_with_broker_error(
+            variant(message='refused', exception=cause)
+        )
+
+        assert isinstance(send_error, TaskSendValidationFailed)
+        assert send_error.exception is cause
 
     def test_the_key_conflict_keeps_the_owner(self) -> None:
         send_error = _send_with_broker_error(

@@ -246,7 +246,7 @@ For a validation failure, the cause names the field, the message and the type, n
 | ---- | ----------- | ------------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
-| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
+| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist. A sync send whose broker runner is stopped also returns this code with `retryable=False`; nothing was written, and the sync retry methods return the same error, so use `retry_*_async(err)` | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |

@@ -52,12 +52,17 @@ and there is no migration contract between pre-1.0 versions.
     `payload.reject_bytes` (before: `ENQUEUE_FAILED`).
   - `LISTENER_DISABLED`: `ping_workers` on a broker built with
     `assume_initialized=True` (before: `WORKER_PING_FAILED`).
-  A send maps both codes to `TaskSendEnqueueFailed` with `retryable=False`,
-  as before.
 - **Malformed `task_options` JSON passed to `enqueue()` returns
   `INVALID_TASK_OPTIONS`.** Before, it returned `ENQUEUE_FAILED`.
   `ENQUEUE_FAILED` now means only that the enqueue write failed or could not
   be confirmed.
+- **Breaking: a send or schedule that the broker refuses with
+  `INVALID_INPUT` or `INVALID_TASK_OPTIONS` returns
+  `TaskSendValidationFailed`.** The broker refused the input before the
+  write: nothing was written, and the same payload is refused again. The
+  retry methods do not accept `TaskSendValidationFailed`; correct the input
+  and send again. Before, the send returned `TaskSendEnqueueFailed` with
+  `retryable=False`, which the retry methods accept.
 - **Breaking: the codec raises `ValueValidationError`, not pydantic
   `ValidationError`.** `encode_value`, `decode_value` and the task-result
   and kwargs functions in `horsies.core.codec` raise `ValueValidationError`
