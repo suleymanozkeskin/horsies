@@ -607,7 +607,8 @@ class WorkflowHandle(Generic[OutT]):
         """Sync bridge for wrap-strategy async methods.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and runs nothing.
+        and runs nothing. A runner failure returns ``LOOP_RUNNER_FAILED``;
+        nothing ran. Any other exception propagates, as from the async form.
         """
         if in_running_event_loop():
             return Err(HandleOperationError(
@@ -621,22 +622,10 @@ class WorkflowHandle(Generic[OutT]):
             ))
         try:
             return self.broker.run_sync(coro_fn, *args)
-        except asyncio.CancelledError:
-            raise
         except LoopRunnerError as exc:
             return Err(HandleOperationError(
                 code=HandleErrorCode.LOOP_RUNNER_FAILED,
                 message=f'Loop runner failed for {operation}: {exc}',
-                retryable=False,
-                workflow_id=self.workflow_id,
-                exception=exc,
-            ))
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.INTERNAL_FAILED,
-                message=f'Unexpected error in sync bridge for {operation}: {exc}',
                 retryable=False,
                 workflow_id=self.workflow_id,
                 exception=exc,
@@ -653,7 +642,9 @@ class WorkflowHandle(Generic[OutT]):
         """Sync bridge for fold-strategy async methods.
 
         On a thread that runs an event loop it returns an ``ASYNC_CONTEXT``
-        result and runs nothing.
+        result and runs nothing. A runner failure returns a ``BROKER_ERROR``
+        result; nothing ran. Any other exception propagates, as from the
+        async form.
         """
         if in_running_event_loop():
             return cast(
@@ -662,19 +653,10 @@ class WorkflowHandle(Generic[OutT]):
             )
         try:
             return self.broker.run_sync(coro_fn, *args)
-        except asyncio.CancelledError:
-            raise
         except LoopRunnerError as exc:
             return cast(
                 'TaskResult[_T, TaskError]',
                 _broker_task_error(f'Loop runner failed: {exc}'),
-            )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return cast(
-                'TaskResult[_T, TaskError]',
-                _broker_task_error(f'Unexpected error in sync bridge: {exc}'),
             )
 
     # ─── status ──────────────────────────────────────────────────────

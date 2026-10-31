@@ -2650,7 +2650,7 @@ class TestWorkflowStartErrors:
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Sync bridge failure returns Err(INTERNAL_FAILED)."""
+        """A sync runner failure returns Err(LOOP_RUNNER_FAILED)."""
         from unittest.mock import patch
 
         from horsies.core.workflows.engine import start_workflow
@@ -2674,17 +2674,17 @@ class TestWorkflowStartErrors:
             r = await asyncio.to_thread(start_workflow, spec, broker)
 
         assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
+        assert r.err_value.code == WorkflowStartErrorCode.LOOP_RUNNER_FAILED
         assert r.err_value.retryable is False
         assert r.err_value.workflow_name == 'sync_fail_wf'
         assert r.err_value.workflow_id  # always populated
         assert 'No running event loop' in r.err_value.message
 
-    async def test_start_sync_internal_failed(
+    async def test_start_sync_unexpected_exception_propagates(
         self,
         setup: _SetupTuple,
     ) -> None:
-        """Unexpected sync-path exception returns Err(INTERNAL_FAILED)."""
+        """An exception that is not a LoopRunnerError propagates from start_workflow."""
         from unittest.mock import patch
 
         from horsies.core.workflows.engine import start_workflow
@@ -2698,16 +2698,11 @@ class TestWorkflowStartErrors:
             broker,
         )
 
-        with patch.object(
-            broker._loop_runner,
-            'call',
-            side_effect=RuntimeError('Unexpected runner call failure'),
+        defect = RuntimeError('Unexpected runner call failure')
+        with (
+            patch.object(broker._loop_runner, 'call', side_effect=defect),
+            pytest.raises(RuntimeError) as exc_info,
         ):
-            r = await asyncio.to_thread(start_workflow, spec, broker)
+            await asyncio.to_thread(start_workflow, spec, broker)
 
-        assert is_err(r)
-        assert r.err_value.code == WorkflowStartErrorCode.INTERNAL_FAILED
-        assert r.err_value.retryable is False
-        assert r.err_value.workflow_name == 'sync_internal_fail_wf'
-        assert r.err_value.workflow_id  # always populated
-        assert 'Unexpected runner call failure' in r.err_value.message
+        assert exc_info.value is defect

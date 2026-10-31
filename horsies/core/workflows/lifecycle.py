@@ -803,8 +803,9 @@ def start_workflow(
     Sync wrapper around ``start_workflow_async()``.
 
     Inner async ``Err`` passes through unchanged.
-    Bridge infrastructure failures are returned as ``INTERNAL_FAILED``.
-    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    A failure of the broker's sync runner is returned as
+    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    as from ``start_workflow_async()``.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
     writes nothing; ``retry_start`` does not accept that error.
     ``WorkflowSpec.start()`` and ``retry_start()`` check first, so their
@@ -850,19 +851,8 @@ def start_workflow(
         )
     except LoopRunnerError as exc:
         return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.INTERNAL_FAILED,
-            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
-            retryable=False,
-            workflow_name=spec.name,
-            workflow_id=wf_id,
-            exception=exc,
-        ))
-    except AssertionError:
-        raise
-    except Exception as exc:
-        return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.INTERNAL_FAILED,
-            message=f'Internal start failure: {type(exc).__name__}: {exc}',
+            code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Loop runner failed for start_workflow(): {exc}',
             retryable=False,
             workflow_name=spec.name,
             workflow_id=wf_id,
@@ -1049,8 +1039,9 @@ def pause_workflow_sync(
     Sync wrapper around ``pause_workflow()``.
 
     Inner async ``Err`` passes through unchanged.
-    Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
-    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    A failure of the broker's sync runner is returned as
+    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    as from the async form.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
     changes nothing.
 
@@ -1084,17 +1075,7 @@ def pause_workflow_sync(
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
-            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
-            retryable=False,
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    except AssertionError:
-        raise
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Internal pause failure: {type(exc).__name__}: {exc}',
+            message=f'Loop runner failed for pause_workflow_sync(): {exc}',
             retryable=False,
             workflow_id=workflow_id,
             exception=exc,
@@ -1387,8 +1368,9 @@ def resume_workflow_sync(
     Sync wrapper around ``resume_workflow()``.
 
     Inner async ``Err`` passes through unchanged.
-    Bridge infrastructure failures are returned as ``LOOP_RUNNER_FAILED``.
-    Unexpected sync-path exceptions are returned as ``INTERNAL_FAILED``.
+    A failure of the broker's sync runner is returned as
+    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    as from the async form.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
     changes nothing.
 
@@ -1422,17 +1404,7 @@ def resume_workflow_sync(
     except LoopRunnerError as exc:
         return Err(HandleOperationError(
             code=HandleErrorCode.LOOP_RUNNER_FAILED,
-            message=f'Sync bridge failed: {type(exc).__name__}: {exc}',
-            retryable=False,
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    except AssertionError:
-        raise
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Internal resume failure: {type(exc).__name__}: {exc}',
+            message=f'Loop runner failed for resume_workflow_sync(): {exc}',
             retryable=False,
             workflow_id=workflow_id,
             exception=exc,

@@ -30,7 +30,12 @@ class WorkflowStartErrorCode(str, Enum):
     - ``BROKER_NOT_CONFIGURED``: config error (no broker attached)
     - ``VALIDATION_FAILED``: programmer error (bad DAG, bad args, serialization)
     - ``ENQUEUE_FAILED``: infra error (schema init, DB transaction), conditionally retryable
-    - ``INTERNAL_FAILED``: bug / catch-all
+    - ``LOOP_RUNNER_FAILED``: sync ``start()`` could not run the call on
+      the broker's sync runner (the runner is stopped, its thread did not
+      start, or scheduling failed); nothing ran and nothing was written.
+      A stopped runner does not start again (``broker.close()`` and
+      ``close_async()`` stop it); call ``await spec.start_async()`` or use
+      a new broker
     - ``EVENT_LOOP_LIMIT``: the broker already holds resource sets for its
       limit of open event loops, and this call ran on a new one; nothing was
       written; clears when one of those loops closes
@@ -43,7 +48,7 @@ class WorkflowStartErrorCode(str, Enum):
     BROKER_NOT_CONFIGURED = 'BROKER_NOT_CONFIGURED'
     VALIDATION_FAILED = 'VALIDATION_FAILED'
     ENQUEUE_FAILED = 'ENQUEUE_FAILED'
-    INTERNAL_FAILED = 'INTERNAL_FAILED'
+    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
     EVENT_LOOP_LIMIT = 'EVENT_LOOP_LIMIT'
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
 

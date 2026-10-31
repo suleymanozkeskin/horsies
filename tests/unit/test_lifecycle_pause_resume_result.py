@@ -256,13 +256,13 @@ class TestResumeWorkflowResult:
 
 
 # ===========================================================================
-# Sync wrappers: LoopRunnerError / unexpected exception handling
+# Sync wrappers: LoopRunnerError and other exceptions
 # ===========================================================================
 
 
 @pytest.mark.unit
 class TestPauseSyncWrapper:
-    """pause_workflow_sync catches LoopRunnerError and unexpected exceptions."""
+    """pause_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
 
     def test_loop_runner_error_returns_err(self) -> None:
         """LoopRunnerError -> Err(LOOP_RUNNER_FAILED)."""
@@ -283,26 +283,24 @@ class TestPauseSyncWrapper:
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
-    def test_unexpected_exception_returns_internal_failed(self) -> None:
-        """Unexpected exception -> Err(INTERNAL_FAILED)."""
+    def test_unexpected_exception_propagates(self) -> None:
+        """An exception that is not a LoopRunnerError propagates unchanged."""
         from horsies.core.workflows.lifecycle import pause_workflow_sync
 
         broker = MagicMock()
-        with patch.object(
-            broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = RuntimeError('boom')
-            result = pause_workflow_sync(broker, 'wf-1')
+        defect = RuntimeError('boom')
+        with (
+            patch.object(broker, 'run_sync', side_effect=defect),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            pause_workflow_sync(broker, 'wf-1')
 
-        assert is_err(result)
-        err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.INTERNAL_FAILED
+        assert exc_info.value is defect
 
 
 @pytest.mark.unit
 class TestResumeSyncWrapper:
-    """resume_workflow_sync catches LoopRunnerError and unexpected exceptions."""
+    """resume_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
 
     def test_loop_runner_error_returns_err(self) -> None:
         """LoopRunnerError -> Err(LOOP_RUNNER_FAILED)."""
@@ -323,18 +321,16 @@ class TestResumeSyncWrapper:
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
-    def test_unexpected_exception_returns_internal_failed(self) -> None:
-        """Unexpected exception -> Err(INTERNAL_FAILED)."""
+    def test_unexpected_exception_propagates(self) -> None:
+        """An exception that is not a LoopRunnerError propagates unchanged."""
         from horsies.core.workflows.lifecycle import resume_workflow_sync
 
         broker = MagicMock()
-        with patch.object(
-            broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = RuntimeError('boom')
-            result = resume_workflow_sync(broker, 'wf-1')
+        defect = RuntimeError('boom')
+        with (
+            patch.object(broker, 'run_sync', side_effect=defect),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            resume_workflow_sync(broker, 'wf-1')
 
-        assert is_err(result)
-        err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.INTERNAL_FAILED
+        assert exc_info.value is defect

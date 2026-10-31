@@ -32,7 +32,12 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendAsyncContext
-from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    RetrievalCode,
+    TaskError,
+    TaskResult,
+)
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
@@ -41,7 +46,11 @@ from horsies.core.models.workflow.handle_types import (
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
-from horsies.core.utils.loop_runner import LoopRunner, in_running_event_loop
+from horsies.core.utils.loop_runner import (
+    LoopRunner,
+    LoopRunnerError,
+    in_running_event_loop,
+)
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
@@ -529,7 +538,8 @@ def test_run_sync_with_a_stopped_loop_on_the_thread_runs(app: Horsies) -> None:
 
 
 # =============================================================================
-# Every run_sync call site re-raises an AssertionError
+# Every run_sync call site: a LoopRunnerError is the site's catalog error;
+# every other exception propagates unchanged
 # =============================================================================
 
 
@@ -572,6 +582,89 @@ def test_run_sync_call_site_reraises_an_assertion(app: Horsies, site: str) -> No
     ):
         RUN_SYNC_SITES[site](app, broker)
 
+    run_sync.assert_called_once()
+
+
+RUNNER_FAILURE_CODES: dict[str, object] = {
+    **{
+        site: BrokerErrorCode.LOOP_RUNNER_FAILED
+        for site in RUN_SYNC_SITES
+        if site.startswith(('broker.', 'app.'))
+    },
+    'WorkflowHandle.status': HandleErrorCode.LOOP_RUNNER_FAILED,
+    'WorkflowHandle.get': OperationalErrorCode.BROKER_ERROR,
+    'start_workflow': WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+    'pause_workflow_sync': HandleErrorCode.LOOP_RUNNER_FAILED,
+    'resume_workflow_sync': HandleErrorCode.LOOP_RUNNER_FAILED,
+}
+
+
+def _failure_code(result: object) -> object:
+    """The code of a failed facade result: an ``Err`` or a failed ``TaskResult``."""
+    match result:
+        case TaskResult(err=TaskError(error_code=code)):
+            return code
+        case Err(err_value=(
+            BrokerOperationError(code=code)
+            | HandleOperationError(code=code)
+            | WorkflowStartError(code=code)
+        )):
+            return code
+        case _:
+            raise AssertionError(f'expected a failure, got {result!r}')
+
+
+def _runner_error_fields(result: object) -> tuple[bool, BaseException | None] | None:
+    """``(retryable, exception)`` of an ``Err`` result; ``None`` for a ``TaskResult``."""
+    match result:
+        case Err(err_value=(
+            BrokerOperationError(retryable=retryable, exception=exception)
+            | HandleOperationError(retryable=retryable, exception=exception)
+            | WorkflowStartError(retryable=retryable, exception=exception)
+        )):
+            return (retryable, exception)
+        case _:
+            return None
+
+
+def test_runner_failure_codes_cover_every_site() -> None:
+    assert set(RUNNER_FAILURE_CODES) == set(RUN_SYNC_SITES)
+
+
+@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
+def test_run_sync_call_site_propagates_a_defect(app: Horsies, site: str) -> None:
+    """An exception that is not a LoopRunnerError propagates unchanged."""
+    broker = app.get_broker()
+    defect = TypeError('stub defect')
+
+    with (
+        patch.object(broker, 'run_sync', side_effect=defect) as run_sync,
+        pytest.raises(TypeError) as exc_info,
+    ):
+        RUN_SYNC_SITES[site](app, broker)
+
+    assert exc_info.value is defect
+    run_sync.assert_called_once()
+
+
+@pytest.mark.parametrize('site', list(RUN_SYNC_SITES))
+def test_run_sync_call_site_returns_the_loop_runner_code(
+    app: Horsies, site: str,
+) -> None:
+    """A LoopRunnerError is the site's loop-runner error; nothing else is raised."""
+    broker = app.get_broker()
+    runner_error = LoopRunnerError('runner stopped')
+
+    with patch.object(broker, 'run_sync', side_effect=runner_error) as run_sync:
+        result = RUN_SYNC_SITES[site](app, broker)
+
+    assert _failure_code(result) is RUNNER_FAILURE_CODES[site]
+    match _runner_error_fields(result):
+        case None:
+            assert site == 'WorkflowHandle.get'
+        case (retryable, exception):
+            assert retryable is False
+            assert exception is runner_error
     run_sync.assert_called_once()
 
 

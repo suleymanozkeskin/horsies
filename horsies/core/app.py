@@ -60,6 +60,7 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from horsies.core.utils.imports import import_by_path
 from horsies.core.utils.loop_runner import (
+    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -70,7 +71,7 @@ from horsies.core.types.result import is_err
 if TYPE_CHECKING:
     from horsies.core.task_decorator import TaskFunction
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
-    from horsies.core.brokers.result_types import BrokerResult, BrokerErrorCode
+    from horsies.core.brokers.result_types import BrokerResult
     from horsies.core.models.health import (
         DatabasePing,
         WorkerPong,
@@ -1257,21 +1258,8 @@ class Horsies:
             return broker.run_sync(
                 self.get_result_async, task_id, timeout_ms,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            from horsies.core.brokers.result_types import (
-                BrokerErrorCode,
-                BrokerOperationError,
-            )
-            from horsies.core.types.result import Err
-
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                message=f'Sync bridge failed for get_result: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_result', exc)
 
     async def get_task_info_async(
         self,
@@ -1394,37 +1382,27 @@ class Horsies:
                 include_failed_reason=include_failed_reason,
                 include_attempts=include_attempts,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            from horsies.core.brokers.result_types import (
-                BrokerErrorCode,
-                BrokerOperationError,
-            )
-            from horsies.core.types.result import Err
-
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                message=f'Sync bridge failed for get_task_info: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_task_info', exc)
 
     # ------------- Health / liveness API -------------
 
-    def _sync_bridge_err(
-        self,
-        code: 'BrokerErrorCode',
-        label: str,
-        exc: Exception,
+    def _loop_runner_err(
+        self, label: str, exc: LoopRunnerError,
     ) -> 'BrokerResult[Any]':
-        """Wrap a sync-bridge failure as an Err (shared by health sync facades)."""
-        from horsies.core.brokers.result_types import BrokerOperationError
+        """The broker's sync runner could not run the call. Nothing ran.
+
+        Not retryable: a stopped runner does not start again.
+        """
+        from horsies.core.brokers.result_types import (
+            BrokerErrorCode,
+            BrokerOperationError,
+        )
         from horsies.core.types.result import Err
 
         return Err(BrokerOperationError(
-            code=code,
-            message=f'Sync bridge failed for {label}: {exc}',
+            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Loop runner failed for app.{label}(): {exc}',
             retryable=False,
             exception=exc,
         ))
@@ -1455,19 +1433,13 @@ class Horsies:
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
-        from horsies.core.brokers.result_types import BrokerErrorCode
-
         if in_running_event_loop():
             return self._async_context_err('ping_database')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.ping_database_async)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return self._sync_bridge_err(
-                BrokerErrorCode.DB_PING_FAILED, 'ping_database', exc
-            )
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('ping_database', exc)
 
     async def ping_workers_async(
         self,
@@ -1499,8 +1471,6 @@ class Horsies:
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
-        from horsies.core.brokers.result_types import BrokerErrorCode
-
         if in_running_event_loop():
             return self._async_context_err('ping_workers')
         broker = self.get_broker()
@@ -1511,12 +1481,8 @@ class Horsies:
                 timeout_seconds=timeout_seconds,
                 min_responses=min_responses,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return self._sync_bridge_err(
-                BrokerErrorCode.WORKER_PING_FAILED, 'ping_workers', exc
-            )
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('ping_workers', exc)
 
     async def list_worker_states_async(
         self,
@@ -1530,19 +1496,13 @@ class Horsies:
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
-        from horsies.core.brokers.result_types import BrokerErrorCode
-
         if in_running_event_loop():
             return self._async_context_err('list_worker_states')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.list_worker_states_async)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return self._sync_bridge_err(
-                BrokerErrorCode.MONITORING_QUERY_FAILED, 'list_worker_states', exc
-            )
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('list_worker_states', exc)
 
     async def get_worker_state_async(
         self,
@@ -1560,19 +1520,13 @@ class Horsies:
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
-        from horsies.core.brokers.result_types import BrokerErrorCode
-
         if in_running_event_loop():
             return self._async_context_err('get_worker_state')
         broker = self.get_broker()
         try:
             return broker.run_sync(self.get_worker_state_async, worker_id)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return self._sync_bridge_err(
-                BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state', exc
-            )
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_worker_state', exc)
 
     async def get_worker_state_history_async(
         self,
@@ -1596,8 +1550,6 @@ class Horsies:
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
         """
-        from horsies.core.brokers.result_types import BrokerErrorCode
-
         if in_running_event_loop():
             return self._async_context_err('get_worker_state_history')
         broker = self.get_broker()
@@ -1605,12 +1557,8 @@ class Horsies:
             return broker.run_sync(
                 self.get_worker_state_history_async, worker_id, limit=limit
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return self._sync_bridge_err(
-                BrokerErrorCode.MONITORING_QUERY_FAILED, 'get_worker_state_history', exc
-            )
+        except LoopRunnerError as exc:
+            return self._loop_runner_err('get_worker_state_history', exc)
 
     def discover_tasks(
         self,

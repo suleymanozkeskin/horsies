@@ -47,6 +47,7 @@ from horsies.core.models.task_send_types import (
 )
 from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Err, Ok, is_ok, is_err
+from horsies.core.utils.loop_runner import LoopRunnerError
 
 
 # =============================================================================
@@ -350,11 +351,15 @@ class TestTaskHandleGet:
         assert handle._result_fetched is True
         broker.get_raw_result_record.assert_called_once_with('t-4', 5000)
 
-    def test_broker_mode_exception_returns_broker_error(self) -> None:
-        """Broker mode: exception from broker fetch returns BROKER_ERROR."""
+    def test_broker_mode_loop_runner_failure_returns_broker_error(self) -> None:
+        """Broker mode: a LOOP_RUNNER_FAILED broker error gives BROKER_ERROR, not cached."""
         app = _make_app()
         broker = MagicMock()
-        broker.get_raw_result_record.side_effect = ConnectionError('db down')
+        broker.get_raw_result_record.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+            message='Loop runner failed for PostgresBroker.get_raw_result_record()',
+            retryable=False,
+        ))
         app.get_broker.return_value = broker
 
         handle: TaskHandle[int] = TaskHandle(
@@ -362,11 +367,31 @@ class TestTaskHandleGet:
         )
 
         result = handle.get()
+        handle.get()
 
         assert result.is_err()
         assert result.err is not None
         assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
-        assert result.err.exception is not None
+        assert 'Loop runner failed' in (result.err.message or '')
+        # Not cached: the second get() reads the broker again.
+        assert broker.get_raw_result_record.call_count == 2
+
+    def test_broker_mode_exception_propagates(self) -> None:
+        """Broker mode: an exception from the sync broker read propagates unchanged."""
+        app = _make_app()
+        broker = MagicMock()
+        defect = RuntimeError('stub defect')
+        broker.get_raw_result_record.side_effect = defect
+        app.get_broker.return_value = broker
+
+        handle: TaskHandle[int] = TaskHandle(
+            't-5', app=app, broker_mode=True, ok_type=int,
+        )
+
+        with pytest.raises(RuntimeError) as exc_info:
+            handle.get()
+
+        assert exc_info.value is defect
 
     def test_wait_timeout_not_cached(self) -> None:
         """WAIT_TIMEOUT is transient; subsequent get() must re-query.
@@ -2193,35 +2218,20 @@ class TestAutoRetry:
         assert isinstance(result.err_value, TaskSendPayloadMismatch)
         assert broker.enqueue.call_count == 1
 
-    def test_exception_from_broker_classified_as_retryable_for_connection_error(self) -> None:
-        """OperationalError raised by broker is classified retryable and retried."""
-        from psycopg import OperationalError
-
+    def test_loop_runner_failure_is_enqueue_failed_and_not_resent(self) -> None:
+        """A LOOP_RUNNER_FAILED broker error is a non-retryable TaskSendEnqueueFailed."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
         app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
-        broker.enqueue.side_effect = [
-            OperationalError('connection reset'),
-            Ok('task-ok'),
-        ]
-        app.get_broker.return_value = broker
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        result = wrapper.send(x=1)
-
-        assert is_ok(result)
-        assert broker.enqueue.call_count == 2  # 1 failed + 1 retry
-
-    def test_exception_from_broker_not_retried_for_programmer_error(self) -> None:
-        """TypeError raised by broker is classified non-retryable — no retry."""
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
-
-        app = _make_app(resend_on_transient_err=True)
-        broker = MagicMock()
-        broker.enqueue.side_effect = TypeError('missing required argument')
+        runner_error = LoopRunnerError('Loop runner is not running')
+        broker.enqueue.return_value = Err(BrokerOperationError(
+            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+            message='Loop runner failed for PostgresBroker.enqueue()',
+            retryable=False,
+            exception=runner_error,
+        ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
@@ -2229,8 +2239,45 @@ class TestAutoRetry:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert not result.err_value.retryable
-        assert broker.enqueue.call_count == 1  # no retry
+        assert result.err_value.retryable is False
+        assert result.err_value.exception is runner_error
+        assert broker.enqueue.call_count == 1  # no resend
+
+    def test_exception_from_sync_broker_enqueue_propagates(self) -> None:
+        """An exception raised by the sync broker enqueue propagates; no resend."""
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        defect = TypeError('missing required argument')
+        broker.enqueue.side_effect = defect
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        with pytest.raises(TypeError) as exc_info:
+            wrapper.send(x=1)
+
+        assert exc_info.value is defect
+        assert broker.enqueue.call_count == 1  # no resend
+
+    def test_exception_from_sync_broker_schedule_propagates(self) -> None:
+        """An exception raised by the sync broker enqueue for schedule() propagates."""
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        defect = TypeError('missing required argument')
+        broker.enqueue.side_effect = defect
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        with pytest.raises(TypeError) as exc_info:
+            wrapper.schedule(5, x=1)
+
+        assert exc_info.value is defect
+        assert broker.enqueue.call_count == 1  # no resend
 
 
 # =============================================================================
@@ -2755,12 +2802,17 @@ def _failed_send_error(
     schedule_delay: int | None = None,
 ) -> TaskSendEnqueueFailed:
     """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
-    broker.enqueue.side_effect = ValueError('boom')
+    ok_return = broker.enqueue.return_value
+    broker.enqueue.return_value = Err(BrokerOperationError(
+        code=BrokerErrorCode.ENQUEUE_FAILED,
+        message='boom',
+        retryable=False,
+    ))
     if schedule_delay is None:
         res = task.send(value=1)
     else:
         res = task.schedule(schedule_delay, value=1)
-    broker.enqueue.side_effect = None
+    broker.enqueue.return_value = ok_return
     assert is_err(res)
     assert isinstance(res.err_value, TaskSendEnqueueFailed)
     return res.err_value
