@@ -69,9 +69,27 @@ from horsies.core.utils.loop_runner import (
 from horsies.core.history.identity.uuid7 import mint_task_id
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 
-from horsies.core.types.error_detail import IdempotencyKeyOwner, NoCause
+from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
+from horsies.core.brokers.result_types import (
+    BrokerAsyncContext,
+    BrokerEnqueueFailed,
+    BrokerEventLoopLimit,
+    BrokerIdempotencyKeyConflict,
+    BrokerInvalidInput,
+    BrokerInvalidJsonPayload,
+    BrokerInvalidTaskOptions,
+    BrokerListenerDisabled,
+    BrokerLoopRunnerFailed,
+    BrokerNoTypeAvailable,
+    BrokerNotAttached,
+    BrokerOperationError,
+    BrokerOperationFailed,
+    BrokerPayloadMismatch,
+    BrokerResult,
+    RawResultRecord,
+    broker_error_cause,
+)
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
@@ -394,7 +412,7 @@ class TaskHandle(Generic[T]):
 
     def _record_to_task_result(
         self,
-        broker_result: Any,
+        broker_result: BrokerResult[RawResultRecord | None],
         timeout_ms: Optional[int],
     ) -> TaskResult[T, TaskError]:
         """Strict-serde phase 6: map a ``BrokerResult[RawResultRecord | None]``
@@ -422,7 +440,6 @@ class TaskHandle(Generic[T]):
 
         if _is_err(broker_result):
             broker_err = broker_result.err_value
-            code = broker_err.code
             # The strict-serde codes are properties of the stored payload /
             # handle, so they are cached. A generic broker error is
             # transient, and EVENT_LOOP_LIMIT is a property of the calling
@@ -430,16 +447,16 @@ class TaskHandle(Generic[T]):
             # cleared.
             err_code: BuiltInTaskCode
             cache: bool
-            match code:
-                case BrokerErrorCode.NO_TYPE_AVAILABLE:
+            match broker_err:
+                case BrokerNoTypeAvailable():
                     err_code, cache = ContractCode.NO_TYPE_AVAILABLE, True
-                case BrokerErrorCode.INVALID_JSON_PAYLOAD:
+                case BrokerInvalidJsonPayload():
                     err_code, cache = (
                         OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True,
                     )
-                case BrokerErrorCode.EVENT_LOOP_LIMIT:
+                case BrokerEventLoopLimit():
                     err_code, cache = RetrievalCode.EVENT_LOOP_LIMIT, False
-                case BrokerErrorCode.ASYNC_CONTEXT:
+                case BrokerAsyncContext():
                     raise AssertionError(
                         f'TaskHandle result read for task {self.task_id} got '
                         'ASYNC_CONTEXT; get() refuses a running event loop '
@@ -447,30 +464,30 @@ class TaskHandle(Generic[T]):
                         'an async call',
                     )
                 case (
-                    BrokerErrorCode.SCHEMA_INIT_FAILED
-                    | BrokerErrorCode.ENQUEUE_FAILED
-                    | BrokerErrorCode.PAYLOAD_MISMATCH
-                    | BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT
-                    | BrokerErrorCode.TASK_INFO_QUERY_FAILED
-                    | BrokerErrorCode.MONITORING_QUERY_FAILED
-                    | BrokerErrorCode.DB_PING_FAILED
-                    | BrokerErrorCode.WORKER_PING_FAILED
-                    | BrokerErrorCode.CLEANUP_FAILED
-                    | BrokerErrorCode.CLOSE_FAILED
-                    | BrokerErrorCode.LISTENER_START_FAILED
-                    | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
-                    | BrokerErrorCode.NO_BROKER
-                    | BrokerErrorCode.INVALID_TASK_OPTIONS
-                    | BrokerErrorCode.LOOP_RUNNER_FAILED
+                    BrokerOperationFailed()
+                    | BrokerEnqueueFailed()
+                    | BrokerPayloadMismatch()
+                    | BrokerIdempotencyKeyConflict()
+                    | BrokerNotAttached()
+                    | BrokerInvalidTaskOptions()
+                    | BrokerInvalidInput()
+                    | BrokerLoopRunnerFailed()
+                    | BrokerListenerDisabled()
                 ):
                     err_code, cache = OperationalErrorCode.BROKER_ERROR, False
                 case _ as unreachable:
                     assert_never(unreachable)
+            cause: BaseException | None
+            match broker_error_cause(broker_err):
+                case NoCause():
+                    cause = None
+                case exception:
+                    cause = exception
             return self._error_result(
                 error_code=err_code,
                 message=broker_err.message,
-                data={'task_id': self.task_id, 'broker_code': code.value},
-                exception=broker_err.exception,
+                data={'task_id': self.task_id, 'broker_code': broker_err.code.value},
+                exception=cause,
                 cache=cache,
             )
         record = broker_result.ok_value
@@ -720,22 +737,18 @@ class TaskHandle(Generic[T]):
         and Err(ASYNC_CONTEXT) on a thread that runs an event loop.
         """
         if not self._broker_mode or not self._app:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.NO_BROKER,
+            return Err(BrokerNotAttached(
                 message=(
                     'TaskHandle.info() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
                 ),
-                retryable=False,
             ))
         if in_running_event_loop():
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.ASYNC_CONTEXT,
+            return Err(BrokerAsyncContext(
                 message=async_context_message(
                     f'TaskHandle.info() for task {self.task_id}',
                     'handle.info_async(...)',
                 ),
-                retryable=False,
             ))
 
         # Strict-serde phase 6: route through the app-level typed
@@ -763,13 +776,11 @@ class TaskHandle(Generic[T]):
         Err(BrokerOperationError) on infrastructure or precondition failure.
         """
         if not self._broker_mode or not self._app:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.NO_BROKER,
+            return Err(BrokerNotAttached(
                 message=(
                     'TaskHandle.info_async() requires a broker-backed task handle '
                     '(use .send() or .send_async())'
                 ),
-                retryable=False,
             ))
 
         # Strict-serde phase 6: same routing as the sync variant.
@@ -1301,64 +1312,49 @@ def create_task_wrapper(
         task_id: str,
         payload: TaskSendPayload,
     ) -> _BrokerSendError:
-        """Map a BrokerOperationError to the send variant of its code."""
-        match broker_err.code:
-            case BrokerErrorCode.PAYLOAD_MISMATCH:
+        """Map a broker error variant to its send variant."""
+        match broker_err:
+            case BrokerPayloadMismatch(message=message):
                 return TaskSendPayloadMismatch(
                     task_id=task_id,
                     payload=payload,
-                    message=broker_err.message,
+                    message=message,
                 )
-            case BrokerErrorCode.EVENT_LOOP_LIMIT:
-                return TaskSendEventLoopLimit(message=broker_err.message)
-            case BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT:
-                # BrokerOperationError asserts that this code carries the
-                # owner; the flat broker type cannot say it.
-                assert isinstance(broker_err.detail, IdempotencyKeyOwner), (
-                    'IDEMPOTENCY_KEY_CONFLICT broker error without an owner'
-                )
+            case BrokerEventLoopLimit(message=message):
+                return TaskSendEventLoopLimit(message=message)
+            case BrokerIdempotencyKeyConflict(
+                message=message,
+                owner_task_id=owner_task_id,
+            ):
                 return TaskSendIdempotencyKeyConflict(
                     task_id=task_id,
                     payload=payload,
-                    message=broker_err.message,
-                    owner_task_id=broker_err.detail.owner_task_id,
+                    message=message,
+                    owner_task_id=owner_task_id,
                 )
-            case BrokerErrorCode.ASYNC_CONTEXT:
+            case BrokerAsyncContext(message=message):
                 return TaskSendAsyncContext(
                     task_id=task_id,
                     payload=payload,
-                    message=broker_err.message,
+                    message=message,
                 )
             case (
-                BrokerErrorCode.SCHEMA_INIT_FAILED
-                | BrokerErrorCode.ENQUEUE_FAILED
-                | BrokerErrorCode.TASK_INFO_QUERY_FAILED
-                | BrokerErrorCode.MONITORING_QUERY_FAILED
-                | BrokerErrorCode.DB_PING_FAILED
-                | BrokerErrorCode.WORKER_PING_FAILED
-                | BrokerErrorCode.CLEANUP_FAILED
-                | BrokerErrorCode.CLOSE_FAILED
-                | BrokerErrorCode.LISTENER_START_FAILED
-                | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
-                | BrokerErrorCode.NO_BROKER
-                | BrokerErrorCode.NO_TYPE_AVAILABLE
-                | BrokerErrorCode.INVALID_JSON_PAYLOAD
-                | BrokerErrorCode.INVALID_TASK_OPTIONS
-                | BrokerErrorCode.LOOP_RUNNER_FAILED
+                BrokerOperationFailed()
+                | BrokerEnqueueFailed()
+                | BrokerNotAttached()
+                | BrokerNoTypeAvailable()
+                | BrokerInvalidJsonPayload()
+                | BrokerInvalidTaskOptions()
+                | BrokerInvalidInput()
+                | BrokerLoopRunnerFailed()
+                | BrokerListenerDisabled()
             ):
-                # The broker's data checks fail with no exception.
-                cause: BaseException | NoCause
-                match broker_err.exception:
-                    case None:
-                        cause = NoCause()
-                    case exception:
-                        cause = exception
                 return TaskSendEnqueueFailed(
                     task_id=task_id,
                     payload=payload,
                     message=broker_err.message,
                     retryable=broker_err.retryable,
-                    exception=cause,
+                    exception=broker_error_cause(broker_err),
                 )
             case _ as unreachable:
                 assert_never(unreachable)

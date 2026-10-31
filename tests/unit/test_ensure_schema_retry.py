@@ -9,7 +9,7 @@ import pytest
 
 from psycopg import InterfaceError, OperationalError
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
 from horsies.core.cli import _ensure_schema_with_retry
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.types.result import Err, Ok
@@ -22,11 +22,11 @@ def _schema_err(
     exception: BaseException | None = None,
 ) -> Err[BrokerOperationError]:
     """Build an Err for schema init failure in tests."""
-    return Err(BrokerOperationError(
+    return Err(BrokerOperationFailed(
         code=BrokerErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
-        exception=exception,
+        exception=exception or ConnectionError(message),
     ))
 
 

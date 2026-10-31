@@ -3553,7 +3553,7 @@ class TestWorkerStartConnectionOrdering:
 # 17. Reaper loop — uncovered match arms
 # ---------------------------------------------------------------------------
 
-from horsies.core.brokers.result_types import BrokerOperationError, BrokerErrorCode
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
 
 
 def _make_reaper_worker(
@@ -3665,10 +3665,11 @@ def _broker_err(
     *, retryable: bool = False, message: str = 'test error'
 ) -> Err[BrokerOperationError]:
     return Err(
-        BrokerOperationError(
+        BrokerOperationFailed(
             code=BrokerErrorCode.CLEANUP_FAILED,
             message=message,
             retryable=retryable,
+            exception=ConnectionError('cleanup failed'),
         )
     )
 
@@ -4011,10 +4012,11 @@ class TestReaperMatchArms:
     ) -> None:
         """When temp broker close returns Err, it's logged."""
         close_err = Err(
-            BrokerOperationError(
+            BrokerOperationFailed(
                 code=BrokerErrorCode.CLOSE_FAILED,
                 message='close failed',
                 retryable=False,
+                exception=ConnectionError('close failed'),
             )
         )
         worker = _make_reaper_worker(
@@ -5420,7 +5422,7 @@ def _reaper_err(
     *, retryable: bool, exc: BaseException | None = None
 ) -> Err[BrokerOperationError]:
     return Err(
-        BrokerOperationError(
+        BrokerOperationFailed(
             code=BrokerErrorCode.CLEANUP_FAILED,
             message='cleanup failed',
             retryable=retryable,
@@ -5616,12 +5618,12 @@ class TestReaperRequeueBreaker:
         the breaker off during connection-slot exhaustion and stranded
         orphaned CLAIMED tasks after the pressure cleared.
         """
-        from horsies.core.brokers.postgres import _broker_err
+        from horsies.core.brokers.postgres import _operation_failed
 
         worker = _make_worker()
         state = _fresh_reaper_state()
         state.requeue_permanent_failures = _REAPER_MAX_PERMANENT_FAILURES - 1
-        err = _broker_err(
+        err = _operation_failed(
             BrokerErrorCode.CLEANUP_FAILED,
             'requeue_stale_claimed failed',
             SATimeoutError('QueuePool limit of size 5 overflow 2 reached'),

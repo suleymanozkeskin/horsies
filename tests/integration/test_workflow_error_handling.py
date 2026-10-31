@@ -2533,7 +2533,7 @@ class TestWorkflowStartErrors:
         """Schema init failure returns Err(ENQUEUE_FAILED)."""
         from unittest.mock import AsyncMock, patch
 
-        from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+        from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
         from horsies.core.types.result import Err as ResultErr
 
         session, broker, app = setup
@@ -2541,7 +2541,7 @@ class TestWorkflowStartErrors:
 
         spec = make_workflow_spec('schema_fail_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
 
-        mock_err = ResultErr(BrokerOperationError(
+        mock_err = ResultErr(BrokerOperationFailed(
             code=BrokerErrorCode.SCHEMA_INIT_FAILED,
             message='connection refused',
             retryable=True,

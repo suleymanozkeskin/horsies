@@ -107,24 +107,84 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
-| `ENQUEUE_FAILED` | Enqueue or schedule path failed | Yes when the underlying broker error is retryable |
+| `ENQUEUE_FAILED` | The enqueue write failed or could not be confirmed; the row may or may not exist | Varies |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send | No |
-| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; `detail` is an `IdempotencyKeyOwner` that names the owner task | No |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; `owner_task_id` names the owner task | No |
 | `TASK_INFO_QUERY_FAILED` | Task-info or raw-result query failed | Varies |
 | `MONITORING_QUERY_FAILED` | Monitoring or worker-state query failed | Varies |
 | `DB_PING_FAILED` | `ping_database` reachability probe failed | Varies |
-| `WORKER_PING_FAILED` | `ping_workers` failed (listener unavailable, bad timeout) | No |
+| `WORKER_PING_FAILED` | `ping_workers` failed: the reply subscribe or the NOTIFY round trip failed | Varies |
 | `CLEANUP_FAILED` | Cleanup or retention operation failed | Varies |
 | `CLOSE_FAILED` | Broker close failed | Varies |
-| `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | No |
-| `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | No |
+| `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | Varies |
+| `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | Varies |
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this call ran on a new one; nothing ran; clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | A sync method (`app.get_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
 | `LOOP_RUNNER_FAILED` | A sync method could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
-| `INVALID_TASK_OPTIONS` | `enqueue_async` received a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
+| `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON, or a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
+| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, malformed args or kwargs JSON, or a scheduled slot whose kwargs fail to encode or exceed `payload.reject_bytes`. Nothing was written | No |
+| `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
+
+#### BrokerOperationError
+
+`BrokerOperationError` is a union of frozen variants. The nine operation codes from `SCHEMA_INIT_FAILED` to `LISTENER_SUBSCRIBE_FAILED` share `BrokerOperationFailed`, which keeps the code in its `code` field. Every other code has a variant of its own. Every variant has `code`, `message` and `retryable`. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check.
+
+| Variant | `code` | Fields besides `message` | `retryable` | After the failure |
+| ------- | ------ | ------------------------ | ----------- | ----------------- |
+| `BrokerOperationFailed` | one of the nine operation codes | `exception` | driver classification | A read changed nothing. A cleanup may have finished part of its rows |
+| `BrokerEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | driver classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
+| `BrokerPayloadMismatch` | `PAYLOAD_MISMATCH` | – | `False` | Nothing was written |
+| `BrokerIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `owner_task_id` | `False` | Nothing was written |
+| `BrokerNotAttached` | `NO_BROKER` | – | `False` | Nothing ran |
+| `BrokerNoTypeAvailable` | `NO_TYPE_AVAILABLE` | – | `False` | The stored result is unchanged |
+| `BrokerInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `exception` | `False` | The stored data is unchanged |
+| `BrokerInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `exception` | `False` | Nothing was written |
+| `BrokerInvalidInput` | `INVALID_INPUT` | `exception` | `False` | Nothing was written |
+| `BrokerEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit` | `False` | Nothing ran |
+| `BrokerAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
+| `BrokerLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception` | `False` | Nothing ran |
+| `BrokerListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `message` | `str` | Human-readable description |
+| `retryable` | `bool` | Driver classification of the cause where the variant has a cause from the driver: `True` when the condition may clear, for example a lost connection. `False` on every other variant |
+| `exception` | `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `owner_task_id` | `str` | The task that holds the idempotency key |
+| `loop_limit` | `EventLoopLimit` | The limit and the threads of the held event loops |
+
+The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
+
+`broker_error_cause(err)` returns the cause of any variant, or `NoCause()` for a variant without one. Match on it before `raise ... from`, `exc_info=` or an error tracker call:
+
+```python
+from horsies import (
+    BrokerEnqueueFailed,
+    BrokerOperationError,
+    BrokerOperationFailed,
+    NoCause,
+    broker_error_cause,
+)
+
+
+def should_retry(err: BrokerOperationError) -> bool:
+    match err:
+        case BrokerOperationFailed(retryable=retryable) | BrokerEnqueueFailed(retryable=retryable):
+            return retryable
+        case _:
+            return False
+
+
+def raise_broker_error(err: BrokerOperationError) -> None:
+    match broker_error_cause(err):
+        case NoCause():
+            raise RuntimeError(err.message)
+        case cause:
+            raise RuntimeError(err.message) from cause
+```
 
 Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVAILABLE` only fires for the success path. Reading failed tasks across processes that don't import the user code still works.
 

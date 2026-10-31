@@ -5,7 +5,10 @@
     "tests/typing/async_task_refused_pin.py",
     "horsies/core/models/task_send_types.py",
     "horsies/core/types/error_detail.py",
-    "tests/unit/test_task_send_variants.py"
+    "tests/unit/test_task_send_variants.py",
+    "tests/typing/broker_error_variant_pin.py",
+    "horsies/core/brokers/result_types.py",
+    "tests/unit/test_broker_error_variants.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

@@ -13,16 +13,17 @@ from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import Err, Ok
 from horsies.core.brokers.resources import ListenerEnabled
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from tests.broker_resources_support import attach_resources, fake_resources
 
 
 # A failed LISTEN: the wait falls back to polling.
 _SUBSCRIBE_FAILED = Err(
-    BrokerOperationError(
+    BrokerOperationFailed(
         code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
         message='listener unavailable',
         retryable=True,
+        exception=ConnectionError('listener down'),
     ),
 )
 

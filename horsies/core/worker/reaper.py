@@ -15,7 +15,8 @@ import hashlib
 import time
 from typing import TYPE_CHECKING, Any, Literal
 
-from horsies.core.brokers.result_types import BrokerOperationError
+from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
+from horsies.core.types.error_detail import NoCause
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, is_err
 from horsies.core.worker.runtime import (
@@ -45,8 +46,13 @@ logger = get_logger('worker')
 
 
 def _operation_sqlstate(error: BrokerOperationError) -> str | None:
-    cause = error.exception
-    original = getattr(cause, 'orig', cause)
+    cause: BaseException
+    match broker_error_cause(error):
+        case NoCause():
+            return None
+        case exception:
+            cause = exception
+    original: object = getattr(cause, 'orig', cause)
     sqlstate = getattr(original, 'sqlstate', None)
     if isinstance(sqlstate, str):
         return sqlstate

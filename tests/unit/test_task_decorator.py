@@ -12,7 +12,14 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import (
+    BrokerEnqueueFailed,
+    BrokerErrorCode,
+    BrokerIdempotencyKeyConflict,
+    BrokerLoopRunnerFailed,
+    BrokerPayloadMismatch,
+)
+from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import ConfigurationError, ErrorCode, TaskDefinitionError
 from horsies.core.exception_mapper import ExceptionMapper
 from horsies.core.models.tasks import (
@@ -45,7 +52,6 @@ from horsies.core.models.task_send_types import (
     TaskSendSuppressed,
     TaskSendValidationFailed,
 )
-from horsies.core.types.error_detail import IdempotencyKeyOwner
 from horsies.core.types.result import Err, Ok, is_ok, is_err
 from horsies.core.utils.loop_runner import LoopRunnerError
 
@@ -355,10 +361,9 @@ class TestTaskHandleGet:
         """Broker mode: a LOOP_RUNNER_FAILED broker error gives BROKER_ERROR, not cached."""
         app = _make_app()
         broker = MagicMock()
-        broker.get_raw_result_record.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+        broker.get_raw_result_record.return_value = Err(BrokerLoopRunnerFailed(
             message='Loop runner failed for PostgresBroker.get_raw_result_record()',
-            retryable=False,
+            exception=LoopRunnerError('Loop runner is not running'),
         ))
         app.get_broker.return_value = broker
 
@@ -1416,8 +1421,7 @@ class TestCreateTaskWrapperSend:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=ConnectionError('db gone'),
@@ -1681,8 +1685,7 @@ class TestCreateTaskWrapperSendAsync:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue_async = AsyncMock(return_value=Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        broker.enqueue_async = AsyncMock(return_value=Err(BrokerEnqueueFailed(
             message='fail',
             retryable=False,
             exception=RuntimeError('fail'),
@@ -1811,8 +1814,7 @@ class TestCreateTaskWrapperSchedule:
 
         app = _make_app()
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
             message='gone',
             retryable=True,
             exception=ConnectionError('gone'),
@@ -2137,8 +2139,7 @@ class TestAutoRetry:
 
         app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
-        transient_err = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        transient_err = Err(BrokerEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=ConnectionError('db gone'),
@@ -2160,8 +2161,7 @@ class TestAutoRetry:
 
         app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
-        transient_err = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        transient_err = Err(BrokerEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=ConnectionError('db gone'),
@@ -2183,8 +2183,7 @@ class TestAutoRetry:
 
         app = _make_app(resend_on_transient_err=False)
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=ConnectionError('db gone'),
@@ -2204,10 +2203,8 @@ class TestAutoRetry:
 
         app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.PAYLOAD_MISMATCH,
+        broker.enqueue.return_value = Err(BrokerPayloadMismatch(
             message='different payload',
-            retryable=False,
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2226,10 +2223,8 @@ class TestAutoRetry:
         app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
         runner_error = LoopRunnerError('Loop runner is not running')
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+        broker.enqueue.return_value = Err(BrokerLoopRunnerFailed(
             message='Loop runner failed for PostgresBroker.enqueue()',
-            retryable=False,
             exception=runner_error,
         ))
         app.get_broker.return_value = broker
@@ -2298,10 +2293,8 @@ class TestPayloadMismatchClassification:
         app = _make_app()
         broker = MagicMock()
         # Message intentionally omits 'sha mismatch' — old string-matching would miss it.
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.PAYLOAD_MISMATCH,
+        broker.enqueue.return_value = Err(BrokerPayloadMismatch(
             message='duplicate task_id with conflicting payload',
-            retryable=False,
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2321,10 +2314,10 @@ class TestPayloadMismatchClassification:
         broker = MagicMock()
         # Message contains 'sha mismatch' but code is ENQUEUE_FAILED — must NOT
         # be promoted to PAYLOAD_MISMATCH.
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        broker.enqueue.return_value = Err(BrokerEnqueueFailed(
             message='unexpected sha mismatch in log',
             retryable=True,
+            exception=NoCause(),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2346,12 +2339,9 @@ class TestIdempotencyKeyConflictClassification:
 
         app = _make_app()
         broker = MagicMock()
-        owner = IdempotencyKeyOwner(owner_task_id='owner-task-1')
-        broker.enqueue.return_value = Err(BrokerOperationError(
-            code=BrokerErrorCode.IDEMPOTENCY_KEY_CONFLICT,
+        broker.enqueue.return_value = Err(BrokerIdempotencyKeyConflict(
             message='idempotency key is reserved by task owner-task-1',
-            retryable=False,
-            detail=owner,
+            owner_task_id='owner-task-1',
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2360,7 +2350,7 @@ class TestIdempotencyKeyConflictClassification:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendIdempotencyKeyConflict)
-        assert result.err_value.owner_task_id == owner.owner_task_id
+        assert result.err_value.owner_task_id == 'owner-task-1'
         assert result.err_value.payload.task_name == 'test.good_fn'
 
     def test_retry_send_accepts_the_conflict(self) -> None:
@@ -2803,10 +2793,10 @@ def _failed_send_error(
 ) -> TaskSendEnqueueFailed:
     """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
     ok_return = broker.enqueue.return_value
-    broker.enqueue.return_value = Err(BrokerOperationError(
-        code=BrokerErrorCode.ENQUEUE_FAILED,
+    broker.enqueue.return_value = Err(BrokerEnqueueFailed(
         message='boom',
         retryable=False,
+        exception=NoCause(),
     ))
     if schedule_delay is None:
         res = task.send(value=1)

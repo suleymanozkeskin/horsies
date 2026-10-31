@@ -42,6 +42,7 @@ from tests.broker_resources_support import (
     attach_resources,
     fake_resources,
 )
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 
 
 # ---------------------------------------------------------------------------
@@ -448,14 +449,14 @@ def _make_schema_err(
     retryable: bool = True,
     message: str = 'db error',
     exception: Exception | None = None,
-) -> Any:
-    """Build a simple object with retryable/message/exception attrs."""
-    obj = types.SimpleNamespace(
-        retryable=retryable,
+) -> BrokerOperationFailed:
+    """Build a schema init failure; the cause defaults to a connection error."""
+    return BrokerOperationFailed(
+        code=BrokerErrorCode.SCHEMA_INIT_FAILED,
         message=message,
-        exception=exception,
+        retryable=retryable,
+        exception=exception or ConnectionError(message),
     )
-    return obj
 
 
 def _make_worker_namespace(

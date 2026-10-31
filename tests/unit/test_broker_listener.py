@@ -1578,13 +1578,13 @@ class TestCallerUnwrapContract:
     ) -> None:
         """Worker.start() should raise the original exception when listener.start()
         returns Err, preserving retryability for _start_with_resilience_config."""
-        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.brokers.result_types import BrokerOperationFailed
         from horsies.core.types.result import Err as Err_
 
         original_exc = OperationalError('listener conn refused')
         mock_listener = AsyncMock()
         mock_listener.start.return_value = Err_(
-            BrokerOperationError(
+            BrokerOperationFailed(
                 code=BrokerErrorCode.LISTENER_START_FAILED,
                 message='Failed to establish listener connections',
                 retryable=True,
@@ -1624,14 +1624,14 @@ class TestCallerUnwrapContract:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Worker.start() should raise when listener.listen_many() returns Err."""
-        from horsies.core.brokers.result_types import BrokerOperationError
+        from horsies.core.brokers.result_types import BrokerOperationFailed
         from horsies.core.types.result import Err as Err_, Ok as Ok_
 
         original_exc = OperationalError('subscribe failed')
         mock_listener = AsyncMock()
         mock_listener.start.return_value = Ok_(None)
         mock_listener.listen_many.return_value = Err_(
-            BrokerOperationError(
+            BrokerOperationFailed(
                 code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                 message='Failed to subscribe to channels',
                 retryable=True,

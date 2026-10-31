@@ -15,11 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import (
-    BrokerErrorCode,
-    BrokerOperationError,
-    RawResultRecord,
-)
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, RawResultRecord
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -92,10 +88,11 @@ class TestTransientErrorsNotCached:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             side_effect=[
-                Err(BrokerOperationError(
+                Err(BrokerOperationFailed(
                     code=BrokerErrorCode.TASK_INFO_QUERY_FAILED,
                     message='transient',
                     retryable=True,
+                    exception=ConnectionError('db gone'),
                 )),
                 _ok_record(7),
             ],

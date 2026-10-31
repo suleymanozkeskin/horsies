@@ -31,6 +31,37 @@ there is no migration contract between pre-1.0 versions.
   `TaskSendError(code=..., ...)` in tests becomes a variant constructor.
   `isinstance(err, TaskSendError)` is not valid on a type alias; match on
   the variants.
+- **Breaking: `BrokerOperationError` is a union of frozen variants.** The
+  nine operation codes from `SCHEMA_INIT_FAILED` to
+  `LISTENER_SUBSCRIBE_FAILED` share `BrokerOperationFailed`, which keeps the
+  code in its `code` field; every other code has a variant of its own.
+  Every variant has `code`, `message` and `retryable`. Code that reads
+  `err.exception` must match on the variant first, or call
+  `broker_error_cause(err)`; pyright reports each site. `exception` is
+  `BaseException` on `BrokerOperationFailed` and `BrokerLoopRunnerFailed`,
+  and `BaseException | NoCause` on the other variants that have it.
+  `BrokerOperationError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, BrokerOperationError)` is not valid on a
+  type alias; match on the variants.
+- **New broker codes `INVALID_INPUT` and `LISTENER_DISABLED`.** An
+  exhaustive `match` on `BrokerErrorCode` needs a case for each. These
+  failures move to them:
+  - `INVALID_INPUT`: a non-positive `timeout_seconds` or `min_responses` of
+    `ping_workers`, or a `target_worker_id` that is not a string (before:
+    `WORKER_PING_FAILED`); a non-positive `limit` of
+    `get_worker_state_history` (before: `MONITORING_QUERY_FAILED`); both
+    `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without
+    either, or malformed args or kwargs JSON passed to `enqueue()`, and a
+    scheduled slot whose kwargs fail to encode or exceed
+    `payload.reject_bytes` (before: `ENQUEUE_FAILED`).
+  - `LISTENER_DISABLED`: `ping_workers` on a broker built with
+    `assume_initialized=True` (before: `WORKER_PING_FAILED`).
+  A send maps both codes to `TaskSendEnqueueFailed` with `retryable=False`,
+  as before.
+- **Malformed `task_options` JSON passed to `enqueue()` returns
+  `INVALID_TASK_OPTIONS`.** Before, it returned `ENQUEUE_FAILED`.
+  `ENQUEUE_FAILED` now means only that the enqueue write failed or could not
+  be confirmed.
 - **Breaking: the codec raises `ValueValidationError`, not pydantic
   `ValidationError`.** `encode_value`, `decode_value` and the task-result
   and kwargs functions in `horsies.core.codec` raise `ValueValidationError`
@@ -83,10 +114,11 @@ there is no migration contract between pre-1.0 versions.
   The retry methods accept the error; a retry after the reservation ends
   is accepted. An exhaustive `match` on `TaskSendErrorCode` needs an
   `IDEMPOTENCY_KEY_CONFLICT` case.
-- **`BrokerOperationError` has a new field, `detail`.** It is an
-  `IdempotencyKeyOwner` for `IDEMPOTENCY_KEY_CONFLICT` and `None` for every
-  other code. An error built with a code and a detail that do not agree
-  fails an assertion.
+- **The `retryable` flag of a failed conflict verification follows the
+  cause.** When an enqueue's task id conflicts and the query that compares
+  the stored payload fails, `ENQUEUE_FAILED` carries the driver
+  classification of that error, as at every other driver site. Before,
+  `retryable` was always `True`.
 - **A retry that changes the idempotency key of a sent task id returns
   `PAYLOAD_MISMATCH`.** Before, it returned `ENQUEUE_FAILED`, which the
   retry methods accept, and a retry of it could not succeed while the task

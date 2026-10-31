@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerOperationFailed
 from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import Err, Ok, is_err
@@ -287,10 +287,11 @@ class FailingListener:
 
     async def start(self) -> Err[BrokerOperationError]:
         return Err(
-            BrokerOperationError(
+            BrokerOperationFailed(
                 code=BrokerErrorCode.LISTENER_START_FAILED,
                 message='stubbed listener failure',
                 retryable=True,
+                exception=ConnectionError('listener down'),
             )
         )
 
