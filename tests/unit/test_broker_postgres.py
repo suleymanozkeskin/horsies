@@ -17,8 +17,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from sqlalchemy.exc import OperationalError as SAOperationalError
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
-from horsies.core.brokers.result_types import BrokerErrorCode
+from horsies.core.brokers.result_types import (
+    BrokerEnqueueFailed,
+    BrokerErrorCode,
+    BrokerInvalidInput,
+    BrokerInvalidTaskOptions,
+    BrokerListenerDisabled,
+)
+from horsies.core.codec.json_io import SerializationError
+from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -35,7 +44,7 @@ from horsies.core.lifecycle.outcomes import (
     ObservedTaskState,
     SourceStateConflict,
 )
-from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.loop_runner import LoopRunnerError
 from tests.broker_resources_support import pin_resources, resources_of
@@ -885,10 +894,10 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_malformed_task_options_raises(self) -> None:
-        """Malformed task_options JSON propagates as Err(ENQUEUE_FAILED).
+        """Malformed task_options JSON is refused as INVALID_TASK_OPTIONS.
 
-        loads_json returns Err(SerializationError), which enqueue_async checks
-        explicitly and returns as Err(BrokerOperationError(ENQUEUE_FAILED)).
+        loads_json returns Err(SerializationError); enqueue_async returns it
+        as the cause of BrokerInvalidTaskOptions. Nothing was written.
         """
         broker = _make_broker()
         session = _make_enqueue_session()
@@ -902,8 +911,59 @@ class TestEnqueueAsync:
         )
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'JSON' in result.err_value.message
+        match result.err_value:
+            case BrokerInvalidTaskOptions(message=message, exception=cause):
+                assert 'JSON' in message
+                assert isinstance(cause, SerializationError)
+            case other:
+                raise AssertionError(f'expected INVALID_TASK_OPTIONS, got {other!r}')
+
+    @pytest.mark.asyncio
+    async def test_both_scheduling_parameters_are_refused_as_invalid_input(self) -> None:
+        """enqueued_at and enqueue_delay_seconds together → INVALID_INPUT; nothing is written."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            enqueued_at=datetime.now(timezone.utc),
+            enqueue_delay_seconds=30,
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert 'enqueued_at and enqueue_delay_seconds' in message
+                assert cause == NoCause()
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_corrupt_args_json_is_refused_as_invalid_input_with_the_cause(self) -> None:
+        """Malformed args JSON → INVALID_INPUT with the parse error as the cause; nothing is written."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            args_json='NOT_VALID_JSON{{',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert 'args JSON corrupt' in message
+                assert isinstance(cause, SerializationError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_with_good_until_passes_expiry(self) -> None:
@@ -988,8 +1048,12 @@ class TestEnqueueAsync:
         )
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'sent_at' in result.err_value.message
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert 'sent_at' in message
+                assert cause == NoCause()
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1158,14 +1222,25 @@ class TestEnqueueIdempotency:
         assert 'cannot verify payload identity' in result.err_value.message
 
     @pytest.mark.asyncio
-    async def test_enqueue_same_id_select_fails_returns_retryable_err(self) -> None:
-        """INSERT conflicts, SELECT raises -> Err(retryable=True)."""
+    @pytest.mark.parametrize(
+        ('select_error', 'retryable'),
+        [
+            pytest.param(
+                SAOperationalError('SELECT', None, Exception('conn lost')),
+                True,
+                id='driver-connection-error',
+            ),
+            pytest.param(ValueError('row decode failed'), False, id='other-error'),
+        ],
+    )
+    async def test_enqueue_same_id_select_fails_classifies_the_cause(
+        self, select_error: Exception, retryable: bool,
+    ) -> None:
+        """INSERT conflicts, SELECT raises -> Err(ENQUEUE_FAILED) with the driver classification."""
         broker = _make_broker()
         engine, _conn = _make_enqueue_engine(inserted=False)
         _set_resources(broker, engine=engine)
-        session = _make_conflict_session(
-            select_raises=ConnectionError('db gone'),
-        )
+        session = _make_conflict_session(select_raises=select_error)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
         result = await broker.enqueue_async(
@@ -1175,9 +1250,13 @@ class TestEnqueueIdempotency:
         )
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert result.err_value.retryable is True
-        assert 'verification query failed' in result.err_value.message
+        match result.err_value:
+            case BrokerEnqueueFailed(message=message, retryable=flag, exception=cause):
+                assert flag is retryable
+                assert cause is select_error
+                assert 'verification query failed' in message
+            case other:
+                raise AssertionError(f'expected ENQUEUE_FAILED, got {other!r}')
 
 
 # ---------------------------------------------------------------------------
@@ -1665,8 +1744,8 @@ class TestWorkerStateReads:
         result = await broker.get_worker_state_history_async('w1', limit=0)
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.MONITORING_QUERY_FAILED
-        assert result.err_value.retryable is False
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert result.err_value.exception == NoCause()
 
     @pytest.mark.asyncio
     async def test_history_returns_snapshots(self) -> None:
@@ -1692,7 +1771,8 @@ class TestPingWorkers:
         result = await broker.ping_workers_async(timeout_seconds=0)
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert 'timeout_seconds' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_disabled_listener_returns_err_not_raise(self) -> None:
@@ -1709,7 +1789,8 @@ class TestPingWorkers:
         result = await broker.ping_workers_async(timeout_seconds=1.0)
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+        assert isinstance(result.err_value, BrokerListenerDisabled)
+        assert result.err_value.code is BrokerErrorCode.LISTENER_DISABLED
 
     def test_decode_pong_accepts_matching_correlation(self) -> None:
         from horsies.core.codec.json_io import dumps_json
@@ -1755,7 +1836,8 @@ class TestPingWorkers:
         result = await broker.ping_workers_async(min_responses=0)
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.WORKER_PING_FAILED
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert 'min_responses' in result.err_value.message
 
     @pytest.mark.asyncio
     async def test_min_responses_returns_early(self) -> None:
@@ -1794,6 +1876,21 @@ class TestPingWorkers:
         assert elapsed < 2.0, 'should return on first pong, not wait the 5s window'
 
     @pytest.mark.asyncio
+    async def test_request_encode_failure_is_a_defect_not_an_err(self) -> None:
+        """The library builds the ping request; an encode failure raises before any subscribe."""
+        broker = _make_broker()
+        _listener_of(broker).listen = AsyncMock()
+
+        with patch(
+            'horsies.core.brokers.postgres.dumps_json',
+            return_value=Err(SerializationError('cannot encode')),
+        ):
+            with pytest.raises(AssertionError, match='ping_workers request encode failed'):
+                await broker.ping_workers_async(timeout_seconds=1.0)
+
+        _listener_of(broker).listen.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_refused_request_field_gives_text_and_cause_without_value(self) -> None:
         """A request field that fails validation names the field, not the value."""
         from horsies.core.codec.validation_errors import ValueValidationError
@@ -1811,11 +1908,12 @@ class TestPingWorkers:
 
         assert is_err(result)
         err = result.err_value
-        assert err.code == BrokerErrorCode.WORKER_PING_FAILED
+        assert isinstance(err, BrokerInvalidInput)
         assert 'target_worker_id: Input should be a valid string' in err.message
         assert marker not in err.message
         assert isinstance(err.exception, ValueValidationError)
         assert marker not in str(err.exception)
+        _listener_of(broker).listen.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerEnqueueFailed, BrokerOperationError
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import ErrorCode, HorsiesError
 from horsies.core.models.payload import PayloadPolicy
@@ -183,10 +183,10 @@ class TestValidationFailedCause:
 class TestEnqueueFailedCause:
     def test_broker_data_check_without_exception_gives_no_cause(self) -> None:
         app = _make_app()
-        _broker_returning(app, BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        _broker_returning(app, BrokerEnqueueFailed(
             message='task row is gone before the key was bound',
             retryable=False,
+            exception=NoCause(),
         ))
 
         result = _wrapper(app).send(x=1)
@@ -199,8 +199,7 @@ class TestEnqueueFailedCause:
     def test_broker_exception_is_kept(self) -> None:
         app = _make_app()
         cause = ConnectionError('db gone')
-        _broker_returning(app, BrokerOperationError(
-            code=BrokerErrorCode.ENQUEUE_FAILED,
+        _broker_returning(app, BrokerEnqueueFailed(
             message='db gone',
             retryable=True,
             exception=cause,

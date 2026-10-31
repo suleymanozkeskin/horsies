@@ -7,7 +7,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.brokers.result_types import (
+    BrokerEnqueueFailed,
+    BrokerErrorCode,
+    BrokerInvalidInput,
+    BrokerListenerDisabled,
+    BrokerOperationError,
+    BrokerOperationFailed,
+    BrokerPayloadMismatch,
+)
+from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import ConfigurationError, ErrorCode, RegistryError
 from horsies.core.models.schedule import (
     DailySchedule,
@@ -1001,7 +1011,7 @@ def _make_broker_mock(
         broker.ensure_schema_initialized = AsyncMock(return_value=Ok(None))
     else:
         broker.ensure_schema_initialized = AsyncMock(
-            return_value=Err(BrokerOperationError(
+            return_value=Err(BrokerOperationFailed(
                 code=BrokerErrorCode.SCHEMA_INIT_FAILED,
                 message='schema init failed',
                 retryable=False,
@@ -1012,10 +1022,11 @@ def _make_broker_mock(
         broker.close_async = AsyncMock(return_value=Ok(None))
     else:
         broker.close_async = AsyncMock(
-            return_value=Err(BrokerOperationError(
+            return_value=Err(BrokerOperationFailed(
                 code=BrokerErrorCode.CLOSE_FAILED,
                 message='close failed',
                 retryable=False,
+                exception=ConnectionError('close failed'),
             )),
         )
     # ``broker.session_factory`` is a test-side handle only: the same mock is
@@ -1070,8 +1081,35 @@ class TestSchedulerStart:
         app.get_broker = MagicMock(return_value=broker)
         scheduler = Scheduler(app)
 
-        with pytest.raises(RuntimeError, match='Schema initialization failed'):
+        with pytest.raises(RuntimeError, match='Schema initialization failed') as raised:
             await scheduler.start()
+
+        assert isinstance(raised.value.__cause__, RuntimeError)
+        assert str(raised.value.__cause__) == 'db down'
+
+    async def test_schema_init_failure_without_a_cause_raises_unchained(self) -> None:
+        """A schema init error with no exception raises RuntimeError with no cause."""
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                ),
+            ],
+        )
+        app = _make_app(schedule_config=config)
+        broker = _make_broker_mock()
+        broker.ensure_schema_initialized = AsyncMock(
+            return_value=Err(BrokerListenerDisabled(message='no listener')),
+        )
+        app.get_broker = MagicMock(return_value=broker)
+        scheduler = Scheduler(app)
+
+        with pytest.raises(RuntimeError, match='Schema initialization failed: no listener') as raised:
+            await scheduler.start()
+
+        assert raised.value.__cause__ is None
 
     async def test_event_loop_limit_raises_before_schema_init(self) -> None:
         """A broker whose resources serve another loop stops start(); nothing runs."""
@@ -1905,10 +1943,10 @@ class TestCheckScheduleAdditionalPaths:
             call_idx += 1
             if call_idx == 1:
                 return Ok('task-0')
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
+            return Err(BrokerEnqueueFailed(
                 message='transient error',
                 retryable=True,
+                exception=NoCause(),
             ))
 
         scheduler._enqueue_scheduled_task = AsyncMock(side_effect=_fail_second)  # type: ignore[method-assign]
@@ -1952,10 +1990,10 @@ class TestCheckScheduleAdditionalPaths:
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
+            return_value=Err(BrokerEnqueueFailed(
                 message='permanent error',
                 retryable=False,
+                exception=NoCause(),
             )),
         )
 
@@ -1995,10 +2033,10 @@ class TestCheckScheduleAdditionalPaths:
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
+            return_value=Err(BrokerEnqueueFailed(
                 message='connection reset',
                 retryable=True,
+                exception=NoCause(),
             )),
         )
 
@@ -2098,10 +2136,10 @@ class TestCheckScheduleAdditionalPaths:
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
+            return_value=Err(BrokerEnqueueFailed(
                 message='permanent failure',
                 retryable=False,
+                exception=NoCause(),
             )),
         )
 
@@ -2143,10 +2181,10 @@ class TestCheckScheduleAdditionalPaths:
         scheduler.state_manager = state_manager
 
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
-            return_value=Err(BrokerOperationError(
-                code=BrokerErrorCode.ENQUEUE_FAILED,
+            return_value=Err(BrokerEnqueueFailed(
                 message='transient failure',
                 retryable=True,
+                exception=NoCause(),
             )),
         )
 
@@ -2190,10 +2228,8 @@ class TestCheckScheduleAdditionalPaths:
         scheduler._enqueue_scheduled_task = AsyncMock(  # type: ignore[method-assign]
             side_effect=[
                 Ok('task-0'),
-                Err(BrokerOperationError(
-                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                Err(BrokerPayloadMismatch(
                     message='sha mismatch',
-                    retryable=False,
                 )),
             ],
         )
@@ -2493,6 +2529,8 @@ class TestEnqueueScheduledTask:
         )
 
         assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert result.err_value.exception == NoCause()
         assert 'payload.reject_bytes=256' in result.err_value.message
         scheduler.broker.enqueue_async.assert_not_awaited()
 
@@ -2538,8 +2576,44 @@ class TestEnqueueScheduledTask:
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
+    async def test_kwargs_encode_failure_returns_invalid_input_with_the_cause(self) -> None:
+        """A kwarg that fails its declared type → Err(INVALID_INPUT) with the codec error."""
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs={'key': 'val'},
+        )
+        config = ScheduleConfig(schedules=[schedule])
+        def echo(*, key: str) -> str:
+            return key
+
+        task_mock = _make_task_mock(echo)
+        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
+        scheduler = Scheduler(app)
+        scheduler.broker = _make_broker_mock()
+        encode_error = ValueValidationError('key: Input should be a valid integer [int_parsing]')
+
+        with patch(
+            'horsies.core.scheduler.service.encode_kwargs',
+            side_effect=encode_error,
+        ):
+            result = await scheduler._enqueue_scheduled_task(  # pyright: ignore[reportPrivateUsage]
+                schedule,
+                slot_time=_utc(2025, 6, 1, 12, 0, 0),
+            )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert "Failed to encode kwargs for schedule 's'" in message
+                assert cause is encode_error
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        scheduler.broker.enqueue_async.assert_not_called()
+
     async def test_kwargs_serialization_failure_returns_err(self) -> None:
-        """dumps_json returning Err on encoded kwargs → Err(BrokerOperationError).
+        """dumps_json returning Err on encoded kwargs → Err(INVALID_INPUT) with that cause.
 
         Strict-serde phase 3 routes scheduler kwargs through `encode_kwargs`
         then `dumps_json`; this test patches the final stringification step
@@ -2557,9 +2631,10 @@ class TestEnqueueScheduledTask:
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
 
+        serialize_error = TypeError('bad kwargs')
         with patch(
             'horsies.core.scheduler.service.dumps_json',
-            return_value=Err(TypeError('bad kwargs')),
+            return_value=Err(serialize_error),
         ):
             result = await scheduler._enqueue_scheduled_task(
                 schedule,
@@ -2567,8 +2642,13 @@ class TestEnqueueScheduledTask:
             )
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert 'kwargs' in result.err_value.message
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert 'kwargs' in message
+                assert cause is serialize_error
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        assert result.err_value.retryable is False
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:
         """Full success: broker.enqueue_async called with deterministic task_id and sent_at=slot_time."""

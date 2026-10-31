@@ -26,7 +26,7 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import ListenerDisabled
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.result_types import BrokerAsyncContext, BrokerErrorCode, BrokerLoopRunnerFailed
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -248,10 +248,8 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
         return TaskResult(ok=x)
 
     broker = MagicMock()
-    broker.enqueue.return_value = Err(BrokerOperationError(
-        code=BrokerErrorCode.ASYNC_CONTEXT,
+    broker.enqueue.return_value = Err(BrokerAsyncContext(
         message='refused',
-        retryable=False,
     ))
     wrapper = create_task_wrapper(echo, _send_app(broker), 'test.echo')
 
@@ -450,10 +448,8 @@ def test_task_handle_result_mapping_asserts_on_async_context(app: Horsies) -> No
     handle: TaskHandle[int] = TaskHandle(
         TASK_ID, app=app, broker_mode=True, ok_type=int,
     )
-    broker_result = Err(BrokerOperationError(
-        code=BrokerErrorCode.ASYNC_CONTEXT,
+    broker_result = Err(BrokerAsyncContext(
         message='refused',
-        retryable=False,
     ))
 
     with pytest.raises(AssertionError, match='TaskHandle result read'):
@@ -605,7 +601,7 @@ def _failure_code(result: object) -> object:
         case TaskResult(err=TaskError(error_code=code)):
             return code
         case Err(err_value=(
-            BrokerOperationError(code=code)
+            BrokerLoopRunnerFailed(code=code)
             | HandleOperationError(code=code)
             | WorkflowStartError(code=code)
         )):
@@ -618,7 +614,7 @@ def _runner_error_fields(result: object) -> tuple[bool, BaseException | None] | 
     """``(retryable, exception)`` of an ``Err`` result; ``None`` for a ``TaskResult``."""
     match result:
         case Err(err_value=(
-            BrokerOperationError(retryable=retryable, exception=exception)
+            BrokerLoopRunnerFailed(retryable=retryable, exception=exception)
             | HandleOperationError(retryable=retryable, exception=exception)
             | WorkflowStartError(retryable=retryable, exception=exception)
         )):
@@ -752,7 +748,7 @@ def _refusal_message(result: object) -> str:
             assert task_error.error_code is RetrievalCode.ASYNC_CONTEXT
             return task_error.message or ''
         case Err(
-            BrokerOperationError() | HandleOperationError() | WorkflowStartError() as error
+            BrokerAsyncContext() | HandleOperationError() | WorkflowStartError() as error
         ):
             assert error.code.value == 'ASYNC_CONTEXT'
             return error.message

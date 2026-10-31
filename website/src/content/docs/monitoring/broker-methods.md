@@ -7,7 +7,7 @@ tags: [monitoring, broker, api]
 
 `PostgresBroker` exposes async methods for querying task and worker health directly from the database. These are useful for building custom monitoring, alerting, or cleanup scripts.
 
-All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. The error carries a `retryable` flag indicating whether the failure is transient (connection blip) or permanent (schema drift, code bug).
+All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](../tasks/errors#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the driver classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
 from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err

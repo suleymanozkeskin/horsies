@@ -2192,7 +2192,7 @@ class TestListenerFallbackContract:
         """Operational listener Err triggers polling fallback; get_async still returns Ok."""
         from horsies.core.brokers.result_types import (
             BrokerErrorCode,
-            BrokerOperationError,
+            BrokerOperationFailed,
         )
         from horsies.core.types.result import Err as Err_
 
@@ -2205,10 +2205,11 @@ class TestListenerFallbackContract:
 
         await _complete_task(session, broker, handle.workflow_id, 0, TaskResult(ok=100))
 
-        listen_err = Err_(BrokerOperationError(
+        listen_err = Err_(BrokerOperationFailed(
             code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
             message='forced test failure',
             retryable=True,
+            exception=ConnectionError('listener down'),
         ))
         with patch.object(
             listener_of(broker), 'listen', new=AsyncMock(return_value=listen_err),

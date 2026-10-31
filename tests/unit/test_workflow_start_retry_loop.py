@@ -24,6 +24,11 @@ from horsies.core.workflows.lifecycle import (
 from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
 )
+from horsies.core.brokers.result_types import (
+    BrokerErrorCode,
+    BrokerListenerDisabled,
+    BrokerOperationFailed,
+)
 
 
 WORKFLOW_ID = '9f1b7a2c-0d4e-4f61-8a23-5c6d7e8f9a0b'
@@ -60,10 +65,12 @@ def _make_broker(
     if schema_ok:
         broker.ensure_schema_initialized = AsyncMock(return_value=Ok(True))
     else:
-        schema_err = MagicMock()
-        schema_err.message = 'Schema init failed'
-        schema_err.retryable = schema_retryable
-        schema_err.exception = None
+        schema_err = BrokerOperationFailed(
+            code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+            message='Schema init failed',
+            retryable=schema_retryable,
+            exception=ConnectionError('Schema init failed'),
+        )
         broker.ensure_schema_initialized = AsyncMock(return_value=Err(schema_err))
 
     attach_resources(broker, fake_resources())
@@ -169,10 +176,12 @@ class TestRetryOnTransientErrors:
         broker = MagicMock()
 
         # Schema init: fail retryable twice, then succeed
-        schema_err = MagicMock()
-        schema_err.message = 'Schema init timeout'
-        schema_err.retryable = True
-        schema_err.exception = None
+        schema_err = BrokerOperationFailed(
+            code=BrokerErrorCode.SCHEMA_INIT_FAILED,
+            message='Schema init timeout',
+            retryable=True,
+            exception=ConnectionError('Schema init timeout'),
+        )
 
         mock_session = AsyncMock()
         mock_session.info = {}
@@ -265,6 +274,34 @@ class TestNonRetryableErrorsNoRetry:
         assert is_err(result)
         assert result.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
         mock_sleep.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_schema_error_cause_is_the_start_error_cause(self) -> None:
+        """The broker cause of a schema init failure is the start error's exception."""
+        spec = _make_spec()
+        broker = _make_broker(schema_ok=False, schema_retryable=False)
+        broker_error = broker.ensure_schema_initialized.return_value.err_value
+
+        result = await start_workflow_async(spec, broker, WORKFLOW_ID)
+
+        assert is_err(result)
+        assert result.err_value.exception is broker_error.exception
+
+    @pytest.mark.asyncio
+    async def test_schema_error_without_a_cause_gives_no_exception(self) -> None:
+        """A schema init error with no exception gives a start error with exception None."""
+        spec = _make_spec()
+        broker = _make_broker(schema_ok=False, schema_retryable=False)
+        broker.ensure_schema_initialized = AsyncMock(
+            return_value=Err(BrokerListenerDisabled(message='no listener')),
+        )
+
+        result = await start_workflow_async(spec, broker, WORKFLOW_ID)
+
+        assert is_err(result)
+        assert result.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
+        assert result.err_value.exception is None
+        assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
     async def test_validation_error_never_retried(self) -> None:

@@ -574,7 +574,7 @@ Decode failures surface differently depending on which retrieval API the
 caller uses:
 
 - `app.get_result(task_id, ...)` returns
-  `Err(BrokerOperationError(BrokerErrorCode.INVALID_JSON_PAYLOAD))` when
+  `Err(BrokerInvalidJsonPayload(...))` (code `INVALID_JSON_PAYLOAD`) when
   the stored envelope is malformed, missing the `__h_task_result__`
   marker, or fails typed decode against the registered `task_ok_type`.
   Cross-process monitoring and debugging callers see the infrastructure
@@ -742,8 +742,10 @@ from horsies import (
     ExceptionMapper,
     # Status
     TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES,
-    # Broker result (for handle.info())
+    # Broker result (for handle.info()); match on the variant
     BrokerResult, BrokerOperationError, BrokerErrorCode,
+    BrokerOperationFailed, BrokerEnqueueFailed, BrokerInvalidInput,
+    broker_error_cause,
     # Node data flow helper
     from_node,
     # Rerun (re-execute a terminal task as a new request)

@@ -1111,8 +1111,8 @@ class Horsies:
         can therefore decode without importing user code.
         """
         from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
+            BrokerInvalidJsonPayload,
+            BrokerNoTypeAvailable,
         )
         from horsies.core.codec.json_value import StrictJsonError
         from horsies.core.codec.typed import (
@@ -1198,12 +1198,11 @@ class Horsies:
         try:
             envelope = validate_task_result_envelope(raw)
         except StrictJsonError as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'TaskResult envelope invalid for {task_id}: {exc}'
                 ),
-                retryable=False,
+                exception=exc,
             ))
         err_slot = envelope.get('err')
         # Err-fast-path: TaskError is fixed-schema; decodable without
@@ -1213,32 +1212,28 @@ class Horsies:
             try:
                 err_value = decode_task_error(err_slot)
             except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                return Err(BrokerInvalidJsonPayload(
                     message=f'TaskError decode failed for {task_id}: {exc}',
-                    retryable=False,
+                    exception=exc,
                 ))
             return Ok(TaskResult(err=err_value))
         # Ok slot — needs ok_type from local registry.
         task = self.tasks.get(record.task_name)
         ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
         if ok_type is None:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.NO_TYPE_AVAILABLE,
+            return Err(BrokerNoTypeAvailable(
                 message=(
                     f'Task {record.task_name!r} is not locally registered; '
                     f'cannot decode successful result. Use '
                     f'get_raw_result(...) or import the task module.'
                 ),
-                retryable=False,
             ))
         try:
             return Ok(decode_task_result(raw, ok_type))
         except (StrictJsonError, ValueValidationError) as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=f'decode_task_result failed for {task_id}: {exc}',
-                retryable=False,
+                exception=exc,
             ))
 
     def get_result(
@@ -1276,8 +1271,7 @@ class Horsies:
         registered locally and decode succeeds.
         """
         from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
+            BrokerInvalidJsonPayload,
         )
         from horsies.core.codec.json_value import StrictJsonError
         from horsies.core.codec.typed import (
@@ -1309,12 +1303,11 @@ class Horsies:
         try:
             envelope = validate_task_result_envelope(info.raw_result)
         except StrictJsonError as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'TaskResult envelope invalid for {task_id}: {exc}'
                 ),
-                retryable=False,
+                exception=exc,
             ))
         err_slot = envelope.get('err')
         # Err-fast-path: TaskError is fixed-schema; decodable without
@@ -1325,12 +1318,11 @@ class Horsies:
             try:
                 err_value = decode_task_error(err_slot)
             except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                return Err(BrokerInvalidJsonPayload(
                     message=(
                         f'TaskError decode failed for {task_id}: {exc}'
                     ),
-                    retryable=False,
+                    exception=exc,
                 ))
             from horsies.core.models.tasks import TaskResult
             info.decoded_result = TaskResult(err=err_value)
@@ -1347,12 +1339,11 @@ class Horsies:
         try:
             decoded = decode_task_result(info.raw_result, ok_type)
         except (StrictJsonError, ValueValidationError) as exc:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'get_task_info decode failed for {task_id}: {exc}'
                 ),
-                retryable=False,
+                exception=exc,
             ))
         info.decoded_result = decoded
         info.result_decoded = True
@@ -1395,32 +1386,26 @@ class Horsies:
         Not retryable: a stopped runner does not start again.
         """
         from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
+            BrokerLoopRunnerFailed,
         )
         from horsies.core.types.result import Err
 
-        return Err(BrokerOperationError(
-            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+        return Err(BrokerLoopRunnerFailed(
             message=f'Loop runner failed for app.{label}(): {exc}',
-            retryable=False,
             exception=exc,
         ))
 
     def _async_context_err(self, label: str) -> 'BrokerResult[Any]':
         """Refuse a sync facade called inside a running event loop. Nothing ran."""
         from horsies.core.brokers.result_types import (
-            BrokerErrorCode,
-            BrokerOperationError,
+            BrokerAsyncContext,
         )
         from horsies.core.types.result import Err
 
-        return Err(BrokerOperationError(
-            code=BrokerErrorCode.ASYNC_CONTEXT,
+        return Err(BrokerAsyncContext(
             message=async_context_message(
                 f'app.{label}()', f'app.{label}_async(...)',
             ),
-            retryable=False,
         ))
 
     async def ping_database_async(self) -> 'BrokerResult[DatabasePing]':
