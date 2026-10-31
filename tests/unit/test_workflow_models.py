@@ -28,6 +28,7 @@ from horsies.core.models.workflow import (
     SuccessPolicy,
     SuccessCase,
     WorkflowDefinition,
+    WorkflowDefinitionConfig,
     slugify,
 )
 from horsies.core.errors import ErrorCode, HorsiesError, MultipleValidationErrors
@@ -1022,10 +1023,7 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_args_with_args_from')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node_a = TaskNode(fn=fn_a)
         _ = node_a
@@ -1046,10 +1044,7 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_default_build_with')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
@@ -1070,20 +1065,14 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('base_child_default_build_with')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         class InheritedDefaultWorkflow(BaseChildWorkflow):
             name = 'inherited_default_build_with'
             definition_key = _definition_key('inherited_default_build_with')
             child2 = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        InheritedDefaultWorkflow.Meta.output = InheritedDefaultWorkflow.child2
+            config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
             workflow_def=InheritedDefaultWorkflow,
@@ -1107,10 +1096,7 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_default_build_with_no_params')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         child_node = SubWorkflowNode(workflow_def=ChildWorkflow)
 
@@ -1126,25 +1112,19 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('base_child_custom_build_with_missing')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app: Any, value: int) -> WorkflowSpec:
                 _ = value
                 return cls.build(app)
 
-        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
-
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_missing'
             definition_key = _definition_key('inherited_custom_build_with_missing')
             child2 = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        InheritedCustomWorkflow.Meta.output = InheritedCustomWorkflow.child2
+            config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
             workflow_def=InheritedCustomWorkflow,
@@ -1168,25 +1148,19 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('base_child_custom_build_with_invalid_key')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app: Any, value: int) -> WorkflowSpec:
                 _ = value
                 return cls.build(app)
 
-        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
-
         class InheritedCustomWorkflow(BaseChildWorkflow):
             name = 'inherited_custom_build_with_invalid_key'
             definition_key = _definition_key('inherited_custom_build_with_invalid_key')
             child2 = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        InheritedCustomWorkflow.Meta.output = InheritedCustomWorkflow.child2
+            config = WorkflowDefinitionConfig(output=child2)
 
         child_node = SubWorkflowNode(
             workflow_def=InheritedCustomWorkflow,
@@ -1210,20 +1184,15 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('base_child_inherited_definition_key')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        BaseChildWorkflow.Meta.output = BaseChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         class InheritedKeyWorkflow(BaseChildWorkflow):
             name = 'inherited_definition_key_child'
             definition_key = _definition_key('inherited_definition_key_child')
             child2 = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child2)
 
-        InheritedKeyWorkflow.Meta.output = InheritedKeyWorkflow.child2
         delattr(InheritedKeyWorkflow, 'definition_key')
 
         child_node = SubWorkflowNode(workflow_def=InheritedKeyWorkflow)
@@ -1242,15 +1211,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_build_with_positional_rejected')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app: Any, value: int) -> WorkflowSpec:
                 _ = value
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         with pytest.raises(TypeError, match="unexpected keyword argument 'args'"):
             SubWorkflowNode(  # type: ignore[call-arg]
@@ -1268,15 +1234,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_build_with_mutated_args')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app: Any, value: int) -> WorkflowSpec:
                 _ = value
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         child_node = SubWorkflowNode(workflow_def=ChildWorkflow, kwargs={'value': 2})
         child_node.args = (1,)  # defensive validation path
@@ -1399,15 +1362,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_overlap')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app: Any, *, value: int) -> WorkflowSpec:
                 _ = value
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         node_a = TaskNode(fn=fn_a)
         child_node = SubWorkflowNode(
@@ -1487,15 +1447,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_missing_required')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app, *, source: str) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
@@ -1515,15 +1472,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_invalid_kwargs')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app, *, source: str) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
@@ -1544,15 +1498,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_invalid_args_from')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app, *, source: str) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         node_a = TaskNode(fn=fn_a)
         child_node = SubWorkflowNode(
@@ -1576,8 +1527,7 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_type_mismatch')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(
@@ -1585,8 +1535,6 @@ class TestWorkflowSpecValidation:
             ) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         node_a = TaskNode(fn=MockTaskWrapperInt(task_name='producer_int'))
         child_node = SubWorkflowNode(
@@ -1630,15 +1578,12 @@ class TestWorkflowSpecValidation:
             definition_key = _definition_key('child_kwargs_build_with')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
             @classmethod
             def build_with(cls, app, **kwargs: Any) -> WorkflowSpec:
                 _ = kwargs
                 return cls.build(app)
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
 
         child_node = SubWorkflowNode(
             workflow_def=ChildWorkflow,
@@ -2085,10 +2030,7 @@ class TestWorkflowContext:
             definition_key = _definition_key('child_result_for')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=ChildWorkflow, node_id='sub-node',
@@ -2346,8 +2288,8 @@ class TestWorkflowDefinition:
 
         assert spec.tasks[0].node_id == 'my_custom_id'
 
-    def test_meta_output_configuration(self) -> None:
-        """Meta.output sets workflow output."""
+    def test_config_output_names_a_class_body_node(self) -> None:
+        """config.output can name a node of the same class body."""
         from horsies.core.models.workflow import WorkflowDefinition
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
@@ -2356,18 +2298,13 @@ class TestWorkflowDefinition:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
 
-        # Define nodes outside class so Meta can reference them
-        fetch_node = TaskNode(fn=fn_a)
-        process_node = TaskNode(fn=fn_b, waits_for=[fetch_node])
-
         class OutputWorkflow(WorkflowDefinition):
             name = 'output_test'
             definition_key = _definition_key('output_workflow')
-            fetch = fetch_node
-            process = process_node
+            fetch = TaskNode(fn=fn_a)
+            process = TaskNode(fn=fn_b, waits_for=[fetch])
 
-            class Meta:
-                output = process_node
+            config = WorkflowDefinitionConfig(output=process)
 
         app = Horsies(
             config=AppConfig(
@@ -2382,8 +2319,8 @@ class TestWorkflowDefinition:
         assert spec.output is not None
         assert spec.output.name == 'task_b'
 
-    def test_meta_on_error_configuration(self) -> None:
-        """Meta.on_error sets error policy."""
+    def test_config_on_error_sets_error_policy(self) -> None:
+        """config.on_error sets the error policy."""
         from horsies.core.models.workflow import WorkflowDefinition
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
@@ -2396,8 +2333,7 @@ class TestWorkflowDefinition:
             definition_key = _definition_key('pause_workflow')
             fetch = TaskNode(fn=fn_a)
 
-            class Meta:
-                on_error = OnError.PAUSE
+            config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
 
         app = Horsies(
             config=AppConfig(
@@ -2593,10 +2529,7 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('int_workflow')
             produce = TaskNode(fn=fn_int)
 
-            class Meta:
-                output = None
-
-        IntWorkflow.Meta.output = IntWorkflow.produce  # type: ignore[assignment]
+            config = WorkflowDefinitionConfig(output=produce)
 
         # Should not raise
         spec = IntWorkflow.build(app)
@@ -2612,10 +2545,7 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('mismatch_workflow')
             produce = TaskNode(fn=fn_str)
 
-            class Meta:
-                output = None
-
-        MismatchWorkflow.Meta.output = MismatchWorkflow.produce  # type: ignore[assignment]
+            config = WorkflowDefinitionConfig(output=produce)
 
         with pytest.raises(WorkflowValidationError) as exc:
             MismatchWorkflow.build(app)
@@ -2635,10 +2565,7 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('untyped_workflow')
             produce = TaskNode(fn=fn_str)
 
-            class Meta:
-                output = None
-
-        UntypedWorkflow.Meta.output = UntypedWorkflow.produce  # type: ignore[assignment]
+            config = WorkflowDefinitionConfig(output=produce)
 
         # Should not raise — no generic to compare against
         spec = UntypedWorkflow.build(app)
@@ -2654,17 +2581,14 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('any_workflow')
             produce = TaskNode(fn=fn_str)
 
-            class Meta:
-                output = None
-
-        AnyWorkflow.Meta.output = AnyWorkflow.produce  # type: ignore[assignment]
+            config = WorkflowDefinitionConfig(output=produce)
 
         # Should not raise — Any is compatible with everything
         spec = AnyWorkflow.build(app)
         assert spec.output is not None
 
-    def test_concrete_output_type_requires_meta_output(self) -> None:
-        """WorkflowDefinition[int] without Meta.output is rejected."""
+    def test_concrete_output_type_requires_config_output(self) -> None:
+        """WorkflowDefinition[int] without config.output is rejected."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
@@ -2678,11 +2602,11 @@ class TestWorkflowOutputTypeMismatch:
 
         err = exc.value
         assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
-        assert 'Meta.output' in err.message
+        assert 'config.output' in err.message
         assert 'int' in err.message
 
     def test_none_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[None] may omit Meta.output."""
+        """WorkflowDefinition[None] may omit config.output."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
@@ -2695,7 +2619,7 @@ class TestWorkflowOutputTypeMismatch:
         assert spec.output is None
 
     def test_any_output_type_allows_outputless_definition(self) -> None:
-        """WorkflowDefinition[Any] may omit Meta.output as a compatibility escape hatch."""
+        """WorkflowDefinition[Any] may omit config.output as a compatibility escape hatch."""
         fn_a = MockTaskWrapper(task_name='task_a')
         app = self._make_app()
 
@@ -2722,7 +2646,7 @@ class TestWorkflowOutputTypeMismatch:
 
         err = exc.value
         assert err.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
-        assert 'Meta.output' in err.message
+        assert 'config.output' in err.message
 
     def test_subclass_compatible_output_accepted(self) -> None:
         """Subclass of declared type is compatible."""
@@ -2742,14 +2666,158 @@ class TestWorkflowOutputTypeMismatch:
             definition_key = _definition_key('subclass_workflow')
             produce = TaskNode(fn=fn_derived)
 
-            class Meta:
-                output = None
-
-        SubclassWorkflow.Meta.output = SubclassWorkflow.produce  # type: ignore[assignment]
+            config = WorkflowDefinitionConfig(output=produce)
 
         # Derived is subclass of Base — should pass
         spec = SubclassWorkflow.build(app)
         assert spec.output is not None
+
+
+# =============================================================================
+# WorkflowDefinitionConfig Tests (HRS-033)
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestWorkflowDefinitionConfig:
+    """The ``config`` class attribute and its class-creation check (HRS-033)."""
+
+    @staticmethod
+    def _make_app() -> Any:
+        from pydantic import SecretStr
+
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+
+        return Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://test:test@localhost/test'),
+                ),
+            ),
+        )
+
+    def test_no_config_gives_no_output_and_fail_policy(self) -> None:
+        """A class without config gets the default WorkflowDefinitionConfig."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class DefaultWorkflow(WorkflowDefinition[None]):
+            name = 'default_config'
+            definition_key = _definition_key('default_config')
+            fetch = TaskNode(fn=fn_a)
+
+        spec = DefaultWorkflow.build(self._make_app())
+
+        assert DefaultWorkflow.config == WorkflowDefinitionConfig()
+        assert spec.output is None
+        assert spec.on_error == OnError.FAIL
+        assert spec.success_policy is None
+
+    def test_subclass_inherits_parent_config(self) -> None:
+        """A subclass without its own config uses the parent's config."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class ParentWorkflow(WorkflowDefinition[None]):
+            name = 'parent_config'
+            definition_key = _definition_key('parent_config')
+            fetch = TaskNode(fn=fn_a)
+
+            config = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
+
+        class ChildWorkflow(ParentWorkflow):
+            name = 'child_inherits_config'
+            definition_key = _definition_key('child_inherits_config')
+            other = TaskNode(fn=fn_a)
+
+        spec = ChildWorkflow.build(self._make_app())
+
+        assert ChildWorkflow.config is ParentWorkflow.config
+        assert spec.on_error == OnError.PAUSE
+
+    def test_nested_meta_class_is_refused_at_class_creation(self) -> None:
+        """A nested class Meta raises HRS-033 when the class is created, before build()."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+
+            class OldStyleWorkflow(WorkflowDefinition[None]):
+                name = 'old_style_meta'
+                definition_key = _definition_key('old_style_meta')
+                fetch = TaskNode(fn=fn_a)
+
+                class Meta:
+                    on_error = OnError.PAUSE
+
+            _ = OldStyleWorkflow  # not reached: class creation raises
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert "OldStyleWorkflow' defines 'Meta'" in exc_info.value.message
+        assert 'config = WorkflowDefinitionConfig(...)' in exc_info.value.message
+
+    def test_meta_attribute_that_is_not_a_class_is_refused(self) -> None:
+        """Any attribute named Meta is refused, not only a nested class."""
+        from types import SimpleNamespace
+
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+
+            class NamespaceMetaWorkflow(WorkflowDefinition[None]):
+                name = 'namespace_meta'
+                definition_key = _definition_key('namespace_meta')
+                fetch = TaskNode(fn=fn_a)
+                Meta = SimpleNamespace(on_error=OnError.PAUSE)
+
+            _ = NamespaceMetaWorkflow  # not reached: class creation raises
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+
+    def test_meta_from_a_mixin_base_is_refused(self) -> None:
+        """A Meta that a non-workflow base class defines is refused too."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        class OptionsMixin:
+            class Meta:
+                on_error = OnError.PAUSE
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+
+            class MixinWorkflow(OptionsMixin, WorkflowDefinition[None]):
+                name = 'mixin_meta'
+                definition_key = _definition_key('mixin_meta')
+                fetch = TaskNode(fn=fn_a)
+
+            _ = MixinWorkflow  # not reached: class creation raises
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+
+    def test_config_that_is_not_a_definition_config_is_refused(self) -> None:
+        """config of another type raises HRS-033 at class creation and names the type."""
+        fn_a = MockTaskWrapper(task_name='task_a')
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+
+            class WrongConfigWorkflow(WorkflowDefinition[None]):
+                name = 'wrong_config'
+                definition_key = _definition_key('wrong_config')
+                fetch = TaskNode(fn=fn_a)
+
+                config = {'on_error': OnError.PAUSE}  # type: ignore[assignment]
+
+            _ = WrongConfigWorkflow  # not reached: class creation raises
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG
+        assert "sets 'config' to dict, not WorkflowDefinitionConfig" in exc_info.value.message
+
+    def test_config_is_frozen(self) -> None:
+        """WorkflowDefinitionConfig fields cannot be reassigned."""
+        from dataclasses import FrozenInstanceError
+
+        config: WorkflowDefinitionConfig[None] = WorkflowDefinitionConfig(on_error=OnError.PAUSE)
+
+        with pytest.raises(FrozenInstanceError):
+            config.on_error = OnError.FAIL  # type: ignore[misc]
 
 
 # =============================================================================
@@ -2924,10 +2992,7 @@ class TestNodeKey:
             definition_key = _definition_key('child_key_test')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
 
@@ -2945,10 +3010,7 @@ class TestNodeKey:
             definition_key = _definition_key('child_key_none')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow)
         # node_id is None by default
@@ -2975,10 +3037,7 @@ class TestSubWorkflowNode:
             definition_key = _definition_key('child_defaults')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow)
 
@@ -3002,10 +3061,7 @@ class TestSubWorkflowNode:
             definition_key = _definition_key('my_child_workflow')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow)
 
@@ -3047,10 +3103,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_summary')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
 
@@ -3101,10 +3154,8 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_pydantic_output')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
-        ChildWorkflow.Meta.output = ChildWorkflow.child
         node = SubWorkflowNode(
             workflow_def=ChildWorkflow, node_id='sub-node',
         )
@@ -3143,10 +3194,8 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_any_output')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
-        ChildWorkflow.Meta.output = ChildWorkflow.child
         node = SubWorkflowNode(
             workflow_def=ChildWorkflow, node_id='sub-node',
         )
@@ -3191,10 +3240,8 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_no_mutation')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
-        ChildWorkflow.Meta.output = ChildWorkflow.child
         node = SubWorkflowNode(
             workflow_def=ChildWorkflow, node_id='sub-node',
         )
@@ -3240,10 +3287,8 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_none_output')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
+            config = WorkflowDefinitionConfig(output=child)
 
-        ChildWorkflow.Meta.output = ChildWorkflow.child
         node = SubWorkflowNode(
             workflow_def=ChildWorkflow, node_id='sub-node',
         )
@@ -3281,10 +3326,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_summary_dump')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
         restored = WorkflowContext.model_validate(dumped)
@@ -3334,10 +3376,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_summary_json_dump')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
         restored = WorkflowContext.model_validate(dumped)
@@ -3363,10 +3402,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_no_id')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow)
         # node_id is None
@@ -3391,10 +3427,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_missing')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
 
@@ -3427,10 +3460,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_has_sum')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
 
@@ -3453,10 +3483,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_no_sum')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow, node_id='sub-node')
 
@@ -3478,10 +3505,7 @@ class TestWorkflowContextSummary:
             definition_key = _definition_key('child_no_id2')
             child = TaskNode(fn=fn_a)
 
-            class Meta:
-                output = None
-
-        ChildWorkflow.Meta.output = ChildWorkflow.child
+            config = WorkflowDefinitionConfig(output=child)
 
         node = SubWorkflowNode(workflow_def=ChildWorkflow)
 

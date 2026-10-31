@@ -48,6 +48,7 @@ from horsies.core.models.workflow.spec import WorkflowSpec
 from horsies.core.models.workflow.definition import (
     WorkflowDefinitionMeta as WorkflowDefinitionMeta,
     WorkflowDefinition,
+    WorkflowDefinitionConfig,
 )
 
 # Backward compatibility: re-export WorkflowValidationError
@@ -92,6 +93,7 @@ __all__ = [
     'WorkflowSpec',
     # definition
     'WorkflowDefinition',
+    'WorkflowDefinitionConfig',
     'WorkflowDefinitionMeta',
     # errors
     'WorkflowValidationError',

@@ -765,7 +765,7 @@ class TestValidateWorkflowGenericOutputMatch:
                 validate_workflow_generic_output_match(mock_cls, mock_spec)
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH
-        assert "Meta.output" in exc_info.value.message
+        assert "config.output" in exc_info.value.message
         assert "WorkflowDefinition[int]" in exc_info.value.message
 
     def test_unresolvable_declared_type_skips_validation(self) -> None:

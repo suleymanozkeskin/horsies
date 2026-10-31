@@ -139,31 +139,28 @@ process_node = TaskNode(
 
 ### In WorkflowDefinition
 
-Define nodes at module level to reference in `Meta.output`:
+`config` can name the nodes of the same class body:
 
 ```python
-from horsies import WorkflowDefinition, OnError
-
-_score_a = compute_score.node(node_id='score_a')(
-    user_id='user-1',
-    base_score=100,
-)
-
-_score_b = compute_score.node(node_id='score_b')(
-    user_id='user-2',
-    base_score=80,
-)
+from horsies import WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
 class ScoreWorkflow(WorkflowDefinition[int]):
     name = 'score_workflow'
     definition_key = 'myapp.score_workflow.v1'
 
-    score_a = _score_a
-    score_b = _score_b
+    score_a = compute_score.node(node_id='score_a')(
+        user_id='user-1',
+        base_score=100,
+    )
+    score_b = compute_score.node(node_id='score_b')(
+        user_id='user-2',
+        base_score=80,
+    )
 
-    class Meta:
-        output = _score_b
-        on_error = OnError.FAIL
+    config = WorkflowDefinitionConfig(
+        output=score_b,
+        on_error=OnError.FAIL,
+    )
 ```
 
 ## Things to Avoid
