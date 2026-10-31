@@ -9,7 +9,10 @@
     "tests/unit/test_task_send_variants.py",
     "tests/typing/broker_error_variant_pin.py",
     "horsies/core/brokers/result_types.py",
-    "tests/unit/test_broker_error_variants.py"
+    "tests/unit/test_broker_error_variants.py",
+    "tests/typing/workflow_start_variant_pin.py",
+    "horsies/core/workflows/start_types.py",
+    "tests/unit/test_workflow_start_variants.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

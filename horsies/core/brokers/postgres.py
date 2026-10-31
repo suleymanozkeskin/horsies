@@ -165,7 +165,7 @@ def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed
 
 def _loop_limit_err(
     operation: str, loop_limit: EventLoopLimit,
-) -> Err[BrokerOperationError]:
+) -> Err[BrokerEventLoopLimit]:
     """Build the broker error for the event loop limit. Nothing ran."""
     return Err(
         BrokerEventLoopLimit(
@@ -1849,14 +1849,18 @@ class PostgresBroker:
         await self._run_with_schema_engine(resources, self._maybe_run_schema_init)
         self._initialized = True
 
-    async def ensure_schema_initialized(self) -> BrokerResult[None]:
+    async def ensure_schema_initialized(
+        self,
+    ) -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit]:
         """
         Public entry point to ensure tables and triggers exist.
 
         Safe to call multiple times and from multiple processes; internally
         guarded by a PostgreSQL advisory lock to avoid DDL races.
 
-        Returns Ok(None) on success, Err(BrokerOperationError) on failure.
+        Returns Ok(None) on success. On failure: ``BrokerOperationFailed``
+        with ``SCHEMA_INIT_FAILED`` and its cause, or ``BrokerEventLoopLimit``
+        when the call ran on one loop more than the broker's limit.
         """
         match await self.select_resources():
             case Err(loop_limit):

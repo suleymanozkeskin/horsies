@@ -36,9 +36,11 @@ Where Result stops and exceptions take over (the "stop line"):
 
 * **Workflow start** (``start_workflow_async``, ``start_workflow``) --
   returns ``WorkflowStartResult`` (see ``start_types.py``).  A schema
-  init ``Err`` becomes ``WorkflowStartError(ENQUEUE_FAILED)`` with the
-  ``retryable`` flag and the cause of the broker error.  A sync runner
-  failure maps to ``LOOP_RUNNER_FAILED``; any other exception propagates.
+  init ``BrokerOperationFailed`` becomes ``WorkflowStartEnqueueFailed``
+  with the ``retryable`` flag and the cause of the broker error; a
+  ``BrokerEventLoopLimit`` becomes ``WorkflowStartEventLoopLimit``.  A
+  sync runner failure maps to ``WorkflowStartLoopRunnerFailed``; any other
+  exception propagates.
 
 * **User-facing API** (``TaskHandle.info`` / ``info_async``) -- returns
   ``BrokerResult`` directly.  The user decides how to handle

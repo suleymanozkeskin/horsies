@@ -43,7 +43,10 @@ from horsies.core.workflows.lifecycle import (
     resume_workflow,
     start_workflow_async,
 )
-from horsies.core.workflows.start_types import WorkflowStartErrorCode
+from horsies.core.workflows.start_types import (
+    WorkflowStartErrorCode,
+    WorkflowStartEventLoopLimit,
+)
 from horsies.web.routes.actions import _task_action_failed
 from tests.broker_resources_support import attach_loop_limit
 
@@ -153,7 +156,7 @@ def test_start_workflow_returns_loop_limit_before_any_attempt() -> None:
     spec.workflow_def_cls = None
     broker = MagicMock()
     broker.ensure_schema_initialized = AsyncMock()
-    attach_loop_limit(broker)
+    loop_limit = attach_loop_limit(broker)
 
     result = asyncio.run(start_workflow_async(spec, broker, WORKFLOW_ID))
 
@@ -161,6 +164,8 @@ def test_start_workflow_returns_loop_limit_before_any_attempt() -> None:
     assert result.err_value.code is WorkflowStartErrorCode.EVENT_LOOP_LIMIT
     assert result.err_value.retryable is False
     assert result.err_value.workflow_id == WORKFLOW_ID
+    assert isinstance(result.err_value, WorkflowStartEventLoopLimit)
+    assert result.err_value.loop_limit is loop_limit
     broker.ensure_schema_initialized.assert_not_awaited()
 
 

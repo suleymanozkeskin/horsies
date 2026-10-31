@@ -22,7 +22,10 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.task_decorator import from_node
 from horsies.core.workflows.engine import on_workflow_task_complete
-from horsies.core.workflows.start_types import WorkflowStartErrorCode
+from horsies.core.workflows.start_types import (
+    WorkflowStartErrorCode,
+    WorkflowStartIdConflict,
+)
 from horsies.core.types.result import is_err
 
 from .conftest import (
@@ -559,7 +562,7 @@ class TestWorkflowStart:
         )
         assert task_count.scalar() == 1
 
-    async def test_duplicate_workflow_id_with_different_name_fails_validation(
+    async def test_duplicate_workflow_id_with_different_name_is_an_id_conflict(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
@@ -584,7 +587,9 @@ class TestWorkflowStart:
         second_start = await second.start_async(custom_id)
 
         assert is_err(second_start)
-        assert second_start.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
+        assert isinstance(second_start.err_value, WorkflowStartIdConflict)
+        assert second_start.err_value.code == WorkflowStartErrorCode.WORKFLOW_ID_CONFLICT
+        assert second_start.err_value.existing_workflow_name == 'idempotent_name_guard_first'
         assert custom_id in second_start.err_value.message
 
     async def test_concurrent_duplicate_workflow_id_returns_existing_handle(

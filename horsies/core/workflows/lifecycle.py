@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from collections import deque
 from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
+from psycopg import Error as PsycopgError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -37,8 +38,10 @@ from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
-from horsies.core.brokers.result_types import broker_error_cause
-from horsies.core.types.error_detail import NoCause
+from horsies.core.brokers.result_types import (
+    BrokerEventLoopLimit,
+    BrokerOperationFailed,
+)
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     TaskNode,
@@ -56,9 +59,13 @@ from horsies.core.models.workflow.handle_types import (
     HandleResult,
 )
 from horsies.core.workflows.start_types import (
-    WorkflowStartError,
-    WorkflowStartErrorCode,
+    WorkflowStartAsyncContext,
+    WorkflowStartEnqueueFailed,
+    WorkflowStartEventLoopLimit,
+    WorkflowStartIdConflict,
+    WorkflowStartLoopRunnerFailed,
     WorkflowStartResult,
+    WorkflowStartValidationFailed,
 )
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from horsies.core.workflows.retention import queue_retention_class
@@ -213,6 +220,18 @@ def root_retry_and_deadline(
     return max_retries, good_until_str, good_until_dt
 
 
+def _start_loop_limit(
+    workflow_name: str, workflow_id: str, loop_limit: EventLoopLimit,
+) -> WorkflowStartEventLoopLimit:
+    """Build the start error for the event loop limit. Nothing was written."""
+    return WorkflowStartEventLoopLimit(
+        message=f'start of workflow {workflow_name!r}: {loop_limit.describe()}',
+        workflow_name=workflow_name,
+        workflow_id=workflow_id,
+        loop_limit=loop_limit,
+    )
+
+
 async def start_workflow_async(
     spec: 'WorkflowSpec[OutT]',
     broker: 'PostgresBroker',
@@ -236,8 +255,9 @@ async def start_workflow_async(
 
     Returns:
         ``Ok(WorkflowHandle)`` on success.
-        ``Err(WorkflowStartError)`` on failure, with ``code`` and ``retryable``
-        fields for programmatic handling.
+        ``Err(WorkflowStartError)`` on failure; match on the variant. A
+        database or driver error is ``WorkflowStartEnqueueFailed``. Any other
+        exception from the start transaction is a defect and propagates.
 
     Notes:
         If workflow_id is provided and already exists, returns existing handle
@@ -299,19 +319,15 @@ async def start_workflow_async(
     except asyncio.CancelledError:
         raise
     except (WorkflowValidationError, MultipleValidationErrors, ValueError) as exc:
-        return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.VALIDATION_FAILED,
+        return Err(WorkflowStartValidationFailed(
             message=str(exc),
-            retryable=False,
             workflow_name=spec.name,
             workflow_id=wf_id,
             exception=exc,
         ))
     except SerializationError as exc:
-        return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.VALIDATION_FAILED,
+        return Err(WorkflowStartValidationFailed(
             message=str(exc),
-            retryable=False,
             workflow_name=spec.name,
             workflow_id=wf_id,
             exception=exc,
@@ -322,18 +338,12 @@ async def start_workflow_async(
 
     match await broker.select_resources():
         case Err(loop_limit):
-            return Err(WorkflowStartError(
-                code=WorkflowStartErrorCode.EVENT_LOOP_LIMIT,
-                message=f'start of workflow {spec.name!r}: {loop_limit.describe()}',
-                retryable=False,
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-            ))
+            return Err(_start_loop_limit(spec.name, wf_id, loop_limit))
         case Ok(resources):
             pass
 
     max_attempts = 1 + (_START_RETRY_COUNT if resend_on_transient_err else 0)
-    last_err: WorkflowStartError | None = None
+    last_err: WorkflowStartEnqueueFailed | None = None
 
     for attempt in range(max_attempts):
         if attempt > 0 and last_err is not None:
@@ -346,22 +356,21 @@ async def start_workflow_async(
         # ── Schema init ──────────────────────────────────────────────
         init_result = await broker.ensure_schema_initialized()
         if is_err(init_result):
-            broker_err = init_result.err_value
-            # The start catalog stores no cause as None.
-            schema_cause: BaseException | None
-            match broker_error_cause(broker_err):
-                case NoCause():
-                    schema_cause = None
-                case exception:
-                    schema_cause = exception
-            last_err = WorkflowStartError(
-                code=WorkflowStartErrorCode.ENQUEUE_FAILED,
-                message=f'Schema initialization failed: {broker_err.message}',
-                retryable=broker_err.retryable,
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                exception=schema_cause,
-            )
+            match init_result.err_value:
+                case BrokerOperationFailed(
+                    message=message, retryable=retryable, exception=cause,
+                ):
+                    last_err = WorkflowStartEnqueueFailed(
+                        message=f'Schema initialization failed: {message}',
+                        retryable=retryable,
+                        workflow_name=spec.name,
+                        workflow_id=wf_id,
+                        exception=cause,
+                    )
+                case BrokerEventLoopLimit(loop_limit=loop_limit):
+                    return Err(_start_loop_limit(spec.name, wf_id, loop_limit))
+                case _ as unreachable:
+                    assert_never(unreachable)
             if last_err.retryable and attempt < max_attempts - 1:
                 continue
             return Err(last_err)
@@ -413,16 +422,15 @@ async def start_workflow_async(
                     existing_name_row = existing_name_result.fetchone()
                     existing_name = existing_name_row.name if existing_name_row else None
                     if existing_name is not None and existing_name != spec.name:
-                        return Err(WorkflowStartError(
-                            code=WorkflowStartErrorCode.VALIDATION_FAILED,
+                        return Err(WorkflowStartIdConflict(
                             message=(
                                 f"workflow_id '{wf_id}' already exists for workflow "
                                 f"name '{existing_name}', cannot start workflow "
                                 f"name '{spec.name}' with the same id"
                             ),
-                            retryable=False,
                             workflow_name=spec.name,
                             workflow_id=wf_id,
+                            existing_workflow_name=existing_name,
                         ))
                     logger.warning(
                         f'Workflow {wf_id} already exists, returning existing handle'
@@ -742,27 +750,24 @@ async def start_workflow_async(
             raise
         except SerializationError as exc:
             # Deterministic — never retry.
-            return Err(WorkflowStartError(
-                code=WorkflowStartErrorCode.VALIDATION_FAILED,
+            return Err(WorkflowStartValidationFailed(
                 message=str(exc),
-                retryable=False,
                 workflow_name=spec.name,
                 workflow_id=wf_id,
                 exception=exc,
             ))
         except ValueError as exc:
             # guard_no_positional_args — deterministic, never retry.
-            return Err(WorkflowStartError(
-                code=WorkflowStartErrorCode.VALIDATION_FAILED,
+            return Err(WorkflowStartValidationFailed(
                 message=str(exc),
-                retryable=False,
                 workflow_name=spec.name,
                 workflow_id=wf_id,
                 exception=exc,
             ))
-        except Exception as exc:
-            last_err = WorkflowStartError(
-                code=WorkflowStartErrorCode.ENQUEUE_FAILED,
+        except (SQLAlchemyError, PsycopgError) as exc:
+            # A database or driver error. Any other exception is a defect
+            # and propagates.
+            last_err = WorkflowStartEnqueueFailed(
                 message=f'{type(exc).__name__}: {exc}',
                 retryable=is_retryable_connection_error(exc),
                 workflow_name=spec.name,
@@ -787,16 +792,11 @@ async def start_workflow_async(
             ),
         ))
 
-    # Exhausted all attempts (should not reach here, but satisfy type checker).
-    if last_err is not None:
-        return Err(last_err)
-    return Err(WorkflowStartError(
-        code=WorkflowStartErrorCode.ENQUEUE_FAILED,
-        message='Exhausted retry attempts',
-        retryable=False,
-        workflow_name=spec.name,
-        workflow_id=wf_id,
-    ))
+    # Unreachable: max_attempts >= 1, and the last attempt returns.
+    assert last_err is not None, (
+        'start attempt loop ended without a failed attempt'
+    )
+    return Err(last_err)
 
 
 def start_workflow(
@@ -816,7 +816,8 @@ def start_workflow(
     ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
     as from ``start_workflow_async()``.
     On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    writes nothing; ``retry_start`` does not accept that error.
+    writes nothing; ``retry_start_async(err)`` completes the start with the
+    error's id.
     ``WorkflowSpec.start()`` and ``retry_start()`` check first, so their
     message names their own async form.
 
@@ -838,13 +839,11 @@ def start_workflow(
 
     wf_id = workflow_id or str(uuid.uuid4())
     if in_running_event_loop():
-        return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.ASYNC_CONTEXT,
+        return Err(WorkflowStartAsyncContext(
             message=async_context_message(
                 f'start_workflow() of workflow {spec.name!r}',
                 'start_workflow_async(...)',
             ),
-            retryable=False,
             workflow_name=spec.name,
             workflow_id=wf_id,
         ))
@@ -859,10 +858,8 @@ def start_workflow(
             resend_on_transient_err=resend_on_transient_err,
         )
     except LoopRunnerError as exc:
-        return Err(WorkflowStartError(
-            code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+        return Err(WorkflowStartLoopRunnerFailed(
             message=f'Loop runner failed for start_workflow(): {exc}',
-            retryable=False,
             workflow_name=spec.name,
             workflow_id=wf_id,
             exception=exc,
