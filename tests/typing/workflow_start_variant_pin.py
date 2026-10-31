@@ -10,15 +10,12 @@ match, or a field on the wrong variant fails the check.
 
 from __future__ import annotations
 
-from typing import assert_never
-
 from horsies import (
     NoCause,
     WorkflowSpec,
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
     WorkflowStartEnqueueFailed,
-    WorkflowStartError,
     WorkflowStartEventLoopLimit,
     WorkflowStartIdConflict,
     WorkflowStartLoopRunnerFailed,
@@ -93,13 +90,3 @@ def existing_name_only_on_the_conflict(
 ) -> None:
     _ = conflict.existing_workflow_name
     _ = validation_failed.existing_workflow_name  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-
-
-def every_variant_is_matched(error: WorkflowStartError) -> str:
-    match error:
-        case WorkflowStartEnqueueFailed() | WorkflowStartLoopRunnerFailed():
-            return 'retry'
-        case WorkflowStartValidationFailed() | WorkflowStartIdConflict():
-            return 'refused'
-        case _ as unreachable:
-            assert_never(unreachable)  # pyright: ignore[reportArgumentType]

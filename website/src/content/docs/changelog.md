@@ -43,6 +43,43 @@ there is no migration contract between pre-1.0 versions.
   `BrokerOperationError(code=..., ...)` in tests becomes a variant
   constructor. `isinstance(err, BrokerOperationError)` is not valid on a
   type alias; match on the variants.
+- **Breaking: `WorkflowStartError` is a union of frozen variants, one per
+  `WorkflowStartErrorCode` member.** Every variant has `code`, `message`,
+  `retryable`, `workflow_name` and `workflow_id`. Code that reads
+  `err.exception` must match on the variant first; pyright reports each
+  site. `exception` is `BaseException` on `WorkflowStartEnqueueFailed` and
+  `WorkflowStartLoopRunnerFailed`, and `BaseException | NoCause` on
+  `WorkflowStartValidationFailed`; the other variants have no cause.
+  `WorkflowStartError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, WorkflowStartError)` is not valid on a type
+  alias; match on the variants.
+- **New code `WorkflowStartErrorCode.WORKFLOW_ID_CONFLICT`.** A start whose
+  workflow id exists for another workflow name returns
+  `WorkflowStartIdConflict`, with the other name in
+  `existing_workflow_name`. Nothing was written; use another id. Before, it
+  returned `VALIDATION_FAILED`. An exhaustive `match` on
+  `WorkflowStartErrorCode` needs a case for it.
+- **Breaking: `retry_start()` and `retry_start_async()` take
+  `WorkflowStartRetryable`.** It is `WorkflowStartEnqueueFailed |
+  WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed`; each carries
+  the id of its start, and the retry starts again with that id. Another
+  variant is a type error, and at run time it fails an assertion that
+  names the variant. Before, the retry methods took every code and
+  returned `VALIDATION_FAILED` for a code other than `ENQUEUE_FAILED`. An
+  error of another workflow still returns `VALIDATION_FAILED`.
+- **Breaking: a defect in the workflow start transaction propagates.** The
+  start transaction catches only `sqlalchemy.exc.SQLAlchemyError` and
+  `psycopg.Error`, and returns them as `WorkflowStartEnqueueFailed`. Any
+  other exception propagates. Before, the start returned every exception
+  as `ENQUEUE_FAILED`.
+- **An event loop limit at schema initialization returns
+  `EVENT_LOOP_LIMIT`.** Before, a workflow start returned it as
+  `ENQUEUE_FAILED`, which `retry_start()` accepted.
+- **`PostgresBroker.ensure_schema_initialized()` returns
+  `Result[None, BrokerOperationFailed | BrokerEventLoopLimit]`**, its only
+  failures. The run-time behavior does not change. A `match` on its error
+  with an arm for another broker variant fails strict pyright
+  (`reportUnnecessaryComparison`); remove that arm.
 - **New broker codes `INVALID_INPUT` and `LISTENER_DISABLED`.** An
   exhaustive `match` on `BrokerErrorCode` needs a case for each. These
   failures move to them:
@@ -190,8 +227,8 @@ there is no migration contract between pre-1.0 versions.
     `results()`, `tasks()`, `cancel()`, `pause()` and `resume()`, and for
     `pause_workflow_sync()` / `resume_workflow_sync()`.
   - `WorkflowStartErrorCode` for `spec.start()` and `spec.retry_start()`.
-    `retry_start()` does not accept `ASYNC_CONTEXT`; call
-    `await spec.start_async()`.
+    `await spec.retry_start_async(err)` completes that start with the
+    error's workflow id.
 
   `send()`, `schedule()` and their sync retries already returned
   `TaskSendErrorCode.ASYNC_CONTEXT`. A broker `ASYNC_CONTEXT` that reaches

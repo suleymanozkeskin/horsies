@@ -293,6 +293,7 @@ class TestNonRetryableErrorsNoRetry:
         result = await start_workflow_async(spec, broker, WORKFLOW_ID)
 
         assert is_err(result)
+        assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
         assert result.err_value.exception is broker_error.exception
 
     @pytest.mark.asyncio

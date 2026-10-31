@@ -23,8 +23,8 @@ Use this page for the exact method signatures and return types used by workflows
 | `.resend_on_transient_err` | `bool` | Auto-retry transient start errors (default `False`) |
 | `.start(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (sync) |
 | `.start_async(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (async) |
-| `.retry_start(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
-| `.retry_start_async(error)` | `(WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
+| `.retry_start(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
+| `.retry_start_async(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
 
 ### Module-Level Start Functions
 
@@ -58,18 +58,23 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | Outcome | Type | Description |
 |---|---|---|
 | Success | `Ok(WorkflowHandle[T])` | Workflow created and root tasks enqueued |
-| Failure | `Err(WorkflowStartError)` | Start failed with categorized error |
+| Failure | `Err(WorkflowStartError)` | Start failed; match on the variant |
 
-**WorkflowStartError fields:**
+**WorkflowStartError variants:**
 
-| Field | Type | Description |
-|---|---|---|
-| `code` | `WorkflowStartErrorCode` | Failure category |
-| `message` | `str` | Human-readable description |
-| `retryable` | `bool` | Whether caller can safely retry |
-| `workflow_name` | `str` | Workflow spec name |
-| `workflow_id` | `str` | Generated workflow ID (always populated) |
-| `exception` | `BaseException \| None` | Original cause |
+`WorkflowStartError` is a union with one frozen variant per `WorkflowStartErrorCode` member. Every variant has `code`, `message`, `retryable`, `workflow_name` and `workflow_id`. `workflow_id` is the id that this start used: the caller's id, or the id minted for the start. `message` and the cause do not show in `repr()`.
+
+| Variant | `code` | Other fields | `retryable` | After the failure |
+|---|---|---|---|---|
+| `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` | Nothing ran |
+| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
+| `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | Driver classification of the cause | Rolled back, or the commit outcome is unknown |
+| `WorkflowStartLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
+| `WorkflowStartEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing written |
+| `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
+
+`NoCause()` means that a check refused the input without a Python exception. Match on `exception` before `raise ... from`.
 
 **WorkflowStartErrorCode values:**
 
@@ -77,16 +82,19 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
-| `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.start_async()` or use a new broker |
+| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
+| `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
+| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
-| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.start_async()`; `retry_start()` does not accept this code |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
+
+`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
 
 **Usage:**
 
 ```python
-from horsies import Ok, Err
+from horsies import Ok, Err, WorkflowStartEnqueueFailed
 
 match spec.start():
     case Ok(handle):
@@ -96,7 +104,7 @@ match spec.start():
         else:
             print(f"Task failed: {result.err_value.error_code}")
 
-    case Err(err) if err.retryable:
+    case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
         # Transient infra failure — retry with stored workflow_id
         match spec.retry_start(err):
             case Ok(handle):
