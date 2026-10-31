@@ -73,6 +73,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 
 **WorkflowStartErrorCode values:**
 
+<!-- members: WorkflowStartErrorCode -->
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
@@ -203,6 +204,7 @@ def build_regional_pipeline(region: str) -> WorkflowSpec:
 
 **Errors:**
 
+<!-- members: ErrorCode subset -->
 | Code | When |
 |------|------|
 | HRS-027 | Parameterized builder missing `cases=` |

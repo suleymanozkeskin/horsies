@@ -120,6 +120,7 @@ WeeklySchedule(
 
 Weekday values:
 
+<!-- members: Weekday -->
 - `Weekday.MONDAY`
 - `Weekday.TUESDAY`
 - `Weekday.WEDNESDAY`

@@ -79,10 +79,12 @@ not authentication). Implement the protocol to delegate to a host session/RBAC.
 The monitoring layer NEVER executes DDL. Brokers it constructs skip schema
 migrations; instead the stored schema version is probed (cached 60 s):
 
+<!-- members: SchemaState -->
 | State | Meaning | Reads | Actions |
 |---|---|---|---|
 | `MATCH` | stored == expected | served | allowed (policy permitting) |
 | `MISMATCH` | version differs | served | 409 `SCHEMA_INCOMPATIBLE`, server-side |
+| `CUTOVER_REQUIRED` | stored == expected, but the offline task-history cutover is not complete | served | 409 `SCHEMA_INCOMPATIBLE`, server-side |
 | `ABSENT` | a successful probe found no horsies schema | — | refused; the tool never initializes a database |
 | `UNKNOWN` | the probe has never succeeded (unreachable DB) | — | refused (`SCHEMA_UNKNOWN`); never conflated with ABSENT |
 

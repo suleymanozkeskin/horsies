@@ -204,6 +204,7 @@ class WorkflowStartError:
 
 ### WorkflowStartErrorCode
 
+<!-- members: WorkflowStartErrorCode -->
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
@@ -319,6 +320,7 @@ class HandleOperationError:
     exception: BaseException | None = None
 ```
 
+<!-- members: HandleErrorCode -->
 | Code | Retryable | When |
 |---|---|---|
 | `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
@@ -489,6 +491,7 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 
 ### `allow_failed_deps`
 
+<!-- members: WorkflowTaskStatus subset -->
 | Upstream state | `allow_failed_deps=False` | `allow_failed_deps=True` |
 |---|---|---|
 | COMPLETED | Runs normally | Runs normally |
@@ -533,6 +536,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 
 ## Validation Errors (HRS-001–HRS-033)
 
+<!-- members: ErrorCode subset -->
 | Code | Name | Trigger |
 |---|---|---|
 | HRS-001 | `WORKFLOW_NO_NAME` | Missing `name` |

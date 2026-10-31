@@ -12,7 +12,8 @@
     "tests/unit/test_broker_error_variants.py",
     "tests/typing/workflow_start_variant_pin.py",
     "horsies/core/workflows/start_types.py",
-    "tests/unit/test_workflow_start_variants.py"
+    "tests/unit/test_workflow_start_variants.py",
+    "tests/unit/test_docs_enum_lists.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }
