@@ -136,9 +136,9 @@ class LoopRunner:
             loop = self._loop
             if self._closed or not self._started or loop is None:
                 raise LoopRunnerError('Loop runner is not running')
-        self.logger.debug(
-            f'Calling {coro_fn.__name__} with args: {args} and kwargs: {kwargs}'
-        )
+        # The arguments are not logged: a sync send passes the task's
+        # serialized kwargs through here.
+        self.logger.debug('Calling %s', coro_fn.__name__)
         coro: Awaitable[Any] | None = None
         try:
             coro = coro_fn(*args, **kwargs)

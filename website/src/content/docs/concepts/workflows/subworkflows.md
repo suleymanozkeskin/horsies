@@ -25,7 +25,7 @@ Workflows provide:
 ### 2.1 Class-Based Definition (Recommended)
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, TaskNode, TaskResult, TaskError, JsonValue
+from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, TaskResult, TaskError, JsonValue
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
@@ -72,15 +72,17 @@ class DataPipeline(WorkflowDefinition[bool]):
         args_from={"transformed": transform},
     )
 
-    class Meta:
-        output = store  # Workflow result comes from this node
+    config = WorkflowDefinitionConfig(
+        output=store,  # Workflow result comes from this node
+    )
 ```
 
 **Key points:**
 - `name` is required and must be unique
 - `definition_key` is required — a stable string key used for persistence and runtime lookup (e.g. `"myapp.data_pipeline.v1"`)
 - Nodes are class attributes (order doesn't matter, DAG is built from `waits_for`)
-- `Meta.output` defines which node's result becomes the workflow result
+- `config = WorkflowDefinitionConfig(output=...)` names the node whose result becomes the workflow result. The class body can name its own nodes there
+- A `Meta` attribute (the earlier nested `class Meta` form), or a `config` that is not a `WorkflowDefinitionConfig`, raises `HRS-033` when the class is created
 
 For type-safe node construction with static arguments, see [Typed Node Builder](typed-node-builder).
 
@@ -142,8 +144,7 @@ class DiamondDAG(WorkflowDefinition[str]):
     c = TaskNode(fn=task_c, waits_for=[a])
     d = TaskNode(fn=task_d, waits_for=[b, c])  # Waits for BOTH b and c
 
-    class Meta:
-        output = d
+    config = WorkflowDefinitionConfig(output=d)
 ```
 
 **Important**: `waits_for` means "wait for completion", not "require success".
@@ -184,8 +185,7 @@ class MathWorkflow(WorkflowDefinition[int]):
         kwargs={"factor": 10},
     )
 
-    class Meta:
-        output = multiply_node
+    config = WorkflowDefinitionConfig(output=multiply_node)
 ```
 
 **The injected value is always `TaskResult[T, TaskError]`**, not the raw value.
@@ -232,8 +232,7 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
         workflow_ctx_from=[node_a, node_b],  # Both results available in context
     )
 
-    class Meta:
-        output = agg
+    config = WorkflowDefinitionConfig(output=agg)
 ```
 
 **Rules:**
@@ -268,8 +267,7 @@ class ChildPipeline(WorkflowDefinition[int]):
     step1 = TaskNode(fn=produce_int, kwargs={'value': 5})
     step2 = TaskNode(fn=double, waits_for=[step1], args_from={"value": step1})
 
-    class Meta:
-        output = step2
+    config = WorkflowDefinitionConfig(output=step2)
 
 
 # Parent workflow
@@ -279,8 +277,9 @@ class ParentWorkflow(WorkflowDefinition[int]):
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
 
-    class Meta:
-        output = child  # Parent result = child workflow result
+    config = WorkflowDefinitionConfig(
+        output=child,  # Parent result = child workflow result
+    )
 ```
 
 **Lifecycle mapping:**
@@ -324,9 +323,6 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
             tasks=[fetch, clean, process],
             output=process,
         )
-
-    class Meta:
-        output = None  # Set dynamically in build_with
 ```
 
 :::note[Queue and priority binding]
@@ -371,8 +367,7 @@ class MultiSourceAggregation(WorkflowDefinition[Report]):
         args_from={"result1": source1, "result2": source2},
     )
 
-    class Meta:
-        output = aggregate
+    config = WorkflowDefinitionConfig(output=aggregate)
 ```
 
 ### 6.4 Accessing Subworkflow Health: SubWorkflowSummary
@@ -416,8 +411,7 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
         allow_failed_deps=True,     # Run even if child fails
     )
 
-    class Meta:
-        output = reporter
+    config = WorkflowDefinitionConfig(output=reporter)
 ```
 
 **SubWorkflowSummary fields:**
@@ -462,12 +456,11 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
         args_from={"child_result": child},  # Receives TaskResult[ChildOutput, TaskError]
     )
 
-    class Meta:
-        output = processor
+    config = WorkflowDefinitionConfig(output=processor)
 ```
 
 Outputless child workflows are orchestration-only when used through
-`SubWorkflowNode`. If a `WorkflowDefinition` has no `Meta.output`, declare it
+`SubWorkflowNode`. If a `WorkflowDefinition` has no `config.output`, declare it
 as `WorkflowDefinition[None]`; the parent node receives `TaskResult[None,
 TaskError]` with `ok=None` when the child completes. The terminal-results map
 returned by a top-level outputless `app.workflow(...).get()` is not exposed as
@@ -517,8 +510,7 @@ class RecoveryWorkflow(WorkflowDefinition[Data]):
         allow_failed_deps=True,  # Run even if primary fails
     )
 
-    class Meta:
-        output = recovery
+    config = WorkflowDefinitionConfig(output=recovery)
 ```
 
 ### 7.3 Workflow-Level Error Policy: `on_error`
@@ -526,17 +518,18 @@ class RecoveryWorkflow(WorkflowDefinition[Data]):
 Control what happens when any task fails:
 
 ```python
-from horsies import OnError
+from horsies import OnError, WorkflowDefinitionConfig
 
-# Set on_error in the WorkflowDefinition's Meta class
+# Set on_error in the WorkflowDefinition's config
 class MyWorkflow(WorkflowDefinition[OutputType]):
     name = "my_workflow"
     definition_key = "myapp.my_workflow.v1"
     # ... nodes ...
 
-    class Meta:
-        output = some_node
-        on_error = OnError.PAUSE  # default is OnError.FAIL
+    config = WorkflowDefinitionConfig(
+        output=some_node,
+        on_error=OnError.PAUSE,  # default is OnError.FAIL
+    )
 ```
 
 | Policy | Behavior |
@@ -644,14 +637,15 @@ class DeliveryWorkflow(WorkflowDefinition[str]):
     deliver_neighbor = TaskNode(fn=deliver_to_neighbor, waits_for=[pickup])
     deliver_locker = TaskNode(fn=deliver_to_locker, waits_for=[pickup])
 
-    class Meta:
-        output = deliver_door
+    config = WorkflowDefinitionConfig(
+        output=deliver_door,
         # Workflow succeeds if ANY delivery method works
-        success_policy = SuccessPolicy(cases=[
+        success_policy=SuccessPolicy(cases=[
             SuccessCase(required=[deliver_door]),
             SuccessCase(required=[deliver_neighbor]),
             SuccessCase(required=[deliver_locker]),
-        ])
+        ]),
+    )
 ```
 
 **Evaluation**: Cases are checked in order. First satisfied case determines success.
@@ -864,6 +858,7 @@ from horsies import (
     AppConfig,
     PostgresConfig,
     WorkflowDefinition,
+    WorkflowDefinitionConfig,
     TaskNode,
     SubWorkflowNode,
     TaskResult,
@@ -972,9 +967,6 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
             output=process,
         )
 
-    class Meta:
-        output = None  # Dynamic
-
 
 # --- Parent Workflow: Multi-Source Aggregation ---
 
@@ -1010,12 +1002,13 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
     source2 = source2_node
     aggregate = aggregate_node
 
-    class Meta:
-        output = aggregate
+    config = WorkflowDefinitionConfig(
+        output=aggregate,
         # Success if aggregation completes (even with partial data)
-        success_policy = SuccessPolicy(cases=[
+        success_policy=SuccessPolicy(cases=[
             SuccessCase(required=[aggregate]),
-        ])
+        ]),
+    )
 
 
 # --- Usage ---

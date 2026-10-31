@@ -56,6 +56,37 @@ there is no migration contract between pre-1.0 versions.
   `ValidationError` with the type `extra_forbidden` for a key that is not a
   field. Before, the key was dropped with no error. Remove or correct the
   key.
+- **Breaking: a `WorkflowDefinition` sets its options with `config =
+  WorkflowDefinitionConfig(...)`, not a nested `class Meta`.** A class that
+  defines `Meta`, or sets `config` to a value of another type, raises
+  `WorkflowValidationError` with `HRS-033` when the class is created. A
+  nested class body cannot name the nodes of the enclosing class, so the
+  documented `class Meta: output = save` raised `NameError`, and working
+  code set `Meta.output` after the class. Before:
+
+  ```python
+  class Pipeline(WorkflowDefinition[SaveResult]):
+      name = 'pipeline'
+      definition_key = 'myapp.pipeline.v1'
+      save = TaskNode(fn=save_result)
+
+      class Meta:
+          output = None
+          on_error = OnError.FAIL
+
+  Pipeline.Meta.output = Pipeline.save
+  ```
+
+  After:
+
+  ```python
+  class Pipeline(WorkflowDefinition[SaveResult]):
+      name = 'pipeline'
+      definition_key = 'myapp.pipeline.v1'
+      save = TaskNode(fn=save_result)
+
+      config = WorkflowDefinitionConfig(output=save, on_error=OnError.FAIL)
+  ```
 - **Breaking: a sync method returns an `Err` only for a failure of the
   broker's sync runner; every other exception propagates.** This covers the
   sync methods of `PostgresBroker` and `Horsies`, the sync `WorkflowHandle`
@@ -215,6 +246,16 @@ there is no migration contract between pre-1.0 versions.
   `HourlySchedule`, `DailySchedule`, `WeeklySchedule`, `MonthlySchedule`,
   `CronSchedule` and its field and day models). `TaskSchedule` already
   refused unknown keys.
+- **`WorkflowDefinitionConfig` is a new export, and
+  `ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG` (`HRS-033`) is a new
+  member.** `WorkflowDefinitionConfig(output=None, on_error=OnError.FAIL,
+  success_policy=None)` is frozen and generic in the output type.
+  `WorkflowDefinition.config` defaults to `WorkflowDefinitionConfig()`; a
+  subclass without its own `config` uses the parent's. The check runs for
+  every workflow class when it is defined, whether or not `build()` runs,
+  and refuses any attribute named `Meta`, also one from a base class. The
+  `HRS-025` messages name `config.output`. The run-time `WorkflowMeta`
+  that a task receives as `workflow_meta` does not change.
 
 ### Removed
 
@@ -244,6 +285,12 @@ there is no migration contract between pre-1.0 versions.
 - **`close_async()` does not block its event loop while it stops the sync
   runner.** The stop joins the runner thread for up to 2 s; it now runs on a
   worker thread through `asyncio.to_thread()`.
+- **The sync bridge debug log no longer holds call arguments.**
+  `LoopRunner.call` logged `Calling <function> with args: ... and kwargs:
+  ...` at `DEBUG`. For a sync `send()` or `schedule()` the arguments hold
+  the task's serialized kwargs, so task input went into the debug log. The
+  line now names the function only, and it no longer formats every argument
+  on each call when `DEBUG` is off.
 
 ## 0.5.5 — 2026-10-28
 
