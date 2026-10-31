@@ -129,6 +129,20 @@ there is no migration contract between pre-1.0 versions.
   `ENQUEUE_FAILED`, `CLOSE_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED`,
   `MONITORING_QUERY_FAILED` or `INTERNAL_FAILED`, or a `BROKER_ERROR`
   result.
+- **Breaking: `send_async()`, `schedule_async()`, their retry methods and
+  `TaskHandle.get_async()` let an exception from the broker call
+  propagate, as the sync forms do.** The broker still returns its database
+  and connection failures as an `Err`, so these methods still return
+  `TaskSendEnqueueFailed` or a `BROKER_ERROR` result for them. Before, they
+  returned any other exception as `TaskSendEnqueueFailed` or as a
+  `BROKER_ERROR` result.
+- **Breaking: a failed broker construction propagates from every send and
+  schedule method.** `app.get_broker()` raises `HorsiesError` with
+  `BROKER_INIT_FAILED` (`HRS-211`), a configuration error. `send()`,
+  `send_async()`, `schedule()`, `schedule_async()` and their retry methods
+  let it propagate. Before, they returned it as `TaskSendEnqueueFailed` with
+  `retryable=False`. Correct the broker configuration; a retry does not
+  clear this error.
 - **Breaking: `WorkflowStartErrorCode.INTERNAL_FAILED` is removed.** A
   runner failure in `start_workflow()` returns `LOOP_RUNNER_FAILED`; any
   other exception propagates. Code that names `INTERNAL_FAILED` fails
@@ -201,6 +215,11 @@ there is no migration contract between pre-1.0 versions.
   the sync retry methods return the same error, so use `retry_*_async(err)`.
   `TaskHandle.get()` maps it to `BROKER_ERROR`, not cached.
   `HandleErrorCode.LOOP_RUNNER_FAILED` is unchanged.
+- **The async send, schedule and result methods call the broker without an
+  `except Exception`.** This matches their sync forms. The send and schedule
+  methods also call `app.get_broker()` without a catch. The only other
+  call inside a `try` is the `horsies scheduler` command, a process
+  boundary: it logs the error, closes the broker and exits with status 1.
 - **Statement errors do not show bound values.** The broker's engines are
   created with `hide_parameters=True`. A failed statement shows
   `[SQL parameters hidden due to hide_parameters=True]` in place of its

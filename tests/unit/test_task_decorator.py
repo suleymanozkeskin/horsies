@@ -527,24 +527,26 @@ class TestTaskHandleGetAsync:
         assert handle._result_fetched is True
 
     @pytest.mark.asyncio
-    async def test_broker_mode_exception_returns_broker_error(self) -> None:
-        """Broker mode: exception from broker fetch returns BROKER_ERROR."""
+    async def test_broker_mode_exception_propagates(self) -> None:
+        """Broker mode: an exception from the async broker read propagates unchanged.
+
+        The broker returns ``Err`` for its own DB and connection failures, so
+        an exception here is a defect, as from ``get()``.
+        """
         app = _make_app()
         broker = MagicMock()
-        broker.get_raw_result_record_async = AsyncMock(
-            side_effect=ConnectionError('oops'),
-        )
+        defect = RuntimeError('stub defect')
+        broker.get_raw_result_record_async = AsyncMock(side_effect=defect)
         app.get_broker.return_value = broker
 
         handle: TaskHandle[str] = TaskHandle(
             't-5', app=app, broker_mode=True, ok_type=str,
         )
 
-        result = await handle.get_async()
+        with pytest.raises(RuntimeError) as exc_info:
+            await handle.get_async()
 
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == OperationalErrorCode.BROKER_ERROR
+        assert exc_info.value is defect
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
@@ -1700,24 +1702,42 @@ class TestCreateTaskWrapperSendAsync:
         assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
-    async def test_send_async_enqueue_raises_returns_enqueue_error(self) -> None:
-        """Async enqueue non-connection exception returns non-retryable Err(ENQUEUE_FAILED)."""
+    async def test_send_async_enqueue_exception_propagates(self) -> None:
+        """An exception raised by the async broker enqueue propagates; no resend."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
-        app = _make_app()
+        app = _make_app(resend_on_transient_err=True)
         broker = MagicMock()
-        broker.enqueue_async = AsyncMock(side_effect=RuntimeError('loop dead'))
+        defect = TypeError('missing required argument')
+        broker.enqueue_async = AsyncMock(side_effect=defect)
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = await wrapper.send_async(x=1)
+        with pytest.raises(TypeError) as exc_info:
+            await wrapper.send_async(x=1)
 
-        assert is_err(result)
-        err = result.err_value
-        assert isinstance(err, TaskSendEnqueueFailed)
-        assert err.retryable is False
-        assert isinstance(err.exception, RuntimeError)
+        assert exc_info.value is defect
+        assert broker.enqueue_async.await_count == 1  # no resend
+
+    @pytest.mark.asyncio
+    async def test_schedule_async_enqueue_exception_propagates(self) -> None:
+        """An exception raised by the async broker enqueue for schedule_async() propagates."""
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        app = _make_app(resend_on_transient_err=True)
+        broker = MagicMock()
+        defect = TypeError('missing required argument')
+        broker.enqueue_async = AsyncMock(side_effect=defect)
+        app.get_broker.return_value = broker
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        with pytest.raises(TypeError) as exc_info:
+            await wrapper.schedule_async(5, x=1)
+
+        assert exc_info.value is defect
+        assert broker.enqueue_async.await_count == 1  # no resend
 
     @pytest.mark.asyncio
     async def test_send_async_queue_validation_failure(self) -> None:

@@ -8,6 +8,7 @@ exception, or ``NoCause()`` when a check found the failure.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, get_args
 from unittest.mock import MagicMock
@@ -16,6 +17,7 @@ import pytest
 
 from horsies.core.brokers.result_types import BrokerEnqueueFailed, BrokerOperationError
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.errors import ErrorCode, HorsiesError
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -210,18 +212,36 @@ class TestEnqueueFailedCause:
         assert result.err_value.exception is cause
         assert result.err_value.retryable is True
 
-    def test_broker_lookup_failure_keeps_its_exception(self) -> None:
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    def test_broker_init_failure_propagates(self, form: str) -> None:
+        """``get_broker()`` raises ``BROKER_INIT_FAILED`` as a fail-fast error.
+
+        Every send and schedule form lets it propagate; no form turns it
+        into ``TaskSendEnqueueFailed``.
+        """
         app = _make_app()
-        cause = RuntimeError('no broker configured')
-        app.get_broker.side_effect = cause
+        init_failure = HorsiesError(
+            message='Failed to initialize broker: bad url',
+            code=ErrorCode.BROKER_INIT_FAILED,
+        )
+        app.get_broker.side_effect = init_failure
+        wrapper = _wrapper(app)
 
-        result = _wrapper(app).send(x=1)
+        with pytest.raises(HorsiesError) as exc_info:
+            match form:
+                case 'send':
+                    wrapper.send(x=1)
+                case 'send_async':
+                    asyncio.run(wrapper.send_async(x=1))
+                case 'schedule':
+                    wrapper.schedule(5, x=1)
+                case 'schedule_async':
+                    asyncio.run(wrapper.schedule_async(5, x=1))
+                case _:
+                    raise AssertionError(f'unknown form: {form}')
 
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.exception is cause
-        assert result.err_value.retryable is False
-        assert result.err_value.payload.task_name == 'test.good_fn'
+        assert exc_info.value is init_failure
+        app.get_broker.assert_called_once_with()
 
 
 @pytest.mark.unit
