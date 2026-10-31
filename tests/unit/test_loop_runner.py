@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+import logging
 import threading
 import time
 import warnings
@@ -60,6 +61,32 @@ class TestLoopRunnerCall:
         assert runner._started is False
         assert runner._loop is None
         assert runner._thread is None
+
+    def test_call_debug_log_names_the_function_without_its_arguments(
+        self, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The debug line names the called function; args and kwargs stay out."""
+        marker = 'loop-runner-argument-marker'
+        runner = LoopRunner()
+        runner.start()
+
+        async def sample_call(value: str, *, label: str) -> str:
+            return value + label
+
+        try:
+            with caplog.at_level(logging.DEBUG, logger='horsies.loop_runner'):
+                result = runner.call(sample_call, marker, label=marker)
+        finally:
+            runner.stop()
+
+        assert result == marker + marker
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == 'horsies.loop_runner'
+        ]
+        assert 'Calling sample_call' in messages
+        assert not any(marker in message for message in messages)
 
 
 @pytest.mark.unit
