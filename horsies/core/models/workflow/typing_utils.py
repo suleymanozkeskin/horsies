@@ -249,7 +249,7 @@ def validate_workflow_generic_output_match(
     """Validate that the declared WorkflowDefinition[OkT] matches the actual spec output type.
 
     Catches the 'lying generic' bug where a class declares e.g.
-    WorkflowDefinition[AggregatedReport] but Meta.output points to
+    WorkflowDefinition[AggregatedReport] but config.output points to
     a TaskNode[str].
 
     Raises WorkflowValidationError (HRS-025) on mismatch.
@@ -268,14 +268,14 @@ def validate_workflow_generic_output_match(
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
                 f'[{_format_type_name(declared_ok)}] but has no '
-                'Meta.output'
+                'config.output'
             ),
             notes=[
                 f'declared generic: {_format_type_name(declared_ok)}',
                 'actual output type: None',
             ],
             help_text=(
-                'set Meta.output to a node that produces the declared type, '
+                'set config.output to a node that produces the declared type, '
                 'or declare WorkflowDefinition[None] for an outputless '
                 'orchestration workflow'
             ),
@@ -291,14 +291,14 @@ def validate_workflow_generic_output_match(
             code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
             message=(
                 f"workflow '{spec.name}' declares WorkflowDefinition"
-                f'[{_format_type_name(declared_ok)}] but Meta.output produces '
+                f'[{_format_type_name(declared_ok)}] but config.output produces '
                 f'{_format_type_name(actual_ok)}'
             ),
             notes=[
                 f'declared generic: {_format_type_name(declared_ok)}',
                 f'actual output type: {_format_type_name(actual_ok)}',
             ],
-            help_text='change the class generic to match the output type, or change Meta.output to a node that produces the declared type',
+            help_text='change the class generic to match the output type, or change config.output to a node that produces the declared type',
         )
 
 

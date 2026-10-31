@@ -374,6 +374,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Function returns WorkflowSpec but lacks @app.workflow_builder |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
+| HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | A `WorkflowDefinition` class defines `Meta`, or sets `config` to a value that is not a `WorkflowDefinitionConfig`; raised when the class is created |
 
 ### Task Definition (HRS-100-HRS-199)
 

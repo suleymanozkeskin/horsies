@@ -153,7 +153,7 @@ Best for dynamic workflows where node kwargs depend on runtime inputs.
 Nodes are class attributes; `node_id` is auto-assigned from the attribute name:
 
 ```python
-from horsies import TaskNode, WorkflowDefinition, OnError
+from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
 class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
@@ -163,12 +163,15 @@ class ETLPipeline(WorkflowDefinition[SaveResult]):
     process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
     save = TaskNode(fn=save_result, waits_for=[process], args_from={"result": process})
 
-    class Meta:
-        output = save
-        on_error = OnError.FAIL
+    config = WorkflowDefinitionConfig(
+        output=save,
+        on_error=OnError.FAIL,
+    )
 
 spec = ETLPipeline.build(app)
 ```
+
+`config = WorkflowDefinitionConfig(...)` sets `output`, `on_error` and `success_policy`, and can name the nodes of the same class body. A `Meta` attribute raises HRS-033 when the class is created.
 
 Best for static, reusable DAGs. Use `build_with(app, **params)` for parameterized builds.
 

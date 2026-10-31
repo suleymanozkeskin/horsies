@@ -293,6 +293,10 @@ class TestDeclaredDurationGovernsTheDrop:
         A leaf spans one day and drops only once its whole day is past
         the duration, so a 1-hour class keeps yesterday's leaf until an
         hour after that day ends — never less than the declared hour.
+
+        The dropped leaf is two days old, not one: yesterday's leaf drops
+        at 01:00 UTC today, so between 00:00 and 01:00 UTC it is still
+        kept. A two-day-old leaf is past its drop point at any time of day.
         """
         schema = terminalization_schema
         async with schema.engine.begin() as connection:
@@ -310,8 +314,8 @@ class TestDeclaredDurationGovernsTheDrop:
         today = await _make_history_leaf(
             schema, parent, days_ago=0, class_key='it_subday'
         )
-        yesterday = await _make_history_leaf(
-            schema, parent, days_ago=1, class_key='it_subday'
+        two_days_ago = await _make_history_leaf(
+            schema, parent, days_ago=2, class_key='it_subday'
         )
 
         pruned = await prune_expired_partitions(
@@ -325,7 +329,7 @@ class TestDeclaredDurationGovernsTheDrop:
         assert await _relation_exists(schema, today.leaf_name), (
             "today's leaf is not yet a whole day old plus an hour"
         )
-        assert not await _relation_exists(schema, yesterday.leaf_name)
+        assert not await _relation_exists(schema, two_days_ago.leaf_name)
 
 
 class TestHistoryPruning:
