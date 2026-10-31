@@ -24,13 +24,21 @@ there is no migration contract between pre-1.0 versions.
   (`RetrievalCode.ASYNC_CONTEXT`).** An `exception_mapper` or
   `default_unhandled_error_code` value `ASYNC_CONTEXT` fails `horsies check`
   with `HRS-212`, and `TaskError(error_code='ASYNC_CONTEXT')` is refused.
-- **Breaking: `TaskSendError` is a union of eight frozen variants, one per
+- **Breaking: `TaskSendError` is a union of nine frozen variants, one per
   `TaskSendErrorCode` member.** Code that reads `err.task_id`,
   `err.payload`, `err.retryable` or `err.exception` on a send error must
   match on the variant first; pyright reports each site.
   `TaskSendError(code=..., ...)` in tests becomes a variant constructor.
   `isinstance(err, TaskSendError)` is not valid on a type alias; match on
   the variants.
+- **An exhaustive `match` on `TaskSendErrorCode` needs a
+  `LOOP_RUNNER_FAILED` case.** A sync send or schedule whose broker runner
+  cannot run the enqueue returns `TaskSendLoopRunnerFailed(task_id, payload,
+  message, exception)`, not `TaskSendEnqueueFailed`. Nothing ran and nothing
+  was written. The retry methods accept it: a sync retry returns the same
+  error, and `retry_send_async(err)` or `retry_schedule_async(err)`
+  completes the send. Before, the send returned `ENQUEUE_FAILED` with
+  `retryable=False`.
 - **Breaking: `BrokerOperationError` is a union of frozen variants.** The
   nine operation codes from `SCHEMA_INIT_FAILED` to
   `LISTENER_SUBSCRIBE_FAILED` share `BrokerOperationFailed`, which keeps the
@@ -206,8 +214,9 @@ there is no migration contract between pre-1.0 versions.
 - **`PostgresBroker.run_sync()` fails an assertion when it is called on a
   thread that runs an event loop.** Nothing runs, and the sync runner does
   not start. Before, it blocked that loop until the call completed.
-- **`BrokerErrorCode.LOOP_RUNNER_FAILED` and
-  `WorkflowStartErrorCode.LOOP_RUNNER_FAILED` are new members.** A sync
+- **`BrokerErrorCode.LOOP_RUNNER_FAILED`,
+  `WorkflowStartErrorCode.LOOP_RUNNER_FAILED` and
+  `TaskSendErrorCode.LOOP_RUNNER_FAILED` are new members.** A sync
   method returns it when the broker's sync runner cannot run the call: the
   runner is stopped, its thread did not start, or scheduling failed.
   Nothing ran. `retryable` is `False`, and `exception` is the
@@ -215,9 +224,10 @@ there is no migration contract between pre-1.0 versions.
   stopped runner does not start again; call the `*_async` form or use a new
   broker. Before, the sync broker and app methods returned this failure as
   their operation's code (for example `CLOSE_FAILED`), and
-  `start_workflow()` returned `INTERNAL_FAILED`. A send maps it to
-  `TaskSendEnqueueFailed` with `retryable=False`; nothing was written, and
-  the sync retry methods return the same error, so use `retry_*_async(err)`.
+  `start_workflow()` returned `INTERNAL_FAILED`. A send or schedule returns
+  `TaskSendLoopRunnerFailed`, which has no `retryable` field and keeps the
+  task id and the payload; nothing was written, the sync retry methods
+  return the same error, and `retry_*_async(err)` completes the send.
   `TaskHandle.get()` maps it to `BROKER_ERROR`, not cached.
   `HandleErrorCode.LOOP_RUNNER_FAILED` is unchanged.
 - **The async send, schedule and result methods call the broker without an
@@ -242,8 +252,9 @@ there is no migration contract between pre-1.0 versions.
   `TaskSendEnqueueFailed(task_id, payload, message, retryable, exception)`,
   `TaskSendPayloadMismatch(task_id, payload, message)`,
   `TaskSendPayloadTooLarge(message, size_bytes, limit_bytes)`,
-  `TaskSendIdempotencyKeyConflict(task_id, payload, message, owner_task_id)`
-  and `TaskSendEventLoopLimit(message)`. `err.code` is a class variable on
+  `TaskSendIdempotencyKeyConflict(task_id, payload, message, owner_task_id)`,
+  `TaskSendEventLoopLimit(message)` and
+  `TaskSendLoopRunnerFailed(task_id, payload, message, exception)`. `err.code` is a class variable on
   each variant and keeps its `TaskSendErrorCode` value. Only
   `TaskSendEnqueueFailed` has `retryable`. `VALIDATION_FAILED` and
   `PAYLOAD_TOO_LARGE` errors carry no task id; `PAYLOAD_TOO_LARGE` carries
@@ -253,9 +264,11 @@ there is no migration contract between pre-1.0 versions.
   and `TaskSendEnqueueFailed`. `NoCause()` is the value when a check found
   the failure without a Python exception; before, it was `None`. Match on
   it before `raise ... from`, `exc_info=` or an error tracker call.
+  `TaskSendLoopRunnerFailed.exception` is `BaseException`: always the
+  `LoopRunnerError`.
 - **The retry methods take a `TaskSendRetryable`**
   (`TaskSendEnqueueFailed | TaskSendAsyncContext |
-  TaskSendIdempotencyKeyConflict`). Another variant is a type error, and at
+  TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`). Another variant is a type error, and at
   run time it fails an assertion that names the variant. Before, the
   methods returned `VALIDATION_FAILED` for another code or for an error
   without a payload.

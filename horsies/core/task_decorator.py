@@ -94,6 +94,7 @@ from horsies.core.models.task_send_types import (
     TaskSendEnqueueFailed,
     TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
+    TaskSendLoopRunnerFailed,
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
@@ -182,6 +183,7 @@ type _BrokerSendError = (
     | TaskSendIdempotencyKeyConflict
     | TaskSendEventLoopLimit
     | TaskSendAsyncContext
+    | TaskSendLoopRunnerFailed
 )
 
 
@@ -1327,6 +1329,13 @@ def create_task_wrapper(
                     payload=payload,
                     message=message,
                 )
+            case BrokerLoopRunnerFailed(message=message, exception=exception):
+                return TaskSendLoopRunnerFailed(
+                    task_id=task_id,
+                    payload=payload,
+                    message=message,
+                    exception=exception,
+                )
             case (
                 BrokerInvalidTaskOptions(message=message, exception=exception)
                 | BrokerInvalidInput(message=message, exception=exception)
@@ -1343,7 +1352,6 @@ def create_task_wrapper(
                 | BrokerNotAttached()
                 | BrokerNoTypeAvailable()
                 | BrokerInvalidJsonPayload()
-                | BrokerLoopRunnerFailed()
                 | BrokerListenerDisabled()
             ):
                 return TaskSendEnqueueFailed(
@@ -2147,8 +2155,8 @@ def create_task_wrapper(
         """Check that a retryable error's payload fits this retry method.
 
         The parameter type admits ``TaskSendEnqueueFailed``,
-        ``TaskSendAsyncContext`` and ``TaskSendIdempotencyKeyConflict``; each
-        carries its task id and payload. Another variant, passed by a caller
+        ``TaskSendAsyncContext``, ``TaskSendIdempotencyKeyConflict`` and
+        ``TaskSendLoopRunnerFailed``; each carries its task id and payload. Another variant, passed by a caller
         without a type checker, fails an assertion that names it. Refused: a
         payload of another task, a payload without a delay when
         ``require_delay``, and a payload with a delay when ``reject_delay``.
@@ -2159,6 +2167,7 @@ def create_task_wrapper(
                 TaskSendEnqueueFailed()
                 | TaskSendAsyncContext()
                 | TaskSendIdempotencyKeyConflict()
+                | TaskSendLoopRunnerFailed()
             ):
                 pass
             case _ as refused:

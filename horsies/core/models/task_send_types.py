@@ -67,6 +67,15 @@ class TaskSendErrorCode(str, Enum):
     send on this loop returns the same error until one of those loops closes.
     The retry methods refuse it."""
 
+    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
+    """Sync ``send()``/``schedule()`` (or their sync retry variants) could
+    not run the enqueue on the broker's sync runner: the runner is stopped,
+    its thread did not start, or scheduling failed. Nothing ran and nothing
+    was written. A stopped runner does not start again (``broker.close()``
+    and ``close_async()`` stop it). The error carries ``task_id`` and
+    payload — complete the dispatch with ``retry_send_async`` /
+    ``retry_schedule_async``."""
+
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:
@@ -212,6 +221,23 @@ class TaskSendEventLoopLimit:
     message: str = field(repr=False)
 
 
+@dataclass(slots=True, frozen=True)
+class TaskSendLoopRunnerFailed:
+    """A sync send or schedule could not run on the broker's sync runner. Nothing ran.
+
+    Nothing was written. A stopped runner does not start again, so a sync
+    retry returns this error again. ``retry_send_async(err)`` or
+    ``retry_schedule_async(err)`` completes the same dispatch with the same
+    task id. ``exception`` is the ``LoopRunnerError``.
+    """
+
+    code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.LOOP_RUNNER_FAILED
+    task_id: str
+    payload: TaskSendPayload = field(repr=False)
+    message: str = field(repr=False)
+    exception: BaseException = field(repr=False)
+
+
 type TaskSendError = (
     TaskSendSuppressed
     | TaskSendAsyncContext
@@ -221,11 +247,15 @@ type TaskSendError = (
     | TaskSendPayloadTooLarge
     | TaskSendIdempotencyKeyConflict
     | TaskSendEventLoopLimit
+    | TaskSendLoopRunnerFailed
 )
 """Every failure of a send or schedule: one variant per ``TaskSendErrorCode``."""
 
 type TaskSendRetryable = (
-    TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict
+    TaskSendEnqueueFailed
+    | TaskSendAsyncContext
+    | TaskSendIdempotencyKeyConflict
+    | TaskSendLoopRunnerFailed
 )
 """The variants that the retry methods accept. Each carries its task id and payload."""
 

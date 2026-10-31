@@ -265,7 +265,7 @@ match my_task.send(name="alice", count=3):
         print(f"Permanent failure: {err.code}")
 ```
 
-The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext` or `TaskSendIdempotencyKeyConflict`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error.
+The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict` or `TaskSendLoopRunnerFailed`. Passing another variant is a type error; at run time it fails an assertion that names the variant. A retry of a `TaskSendIdempotencyKeyConflict` before the key's reservation ends returns the same error. A sync retry of a `TaskSendLoopRunnerFailed` returns the same error, because a stopped runner does not start again; `retry_send_async(err)` or `retry_schedule_async(err)` completes the send.
 
 ### Automatic Retry via Config
 

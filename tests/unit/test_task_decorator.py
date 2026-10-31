@@ -46,6 +46,7 @@ from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
     TaskSendEnqueueFailed,
     TaskSendIdempotencyKeyConflict,
+    TaskSendLoopRunnerFailed,
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
@@ -2235,8 +2236,8 @@ class TestAutoRetry:
         assert isinstance(result.err_value, TaskSendPayloadMismatch)
         assert broker.enqueue.call_count == 1
 
-    def test_loop_runner_failure_is_enqueue_failed_and_not_resent(self) -> None:
-        """A LOOP_RUNNER_FAILED broker error is a non-retryable TaskSendEnqueueFailed."""
+    def test_loop_runner_failure_is_its_own_variant_and_not_resent(self) -> None:
+        """A LOOP_RUNNER_FAILED broker error is TaskSendLoopRunnerFailed; no resend."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=x)
 
@@ -2253,8 +2254,7 @@ class TestAutoRetry:
         result = wrapper.send(x=1)
 
         assert is_err(result)
-        assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.retryable is False
+        assert isinstance(result.err_value, TaskSendLoopRunnerFailed)
         assert result.err_value.exception is runner_error
         assert broker.enqueue.call_count == 1  # no resend
 

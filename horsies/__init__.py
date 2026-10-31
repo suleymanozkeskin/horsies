@@ -117,6 +117,7 @@ from .core.models.task_send_types import (
     TaskSendPayloadTooLarge,
     TaskSendIdempotencyKeyConflict,
     TaskSendEventLoopLimit,
+    TaskSendLoopRunnerFailed,
 )
 from .core.brokers.result_types import (
     BrokerErrorCode,
@@ -278,6 +279,7 @@ __all__ = [
     'TaskSendPayloadTooLarge',
     'TaskSendIdempotencyKeyConflict',
     'TaskSendEventLoopLimit',
+    'TaskSendLoopRunnerFailed',
     'NoCause',
     # Broker result types
     'BrokerErrorCode',
