@@ -40,6 +40,7 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 
 `WorkflowStatus` values:
 
+<!-- members: WorkflowStatus -->
 | Enum | Value | Terminal |
 |------|-------|----------|
 | `PENDING` | `"PENDING"` | No |
@@ -52,6 +53,7 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 
 `WorkflowTaskStatus` values:
 
+<!-- members: WorkflowTaskStatus -->
 | Enum | Value | Terminal |
 |------|-------|----------|
 | `PENDING` | `"PENDING"` | No |

@@ -225,12 +225,14 @@ exactly as that app configured it.
 
 Instead of migrating, the app reads `horsies_schema_version` at startup with a
 plain `SELECT`, caches the verdict for 60 seconds, and re-reads lazily. There
-are four states.
+are five states.
 
+<!-- members: SchemaState -->
 | State | Condition | Reads | Actions | UI |
 |---|---|---|---|---|
 | `MATCH` | Stored version equals the version this build expects | Served | Permitted, subject to the auth policy | Normal |
 | `MISMATCH` | Stored version differs, older or newer | Served | Force-disabled server-side | Persistent read-only banner naming both versions |
+| `CUTOVER_REQUIRED` | Stored version equals the expected version, but the offline task-history cutover has not reached its completion marker | Served | Force-disabled server-side (409 `SCHEMA_INCOMPATIBLE`) | The read-only banner of `MISMATCH` |
 | `ABSENT` | A **successful** probe observed the version table or row missing | — | Disabled | Full-screen state: the database has no horsies schema |
 | `UNKNOWN` | The probe has **never** succeeded — connection failure with no prior verdict | — | Disabled | Full-screen state: the database cannot be reached to determine its schema |
 

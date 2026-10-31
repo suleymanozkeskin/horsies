@@ -96,6 +96,7 @@ runner heartbeats.
 
 All child processes of a worker share one process pool. When a child process exits abnormally (a segfault in a C extension, a kill by the operating system such as an out-of-memory kill, `os._exit()` in task code, or the kill after `timeout_ms`), Python marks the whole pool as broken and stops every other child of that worker. The worker detects this at once, without waiting for heartbeats, recovers each task that was in the pool, and starts a new pool:
 
+<!-- members: TaskStatus subset -->
 - CLAIMED task (user code not started): returned to PENDING
 - RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
 
