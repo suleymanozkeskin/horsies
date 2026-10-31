@@ -1,6 +1,6 @@
 ---
 name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-032. Use when building, validating, or troubleshooting workflows.
+description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-033. Use when building, validating, or troubleshooting workflows.
 ---
 
 # horsies — Workflows
@@ -45,17 +45,20 @@ class ETLPipeline(WorkflowDefinition[SaveResult]):
     process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
     save = TaskNode(fn=save_result, waits_for=[process], args_from={"result": process})
 
-    class Meta:
-        output = save
-        on_error = OnError.FAIL
-        success_policy = None  # optional
+    config = WorkflowDefinitionConfig(
+        output=save,
+        on_error=OnError.FAIL,
+        success_policy=None,  # optional
+    )
 
 spec = ETLPipeline.build(app)
 ```
 
 - `node_id` auto-assigned from attribute name (`fetch`, `process`, `save`).
 - `definition_key` is required — a stable string key for persistence and runtime lookup. Auto-registered by the metaclass at import time.
-- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `Meta.output`, `T` must be `None` (`WorkflowDefinition[None]`) or `Any`; a concrete `T` without `Meta.output` raises HRS-025.
+- `config` is a frozen `WorkflowDefinitionConfig(output=None, on_error=OnError.FAIL, success_policy=None)`. The class body can name its own nodes in it. A subclass without its own `config` uses the parent's `config`.
+- A `Meta` attribute (any object, also from a base class) or a `config` that is not a `WorkflowDefinitionConfig` raises HRS-033 when the class is created, before `build()`.
+- Generic parameter `WorkflowDefinition[T]` types the output node result. With no `config.output`, `T` must be `None` (`WorkflowDefinition[None]`) or `Any`; a concrete `T` without `config.output` raises HRS-025.
 - Nodes are collected in definition order by the metaclass.
 - Spec and all nodes are **frozen** (immutable) after construction.
 
@@ -151,7 +154,7 @@ Differences from `TaskNode`:
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects upstream `TaskResult` into `build_with()`.
 - Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`.
-- Outputless child (`WorkflowDefinition[None]`, no `Meta.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
 
 ## NodeFactory / `.node()` — Two-Step Builder
 
@@ -528,7 +531,7 @@ def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-032)
+## Validation Errors (HRS-001–HRS-033)
 
 | Code | Name | Trigger |
 |---|---|---|
@@ -555,7 +558,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-021 | `WORKFLOW_KWARGS_ARGS_FROM_OVERLAP` | Same key in kwargs and args_from |
 | HRS-022 | `WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH` | Child uses default build_with() |
 | HRS-024 | `WORKFLOW_ARGS_FROM_TYPE_MISMATCH` | Incompatible TaskResult type |
-| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or concrete `WorkflowDefinition[T]` has no `Meta.output` |
+| HRS-025 | `WORKFLOW_OUTPUT_TYPE_MISMATCH` | Generic param doesn't match output, or concrete `WorkflowDefinition[T]` has no `config.output` |
 | HRS-026 | `WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED` | Non-empty positional args |
 | HRS-027 | `WORKFLOW_CHECK_CASES_REQUIRED` | Builder needs cases= |
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
@@ -563,6 +566,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
+| HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
 
 ## Known Constraints
 

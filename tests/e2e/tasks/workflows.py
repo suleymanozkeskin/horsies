@@ -1013,7 +1013,11 @@ spec_on_error_pause = _workflow(
 # L7: SubWorkflowNode full lifecycle matrix
 # =============================================================================
 
-from horsies.core.models.workflow import SubWorkflowNode, WorkflowDefinition
+from horsies.core.models.workflow import (
+    SubWorkflowNode,
+    WorkflowDefinition,
+    WorkflowDefinitionConfig,
+)
 
 
 class E2ESubCat(BaseModel):
@@ -1191,12 +1195,7 @@ class E2ESubOkWorkflow(WorkflowDefinition[int]):
 
     child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': 11})
 
-    class Meta:
-        output = None
-        on_error = OnError.FAIL
-
-
-E2ESubOkWorkflow.Meta.output = E2ESubOkWorkflow.child
+    config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
 
 class E2ESubFailWorkflow(WorkflowDefinition[int]):
@@ -1208,12 +1207,7 @@ class E2ESubFailWorkflow(WorkflowDefinition[int]):
         kwargs={'error_code': 'E2E_SUB_CHILD_FAIL'},
     )
 
-    class Meta:
-        output = None
-        on_error = OnError.FAIL
-
-
-E2ESubFailWorkflow.Meta.output = E2ESubFailWorkflow.child
+    config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
 
 class E2ESubNestedOkMiddleWorkflow(WorkflowDefinition[int]):
@@ -1222,12 +1216,7 @@ class E2ESubNestedOkMiddleWorkflow(WorkflowDefinition[int]):
 
     child = SubWorkflowNode(workflow_def=E2ESubOkWorkflow)
 
-    class Meta:
-        output = None
-        on_error = OnError.FAIL
-
-
-E2ESubNestedOkMiddleWorkflow.Meta.output = E2ESubNestedOkMiddleWorkflow.child
+    config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
 
 class E2ESubNestedFailMiddleWorkflow(WorkflowDefinition[int]):
@@ -1236,12 +1225,7 @@ class E2ESubNestedFailMiddleWorkflow(WorkflowDefinition[int]):
 
     child = SubWorkflowNode(workflow_def=E2ESubFailWorkflow)
 
-    class Meta:
-        output = None
-        on_error = OnError.FAIL
-
-
-E2ESubNestedFailMiddleWorkflow.Meta.output = E2ESubNestedFailMiddleWorkflow.child
+    config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
 
 class E2ESubParamWorkflow(WorkflowDefinition[int]):
@@ -1358,12 +1342,7 @@ class E2ESubNestedSlowMiddleWorkflow(WorkflowDefinition[str]):
         kwargs={'value': 'nested_slow_leaf', 'delay_ms': 1_000},
     )
 
-    class Meta:
-        output = None
-        on_error = OnError.FAIL
-
-
-E2ESubNestedSlowMiddleWorkflow.Meta.output = E2ESubNestedSlowMiddleWorkflow.child
+    config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
 
 class E2ESubRetryWorkflow(WorkflowDefinition[str]):

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy as copy_module
 import uuid as uuid_module
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -35,6 +36,72 @@ _build_call_token: ContextVar[str | None] = ContextVar(
 
 
 # =============================================================================
+# WorkflowDefinitionConfig (options of a class-based workflow)
+# =============================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDefinitionConfig(Generic[OkT_co]):
+    """Options of a ``WorkflowDefinition``, set in the class body as ``config``.
+
+    The class body can name its own nodes, so ``output`` and
+    ``success_policy`` refer to them directly::
+
+        config = WorkflowDefinitionConfig(output=persist, on_error=OnError.FAIL)
+
+    ``output=None`` means the workflow has no output node, and
+    ``success_policy=None`` means the default policy. These ``None`` values
+    are the ones that ``app.workflow()`` takes, and ``build()`` passes them
+    on unchanged.
+
+    Attributes:
+        output: Node whose result is the workflow output.
+        on_error: Error handling policy.
+        success_policy: Custom success policy.
+    """
+
+    output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
+    on_error: OnError = OnError.FAIL
+    success_policy: SuccessPolicy | None = None
+
+
+def _check_definition_config(cls: type) -> None:
+    """Refuse a ``Meta`` attribute and a ``config`` that is not a ``WorkflowDefinitionConfig``.
+
+    Runs when the class is created. A subclass inherits the parent's
+    ``config``. Raises ``WorkflowValidationError`` with
+    ``WORKFLOW_INVALID_DEFINITION_CONFIG``.
+    """
+    if any('Meta' in vars(klass) for klass in cls.__mro__):
+        raise WorkflowValidationError(
+            message=(
+                f"workflow class '{cls.__qualname__}' defines 'Meta', which is "
+                'not read; set config = WorkflowDefinitionConfig(...) in the class body'
+            ),
+            code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+            notes=[
+                'config = WorkflowDefinitionConfig(output=..., on_error=..., success_policy=...) '
+                'can name the nodes of the same class body',
+            ],
+            help_text=(
+                "replace 'class Meta' with 'config = WorkflowDefinitionConfig(...)'"
+            ),
+        )
+    match getattr(cls, 'config', None):
+        case WorkflowDefinitionConfig():
+            pass
+        case other:
+            raise WorkflowValidationError(
+                message=(
+                    f"workflow class '{cls.__qualname__}' sets 'config' to "
+                    f'{type(other).__name__}, not WorkflowDefinitionConfig'
+                ),
+                code=ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+                help_text="set 'config = WorkflowDefinitionConfig(...)' in the class body",
+            )
+
+
+# =============================================================================
 # WorkflowDefinition (class-based workflow definition)
 # =============================================================================
 
@@ -58,6 +125,8 @@ class WorkflowDefinitionMeta(type):
         # Skip processing for the base class itself
         if name == 'WorkflowDefinition':
             return cls
+
+        _check_definition_config(cls)
 
         # Collect TaskNode and SubWorkflowNode instances in definition order.
         # Stamp node_id = attr_name on unstamped nodes so that condition
@@ -149,7 +218,7 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     Base class for declarative workflow definitions.
 
     Generic parameter OkT represents the workflow's output type, derived from
-    Meta.output task's return type.
+    the return type of the ``config.output`` node.
 
     Provides a class-based alternative to app.workflow() for defining workflows.
     TaskNode and SubWorkflowNode instances defined as class attributes are
@@ -163,23 +232,25 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             parse = TaskNode(fn=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
             persist = TaskNode(fn=persist_listing, waits_for=[parse], args_from={"data": parse})
 
-            class Meta:
-                output = persist  # Output type is PersistResult
-                on_error = OnError.FAIL
+            config = WorkflowDefinitionConfig(
+                output=persist,  # Output type is PersistResult
+                on_error=OnError.FAIL,
+            )
 
         spec = ScrapeWorkflow.build(app)
 
     Attributes:
         name: Required workflow name (class attribute).
-        Meta: Optional inner class for workflow configuration.
-            - output: TaskNode/SubWorkflowNode to use as workflow output (default: None)
-            - on_error: Error handling policy (default: OnError.FAIL)
-            - success_policy: Custom success policy (default: None)
+        config: Workflow options, a ``WorkflowDefinitionConfig``. The default
+            has no output, ``OnError.FAIL`` and the default success policy.
+            Class creation refuses a ``Meta`` attribute and a ``config``
+            that is not a ``WorkflowDefinitionConfig`` (HRS-033).
     """
 
     # Class attributes to be defined by subclasses
     name: ClassVar[str]
     definition_key: ClassVar[str]
+    config: ClassVar[WorkflowDefinitionConfig[Any]] = WorkflowDefinitionConfig()
 
     # Populated by metaclass
     _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]]
@@ -256,44 +327,39 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                     for ref in node_copy.workflow_ctx_from
                 ])
 
-        # Get Meta configuration, remapping output/success_policy refs to copies.
+        # Read the config, remapping output/success_policy refs to copies.
+        # Class creation guarantees that config is a WorkflowDefinitionConfig.
+        config = cls.config
         output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
-        on_error: OnError = OnError.FAIL
+        on_error: OnError = config.on_error
         success_policy: SuccessPolicy | None = None
 
-        meta: type[Any] | None = getattr(cls, 'Meta', None)
-        if meta is not None:
-            raw_output: TaskNode[Any] | SubWorkflowNode[Any] | None = getattr(
-                meta, 'output', None,
+        raw_output = config.output
+        if raw_output is not None:
+            output = cast(
+                'TaskNode[OkT_co] | SubWorkflowNode[OkT_co]',
+                old_to_new.get(id(raw_output), raw_output),
             )
-            if raw_output is not None:
-                output = cast(
-                    'TaskNode[OkT_co] | SubWorkflowNode[OkT_co]',
-                    old_to_new.get(id(raw_output), raw_output),
-                )
-            on_error = getattr(meta, 'on_error', OnError.FAIL)
-            raw_policy: SuccessPolicy | None = getattr(
-                meta, 'success_policy', None,
-            )
-            if raw_policy is not None:
-                new_cases: list[SuccessCase] = []
-                for case in raw_policy.cases:
-                    new_cases.append(SuccessCase(
-                        required=[
-                            cast('TaskNode[Any]', old_to_new.get(id(t), t))
-                            for t in case.required
-                        ],
-                    ))
-                new_optional: list[TaskNode[Any]] | None = None
-                if raw_policy.optional is not None:
-                    new_optional = [
+        raw_policy = config.success_policy
+        if raw_policy is not None:
+            new_cases: list[SuccessCase] = []
+            for case in raw_policy.cases:
+                new_cases.append(SuccessCase(
+                    required=[
                         cast('TaskNode[Any]', old_to_new.get(id(t), t))
-                        for t in raw_policy.optional
-                    ]
-                success_policy = SuccessPolicy(
-                    cases=new_cases,
-                    optional=new_optional,
-                )
+                        for t in case.required
+                    ],
+                ))
+            new_optional: list[TaskNode[Any]] | None = None
+            if raw_policy.optional is not None:
+                new_optional = [
+                    cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                    for t in raw_policy.optional
+                ]
+            success_policy = SuccessPolicy(
+                cases=new_cases,
+                optional=new_optional,
+            )
 
         # Build WorkflowSpec — split paths for correct type inference.
         # When output is set, overload resolves WorkflowSpec[OkT_co] directly.

@@ -77,7 +77,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 Define nodes at module level with explicit `node_id`, then assign to class attributes:
 
 ```python
-from horsies import TaskNode, WorkflowDefinition, OnError
+from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
 # Module-level nodes with explicit node_id
 _validate_node: TaskNode[ValidatedOrder] = TaskNode(
@@ -153,9 +153,10 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
     shipment = _shipment_node
     notify = _notify_node
 
-    class Meta:
-        output = _notify_node
-        on_error = OnError.FAIL
+    config = WorkflowDefinitionConfig(
+        output=_notify_node,
+        on_error=OnError.FAIL,
+    )
 ```
 
 ## Starting a Workflow

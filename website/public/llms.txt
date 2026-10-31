@@ -14,7 +14,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - In source checkouts, skills live under: `horsies/.agents/skills/`
 - `SKILL.md` -> quick orientation and routing
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-032 validation
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-033 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
 - `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
@@ -336,7 +336,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### WorkflowDefinition[T] (class-based workflow builder)
 - Subclass with name (ClassVar[str]) and TaskNode/SubWorkflowNode class attributes
-- class Meta: output, on_error, success_policy
+- config = WorkflowDefinitionConfig(output=..., on_error=..., success_policy=...) (frozen; the class body can name its own nodes; a subclass inherits the parent's config)
+- A Meta attribute, or a config that is not a WorkflowDefinitionConfig, raises HRS-033 at class creation
 - .build(app) -> WorkflowSpec
 - .build_with(app, **params) -> WorkflowSpec (with runtime parameters; kwargs-only)
 - .get_workflow_nodes() -> list[tuple[str, TaskNode | SubWorkflowNode]]
@@ -499,6 +500,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
   - HRS-026 WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED
   - HRS-027 WORKFLOW_CHECK_CASES_REQUIRED, HRS-028 WORKFLOW_CHECK_CASE_INVALID
   - HRS-029 WORKFLOW_CHECK_BUILDER_EXCEPTION, HRS-030 WORKFLOW_CHECK_UNDECORATED_BUILDER
+  - HRS-033 WORKFLOW_INVALID_DEFINITION_CONFIG
 - Task definition (HRS-100-HRS-103):
   - HRS-100 TASK_NO_RETURN_TYPE, HRS-101 TASK_INVALID_RETURN_TYPE
   - HRS-102 TASK_INVALID_OPTIONS, HRS-103 TASK_INVALID_QUEUE

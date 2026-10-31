@@ -3,7 +3,7 @@
 
     receive_return -> inspect_item -> restock_or_writeoff
 
-`Meta.on_error = OnError.PAUSE` is the whole story. When `inspect_item` reports
+`on_error=OnError.PAUSE` is the whole story. When `inspect_item` reports
 `DAMAGED_ITEM`, the workflow does not fail and does not carry on: it goes
 PAUSED, no further node is enqueued, and it stays that way until someone
 resumes or cancels it from the dashboard.
