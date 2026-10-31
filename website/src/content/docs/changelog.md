@@ -154,8 +154,9 @@ there is no migration contract between pre-1.0 versions.
   `HandleErrorCode.LOOP_RUNNER_FAILED` is unchanged.
 - **The async send, schedule and result methods call the broker without an
   `except Exception`.** This matches their sync forms. The send and schedule
-  methods also call `app.get_broker()` without a catch, as every other
-  caller of `get_broker()` does.
+  methods also call `app.get_broker()` without a catch. The only other
+  call inside a `try` is the `horsies scheduler` command, a process
+  boundary: it logs the error, closes the broker and exits with status 1.
 - **Statement errors do not show bound values.** The broker's engines are
   created with `hide_parameters=True`. A failed statement shows
   `[SQL parameters hidden due to hide_parameters=True]` in place of its
