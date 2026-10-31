@@ -34,12 +34,11 @@ from psycopg import sql
 
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
-    BrokerOperationError,
-    BrokerResult,
+    BrokerOperationFailed,
 )
 from horsies.core.defaults import DEFAULT_TCP_USER_TIMEOUT_MS
 from horsies.core.logging import get_logger
-from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.utils.db import is_retryable_connection_error
 
 logger = get_logger('listener')
@@ -82,10 +81,10 @@ class PostgresListener:
     Usage:
     ------
     listener = PostgresListener(database_url)
-    start_r = await listener.start()       # BrokerResult[None]
+    start_r = await listener.start()       # Result[None, BrokerOperationFailed]
     assert start_r.is_ok()
 
-    # Subscribe: returns BrokerResult[Queue[Notify]]
+    # Subscribe: returns Result[Queue[Notify], BrokerOperationFailed]
     listen_r = await listener.listen("task_done")
     queue = listen_r.ok_value
 
@@ -197,12 +196,12 @@ class PostgresListener:
             for key, queues in self._payload_subs.items()
         )
 
-    async def start(self) -> BrokerResult[None]:
+    async def start(self) -> Result[None, BrokerOperationFailed]:
         """Establish notification connections (autocommit) and start health monitor.
 
         Safe to call multiple times.
 
-        Returns Ok(None) on success, Err(BrokerOperationError) on connection failure.
+        Returns Ok(None) on success, Err(BrokerOperationFailed) on connection failure.
         A call from a non-owner event loop fails an assertion (programming error).
         """
         self._bind_or_validate_loop()
@@ -229,12 +228,12 @@ class PostgresListener:
         for channel in self._listen_channels:
             await conn.execute(sql.SQL('LISTEN {}').format(sql.Identifier(channel)))
 
-    async def _ensure_connections(self) -> BrokerResult[None]:
+    async def _ensure_connections(self) -> Result[None, BrokerOperationFailed]:
         """Ensure we have live AsyncConnections in autocommit mode.
 
         On reconnection, re-issue LISTEN for any previously tracked channels.
 
-        Returns Ok(None) on success, Err(BrokerOperationError) on failure.
+        Returns Ok(None) on success, Err(BrokerOperationFailed) on failure.
         """
         created_dispatcher = False
         created_command = False
@@ -285,7 +284,7 @@ class PostgresListener:
                         await self._dispatcher_conn.close()
                 self._dispatcher_conn = None
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_START_FAILED,
                     message=f'Failed to establish listener connections: {exc}',
                     retryable=is_retryable_connection_error(exc),
@@ -315,7 +314,7 @@ class PostgresListener:
                 failure from _ensure_connections, re-raised at this seam.
                 Callers: the dispatcher loop (backoff + reconnect) and
                 listen/listen_many/listen_payload (fold to Err).
-            RuntimeError: Err carried no exception, or the connection was
+            RuntimeError: the connection was
                 torn down concurrently (close/health reset run without
                 self._lock) between ensure and this check — same exposure
                 the bare assert had, now explicit and -O-proof.
@@ -325,7 +324,7 @@ class PostgresListener:
             conn_r = await self._ensure_connections()
             if is_err(conn_r):
                 err = conn_r.err_value
-                raise err.exception or RuntimeError(err.message)
+                raise err.exception
         if self._dispatcher_conn is None:
             raise RuntimeError('dispatcher connection missing after ensure')
         return self._dispatcher_conn
@@ -519,7 +518,9 @@ class PostgresListener:
                 await asyncio.sleep(0.5)
                 continue
 
-    async def listen(self, channel_name: str) -> BrokerResult[Queue[Notify]]:
+    async def listen(
+        self, channel_name: str,
+    ) -> Result[Queue[Notify], BrokerOperationFailed]:
         """Subscribe to a PostgreSQL notification channel.
 
         Creates a new asyncio queue for this subscriber and issues LISTEN command
@@ -532,8 +533,8 @@ class PostgresListener:
 
         Returns
         -------
-        BrokerResult[Queue[Notify]]
-            Ok(queue) on success, Err(BrokerOperationError) on connection or SQL failure.
+        Result[Queue[Notify], BrokerOperationFailed]
+            Ok(queue) on success, Err(BrokerOperationFailed) on connection or SQL failure.
 
         Raises
         ------
@@ -550,7 +551,7 @@ class PostgresListener:
         conn_r = await self._ensure_connections()
         if is_err(conn_r):
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=f'Failed to subscribe to {channel_name!r}: {conn_r.err_value.message}',
                     retryable=conn_r.err_value.retryable,
@@ -589,7 +590,7 @@ class PostgresListener:
             # RuntimeError: _ensure_dispatcher_connection found the dispatcher
             # connection torn down by a concurrent reset.
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=f'Failed to subscribe to {channel_name!r}: {exc}',
                     retryable=is_retryable_connection_error(exc),
@@ -599,7 +600,7 @@ class PostgresListener:
 
     async def listen_payload(
         self, channel_name: str, payload: str
-    ) -> BrokerResult[Queue[Notify]]:
+    ) -> Result[Queue[Notify], BrokerOperationFailed]:
         """Subscribe to a channel filtered to one exact payload.
 
         Server-side this is a plain channel LISTEN (issued once per channel,
@@ -607,14 +608,14 @@ class PostgresListener:
         notification to this queue only when its payload matches. Use for
         single-value waits on busy channels (e.g. one task_id on task_done).
 
-        Returns Ok(queue) on success, Err(BrokerOperationError) on failure.
+        Returns Ok(queue) on success, Err(BrokerOperationFailed) on failure.
         A call from a non-owner event loop fails an assertion.
         """
         self._bind_or_validate_loop()
         conn_r = await self._ensure_connections()
         if is_err(conn_r):
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=(
                         f'Failed to subscribe to {channel_name!r}: '
@@ -648,7 +649,7 @@ class PostgresListener:
             # RuntimeError: _ensure_dispatcher_connection found the dispatcher
             # connection torn down by a concurrent reset.
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=f'Failed to subscribe to {channel_name!r}: {exc}',
                     retryable=is_retryable_connection_error(exc),
@@ -682,14 +683,14 @@ class PostgresListener:
     async def listen_many(
         self,
         channel_names: Sequence[str],
-    ) -> BrokerResult[list[Queue[Notify]]]:
+    ) -> Result[list[Queue[Notify]], BrokerOperationFailed]:
         """Subscribe to multiple channels in a single lock acquisition.
 
         More efficient than calling listen() in a loop because the
         dispatcher is stopped/restarted at most once.
 
         Returns Ok(queues) in the same order as *channel_names*,
-        or Err(BrokerOperationError) on connection or SQL failure.
+        or Err(BrokerOperationFailed) on connection or SQL failure.
 
         A call from a non-owner event loop fails an assertion.
         """
@@ -697,7 +698,7 @@ class PostgresListener:
         conn_r = await self._ensure_connections()
         if is_err(conn_r):
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=f'Failed to subscribe to channels: {conn_r.err_value.message}',
                     retryable=conn_r.err_value.retryable,
@@ -742,7 +743,7 @@ class PostgresListener:
             # RuntimeError: _ensure_dispatcher_connection found the dispatcher
             # connection torn down by a concurrent reset.
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED,
                     message=f'Failed to subscribe to channels: {exc}',
                     retryable=is_retryable_connection_error(exc),

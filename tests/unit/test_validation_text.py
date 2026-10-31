@@ -34,7 +34,7 @@ from pydantic_core._pydantic_core import list_all_errors  # pyright: ignore[repo
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import (
     PostgresBroker,
-    _broker_err,  # pyright: ignore[reportPrivateUsage]
+    _operation_failed,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.brokers.result_types import BrokerErrorCode
 from horsies.core.codec.error_payload import MAX_EXCEPTION_CHAIN_LINKS, flatten_exception
@@ -521,7 +521,7 @@ class TestBrokerErrorCause:
     def test_a_validation_error_cause_is_stored_without_input(self) -> None:
         error = _refusal(TypeAdapter(int), MARKER)
 
-        result = _broker_err(BrokerErrorCode.WORKER_PING_FAILED, 'ping failed', error)
+        result = _operation_failed(BrokerErrorCode.WORKER_PING_FAILED, 'ping failed', error)
 
         cause = result.err_value.exception
         assert isinstance(cause, ValueValidationError)

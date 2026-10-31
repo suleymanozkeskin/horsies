@@ -23,6 +23,8 @@ from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
+from horsies.core.brokers.result_types import BrokerOperationError, broker_error_cause
+from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -41,8 +43,17 @@ from horsies.core.utils.imports import (
 from horsies.core.utils.url import to_psycopg_url
 
 
+def _raise_schema_error(err: BrokerOperationError) -> NoReturn:
+    """Raise ``RuntimeError(err.message)``, chained from the cause when there is one."""
+    match broker_error_cause(err):
+        case NoCause():
+            raise RuntimeError(err.message)
+        case cause:
+            raise RuntimeError(err.message) from cause
+
+
 async def _ensure_schema_with_retry(
-    broker: Any,
+    broker: PostgresBroker,
     resilience: WorkerResilienceConfig,
     logger: logging.Logger,
 ) -> None:
@@ -62,7 +73,7 @@ async def _ensure_schema_with_retry(
 
         err = result.err_value
         if not err.retryable:
-            raise RuntimeError(err.message) from err.exception
+            _raise_schema_error(err)
 
         attempts += 1
         match resilience.db_retry_max_attempts:
@@ -75,7 +86,7 @@ async def _ensure_schema_with_retry(
             logger.error(
                 f'Database initialization failed after {attempts} attempts: {err.message}'
             )
-            raise RuntimeError(err.message) from err.exception
+            _raise_schema_error(err)
 
         exponent = max(0, attempts - 1)
         base_ms = min(

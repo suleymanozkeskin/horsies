@@ -929,7 +929,7 @@ class Worker(
                     'to a direct/session-capable Postgres URL. Original error: %s',
                     err.message,
                 )
-                raise err.exception or RuntimeError(err.message)
+                raise err.exception
             self._parent_db_sockets_open = True
             # Surface concurrency configuration clearly for operators
             max_claimed_effective = (
@@ -964,7 +964,7 @@ class Worker(
                     'to a direct/session-capable Postgres URL. Original error: %s',
                     err.message,
                 )
-                raise err.exception or RuntimeError(err.message)
+                raise err.exception
             self._queues = listen_r.ok_value
             logger.info(f'Subscribed to queues: {self.cfg.queues}')
 
@@ -980,7 +980,7 @@ class Worker(
                     WORKER_PING_CHANNEL,
                     err.message,
                 )
-                raise err.exception or RuntimeError(err.message)
+                raise err.exception
             self._ping_queue = ping_listen_r.ok_value
             logger.info('Subscribed to worker ping channel')
 

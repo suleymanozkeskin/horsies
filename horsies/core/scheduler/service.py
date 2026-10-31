@@ -19,7 +19,12 @@ from horsies.core.scheduler.state import ScheduleStateManager
 from horsies.core.scheduler.validation import collect_schedule_errors
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError, BrokerResult
+from horsies.core.brokers.result_types import (
+    BrokerInvalidInput,
+    BrokerResult,
+    broker_error_cause,
+)
+from horsies.core.types.error_detail import NoCause
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
@@ -148,9 +153,15 @@ class Scheduler:
         init_result = await self.broker.ensure_schema_initialized()
         if is_err(init_result):
             err = init_result.err_value
-            raise RuntimeError(
-                f'Schema initialization failed: {err.message}',
-            ) from err.exception
+            match broker_error_cause(err):
+                case NoCause():
+                    raise RuntimeError(
+                        f'Schema initialization failed: {err.message}',
+                    )
+                case cause:
+                    raise RuntimeError(
+                        f'Schema initialization failed: {err.message}',
+                    ) from cause
         logger.info('Broker initialized')
         lock_engine = self.broker.create_single_connection_engine()
         self._lock_database = ScheduleLockDatabase(
@@ -916,19 +927,15 @@ class Scheduler:
             try:
                 encoded_kwargs = encode_kwargs(task_fn, schedule.kwargs)
             except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                return Err(BrokerInvalidInput(
                     message=f"Failed to encode kwargs for schedule '{schedule.name}': {exc}",
-                    retryable=False,
                     exception=exc,
                 ))
             kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                return Err(BrokerInvalidInput(
                     message=f"Failed to serialize encoded kwargs for schedule '{schedule.name}': {kwargs_r.err_value}",
-                    retryable=False,
-                    exception=kwargs_r.err_value if isinstance(kwargs_r.err_value, BaseException) else None,
+                    exception=kwargs_r.err_value,
                 ))
             kwargs_json = kwargs_r.ok_value
 
@@ -952,15 +959,13 @@ class Scheduler:
                     size_bytes=size_bytes,
                     limit_bytes=limit_bytes,
                 ):
-                    return Err(BrokerOperationError(
-                        code=BrokerErrorCode.ENQUEUE_FAILED,
+                    return Err(BrokerInvalidInput(
                         message=(
                             f"kwargs payload for schedule '{schedule.name}' is "
                             f'{size_bytes} bytes, exceeding payload.reject_bytes='
                             f'{limit_bytes}; slot not enqueued'
                         ),
-                        retryable=False,
-                        exception=None,
+                        exception=NoCause(),
                     ))
                 case _ as unreachable:
                     assert_never(unreachable)

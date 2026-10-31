@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy import text, select
 from sqlalchemy.exc import DBAPIError
+from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
     BrokerResources,
@@ -33,8 +34,20 @@ from horsies.core.brokers.resources import (
 )
 from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.result_types import (
+    BrokerAsyncContext,
+    BrokerEnqueueFailed,
     BrokerErrorCode,
+    BrokerEventLoopLimit,
+    BrokerIdempotencyKeyConflict,
+    BrokerInvalidInput,
+    BrokerInvalidJsonPayload,
+    BrokerInvalidTaskOptions,
+    BrokerListenerDisabled,
+    BrokerLoopRunnerFailed,
     BrokerOperationError,
+    BrokerOperationFailed,
+    BrokerOperationFailedCode,
+    BrokerPayloadMismatch,
     BrokerResult,
     RawResultRecord,
 )
@@ -46,12 +59,16 @@ from horsies.core.models.workflow_pg import (
     WorkflowModel as _WorkflowModel,
     WorkflowTaskModel as _WorkflowTaskModel,
 )
-from horsies.core.types.error_detail import IdempotencyKeyOwner
+from horsies.core.types.error_detail import NoCause
 from horsies.core.types.status import TaskStatus, TaskAttemptOutcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json, dumps_json
 from horsies.core.codec.task_options import stored_max_retries
-from horsies.core.codec.validation_errors import exception_text, without_validation_input
+from horsies.core.codec.validation_errors import (
+    exception_text,
+    validation_summary,
+    without_validation_input,
+)
 from horsies.core.models.tasks import TaskInfo, TaskAttemptInfo
 from horsies.core.lifecycle.commands import (
     CancelOrphanedTasks,
@@ -111,19 +128,34 @@ if TYPE_CHECKING:
 _ = (_WorkflowModel, _WorkflowTaskModel)
 
 
-def _broker_err(
-    code: BrokerErrorCode,
+def _operation_failed(
+    code: BrokerOperationFailedCode,
     message: str,
     exc: BaseException,
-) -> Err[BrokerOperationError]:
-    """Build an Err with retryable classification from the raw exception.
+) -> Err[BrokerOperationFailed]:
+    """Build a ``BrokerOperationFailed`` with retryable classification from the raw exception.
 
     A pydantic ``ValidationError`` cause is stored in its form without input
     values (``without_validation_input``).
     """
     return Err(
-        BrokerOperationError(
+        BrokerOperationFailed(
             code=code,
+            message=message,
+            retryable=is_retryable_connection_error(exc),
+            exception=without_validation_input(exc),
+        )
+    )
+
+
+def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed]:
+    """Build a ``BrokerEnqueueFailed`` with retryable classification from the raw exception.
+
+    The write may or may not have happened. A pydantic ``ValidationError``
+    cause is stored in its form without input values.
+    """
+    return Err(
+        BrokerEnqueueFailed(
             message=message,
             retryable=is_retryable_connection_error(exc),
             exception=without_validation_input(exc),
@@ -136,10 +168,9 @@ def _loop_limit_err(
 ) -> Err[BrokerOperationError]:
     """Build the broker error for the event loop limit. Nothing ran."""
     return Err(
-        BrokerOperationError(
-            code=BrokerErrorCode.EVENT_LOOP_LIMIT,
+        BrokerEventLoopLimit(
             message=f'{operation}: {loop_limit.describe()}',
-            retryable=False,
+            loop_limit=loop_limit,
         )
     )
 
@@ -152,10 +183,8 @@ def _loop_runner_err(
     Nothing ran. Not retryable: a stopped runner does not start again.
     """
     return Err(
-        BrokerOperationError(
-            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+        BrokerLoopRunnerFailed(
             message=f'Loop runner failed for {sync_call}: {exc}',
-            retryable=False,
             exception=exc,
         )
     )
@@ -169,10 +198,8 @@ def _async_context_err(
     Nothing ran, and the sync runner was not started.
     """
     return Err(
-        BrokerOperationError(
-            code=BrokerErrorCode.ASYNC_CONTEXT,
+        BrokerAsyncContext(
             message=async_context_message(sync_call, async_call),
-            retryable=False,
         )
     )
 
@@ -1840,7 +1867,7 @@ class PostgresBroker:
             await self._ensure_initialized(resources)
             return Ok(None)
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.SCHEMA_INIT_FAILED,
                 f'Schema initialization failed: {exc}',
                 exc,
@@ -1888,12 +1915,13 @@ class PostgresBroker:
                 return Ok(None)
             loaded = loads_json(value)
             if is_err(loaded):
-                return _broker_err(
-                    BrokerErrorCode.ENQUEUE_FAILED,
-                    f'{label} JSON corrupt for {task_name}: '
-                    f'{loaded.err_value}',
-                    loaded.err_value,
-                )
+                return Err(BrokerInvalidInput(
+                    message=(
+                        f'{label} JSON corrupt for {task_name}: '
+                        f'{loaded.err_value}'
+                    ),
+                    exception=loaded.err_value,
+                ))
             return loaded
 
         args_r = parsed('args', args_json)
@@ -2066,11 +2094,10 @@ class PostgresBroker:
         if retain_rerun_input is None:
             retain_rerun_input = self.config.retain_rerun_input_default
         if enqueued_at is not None and enqueue_delay_seconds is not None:
-            return _broker_err(
-                BrokerErrorCode.ENQUEUE_FAILED,
-                'Cannot specify both enqueued_at and enqueue_delay_seconds',
-                ValueError('Cannot specify both enqueued_at and enqueue_delay_seconds'),
-            )
+            return Err(BrokerInvalidInput(
+                message='Cannot specify both enqueued_at and enqueue_delay_seconds',
+                exception=NoCause(),
+            ))
         # Guard: sent_at is an immutable call-site timestamp, not a scheduling
         # mechanism.  A future sent_at without an explicit enqueued_at or
         # enqueue_delay_seconds is almost certainly legacy ETA usage that would
@@ -2083,13 +2110,14 @@ class PostgresBroker:
             and enqueued_at is None
             and enqueue_delay_seconds is None
         ):
-            return _broker_err(
-                BrokerErrorCode.ENQUEUE_FAILED,
-                'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
-                'sent_at is a call-site timestamp, use enqueued_at or '
-                'enqueue_delay_seconds to schedule deferred execution',
-                ValueError('future sent_at without explicit scheduling parameter'),
-            )
+            return Err(BrokerInvalidInput(
+                message=(
+                    'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
+                    'sent_at is a call-site timestamp, use enqueued_at or '
+                    'enqueue_delay_seconds to schedule deferred execution'
+                ),
+                exception=NoCause(),
+            ))
         try:
             await self._ensure_initialized(resources)
 
@@ -2105,20 +2133,18 @@ class PostgresBroker:
             if task_options:
                 opts_r = loads_json(task_options)
                 if is_err(opts_r):
-                    return _broker_err(
-                        BrokerErrorCode.ENQUEUE_FAILED,
-                        f'task_options JSON corrupt: {opts_r.err_value}',
-                        opts_r.err_value,
-                    )
+                    return Err(BrokerInvalidTaskOptions(
+                        message=f'task_options JSON corrupt: {opts_r.err_value}',
+                        exception=opts_r.err_value,
+                    ))
                 task_options_value = opts_r.ok_value
                 retry_limit_r = stored_max_retries(task_options_value)
                 if is_err(retry_limit_r):
                     detail = retry_limit_r.err_value.detail
-                    return _broker_err(
-                        BrokerErrorCode.INVALID_TASK_OPTIONS,
-                        f'task_options refused for {task_name}: {detail}',
-                        ValueError(detail),
-                    )
+                    return Err(BrokerInvalidTaskOptions(
+                        message=f'task_options refused for {task_name}: {detail}',
+                        exception=NoCause(),
+                    ))
                 max_retries = retry_limit_r.ok_value
 
             # The cutover payload: command fingerprint, retention
@@ -2207,21 +2233,13 @@ class PostgresBroker:
                         case ReservationConflict(task_id=owner):
                             await session.rollback()
                             return Err(
-                                BrokerOperationError(
-                                    code=(
-                                        BrokerErrorCode
-                                        .IDEMPOTENCY_KEY_CONFLICT
-                                    ),
+                                BrokerIdempotencyKeyConflict(
                                     message=(
                                         f'idempotency key for {task_name} '
                                         f'is reserved by task {owner} '
                                         'with a different command'
                                     ),
-                                    retryable=False,
-                                    exception=None,
-                                    detail=IdempotencyKeyOwner(
-                                        owner_task_id=owner,
-                                    ),
+                                    owner_task_id=owner,
                                 )
                             )
                         case ReservationApplied():
@@ -2266,8 +2284,7 @@ class PostgresBroker:
             )
 
         except Exception as exc:
-            return _broker_err(
-                BrokerErrorCode.ENQUEUE_FAILED,
+            return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
@@ -2304,14 +2321,13 @@ class PostgresBroker:
         if existing is None:
             await session.rollback()
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                BrokerEnqueueFailed(
                     message=(
                         f'task_id {task_id} conflict detected but row disappeared '
                         f'before key binding for {task_name}'
                     ),
                     retryable=False,
-                    exception=None,
+                    exception=NoCause(),
                 )
             )
         existing_fingerprint = existing.command_fingerprint
@@ -2323,14 +2339,11 @@ class PostgresBroker:
         ):
             await session.rollback()
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                BrokerPayloadMismatch(
                     message=(
                         f'task_id {task_id} already exists with different payload '
                         f'for task {task_name}'
                     ),
-                    retryable=False,
-                    exception=None,
                 )
             )
 
@@ -2338,14 +2351,11 @@ class PostgresBroker:
         if bound_digest is not None and bytes(bound_digest) != key_digest:
             await session.rollback()
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.PAYLOAD_MISMATCH,
+                BrokerPayloadMismatch(
                     message=(
                         f'task_id {task_id} for {task_name} is already bound '
                         'to a different idempotency key'
                     ),
-                    retryable=False,
-                    exception=None,
                 )
             )
         if bound_digest is None:
@@ -2380,18 +2390,14 @@ class PostgresBroker:
                 ).fetchone()
         except Exception as exc:
             # SELECT failed — task exists (conflict proves it) but we cannot
-            # confirm payload identity. Retryable so auto-retry or manual
-            # retry can reattempt when DB recovers.
-            return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
-                    message=(
-                        f'task_id {task_id} conflict detected but verification '
-                        f'query failed for {task_name}: {exc}'
-                    ),
-                    retryable=True,
-                    exception=exc,
-                )
+            # confirm payload identity. The driver classification of the
+            # cause decides retryable, as at every other driver site; a
+            # retry is safe because the broker returns the existing task for
+            # a duplicate.
+            return _enqueue_failed(
+                f'task_id {task_id} conflict detected but verification '
+                f'query failed for {task_name}: {exc}',
+                exc,
             )
 
         if row is None:
@@ -2399,14 +2405,13 @@ class PostgresBroker:
             # could compare enqueue_sha. Without the stored fingerprint, this
             # cannot be proven idempotent.
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.ENQUEUE_FAILED,
+                BrokerEnqueueFailed(
                     message=(
                         f'task_id {task_id} conflict detected but row disappeared '
                         f'before verification for {task_name}; cannot verify payload identity'
                     ),
                     retryable=False,
-                    exception=None,
+                    exception=NoCause(),
                 )
             )
 
@@ -2422,14 +2427,11 @@ class PostgresBroker:
 
         # Different payload with same task_id — always a bug.
         return Err(
-            BrokerOperationError(
-                code=BrokerErrorCode.PAYLOAD_MISMATCH,
+            BrokerPayloadMismatch(
                 message=(
                     f'task_id {task_id} already exists with different payload '
                     f'for {task_name} (sha mismatch)'
                 ),
-                retryable=False,
-                exception=None,
             )
         )
 
@@ -2451,23 +2453,21 @@ class PostgresBroker:
         """
         _lr = loads_json(result_json)
         if is_err(_lr):
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'Result JSON parse failed for task {task_id}: '
                     f'{_lr.err_value}'
                 ),
-                retryable=False,
+                exception=_lr.err_value,
             ))
         raw_value = _lr.ok_value
         if raw_value is not None and not isinstance(raw_value, dict):
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'Result for task {task_id} is not a JSON object; '
                     f'got {type(raw_value).__name__}'
                 ),
-                retryable=False,
+                exception=NoCause(),
             ))
         return Ok(RawResultRecord(
             task_id=task_id,
@@ -2545,23 +2545,21 @@ class PostgresBroker:
         # Digest over the exact stored bytes BEFORE parsing — the
         # envelope discipline; a mismatch is corruption, not a payload.
         if digest is None or hashlib.sha256(payload).digest() != digest:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'History result digest mismatch for task {task_id}'
                 ),
-                retryable=False,
+                exception=NoCause(),
             ))
         try:
             result_text = payload.decode('utf-8')
         except UnicodeDecodeError as decode_error:
-            return Err(BrokerOperationError(
-                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+            return Err(BrokerInvalidJsonPayload(
                 message=(
                     f'History result payload for task {task_id} is not '
                     f'valid UTF-8: {decode_error}'
                 ),
-                retryable=False,
+                exception=decode_error,
             ))
         return self._build_raw_result_record(
             task_id,
@@ -2854,7 +2852,7 @@ class PostgresBroker:
             self.logger.exception(
                 'Broker error while retrieving raw task result record',
             )
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.TASK_INFO_QUERY_FAILED,
                 f'Broker error while retrieving task {task_id}: {exc}',
                 exc,
@@ -2940,7 +2938,7 @@ class PostgresBroker:
             except Exception as exc:
                 errors.append(exc)
         if errors:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.CLOSE_FAILED,
                 f'Close failed ({len(errors)} error(s)): {errors[0]}',
                 errors[0],
@@ -2968,7 +2966,7 @@ class PostgresBroker:
                 columns = result.keys()
                 return Ok([dict(zip(columns, row)) for row in result.fetchall()])
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_stale_tasks failed: {exc}',
                 exc,
@@ -2994,7 +2992,7 @@ class PostgresBroker:
             latency_ms = (loop.time() - start) * 1000.0
             return Ok(DatabasePing(latency_ms=latency_ms))
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.DB_PING_FAILED,
                 f'ping_database failed: {exc}',
                 exc,
@@ -3030,18 +3028,16 @@ class PostgresBroker:
                 pass
         if timeout_seconds <= 0:
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                BrokerInvalidInput(
                     message=f'timeout_seconds must be positive, got {timeout_seconds}',
-                    retryable=False,
+                    exception=NoCause(),
                 )
             )
         if min_responses is not None and min_responses < 1:
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.WORKER_PING_FAILED,
+                BrokerInvalidInput(
                     message=f'min_responses must be >= 1 when set, got {min_responses}',
-                    retryable=False,
+                    exception=NoCause(),
                 )
             )
 
@@ -3055,20 +3051,40 @@ class PostgresBroker:
                 pass
             case ListenerDisabled():
                 return Err(
-                    BrokerOperationError(
-                        code=BrokerErrorCode.WORKER_PING_FAILED,
+                    BrokerListenerDisabled(
                         message=(
                             'ping_workers listener unavailable: this broker was '
                             'built with assume_initialized=True and has no listener'
                         ),
-                        retryable=False,
                     )
                 )
+        # A refused target_worker_id is refused input. A validated request
+        # holds strings only, so its encode cannot fail; the encode runs
+        # outside every catch, so a failure crashes as the defect it is.
+        try:
+            request = WorkerPingRequest(
+                correlation_id=correlation_id,
+                reply_channel=reply_channel,
+                target_worker_id=target_worker_id,
+            )
+        except ValidationError as exc:
+            return Err(BrokerInvalidInput(
+                message=f'ping_workers request refused: {validation_summary(exc)}',
+                exception=without_validation_input(exc),
+            ))
+        match dumps_json(request.model_dump()):
+            case Ok(encoded):
+                payload = encoded
+            case Err(encode_error):
+                raise AssertionError(
+                    f'ping_workers request encode failed: {encode_error}',
+                )
+
         listen_r = await listener.listen(reply_channel)
         if is_err(listen_r):
             err = listen_r.err_value
             return Err(
-                BrokerOperationError(
+                BrokerOperationFailed(
                     code=BrokerErrorCode.WORKER_PING_FAILED,
                     message=f'ping_workers reply subscribe failed: {err.message}',
                     retryable=err.retryable,
@@ -3078,22 +3094,6 @@ class PostgresBroker:
         queue = listen_r.ok_value
 
         try:
-            request = WorkerPingRequest(
-                correlation_id=correlation_id,
-                reply_channel=reply_channel,
-                target_worker_id=target_worker_id,
-            )
-            payload_r = dumps_json(request.model_dump())
-            if is_err(payload_r):
-                return Err(
-                    BrokerOperationError(
-                        code=BrokerErrorCode.WORKER_PING_FAILED,
-                        message=f'ping_workers payload encode failed: {payload_r.err_value}',
-                        retryable=False,
-                    )
-                )
-            payload = payload_r.ok_value
-
             loop = asyncio.get_running_loop()
             async with resources.session_factory() as session:
                 await session.execute(
@@ -3127,7 +3127,7 @@ class PostgresBroker:
                     break
             return Ok(pongs)
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.WORKER_PING_FAILED,
                 f'ping_workers failed: {exception_text(exc)}',
                 exc,
@@ -3231,7 +3231,7 @@ class PostgresBroker:
                     [self._row_to_worker_snapshot(row) for row in result.fetchall()]
                 )
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'list_worker_states failed: {exc}',
                 exc,
@@ -3258,7 +3258,7 @@ class PostgresBroker:
                     return Ok(None)
                 return Ok(self._row_to_worker_snapshot(row))
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_worker_state failed: {exc}',
                 exc,
@@ -3282,10 +3282,9 @@ class PostgresBroker:
                 pass
         if limit is not None and limit <= 0:
             return Err(
-                BrokerOperationError(
-                    code=BrokerErrorCode.MONITORING_QUERY_FAILED,
+                BrokerInvalidInput(
                     message=f'limit must be positive when set, got {limit}',
-                    retryable=False,
+                    exception=NoCause(),
                 )
             )
         try:
@@ -3298,7 +3297,7 @@ class PostgresBroker:
                     [self._row_to_worker_snapshot(row) for row in result.fetchall()]
                 )
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_worker_state_history failed: {exc}',
                 exc,
@@ -3317,7 +3316,7 @@ class PostgresBroker:
                 columns = result.keys()
                 return Ok([dict(zip(columns, row)) for row in result.fetchall()])
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.MONITORING_QUERY_FAILED,
                 f'get_expired_tasks failed: {exc}',
                 exc,
@@ -3608,7 +3607,7 @@ class PostgresBroker:
 
             return Ok(processed)
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'mark_stale_tasks_as_failed failed: {exc}',
                 exc,
@@ -3641,7 +3640,7 @@ class PostgresBroker:
             # cleanly. Expired tasks carry no ok payload.
             ser_r = dumps_json(encode_task_result(task_result, type(None)))
             if is_err(ser_r):
-                return _broker_err(
+                return _operation_failed(
                     BrokerErrorCode.CLEANUP_FAILED,
                     f'expire_pending_tasks: failed to serialize TASK_EXPIRED result: {ser_r.err_value}',
                     ser_r.err_value,
@@ -3688,7 +3687,7 @@ class PostgresBroker:
             )
             return Ok(total_expired)
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'expire_pending_tasks failed: {exc}',
                 exc,
@@ -3715,7 +3714,7 @@ class PostgresBroker:
                 await session.commit()
                 return Ok(getattr(result, 'rowcount', 0))
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'requeue_stale_claimed failed: {exc}',
                 exc,
@@ -3776,7 +3775,7 @@ class PostgresBroker:
                 duration_ms=int((time.monotonic() - started) * 1000),
             ))
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.CLEANUP_FAILED,
                 f'audit_orphaned_workflow_tasks failed: {exc}',
                 exc,
@@ -3900,12 +3899,11 @@ class PostgresBroker:
             )
 
             if detail.result_digest is None:
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                return Err(BrokerInvalidJsonPayload(
                     message=(
                         f'History result digest is absent for task {task_id}'
                     ),
-                    retryable=False,
+                    exception=NoCause(),
                 ))
             decoded = decode_result_envelope(
                 version=detail.result_envelope_version,
@@ -3918,22 +3916,20 @@ class PostgresBroker:
                 case DecodedArchiveValue(value=loaded):
                     pass
                 case failure:
-                    return Err(BrokerOperationError(
-                        code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                    return Err(BrokerInvalidJsonPayload(
                         message=(
                             f'History result envelope failed validation for '
                             f'task {task_id}: {failure!r}'
                         ),
-                        retryable=False,
+                        exception=NoCause(),
                     ))
             if loaded is not None and not isinstance(loaded, dict):
-                return Err(BrokerOperationError(
-                    code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                return Err(BrokerInvalidJsonPayload(
                     message=(
                         f'Result for task {task_id} is not a JSON '
                         f'object; got {type(loaded).__name__}'
                     ),
-                    retryable=False,
+                    exception=NoCause(),
                 ))
             raw_result_value = cast('dict[str, Any] | None', loaded)
 
@@ -4106,24 +4102,22 @@ class PostgresBroker:
                     if raw_result_text:
                         _lr = loads_json(raw_result_text)
                         if is_err(_lr):
-                            return Err(BrokerOperationError(
-                                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                            return Err(BrokerInvalidJsonPayload(
                                 message=(
                                     f'Result JSON parse failed for task '
                                     f'{task_id}: {_lr.err_value}'
                                 ),
-                                retryable=False,
+                                exception=_lr.err_value,
                             ))
                         loaded = _lr.ok_value
                         if loaded is not None and not isinstance(loaded, dict):
-                            return Err(BrokerOperationError(
-                                code=BrokerErrorCode.INVALID_JSON_PAYLOAD,
+                            return Err(BrokerInvalidJsonPayload(
                                 message=(
                                     f'Result for task {task_id} is not a '
                                     f'JSON object; got '
                                     f'{type(loaded).__name__}'
                                 ),
-                                retryable=False,
+                                exception=NoCause(),
                             ))
                         # Broker stays infrastructure: no typed decode
                         # here. The app-level `get_task_info` does the
@@ -4192,7 +4186,7 @@ class PostgresBroker:
                     )
                 )
         except Exception as exc:
-            return _broker_err(
+            return _operation_failed(
                 BrokerErrorCode.TASK_INFO_QUERY_FAILED,
                 f'get_task_info failed for {task_id}: {exc}',
                 exc,

@@ -407,7 +407,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 |---|---|---|
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
 | `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
-| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, or cross-method retry attempted |
+| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
 | `ENQUEUE_FAILED` | Accepted | Broker/DB failure. `TaskSendPayload` with `enqueue_sha` available for retry; `retryable` is the driver classification |
 | `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
 | `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted |
@@ -574,7 +574,7 @@ Decode failures surface differently depending on which retrieval API the
 caller uses:
 
 - `app.get_result(task_id, ...)` returns
-  `Err(BrokerOperationError(BrokerErrorCode.INVALID_JSON_PAYLOAD))` when
+  `Err(BrokerInvalidJsonPayload(...))` (code `INVALID_JSON_PAYLOAD`) when
   the stored envelope is malformed, missing the `__h_task_result__`
   marker, or fails typed decode against the registered `task_ok_type`.
   Cross-process monitoring and debugging callers see the infrastructure
@@ -742,8 +742,10 @@ from horsies import (
     ExceptionMapper,
     # Status
     TaskStatus, TaskAttemptOutcome, TASK_TERMINAL_STATES,
-    # Broker result (for handle.info())
+    # Broker result (for handle.info()); match on the variant
     BrokerResult, BrokerOperationError, BrokerErrorCode,
+    BrokerOperationFailed, BrokerEnqueueFailed, BrokerInvalidInput,
+    broker_error_cause,
     # Node data flow helper
     from_node,
     # Rerun (re-execute a terminal task as a new request)

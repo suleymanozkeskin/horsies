@@ -37,6 +37,8 @@ from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.tasks import OutcomeCode, TaskError
 from horsies.core.types.result import Ok, Err, is_err as _is_err
 from horsies.core.brokers.resources import EventLoopLimit
+from horsies.core.brokers.result_types import broker_error_cause
+from horsies.core.types.error_detail import NoCause
 from horsies.core.logging import get_logger
 from horsies.core.models.workflow import (
     TaskNode,
@@ -345,13 +347,20 @@ async def start_workflow_async(
         init_result = await broker.ensure_schema_initialized()
         if is_err(init_result):
             broker_err = init_result.err_value
+            # The start catalog stores no cause as None.
+            schema_cause: BaseException | None
+            match broker_error_cause(broker_err):
+                case NoCause():
+                    schema_cause = None
+                case exception:
+                    schema_cause = exception
             last_err = WorkflowStartError(
                 code=WorkflowStartErrorCode.ENQUEUE_FAILED,
                 message=f'Schema initialization failed: {broker_err.message}',
                 retryable=broker_err.retryable,
                 workflow_name=spec.name,
                 workflow_id=wf_id,
-                exception=broker_err.exception,
+                exception=schema_cause,
             )
             if last_err.retryable and attempt < max_attempts - 1:
                 continue

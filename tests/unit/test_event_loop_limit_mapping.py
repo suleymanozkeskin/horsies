@@ -19,7 +19,8 @@ from pydantic import SecretStr
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import MAX_CALLER_EVENT_LOOPS, PostgresBroker
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationError
+from horsies.core.brokers.resources import EventLoopLimit
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerEventLoopLimit, BrokerOperationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.monitoring.errors import MonitoringQueryErrorCode
@@ -50,10 +51,13 @@ LIMIT_MESSAGE = 'this broker already holds async resources for 5 open event loop
 
 
 def _loop_limit_broker_error() -> BrokerOperationError:
-    return BrokerOperationError(
-        code=BrokerErrorCode.EVENT_LOOP_LIMIT,
+    return BrokerEventLoopLimit(
         message=LIMIT_MESSAGE,
-        retryable=False,
+        loop_limit=EventLoopLimit(
+            limit=MAX_CALLER_EVENT_LOOPS,
+            held_thread_names=('MainThread',),
+            current_thread_name='worker-1',
+        ),
     )
 
 
