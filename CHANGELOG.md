@@ -262,6 +262,12 @@ and there is no migration contract between pre-1.0 versions.
 - **`close_async()` does not block its event loop while it stops the sync
   runner.** The stop joins the runner thread for up to 2 s; it now runs on a
   worker thread through `asyncio.to_thread()`.
+- **The sync bridge debug log no longer holds call arguments.**
+  `LoopRunner.call` logged `Calling <function> with args: ... and kwargs:
+  ...` at `DEBUG`. For a sync `send()` or `schedule()` the arguments hold
+  the task's serialized kwargs, so task input went into the debug log. The
+  line now names the function only, and it no longer formats every argument
+  on each call when `DEBUG` is off.
 
 ## [0.5.5] - 2026-10-28
 
