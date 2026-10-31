@@ -61,7 +61,6 @@ from horsies.core.models.retention import (
     derived_queue_class_key,
     resolve_queue_retention_class,
 )
-from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.utils.loop_runner import (
     async_context_message,
     in_running_event_loop,
@@ -679,20 +678,9 @@ class TaskHandle(Generic[T]):
 
         if self._broker_mode and self._app:
             broker = self._app.get_broker()
-            try:
-                broker_result = await broker.get_raw_result_record_async(
-                    self.task_id, timeout_ms,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                return self._error_result(
-                    error_code=OperationalErrorCode.BROKER_ERROR,
-                    message='Broker error while retrieving task result',
-                    data={'task_id': self.task_id},
-                    exception=exc,
-                    cache=False,
-                )
+            broker_result = await broker.get_raw_result_record_async(
+                self.task_id, timeout_ms,
+            )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
@@ -1381,16 +1369,7 @@ def create_task_wrapper(
                     f'(or retry_send_async for retries).'
                 ),
             ))
-        try:
-            broker = app.get_broker()
-        except Exception as exc:
-            return Err(TaskSendEnqueueFailed(
-                task_id=task_id,
-                payload=payload,
-                message=f'Failed to get broker for {task_name}: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
         max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
@@ -1442,16 +1421,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core async send logic. Used by send_async() and retry_send_async()."""
-        try:
-            broker = app.get_broker()
-        except Exception as exc:
-            return Err(TaskSendEnqueueFailed(
-                task_id=task_id,
-                payload=payload,
-                message=f'Failed to get broker for {task_name}: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
         max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
@@ -1464,32 +1434,20 @@ def create_task_wrapper(
                 )
                 await asyncio.sleep(delay_ms / 1000.0)
 
-            try:
-                result = await broker.enqueue_async(
-                    task_name,
-                    payload.queue_name,
-                    task_id=task_id,
-                    enqueue_sha=payload.enqueue_sha,
-                    args_json=payload.args_json,
-                    kwargs_json=payload.kwargs_json,
-                    priority=payload.priority,
-                    good_until=payload.good_until,
-                    sent_at=payload.sent_at,
-                    task_options=payload.task_options,
-                    idempotency_key=payload.idempotency_key,
-                    retention_class_key=payload.retention_class_key,
-                )
-            except Exception as exc:
-                last_err = TaskSendEnqueueFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=f'Failed to enqueue task {task_name}: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-                if last_err.retryable and attempt < max_attempts - 1:
-                    continue
-                return Err(last_err)
+            result = await broker.enqueue_async(
+                task_name,
+                payload.queue_name,
+                task_id=task_id,
+                enqueue_sha=payload.enqueue_sha,
+                args_json=payload.args_json,
+                kwargs_json=payload.kwargs_json,
+                priority=payload.priority,
+                good_until=payload.good_until,
+                sent_at=payload.sent_at,
+                task_options=payload.task_options,
+                idempotency_key=payload.idempotency_key,
+                retention_class_key=payload.retention_class_key,
+            )
 
             if is_err(result):
                 send_err = _map_broker_err(result.err_value, task_id, payload)
@@ -1526,16 +1484,7 @@ def create_task_wrapper(
                     f'(or retry_schedule_async for retries).'
                 ),
             ))
-        try:
-            broker = app.get_broker()
-        except Exception as exc:
-            return Err(TaskSendEnqueueFailed(
-                task_id=task_id,
-                payload=payload,
-                message=f'Failed to get broker for {task_name}: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
         max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
@@ -1589,16 +1538,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         """Core async schedule logic. Used by schedule_async() and
         retry_schedule_async()."""
-        try:
-            broker = app.get_broker()
-        except Exception as exc:
-            return Err(TaskSendEnqueueFailed(
-                task_id=task_id,
-                payload=payload,
-                message=f'Failed to get broker for {task_name}: {exc}',
-                retryable=False,
-                exception=exc,
-            ))
+        broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
         max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
@@ -1611,33 +1551,21 @@ def create_task_wrapper(
                 )
                 await asyncio.sleep(delay_ms / 1000.0)
 
-            try:
-                result = await broker.enqueue_async(
-                    task_name,
-                    payload.queue_name,
-                    task_id=task_id,
-                    enqueue_sha=payload.enqueue_sha,
-                    args_json=payload.args_json,
-                    kwargs_json=payload.kwargs_json,
-                    priority=payload.priority,
-                    good_until=payload.good_until,
-                    sent_at=payload.sent_at,
-                    enqueue_delay_seconds=payload.enqueue_delay_seconds,
-                    task_options=payload.task_options,
-                    idempotency_key=payload.idempotency_key,
-                    retention_class_key=payload.retention_class_key,
-                )
-            except Exception as exc:
-                last_err = TaskSendEnqueueFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=f'Failed to schedule task {task_name}: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-                if last_err.retryable and attempt < max_attempts - 1:
-                    continue
-                return Err(last_err)
+            result = await broker.enqueue_async(
+                task_name,
+                payload.queue_name,
+                task_id=task_id,
+                enqueue_sha=payload.enqueue_sha,
+                args_json=payload.args_json,
+                kwargs_json=payload.kwargs_json,
+                priority=payload.priority,
+                good_until=payload.good_until,
+                sent_at=payload.sent_at,
+                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                task_options=payload.task_options,
+                idempotency_key=payload.idempotency_key,
+                retention_class_key=payload.retention_class_key,
+            )
 
             if is_err(result):
                 send_err = _map_broker_err(result.err_value, task_id, payload)

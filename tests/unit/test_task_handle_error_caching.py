@@ -69,15 +69,17 @@ def _assert_err_code(result: Any, code: object) -> None:
 @pytest.mark.asyncio
 class TestTransientErrorsNotCached:
     async def test_broker_exception_then_success(self) -> None:
-        """A raised broker exception must not poison the handle."""
+        """A raised broker exception propagates and does not poison the handle."""
         broker = MagicMock()
+        defect = RuntimeError('stub defect')
         broker.get_raw_result_record_async = AsyncMock(
-            side_effect=[RuntimeError('db down'), _ok_record(42)],
+            side_effect=[defect, _ok_record(42)],
         )
         handle = _make_handle(broker)
 
-        first = await handle.get_async()
-        _assert_err_code(first, OperationalErrorCode.BROKER_ERROR)
+        with pytest.raises(RuntimeError) as exc_info:
+            await handle.get_async()
+        assert exc_info.value is defect
 
         second = await handle.get_async()
         assert second.is_ok(), (
