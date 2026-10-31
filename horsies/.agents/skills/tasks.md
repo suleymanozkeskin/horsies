@@ -119,6 +119,7 @@ The old flat `LibraryErrorCode` enum has been split into 4 families. The umbrell
 
 Infra-level failures during task execution, brokering, or worker processing:
 
+<!-- members: OperationalErrorCode -->
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
 - `TASK_EXCEPTION` — task returned `None` instead of `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`). A raised exception in task code gives `UNHANDLED_EXCEPTION`, not `TASK_EXCEPTION`
 - `WORKER_CRASHED` — worker process died during execution
@@ -133,18 +134,17 @@ Infra-level failures during task execution, brokering, or worker processing:
 
 Violations of the declared API contract between task author and library:
 
+<!-- members: ContractCode -->
 - `RETURN_TYPE_MISMATCH` — returned value doesn't match declared type
+- `PYDANTIC_HYDRATION_ERROR` — legacy code, kept in the enum as a reserved code; the library does not return it (stored payloads no longer carry the `__pydantic_model__` shape that needed a runtime class import)
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
-
-(`PYDANTIC_HYDRATION_ERROR` is a legacy code retained in the enum but no
-longer reachable under strict-serde — stored payloads no longer carry
-the polymorphic ``__pydantic_model__`` shape that used to require
-runtime class import.)
+- `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id)
 
 ### `RetrievalCode`
 
 Results from `handle.get()` / `handle.result_for()` when data is not (yet) available:
 
+<!-- members: RetrievalCode -->
 - `WAIT_TIMEOUT` — `get()` timed out; task may still be running, not cached, re-pollable
 - `TASK_NOT_FOUND` — task ID does not exist
 - `WORKFLOW_NOT_FOUND` — workflow ID does not exist
@@ -157,10 +157,12 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 
 Terminal lifecycle outcomes for tasks and workflows:
 
+<!-- members: OutcomeCode -->
 - `TASK_CANCELLED` — task was cancelled
 - `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
 - `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `auto_retry_for`
 - `WORKFLOW_PAUSED` — workflow is paused
+- `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
 - `UPSTREAM_SKIPPED` — upstream task was skipped
@@ -403,6 +405,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 
 ### `TaskSendErrorCode`
 
+<!-- members: TaskSendErrorCode -->
 | Code | Retry methods | When |
 |---|---|---|
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
