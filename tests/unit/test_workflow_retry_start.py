@@ -86,12 +86,12 @@ class TestValidateStartRetry:
         assert is_err(result)
         assert result.err_value.code == WorkflowStartErrorCode.VALIDATION_FAILED
 
-    def test_rejects_internal_failed(self) -> None:
-        """INTERNAL_FAILED errors cannot be retried."""
+    def test_rejects_loop_runner_failed(self) -> None:
+        """LOOP_RUNNER_FAILED errors cannot be retried."""
         spec = _make_spec()
         error = WorkflowStartError(
-            code=WorkflowStartErrorCode.INTERNAL_FAILED,
-            message='Bug',
+            code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+            message='Loop runner is not running',
             retryable=False,
             workflow_name='test-wf',
             workflow_id='wf-123',
@@ -200,8 +200,8 @@ class TestRetryStartAsync:
         """Invalid error code skips start_async() entirely."""
         spec = _make_spec()
         error = WorkflowStartError(
-            code=WorkflowStartErrorCode.INTERNAL_FAILED,
-            message='Bug',
+            code=WorkflowStartErrorCode.LOOP_RUNNER_FAILED,
+            message='Loop runner is not running',
             retryable=False,
             workflow_name='test-wf',
             workflow_id='wf-123',

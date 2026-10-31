@@ -94,6 +94,7 @@ from horsies.core.utils.db import (
 )
 from horsies.core.utils.loop_runner import (
     LoopRunner,
+    LoopRunnerError,
     async_context_message,
     in_running_event_loop,
 )
@@ -139,6 +140,23 @@ def _loop_limit_err(
             code=BrokerErrorCode.EVENT_LOOP_LIMIT,
             message=f'{operation}: {loop_limit.describe()}',
             retryable=False,
+        )
+    )
+
+
+def _loop_runner_err(
+    sync_call: str, exc: LoopRunnerError,
+) -> Err[BrokerOperationError]:
+    """Build the broker error for a sync facade whose runner could not run the call.
+
+    Nothing ran. Not retryable: a stopped runner does not start again.
+    """
+    return Err(
+        BrokerOperationError(
+            code=BrokerErrorCode.LOOP_RUNNER_FAILED,
+            message=f'Loop runner failed for {sync_call}: {exc}',
+            retryable=False,
+            exception=exc,
         )
     )
 
@@ -975,12 +993,13 @@ class PostgresBroker:
 
         Raises:
             AssertionError: the calling thread runs an event loop. Nothing
-                ran, and the runner was not started. Every sync facade
-                re-raises an AssertionError from this call, also one that the
-                coroutine raised, instead of returning it as an Err.
-            LoopRunnerError: the runner is stopped, or scheduling onto its
-                loop failed.
-            Exception: the coroutine's own exception, unchanged.
+                ran, and the runner was not started.
+            LoopRunnerError: the runner is stopped, its thread did not
+                start, or scheduling onto its loop failed. Nothing ran.
+                Every sync facade returns this as its ``LOOP_RUNNER_FAILED``
+                error.
+            Exception: the coroutine's own exception, unchanged. Every sync
+                facade lets it propagate, as the async form does.
         """
         if in_running_event_loop():
             raise AssertionError(
@@ -2861,14 +2880,9 @@ class PostgresBroker:
             return self.run_sync(
                 self.get_raw_result_record_async, task_id, timeout_ms,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return _broker_err(
-                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                f'Sync bridge failed for raw result fetch ({task_id}): '
-                f'{exc}',
-                exc,
+        except LoopRunnerError as exc:
+            return _loop_runner_err(
+                f'PostgresBroker.get_raw_result_record({task_id!r})', exc,
             )
 
     async def _unsubscribe_task_done_safely(
@@ -3825,14 +3839,8 @@ class PostgresBroker:
                 retention_class_key=retention_class_key,
                 retain_rerun_input=retain_rerun_input,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return _broker_err(
-                BrokerErrorCode.ENQUEUE_FAILED,
-                f'Failed to enqueue task {task_name} (sync): {exc}',
-                exc,
-            )
+        except LoopRunnerError as exc:
+            return _loop_runner_err(f'PostgresBroker.enqueue({task_name!r})', exc)
 
 
 
@@ -4216,14 +4224,8 @@ class PostgresBroker:
                 include_failed_reason=include_failed_reason,
                 include_attempts=include_attempts,
             )
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return _broker_err(
-                BrokerErrorCode.TASK_INFO_QUERY_FAILED,
-                f'get_task_info failed for {task_id} (sync): {exc}',
-                exc,
-            )
+        except LoopRunnerError as exc:
+            return _loop_runner_err(f'PostgresBroker.get_task_info({task_id!r})', exc)
 
     def close(self) -> BrokerResult[None]:
         """Synchronous cleanup (runs close_async in background loop).
@@ -4238,13 +4240,7 @@ class PostgresBroker:
             )
         try:
             return self.run_sync(self.close_async)
-        except AssertionError:
-            raise
-        except Exception as exc:
-            return _broker_err(
-                BrokerErrorCode.CLOSE_FAILED,
-                f'close failed (sync): {exc}',
-                exc,
-            )
+        except LoopRunnerError as exc:
+            return _loop_runner_err('PostgresBroker.close()', exc)
         finally:
             self._loop_runner.stop()

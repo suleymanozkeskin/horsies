@@ -209,7 +209,7 @@ class WorkflowStartError:
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
 | `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
 | `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
-| `INTERNAL_FAILED` | No | Sync bridge or unexpected exception |
+| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.start_async()` or use a new broker |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.start_async()` |
 
@@ -323,8 +323,8 @@ class HandleOperationError:
 |---|---|---|
 | `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
 | `DB_OPERATION_FAILED` | Maybe | DB query/commit failure |
-| `LOOP_RUNNER_FAILED` | No | Sync bridge failure |
-| `INTERNAL_FAILED` | No | Unexpected exception |
+| `LOOP_RUNNER_FAILED` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
+| `INTERNAL_FAILED` | No | `pause_workflow()` / `resume_workflow()` raised an exception that is not a database error |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
 | `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 

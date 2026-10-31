@@ -16,7 +16,8 @@ The library uses two distinct error systems:
 Where Result stops and exceptions take over (the "stop line"):
 
 * **Broker layer** -- returns ``BrokerResult``.  Never raises for
-  operational failures (only for ``asyncio.CancelledError``).
+  operational failures.  ``asyncio.CancelledError`` and programmer
+  defects propagate, from the sync facades as from the async methods.
 
 * **Internal call sites** -- handle ``BrokerResult`` with real decisions:
   retry on transient errors, save partial progress, track consecutive
@@ -32,9 +33,8 @@ Where Result stops and exceptions take over (the "stop line"):
 * **Workflow start** (``start_workflow_async``, ``start_workflow``) --
   returns ``WorkflowStartResult`` (see ``start_types.py``).  Schema
   init ``Err`` is converted to ``WorkflowStartError(SCHEMA_INIT_FAILED)``
-  preserving the ``retryable`` flag from the broker error.  Sync bridge
-  infrastructure failures map to ``LOOP_RUNNER_FAILED``; unexpected
-  sync-path exceptions map to ``INTERNAL_FAILED``.
+  preserving the ``retryable`` flag from the broker error.  A sync runner
+  failure maps to ``LOOP_RUNNER_FAILED``; any other exception propagates.
 
 * **User-facing API** (``TaskHandle.info`` / ``info_async``) -- returns
   ``BrokerResult`` directly.  The user decides how to handle
@@ -92,6 +92,12 @@ class BrokerErrorCode(str, Enum):
     # wait would stall that loop, so nothing ran. Repeating the sync call
     # on that thread returns the same error; call the ``*_async`` form.
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
+    # A sync facade could not run the call on the broker's sync runner: the
+    # runner is stopped, its thread did not start, or scheduling failed.
+    # Nothing ran. A stopped runner does not start again (``close()`` and
+    # ``close_async()`` stop it); call the ``*_async`` form or use a new
+    # broker.
+    LOOP_RUNNER_FAILED = 'LOOP_RUNNER_FAILED'
 
 
 @dataclass(slots=True, frozen=True)

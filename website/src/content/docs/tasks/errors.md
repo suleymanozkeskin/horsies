@@ -121,6 +121,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this call ran on a new one; nothing ran; clears when one of those loops closes | No |
 | `ASYNC_CONTEXT` | A sync method (`app.get_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
+| `LOOP_RUNNER_FAILED` | A sync method could not run the call on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran. `close()` and `close_async()` stop the runner, and a stopped runner does not start again: call the `*_async` form or use a new broker | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
@@ -186,7 +187,7 @@ For a validation failure, the cause names the field, the message and the type, n
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
-| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist | Accepted |
+| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist. A sync send whose broker runner is stopped also returns this code with `retryable=False`; nothing was written, and the sync retry methods return the same error, so use `retry_*_async(err)` | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |

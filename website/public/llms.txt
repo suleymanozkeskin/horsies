@@ -110,9 +110,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Err(BrokerOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
 - BrokerOperationError fields: code (BrokerErrorCode), message (str), retryable (bool), exception (BaseException | None)
-- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, LOOP_RUNNER_FAILED
 - ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran and the sync runner did not start; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
 - EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
+- LOOP_RUNNER_FAILED (BrokerErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable). Any other exception from a sync call propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
   ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
@@ -366,7 +367,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed with categorized error
 - WorkflowStartError fields: code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str), exception (BaseException | None)
-- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, INTERNAL_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, LOOP_RUNNER_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
 - Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
 

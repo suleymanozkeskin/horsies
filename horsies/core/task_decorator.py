@@ -461,6 +461,7 @@ class TaskHandle(Generic[T]):
                     | BrokerErrorCode.LISTENER_SUBSCRIBE_FAILED
                     | BrokerErrorCode.NO_BROKER
                     | BrokerErrorCode.INVALID_TASK_OPTIONS
+                    | BrokerErrorCode.LOOP_RUNNER_FAILED
                 ):
                     err_code, cache = OperationalErrorCode.BROKER_ERROR, False
                 case _ as unreachable:
@@ -635,18 +636,9 @@ class TaskHandle(Generic[T]):
                     cache=False,
                 )
             broker = self._app.get_broker()
-            try:
-                broker_result = broker.get_raw_result_record(
-                    self.task_id, timeout_ms,
-                )
-            except Exception as exc:
-                return self._error_result(
-                    error_code=OperationalErrorCode.BROKER_ERROR,
-                    message='Broker error while retrieving task result',
-                    data={'task_id': self.task_id},
-                    exception=exc,
-                    cache=False,
-                )
+            broker_result = broker.get_raw_result_record(
+                self.task_id, timeout_ms,
+            )
             return self._record_to_task_result(broker_result, timeout_ms)
         else:
             # For synchronous/immediate execution, result should already be set
@@ -1352,6 +1344,7 @@ def create_task_wrapper(
                 | BrokerErrorCode.NO_TYPE_AVAILABLE
                 | BrokerErrorCode.INVALID_JSON_PAYLOAD
                 | BrokerErrorCode.INVALID_TASK_OPTIONS
+                | BrokerErrorCode.LOOP_RUNNER_FAILED
             ):
                 # The broker's data checks fail with no exception.
                 cause: BaseException | NoCause
@@ -1410,32 +1403,20 @@ def create_task_wrapper(
                 )
                 time.sleep(delay_ms / 1000.0)
 
-            try:
-                result = broker.enqueue(
-                    task_name,
-                    payload.queue_name,
-                    task_id=task_id,
-                    enqueue_sha=payload.enqueue_sha,
-                    args_json=payload.args_json,
-                    kwargs_json=payload.kwargs_json,
-                    priority=payload.priority,
-                    good_until=payload.good_until,
-                    sent_at=payload.sent_at,
-                    task_options=payload.task_options,
-                    idempotency_key=payload.idempotency_key,
-                    retention_class_key=payload.retention_class_key,
-                )
-            except Exception as exc:
-                last_err = TaskSendEnqueueFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=f'Failed to enqueue task {task_name}: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-                if last_err.retryable and attempt < max_attempts - 1:
-                    continue
-                return Err(last_err)
+            result = broker.enqueue(
+                task_name,
+                payload.queue_name,
+                task_id=task_id,
+                enqueue_sha=payload.enqueue_sha,
+                args_json=payload.args_json,
+                kwargs_json=payload.kwargs_json,
+                priority=payload.priority,
+                good_until=payload.good_until,
+                sent_at=payload.sent_at,
+                task_options=payload.task_options,
+                idempotency_key=payload.idempotency_key,
+                retention_class_key=payload.retention_class_key,
+            )
 
             if is_err(result):
                 send_err = _map_broker_err(result.err_value, task_id, payload)
@@ -1567,33 +1548,21 @@ def create_task_wrapper(
                 )
                 time.sleep(delay_ms / 1000.0)
 
-            try:
-                result = broker.enqueue(
-                    task_name,
-                    payload.queue_name,
-                    task_id=task_id,
-                    enqueue_sha=payload.enqueue_sha,
-                    args_json=payload.args_json,
-                    kwargs_json=payload.kwargs_json,
-                    priority=payload.priority,
-                    good_until=payload.good_until,
-                    sent_at=payload.sent_at,
-                    enqueue_delay_seconds=payload.enqueue_delay_seconds,
-                    task_options=payload.task_options,
-                    idempotency_key=payload.idempotency_key,
-                    retention_class_key=payload.retention_class_key,
-                )
-            except Exception as exc:
-                last_err = TaskSendEnqueueFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=f'Failed to schedule task {task_name}: {exc}',
-                    retryable=is_retryable_connection_error(exc),
-                    exception=exc,
-                )
-                if last_err.retryable and attempt < max_attempts - 1:
-                    continue
-                return Err(last_err)
+            result = broker.enqueue(
+                task_name,
+                payload.queue_name,
+                task_id=task_id,
+                enqueue_sha=payload.enqueue_sha,
+                args_json=payload.args_json,
+                kwargs_json=payload.kwargs_json,
+                priority=payload.priority,
+                good_until=payload.good_until,
+                sent_at=payload.sent_at,
+                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                task_options=payload.task_options,
+                idempotency_key=payload.idempotency_key,
+                retention_class_key=payload.retention_class_key,
+            )
 
             if is_err(result):
                 send_err = _map_broker_err(result.err_value, task_id, payload)

@@ -83,6 +83,23 @@ and there is no migration contract between pre-1.0 versions.
 
       config = WorkflowDefinitionConfig(output=save, on_error=OnError.FAIL)
   ```
+- **Breaking: a sync method returns an `Err` only for a failure of the
+  broker's sync runner; every other exception propagates.** This covers the
+  sync methods of `PostgresBroker` and `Horsies`, the sync `WorkflowHandle`
+  methods, `start_workflow()` and `spec.start()`, `pause_workflow_sync()`,
+  `resume_workflow_sync()`, and the sync `TaskHandle.get()`, `.send()` and
+  `.schedule()`. The called coroutine still returns its expected failures as
+  an `Err`. Before, the sync method returned any exception as its
+  operation's error: an `Err` with `TASK_INFO_QUERY_FAILED`,
+  `ENQUEUE_FAILED`, `CLOSE_FAILED`, `DB_PING_FAILED`, `WORKER_PING_FAILED`,
+  `MONITORING_QUERY_FAILED` or `INTERNAL_FAILED`, or a `BROKER_ERROR`
+  result.
+- **Breaking: `WorkflowStartErrorCode.INTERNAL_FAILED` is removed.** A
+  runner failure in `start_workflow()` returns `LOOP_RUNNER_FAILED`; any
+  other exception propagates. Code that names `INTERNAL_FAILED` fails
+  pyright.
+- **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
+  needs a `LOOP_RUNNER_FAILED` case.**
 
 ### Changed
 
@@ -134,12 +151,20 @@ and there is no migration contract between pre-1.0 versions.
 - **`PostgresBroker.run_sync()` fails an assertion when it is called on a
   thread that runs an event loop.** Nothing runs, and the sync runner does
   not start. Before, it blocked that loop until the call completed.
-- **A sync facade re-raises an `AssertionError` from the sync bridge.** This
-  covers the `run_sync()` assertion and an assertion that fails inside the
-  called coroutine. Before, the facade returned it as its bridge failure: an
-  `Err` with `TASK_INFO_QUERY_FAILED`, `ENQUEUE_FAILED`, `CLOSE_FAILED`,
-  `DB_PING_FAILED`, `WORKER_PING_FAILED`, `MONITORING_QUERY_FAILED` or
-  `INTERNAL_FAILED`, or a `BROKER_ERROR` result.
+- **`BrokerErrorCode.LOOP_RUNNER_FAILED` and
+  `WorkflowStartErrorCode.LOOP_RUNNER_FAILED` are new members.** A sync
+  method returns it when the broker's sync runner cannot run the call: the
+  runner is stopped, its thread did not start, or scheduling failed.
+  Nothing ran. `retryable` is `False`, and `exception` is the
+  `LoopRunnerError`. `close()` and `close_async()` stop the runner, and a
+  stopped runner does not start again; call the `*_async` form or use a new
+  broker. Before, the sync broker and app methods returned this failure as
+  their operation's code (for example `CLOSE_FAILED`), and
+  `start_workflow()` returned `INTERNAL_FAILED`. A send maps it to
+  `TaskSendEnqueueFailed` with `retryable=False`; nothing was written, and
+  the sync retry methods return the same error, so use `retry_*_async(err)`.
+  `TaskHandle.get()` maps it to `BROKER_ERROR`, not cached.
+  `HandleErrorCode.LOOP_RUNNER_FAILED` is unchanged.
 - **Statement errors do not show bound values.** The broker's engines are
   created with `hide_parameters=True`. A failed statement shows
   `[SQL parameters hidden due to hide_parameters=True]` in place of its
