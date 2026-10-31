@@ -1,7 +1,8 @@
 """Unit tests for WorkflowHandle sync wrapper error mapping.
 
-Tests that _sync_call and _sync_task_result_call correctly translate
-LoopRunnerError and unexpected exceptions into typed error payloads.
+Tests that _sync_call and _sync_task_result_call translate a
+LoopRunnerError into a typed error payload and let any other exception
+propagate unchanged.
 """
 
 from __future__ import annotations
@@ -130,21 +131,18 @@ class TestSyncCallWrapStrategy:
         assert result.err_value.code == HandleErrorCode.LOOP_RUNNER_FAILED
         assert result.err_value.workflow_id == 'test-wf-id'
 
-    def test_status_unexpected_exception_returns_internal_failed(self) -> None:
-        """status() returns Err(INTERNAL_FAILED) on unexpected exception."""
+    def test_status_unexpected_exception_propagates(self) -> None:
+        """status() lets an exception that is not a LoopRunnerError propagate."""
         handle = _make_handle()
+        defect = RuntimeError('something unexpected')
 
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = RuntimeError(
-                'something unexpected',
-            )
-            result = handle.status()
+        with (
+            patch.object(handle.broker, 'run_sync', side_effect=defect),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            handle.status()
 
-        assert is_err(result)
-        assert result.err_value.code == HandleErrorCode.INTERNAL_FAILED
-        assert result.err_value.retryable is False
+        assert exc_info.value is defect
 
     def test_sync_call_propagates_ok_result(self) -> None:
         """Wrap-strategy sync wrapper passes through Ok result from async."""
@@ -206,21 +204,18 @@ class TestSyncTaskResultCallFoldStrategy:
         assert result.is_err()
         assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
 
-    def test_get_unexpected_exception_returns_broker_error(self) -> None:
-        """get() returns TaskResult(err=BROKER_ERROR) on unexpected exception."""
+    def test_get_unexpected_exception_propagates(self) -> None:
+        """get() lets an exception that is not a LoopRunnerError propagate."""
         handle = _make_handle()
+        defect = RuntimeError('something unexpected')
 
-        with patch.object(
-            handle.broker, 'run_sync',
-        ) as mock_call:
-            mock_call.side_effect = RuntimeError(
-                'something unexpected',
-            )
-            result = handle.get(timeout_ms=100)
+        with (
+            patch.object(handle.broker, 'run_sync', side_effect=defect),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            handle.get(timeout_ms=100)
 
-        assert result.is_err()
-        assert result.unwrap_err().error_code == OperationalErrorCode.BROKER_ERROR
-        assert 'Unexpected error' in (result.unwrap_err().message or '')
+        assert exc_info.value is defect
 
     def test_fold_sync_call_propagates_task_result(self) -> None:
         """Fold-strategy sync wrapper passes through TaskResult from async."""

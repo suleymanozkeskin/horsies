@@ -37,6 +37,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.types.result import Ok, is_err, is_ok
 from horsies.core.types.status import TaskStatus
+from horsies.core.utils.loop_runner import LoopRunnerError
 from tests.broker_resources_support import pin_resources, resources_of
 
 
@@ -3072,19 +3073,35 @@ class TestClose:
         broker._loop_runner.call.assert_called_once_with(broker.close_async)
         broker._loop_runner.stop.assert_called_once()
 
-    def test_close_stops_runner_even_on_error(self) -> None:
-        """close() should return Err and still stop loop_runner when call() raises."""
+    def test_close_stops_runner_on_loop_runner_error(self) -> None:
+        """close() returns Err(LOOP_RUNNER_FAILED) and still stops loop_runner."""
         broker = _make_broker()
+        runner_error = LoopRunnerError('Loop runner is not running')
         broker._loop_runner = MagicMock()
-        broker._loop_runner.call = MagicMock(side_effect=RuntimeError('boom'))
+        broker._loop_runner.call = MagicMock(side_effect=runner_error)
         broker._loop_runner.stop = MagicMock()
 
         result = broker.close()
 
         assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.CLOSE_FAILED
-        assert isinstance(result.err_value.exception, RuntimeError)
+        assert result.err_value.code == BrokerErrorCode.LOOP_RUNNER_FAILED
+        assert result.err_value.retryable is False
+        assert result.err_value.exception is runner_error
         # stop is called in finally block
+        broker._loop_runner.stop.assert_called_once()
+
+    def test_close_stops_runner_when_an_exception_propagates(self) -> None:
+        """An exception that is not a LoopRunnerError propagates; stop still runs."""
+        broker = _make_broker()
+        defect = RuntimeError('boom')
+        broker._loop_runner = MagicMock()
+        broker._loop_runner.call = MagicMock(side_effect=defect)
+        broker._loop_runner.stop = MagicMock()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            broker.close()
+
+        assert exc_info.value is defect
         broker._loop_runner.stop.assert_called_once()
 
 

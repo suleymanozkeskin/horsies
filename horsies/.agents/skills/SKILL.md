@@ -336,7 +336,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 ### Error Code Enums
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`
-- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
+- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
