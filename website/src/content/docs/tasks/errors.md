@@ -34,6 +34,7 @@ All library-defined error codes are grouped into four families. The umbrella typ
 
 Errors from task execution, broker, and worker internals.
 
+<!-- members: OperationalErrorCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `UNHANDLED_EXCEPTION` | Uncaught exception in task code, wrapped to `UNHANDLED_EXCEPTION` by library  | Yes, if in `auto_retry_for` |
@@ -50,9 +51,11 @@ Errors from task execution, broker, and worker internals.
 
 Errors from type/schema validation and structural contracts.
 
+<!-- members: ContractCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
+| `PYDANTIC_HYDRATION_ERROR` | Legacy code. It stays in the enum as a reserved code, and the library does not return it | No |
 | `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
@@ -62,6 +65,7 @@ Errors from type/schema validation and structural contracts.
 
 Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the result, not task execution failures.
 
+<!-- members: RetrievalCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
@@ -76,12 +80,14 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 
 Terminal outcome codes for tasks and workflows.
 
+<!-- members: OutcomeCode -->
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `TASK_CANCELLED` | Task was cancelled before completion | No |
 | `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started (PENDING or CLAIMED) | No |
 | `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed | Yes, if in `auto_retry_for` |
 | `WORKFLOW_PAUSED` | Workflow was paused | No |
+| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age | No |
 | `WORKFLOW_FAILED` | Workflow failed | No |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled | No |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
@@ -104,6 +110,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 
 `app.get_result_async()` and broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
 
+<!-- members: BrokerErrorCode -->
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
 | `SCHEMA_INIT_FAILED` | Schema initialization failed | Varies |
@@ -243,6 +250,7 @@ For a validation failure, the cause names the field, the message and the type, n
 
 #### TaskSendErrorCode
 
+<!-- members: TaskSendErrorCode -->
 | Code | Description | Retry methods |
 | ---- | ----------- | ------------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
@@ -264,7 +272,39 @@ Workflow-specific error codes are distributed across the four families above:
 - **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`
 - **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`
-- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`
+- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`
+
+### Workflow Start Errors (WorkflowStartResult)
+
+`spec.start()`, `start_async()`, `retry_start()` and `retry_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. The fields of `WorkflowStartError` are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
+
+#### WorkflowStartErrorCode
+
+<!-- members: WorkflowStartErrorCode -->
+| Code | Retryable | When |
+|---|---|---|
+| `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
+| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
+| `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
+| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.start_async()` or use a new broker |
+| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.start_async()`; `retry_start()` does not accept this code |
+
+### Workflow Handle Errors (HandleResult)
+
+`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()` and `result_for()` return a `TaskResult` and use `RetrievalCode` instead.
+
+#### HandleErrorCode
+
+<!-- members: HandleErrorCode -->
+| Code | Retryable | When |
+|---|---|---|
+| `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
+| `DB_OPERATION_FAILED` | Maybe | DB query/commit failure |
+| `LOOP_RUNNER_FAILED` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
+| `INTERNAL_FAILED` | No | `pause_workflow()` / `resume_workflow()` raised an exception that is not a database error |
+| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
 
 ### User-Defined Error Codes
 
@@ -403,6 +443,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 
 ### Workflow Validation (HRS-001-HRS-099)
 
+<!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-001 | `WORKFLOW_NO_NAME` | Workflow has no name |
@@ -440,17 +481,20 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 
 ### Task Definition (HRS-100-HRS-199)
 
+<!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-100 | `TASK_NO_RETURN_TYPE` | Task function missing return type |
 | HRS-101 | `TASK_INVALID_RETURN_TYPE` | Return type is not TaskResult |
 | HRS-102 | `TASK_INVALID_OPTIONS` | Invalid task options |
 | HRS-103 | `TASK_INVALID_QUEUE` | Invalid queue specification |
-| HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is already decorated by another app instance |
+| HRS-104 | `TASK_PREDECORATED_NOT_SUPPORTED` | Task function is pre-decorated: it has a `__wrapped__` chain. Apply `@app.task()` to the raw function |
+| HRS-105 | `TASK_STRICT_SIGNATURE_VIOLATION` | Task signature fails the strict check: a parameter that is not keyword-only (`*args`, `**kwargs`, positional), a type that is not allowed (for example `Any`, a bare container, `set`, `bytes`), or a return type that is not `TaskResult[OkT, TaskError]` |
 | HRS-106 | `TASK_ASYNC_FUNCTION_NOT_SUPPORTED` | Task function is defined with `async def`; task functions must be sync |
 
 ### Configuration (HRS-200-HRS-299)
 
+<!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode |
@@ -466,11 +510,15 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-210 | `MODULE_EXEC_ERROR` | Module raised an error during import |
 | HRS-211 | `BROKER_INIT_FAILED` | Broker failed to initialize |
 | HRS-212 | `CHECK_RESERVED_CODE_COLLISION` | User config value collides with a reserved built-in error code |
+| HRS-213 | `CONFIG_INVALID_BROKER_POOL` | Invalid worker pool bounds: `worker_pool_size` below 1, `worker_max_overflow` below 0, `worker_child_pool_min_size` below 0, `worker_child_pool_max_size` below 1, or a minimum above the maximum |
+| HRS-214 | `CONFIG_INVALID_CHILD_HOOK` | `on_child_process_start` received a value that is not callable, or an async function |
+| HRS-215 | `CONFIG_INVALID_KEEPALIVE` | Invalid TCP keepalive settings: a keepalive value below 1 while `tcp_keepalives` is on, or a negative `tcp_user_timeout_ms` |
 | HRS-216 | `CONFIG_INVALID_RETENTION` | Invalid retention configuration |
 | HRS-217 | `CHECK_LIVE_ASYNC_CONTEXT` | `check(live=True)` was called on a thread that runs an event loop; the live check did not run |
 
 ### Registry (HRS-300-HRS-399)
 
+<!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
 | HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |

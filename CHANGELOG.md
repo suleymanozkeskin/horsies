@@ -322,6 +322,19 @@ and there is no migration contract between pre-1.0 versions.
   `paused_workflow_auto_cancel_after` on `AppConfig.retention`, and give
   `HandleResult` as the return type of `WorkflowHandle.status()` and
   `.tasks()`.
+- **Each docs list of an enum's members holds every member.** The docs
+  site, the skills files and `llms.txt` now list `OutcomeCode.TASK_EXPIRED`,
+  `TASK_TIMEOUT` and `WORKFLOW_EXPIRED`, `ContractCode.NO_TYPE_AVAILABLE`,
+  all 21 `BrokerErrorCode` members, and `SchemaState.CUTOVER_REQUIRED` where
+  they were missing. `ContractCode.PYDANTIC_HYDRATION_ERROR` is listed as a
+  legacy reserved code that the library does not return. The errors page
+  adds HRS-105 and HRS-213 to HRS-215, and tables for
+  `WorkflowStartErrorCode` and `HandleErrorCode`. `llms.txt` adds HRS-016,
+  HRS-017, HRS-031, HRS-032, HRS-104, HRS-105 and HRS-213 to HRS-216.
+  HRS-104 means a pre-decorated task function (it has a `__wrapped__`
+  chain), not a function decorated by another app. A unit test reads each
+  list and fails when a member is missing or extra, or when a member list
+  has no marker comment.
 - **`TaskHandle.get_async()` at the event loop limit returns
   `RetrievalCode.EVENT_LOOP_LIMIT`, not cached.** In 0.5.5 it returned
   `OperationalErrorCode.BROKER_ERROR`, with `broker_code` `EVENT_LOOP_LIMIT`

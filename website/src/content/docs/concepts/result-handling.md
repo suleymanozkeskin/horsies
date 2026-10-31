@@ -73,6 +73,7 @@ When the library itself encounters an error (not your task code), it uses one of
 
 ### OperationalErrorCode
 
+<!-- members: OperationalErrorCode -->
 | Code | When |
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
@@ -87,9 +88,11 @@ When the library itself encounters an error (not your task code), it uses one of
 
 ### ContractCode
 
+<!-- members: ContractCode -->
 | Code | When |
 | ---- | ---- |
 | `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
+| `PYDANTIC_HYDRATION_ERROR` | Legacy code. It stays in the enum as a reserved code, and the library does not return it |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
 
@@ -97,6 +100,7 @@ When the library itself encounters an error (not your task code), it uses one of
 
 Returned by `handle.get()` for issues retrieving results:
 
+<!-- members: RetrievalCode -->
 | Code | When |
 | ---- | ---- |
 | `WAIT_TIMEOUT` | Timeout elapsed while waiting for result (task may still be running) |
@@ -109,10 +113,14 @@ Returned by `handle.get()` for issues retrieving results:
 
 ### OutcomeCode
 
+<!-- members: OutcomeCode -->
 | Code | When |
 | ---- | ---- |
 | `TASK_CANCELLED` | Task was cancelled before completion |
+| `TASK_EXPIRED` | Task's `good_until` deadline passed before execution started |
+| `TASK_TIMEOUT` | Task exceeded its `timeout_ms` execution limit; the child process was killed |
 | `WORKFLOW_PAUSED` | Workflow was paused |
+| `WORKFLOW_EXPIRED` | A paused workflow passed `paused_workflow_auto_cancel_after` and expired |
 | `WORKFLOW_FAILED` | Workflow failed |
 | `WORKFLOW_CANCELLED` | Workflow was cancelled |
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |

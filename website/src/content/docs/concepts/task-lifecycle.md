@@ -7,6 +7,7 @@ tags: [concepts, tasks, states]
 
 ## Task States
 
+<!-- members: TaskStatus -->
 | State | Description |
 |-------|-------------|
 | `PENDING` | Task is queued, waiting to be claimed |
@@ -23,6 +24,7 @@ tags: [concepts, tasks, states]
 
 `TaskStatus` values:
 
+<!-- members: TaskStatus -->
 | Enum | Value | Terminal |
 |------|-------|----------|
 | `PENDING` | `"PENDING"` | No |
