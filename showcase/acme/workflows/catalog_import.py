@@ -33,7 +33,7 @@ from ..tasks.analytics import catalog_import_chunk
 class CatalogImport(WorkflowDefinition[None]):
     """Fan out a catalog import over many slow chunks.
 
-    Declared `WorkflowDefinition[None]` with no `Meta.output`: there is no
+    Declared `WorkflowDefinition[None]` with no `config.output`: there is no
     single result worth naming, and `handle.get()` returns the terminal results
     of every chunk keyed by node id.
     """
