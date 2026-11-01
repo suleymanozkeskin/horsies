@@ -3,7 +3,8 @@
 The digest covers bytes, so the serializer is pinned canonical — equal
 content in any construction order produces identical bytes — and the
 decoder verifies the digest before parsing, refuses foreign shapes, and
-never reads an absent options key as defaults.
+never reads an absent options key as defaults. Stored bytes are strict
+JSON: a non-finite number never enters them and never leaves them.
 """
 
 from __future__ import annotations
@@ -18,6 +19,9 @@ from horsies.core.history.rerun.input_envelope import (
     ReconstructedInput,
     decode_input_envelope,
     encode_input_envelope_v1,
+)
+from horsies.core.history.rerun.operations import (
+    _canonical_json,  # pyright: ignore[reportPrivateUsage]
 )
 
 pytestmark = [pytest.mark.unit]
@@ -106,3 +110,65 @@ class TestDecode:
     )
     def test_foreign_shapes_fail_closed(self, payload: bytes) -> None:
         assert isinstance(roundtrip(payload), InputEnvelopeCorrupt)
+
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'{"args":[Infinity],"kwargs":{},"options":null}',
+            b'{"args":[],"kwargs":{"x":-Infinity},"options":null}',
+            b'{"args":[],"kwargs":{},"options":{"x":NaN}}',
+            b'{"args":[1e9999],"kwargs":{},"options":null}',
+            b'{"args":[],"kwargs":{"x":-1e9999},"options":null}',
+            b'{"args":[],"kwargs":{},"options":{"x":[{"y":1e9999}]}}',
+        ],
+    )
+    def test_non_finite_number_fails_closed(self, payload: bytes) -> None:
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert 'payload is not JSON' in decoded.detail
+
+    def test_integer_over_the_parse_limit_fails_closed(self) -> None:
+        payload = b'{"args":[' + b'1' * 5000 + b'],"kwargs":{},"options":null}'
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert 'payload is not JSON' in decoded.detail
+
+    @pytest.mark.parametrize('payload', [b'not json', b'\xff'])
+    def test_malformed_bytes_with_a_matching_digest_fail_closed(
+        self, payload: bytes
+    ) -> None:
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert 'payload is not JSON' in decoded.detail
+
+    def test_empty_payload_with_a_matching_digest_fails_closed(self) -> None:
+        assert isinstance(roundtrip(b''), InputEnvelopeCorrupt)
+
+    def test_largest_finite_float_roundtrips_byte_identical(self) -> None:
+        payload = encode_input_envelope_v1(
+            args=[1.7976931348623157e308], kwargs={}, options=None
+        )
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, ReconstructedInput)
+        assert (
+            encode_input_envelope_v1(
+                args=decoded.args,
+                kwargs=decoded.kwargs,
+                options=decoded.options,
+            )
+            == payload
+        )
+
+
+class TestNonFiniteValueIsADefect:
+    """Callers hand over parsed, finite values; `inf` here is a code defect."""
+
+    @pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
+    def test_encode_crashes_loud(self, value: float) -> None:
+        with pytest.raises(ValueError, match='not JSON compliant'):
+            encode_input_envelope_v1(args=[], kwargs={'x': value}, options=None)
+
+    @pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
+    def test_canonical_json_crashes_loud(self, value: float) -> None:
+        with pytest.raises(ValueError, match='not JSON compliant'):
+            _canonical_json({'x': value})

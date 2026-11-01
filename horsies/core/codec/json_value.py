@@ -14,6 +14,8 @@ Defines:
 - `_reject_nonstandard_json_constant(constant)` — `parse_constant` hook
   for every raw `json.loads(s, parse_constant=...)` site; rejects
   `NaN`, `Infinity`, `-Infinity` (Python lenient extensions, not RFC 8259).
+- `_parse_finite_float(literal)` — `parse_float` hook for the same sites;
+  rejects a numeric literal outside the finite binary64 range.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ __all__ = [
     'StrictJsonError',
     '_validate_json_native',
     '_reject_nonstandard_json_constant',
+    '_parse_finite_float',
 ]
 
 
@@ -45,7 +48,7 @@ class StrictJsonError(Exception):
     """Raised when a value fails strict JSON-native validation.
 
     Producer-side via `_validate_json_native`; decode-side via
-    `_reject_nonstandard_json_constant`.
+    `_reject_nonstandard_json_constant` and `_parse_finite_float`.
     """
 
 
@@ -107,3 +110,27 @@ def _reject_nonstandard_json_constant(constant: str) -> NoReturn:
     raise StrictJsonError(
         f'Non-standard JSON constant is not allowed: {constant}',
     )
+
+
+def _parse_finite_float(literal: str) -> float:
+    """`parse_float` hook that rejects a literal outside finite binary64.
+
+    `parse_constant` sees only the tokens `NaN`, `Infinity` and `-Infinity`.
+    A numeric literal goes through `parse_float`, and `float('1e9999')` is
+    `inf`. A literal that underflows, such as `1e-9999`, gives `0.0`: the
+    value is finite and the text is valid JSON, so it stays accepted.
+
+    Args:
+        literal: Numeric literal handed over by the json parser. It holds
+            task input, so the error text does not repeat it.
+
+    Returns:
+        The parsed finite float.
+
+    Raises:
+        StrictJsonError: when the literal overflows binary64.
+    """
+    value = float(literal)
+    if math.isinf(value):
+        raise StrictJsonError('JSON number is outside the finite binary64 range')
+    return value

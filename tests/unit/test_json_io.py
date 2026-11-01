@@ -2,7 +2,8 @@
 
 dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
-emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity).
+emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity)
+and numeric literals outside the finite binary64 range.
 """
 
 from __future__ import annotations
@@ -143,3 +144,46 @@ class TestLoadsJson:
 
     def test_malformed_rejected(self) -> None:
         assert is_err(loads_json('{bad'))
+
+    @pytest.mark.parametrize(
+        'document',
+        [
+            '[1e9999]',
+            '[-1e9999]',
+            '[1E400]',
+            '{"a":[{"b":1.8e308}]}',
+            '[' + '1' * 400 + '.0]',
+        ],
+    )
+    def test_number_outside_finite_binary64_rejected(self, document: str) -> None:
+        result = loads_json(document)
+        assert is_err(result)
+        assert 'finite binary64' in str(result.err_value)
+
+    def test_overflow_rejection_text_holds_no_input_value(self) -> None:
+        result = loads_json('[1234e9999]')
+        assert is_err(result)
+        assert '1234e9999' not in str(result.err_value)
+
+    @pytest.mark.parametrize(
+        ('document', 'expected'),
+        [
+            ('[1.5]', 1.5),
+            ('[1.7976931348623157e308]', 1.7976931348623157e308),
+            ('[-1.7976931348623157e308]', -1.7976931348623157e308),
+            ('[5e-324]', 5e-324),
+            ('[1e-9999]', 0.0),
+        ],
+    )
+    def test_finite_float_keeps_its_value(
+        self, document: str, expected: float,
+    ) -> None:
+        result = loads_json(document)
+        assert not is_err(result)
+        assert result.ok_value == [expected]
+
+    def test_integer_literal_stays_an_integer_past_the_float_range(self) -> None:
+        digits = '1' * 400
+        result = loads_json(f'[{digits}]')
+        assert not is_err(result)
+        assert result.ok_value == [int(digits)]

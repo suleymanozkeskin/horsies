@@ -392,6 +392,19 @@ there is no migration contract between pre-1.0 versions.
   the task's serialized kwargs, so task input went into the debug log. The
   line now names the function only, and it no longer formats every argument
   on each call when `DEBUG` is off.
+- **`loads_json` refuses a number outside the finite binary64 range.** A
+  literal such as `1e9999` parsed to `inf`, because `parse_constant` sees
+  only the tokens `NaN`, `Infinity` and `-Infinity`. An enqueue from raw
+  JSON text then stored the token `Infinity` in the rerun-input envelope,
+  which is not JSON, and a rerun copied it into a new row that the worker
+  refused. Each reader now refuses the literal: `enqueue_async` returns
+  `INVALID_INPUT` or `INVALID_TASK_OPTIONS` and writes nothing, the worker
+  returns `WORKER_SERIALIZATION_ERROR`, and cutover preparation counts the
+  row as a decode failure. A rerun of a stored envelope with a non-finite
+  number returns `RerunInputCorrupt` and writes nothing. A literal that
+  underflows, such as `1e-9999`, still parses to `0.0`.
+- **`decode_input_envelope` returns `InputEnvelopeCorrupt` for an integer
+  over the parse limit of 4300 digits.** Before, it raised `ValueError`.
 
 ## 0.5.5 — 2026-10-28
 

@@ -227,9 +227,8 @@ def decode_value(
 ) -> object:
     """Decode a JSON-shaped value into a typed Python value.
 
-    Assumes `json_value` came from `json.loads(s,
-    parse_constant=_reject_nonstandard_json_constant)` so non-RFC-8259
-    constants were rejected upstream.
+    Assumes `json_value` came from `loads_json`, so non-RFC-8259 constants
+    and numbers outside the finite binary64 range were rejected upstream.
 
     Reserved-key invariant is enforced symmetrically with `encode_value`:
     payloads carrying `__h_*` or `__builtin_task_code__` at user-controlled
