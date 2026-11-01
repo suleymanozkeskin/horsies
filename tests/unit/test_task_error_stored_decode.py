@@ -113,6 +113,16 @@ _REFUSED = pytest.mark.parametrize(
     ('err_slot', 'cause'), _NOT_A_TASK_ERROR, ids=_NOT_A_TASK_ERROR_IDS,
 )
 
+_NOT_AN_ENVELOPE = pytest.mark.parametrize(
+    ('stored', 'cause'),
+    [
+        ('not json at all', 'JSON parse failed'),
+        ('{"ok": null, "err": {"message": "m"}}', '__h_task_result__'),
+    ],
+    ids=['text-that-is-not-json', 'json-that-is-not-an-envelope'],
+)
+"""Stored text that fails before the err slot, with a word of the cause."""
+
 
 def _envelope(err_slot: Json) -> dict[str, Json]:
     return {'__h_task_result__': True, 'ok': None, 'err': err_slot}
@@ -151,6 +161,86 @@ def _assert_stored_data_error(result: TaskResult[Any, TaskError], cause: str) ->
     assert cause in error.message
 
 
+def _session_with_row(stored: str) -> AsyncMock:
+    session = AsyncMock()
+    session.execute = AsyncMock(
+        return_value=MagicMock(
+            fetchone=MagicMock(return_value=SimpleNamespace(result=stored)),
+        ),
+    )
+    return session
+
+
+class TestStoredTextThatDoesNotParse:
+    """Text that fails before the err slot gives the same outcome as a bad slot."""
+
+    @_NOT_AN_ENVELOPE
+    def test_decode_err_only_gives_the_stored_data_error(
+        self, stored: str, cause: str,
+    ) -> None:
+        result = _decode_err_only(stored)
+        assert result is not None
+        _assert_stored_data_error(result, cause)
+
+    @_NOT_AN_ENVELOPE
+    @pytest.mark.asyncio
+    async def test_the_workflow_error_of_a_failed_task_names_the_cause(
+        self, stored: str, cause: str,
+    ) -> None:
+        session = _session_with_row(stored)
+
+        stored_error = await get_workflow_failure_error(session, 'wf-1', None)
+
+        assert session.execute.await_args.args[0] is GET_FIRST_FAILED_TASK_RESULT_SQL
+        assert stored_error is not None
+        decoded = decode_task_error(loads_json(stored_error).unwrap())
+        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert cause in decoded.message
+
+    @_NOT_AN_ENVELOPE
+    @pytest.mark.asyncio
+    async def test_the_workflow_error_of_a_required_task_names_the_cause(
+        self, stored: str, cause: str,
+    ) -> None:
+        session = _session_with_row(stored)
+
+        stored_error = await get_workflow_failure_error(
+            session, 'wf-1', {'cases': [{'required_indices': [0]}]},
+        )
+
+        assert session.execute.await_args.args[0] is GET_FIRST_FAILED_REQUIRED_TASK_SQL
+        assert stored_error is not None
+        decoded = decode_task_error(loads_json(stored_error).unwrap())
+        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert cause in decoded.message
+
+    @_NOT_AN_ENVELOPE
+    def test_phase2_recovery_gives_the_stored_data_error(
+        self, stored: str, cause: str,
+    ) -> None:
+        result = _recovered_failure_result('FAILED', stored)
+        _assert_stored_data_error(result, cause)
+        assert result.unwrap_err().data == {'task_status': 'FAILED'}
+
+    @_NOT_AN_ENVELOPE
+    def test_the_recovered_error_encodes_for_the_failure_handler(
+        self, stored: str, cause: str,
+    ) -> None:
+        result = _recovered_failure_result('FAILED', stored)
+        encoded = encode_task_error(result.unwrap_err())
+        assert isinstance(encoded, dict)
+        assert cause in str(encoded['message'])
+
+    @_NOT_AN_ENVELOPE
+    def test_a_child_output_stays_unreadable(self, stored: str, cause: str) -> None:
+        """The child output reader has its own parse: this commit does not reach it."""
+        match _parse_child_output(stored):
+            case _ChildOutputUnreadable(cause=text):
+                assert cause in text
+            case parsed:
+                pytest.fail(f'unexpected variant: {parsed!r}')
+
+
 class TestRequiredFields:
     """``error_code`` and ``message`` are required, and the other two are not."""
 
@@ -165,6 +255,12 @@ class TestRequiredFields:
             decode_task_error({})
         assert 'error_code: Field required' in str(refusal.value)
         assert 'message: Field required' in str(refusal.value)
+
+    def test_a_bad_code_shape_does_not_offer_null(self) -> None:
+        with pytest.raises(StrictJsonError) as refusal:
+            decode_task_error({'error_code': {}, 'message': 'm'})
+        assert 'expected a plain string' in str(refusal.value)
+        assert 'None' not in str(refusal.value)
 
     def test_data_and_exception_stay_optional(self) -> None:
         decoded = decode_task_error(_DECLARED)

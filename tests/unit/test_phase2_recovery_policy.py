@@ -162,10 +162,21 @@ class TestRecoveredFailureResult:
             assert result.is_err()
             assert result.unwrap_err().error_code.value == code, status
 
-    def test_corrupt_stored_json_still_yields_a_true_error(self) -> None:
+    def test_stored_text_that_is_not_json_names_the_cause(self) -> None:
         result = _recovered_failure_result('FAILED', 'not json at all')
         assert result.is_err()
-        assert result.unwrap_err().error_code.value == 'WORKER_CRASHED'
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'JSON parse failed' in error.message
+        assert error.data == {'task_status': 'FAILED'}
+
+    def test_an_envelope_with_no_err_slot_names_the_terminal_status(self) -> None:
+        """It parses, so it is not stored data that does not parse."""
+        result = _recovered_failure_result(
+            'FAILED', '{"__h_task_result__": true, "ok": 1, "err": null}',
+        )
+        assert result.is_err()
+        assert result.unwrap_err().error_code is OperationalErrorCode.WORKER_CRASHED
 
     @pytest.mark.parametrize(
         ('stored', 'cause'),

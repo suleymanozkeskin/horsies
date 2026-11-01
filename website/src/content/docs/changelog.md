@@ -886,13 +886,17 @@ there is no migration contract between pre-1.0 versions.
 - **Phase-2 recovery progresses a failed node whose stored error does not
   decode as a `TaskError`, and it records the cause.** The recovery records
   `RESULT_DESERIALIZATION_ERROR` with the cause in the message. A stored
-  result envelope that does not validate gets the same error. The log names
-  the refusal. Before, the `ValueValidationError` of the decode rolled back
-  the recovery of that row on each pass, and the node did not progress.
-- **A workflow keeps the cause when the stored error of its first failed task
-  does not decode.** The workflow error is `RESULT_DESERIALIZATION_ERROR` with
-  the cause in the message. Before, the refusal was dropped with no log, and
-  the workflow took a NULL error or `WORKFLOW_SUCCESS_CASE_NOT_MET`.
+  result envelope that does not validate and stored text that is not JSON get
+  the same error. The log names the refusal. Before, the
+  `ValueValidationError` of the decode rolled back the recovery of that row
+  on each pass, and the node did not progress. Text that is not JSON recorded
+  the error that the terminal status names.
+- **A workflow keeps the cause when the stored result of its first failed task
+  does not parse.** This applies to text that is not JSON, a result envelope
+  that does not validate, and an error that does not decode. The workflow
+  error is `RESULT_DESERIALIZATION_ERROR` with the cause in the message.
+  Before, the cause was lost, and the workflow took a NULL error or
+  `WORKFLOW_SUCCESS_CASE_NOT_MET`.
 - **A lone surrogate in the text of a node failure no longer loses the
   text.** The text of an exception from `build_with()` can hold one, for
   example a file name. The node now fails with the text, with the surrogate

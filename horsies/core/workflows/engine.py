@@ -261,6 +261,22 @@ def _resolve_source_ok_type(
     )
 
 
+def _unreadable_task_result(cause: str) -> 'TaskResult[Any, TaskError]':
+    """``RESULT_DESERIALIZATION_ERROR`` for a stored task result that does not parse.
+
+    ``cause`` can hold text from a stored row, so a lone surrogate in it is
+    escaped: the caller encodes this error.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=escape_lone_surrogates(cause),
+        ),
+    )
+
+
 def _decode_err_only(
     stored_result: str,
 ) -> 'TaskResult[Any, TaskError] | None':
@@ -269,20 +285,21 @@ def _decode_err_only(
     Mirrors the app-layer err-without-ok-type fast path (design §6):
     ``TaskError`` is a fixed-schema internal type, so an err-only
     payload can be reconstructed even when the source task isn't
-    registered locally. Returns ``None`` if the envelope is missing,
-    malformed, or carries an ok payload (caller must supply ok_type for
-    those).
+    registered locally.
+
+    Outcomes:
+        - An envelope whose err slot decodes: that error.
+        - An envelope with no err slot: ``None``. An ok payload needs an
+          ok_type, and this function has none.
+        - Stored data that does not parse: ``RESULT_DESERIALIZATION_ERROR``
+          with the cause in the message. That is text that is not JSON, JSON
+          that ``validate_task_result_envelope`` refuses, or an err slot that
+          ``decode_task_error`` refuses.
 
     Envelope shape is checked via ``validate_task_result_envelope`` —
     same strict criteria as ``decode_task_result``: exactly the keys
     ``{__h_task_result__, ok, err}``, marker is True, at most one slot
-    populated. Malformed envelopes return ``None`` so the caller falls
-    through to legacy handling rather than crashing.
-
-    An err slot that ``decode_task_error`` refuses is stored data that does
-    not parse: it returns ``RESULT_DESERIALIZATION_ERROR`` with the cause in
-    the message. The cause can hold text from a stored row, so a lone
-    surrogate in it is escaped: the caller encodes this error.
+    populated.
 
     Routes through ``decode_task_error`` (polymorphic) so subclass
     types like ``SubWorkflowError`` survive the decode. The base
@@ -291,26 +308,25 @@ def _decode_err_only(
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
-    deser = _deser_json(stored_result, 'err-only result json')
-    if deser is None:
-        return None
+    parsed = loads_json(stored_result)
+    if is_err(parsed):
+        return _unreadable_task_result(
+            f'Stored task result is not JSON: {parsed.err_value}',
+        )
     try:
-        envelope = validate_task_result_envelope(deser)
-    except StrictJsonError:
-        return None
+        envelope = validate_task_result_envelope(parsed.ok_value)
+    except StrictJsonError as exc:
+        return _unreadable_task_result(
+            f'Stored task result does not decode: {exc}',
+        )
     err_slot = envelope.get('err')
     if err_slot is None:
         return None
     try:
         decoded_err = decode_task_error(err_slot)
     except (StrictJsonError, ValueValidationError) as exc:
-        return TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                message=escape_lone_surrogates(
-                    f'Stored task error does not decode: {exc}',
-                ),
-            ),
+        return _unreadable_task_result(
+            f'Stored task error does not decode: {exc}',
         )
     if not isinstance(decoded_err, TaskError):
         return None

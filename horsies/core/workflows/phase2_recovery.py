@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import text
 
-from horsies.core.codec.json_io import loads_json
+from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.typed import (
     decode_task_error,
@@ -166,7 +166,7 @@ class Phase2RecoverySummary:
 
 def _undecodable_failure_result(
     terminal_status: str,
-    cause: StrictJsonError | ValueValidationError,
+    cause: SerializationError | StrictJsonError,
 ) -> TaskResult[Any, TaskError]:
     """``RESULT_DESERIALIZATION_ERROR`` for a stored result that does not decode.
 
@@ -174,6 +174,11 @@ def _undecodable_failure_result(
     escaped: the failure handler encodes this error, and a raise there would
     repeat on each recovery pass.
     """
+    logger.error(
+        'Phase-2 recovery could not decode the stored result (%s: %s)',
+        type(cause).__name__,
+        cause,
+    )
     return TaskResult(
         err=TaskError(
             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
@@ -199,12 +204,12 @@ def _recovered_failure_result(
 
     Outcomes:
         - A stored error that decodes: that error.
-        - A stored envelope or error that does not decode:
-          ``RESULT_DESERIALIZATION_ERROR``, with the cause in the message.
-          ``validate_task_result_envelope`` refuses with
+        - Stored data that does not parse: ``RESULT_DESERIALIZATION_ERROR``,
+          with the cause in the message. ``loads_json`` refuses text that is
+          not JSON, ``validate_task_result_envelope`` refuses with
           ``StrictJsonError``, and ``decode_task_error`` refuses with
           ``StrictJsonError`` or ``ValueValidationError``.
-        - No stored error, or stored text that is not JSON: the error that
+        - No stored result, or an envelope with no err slot: the error that
           the terminal status names, because the task has to say something
           true.
 
@@ -212,23 +217,18 @@ def _recovered_failure_result(
     """
     if node_result_json is not None:
         parsed = loads_json(node_result_json)
-        if not is_err(parsed):
-            try:
-                envelope = validate_task_result_envelope(parsed.ok_value)
-                err_slot = envelope.get('err')
-                if err_slot is not None:
-                    return TaskResult(err=decode_task_error(err_slot))
-            except (StrictJsonError, ValueValidationError) as exc:
-                # A stored envelope or error that will not decode is
-                # reported through this error rather than failing the
-                # recovery of a task that has already run.
-                logger.error(
-                    'Phase-2 recovery could not decode the stored result '
-                    'envelope (%s: %s)',
-                    type(exc).__name__,
-                    exc,
-                )
-                return _undecodable_failure_result(terminal_status, exc)
+        if is_err(parsed):
+            return _undecodable_failure_result(terminal_status, parsed.err_value)
+        try:
+            envelope = validate_task_result_envelope(parsed.ok_value)
+            err_slot = envelope.get('err')
+            if err_slot is not None:
+                return TaskResult(err=decode_task_error(err_slot))
+        except (StrictJsonError, ValueValidationError) as exc:
+            # A stored envelope or error that will not decode is reported
+            # through this error rather than failing the recovery of a task
+            # that has already run.
+            return _undecodable_failure_result(terminal_status, exc)
 
     error_code: OutcomeCode | RetrievalCode | OperationalErrorCode
     match terminal_status:

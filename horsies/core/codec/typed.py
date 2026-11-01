@@ -654,7 +654,7 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
 
     TaskError's `error_code` serializer emits exactly
     `{"__builtin_task_code__": "<str>"}` for built-in codes and a
-    plain string (or None) for user codes. Anything else under
+    plain string for user codes. Anything else under
     `error_code` — additional keys, other reserved keys alongside the
     discriminator — is rejected as smuggled. `data`, `exception`, and
     `message` are user-controlled and get the full strict scan.
@@ -672,8 +672,7 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
 def _scan_task_error_error_code(value: Json) -> None:
     """Path-aware scan for TaskError.error_code.
 
-    The TaskError serializer emits one of exactly three shapes:
-    - `None` (no error code set)
+    The TaskError serializer emits one of exactly two shapes:
     - `"some_user_code"` (plain string for user codes)
     - `{"__builtin_task_code__": "BUILTIN_NAME"}` (single-key dict for
       built-in codes)
@@ -684,15 +683,14 @@ def _scan_task_error_error_code(value: Json) -> None:
     `{"__builtin_task_code__": "X", "other": "y"}` case, but Pydantic
     silently drops unknown keys during error_code validation — so an
     extra non-reserved key would pass through unobserved. Reject any
-    deviation from the documented three shapes here.
+    deviation from the documented two shapes here. A null `error_code` is not
+    a dict, so the TypeAdapter refuses it with its own cause.
 
     When the deviation includes a reserved key (e.g.
     `{"__builtin_task_code__": "X", "__h_extra__": 1}`), prefer the
     reserved-key message: it tells operators they're looking at a
     smuggle attempt, not just a shape bug.
     """
-    if value is None:
-        return
     if isinstance(value, str):
         return
     if not isinstance(value, dict):
@@ -718,8 +716,8 @@ def _scan_task_error_error_code(value: Json) -> None:
                 f'reserved key {key!r} in user-originated data',
             )
     raise StrictJsonError(
-        f'invalid TaskError.error_code shape: expected None, a plain '
-        f'string, or {{"__builtin_task_code__": "<str>"}}; got dict '
+        f'invalid TaskError.error_code shape: expected a plain string '
+        f'or {{"__builtin_task_code__": "<str>"}}; got dict '
         f'with keys {sorted(d.keys())}',
     )
 
