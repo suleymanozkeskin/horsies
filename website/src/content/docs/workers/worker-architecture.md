@@ -37,7 +37,7 @@ A worker owns one child process per slot:
 
 Each child:
 
-- Is a new Python interpreter, started with `exec`. It inherits no memory, socket, or lock from the worker.
+- Starts from the [preload parent](#preload-parent) on Linux, and with `exec` on other platforms. It inherits no socket or lock from the worker.
 - Has its own session, so a kill also reaches the subprocesses of its task.
 - Has its own socket to the worker. Tasks and results move over it as JSON frames.
 
@@ -58,9 +58,10 @@ horsies worker myapp.instance:app --processes=8
 
 1. Load app from module
 2. Import task modules (for registry population)
-3. Start N children (each loads app independently)
-4. Wait until each child reports ready
-5. Subscribe to NOTIFY channels
+3. Start the preload parent (Linux)
+4. Start N children (each loads app independently)
+5. Wait until each child reports ready
+6. Subscribe to NOTIFY channels
 
 ### 2. Main Loop
 
@@ -146,6 +147,40 @@ A child differs from a `multiprocessing` process:
 - `multiprocessing.current_process().name` is `horsies-child-<slot>`.
 - `__main__` is the child program, not your script. The worker refuses a `__main__:app` locator at startup.
 
+## Preload Parent
+
+On Linux, a worker starts one extra process: the preload parent. It imports code once, then forks each child. A child then starts in milliseconds and shares those memory pages with the other children.
+
+`--child-preload` selects what it imports:
+
+| Mode | Imports | Use it when |
+| ---- | ------- | ----------- |
+| `library` (default) | Horsies and its dependencies | Always. Each child still imports your app |
+| `app` | Horsies, its dependencies, and your app | Your app has no side effect at import |
+| `none` | Nothing, and there is no preload parent | You must rule the preload parent out. Every child starts with `exec` |
+
+Conditions: 8 children, Linux, tasks that run pydantic, SQLAlchemy, and pandas (pandas app only), Postgres in the loop. Memory is the summed PSS of the children and the preload parent.
+
+| App | `--child-preload` | Next child, p50 | Memory |
+| --- | ----------------- | --------------- | ------ |
+| Small | `none` | 618 ms | 461 MiB |
+| Small | `library` | 27 ms | 169 MiB |
+| Small | `app` | 20 ms | 151 MiB |
+| With pandas | `none` | 1,174 ms | 715 MiB |
+| With pandas | `library` | 486 ms | 472 MiB |
+| With pandas | `app` | 26 ms | 236 MiB |
+
+With `app`:
+
+- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](child-process-hooks), which still runs in every child.
+- The worker refuses to start if the import leaves a Python thread or a socket. A fork copies a lock in whatever state another thread left it, and all children would share one socket.
+
+The worker stays the real parent of each child, so exit codes, kills, and parent-death behavior do not change.
+
+If the preload parent dies, running children continue, and new children start with `exec`. The worker replaces it after 5 seconds, up to 5 times. In `ps`, a forked child shows the command line of the preload parent.
+
+Other platforms have no preload parent, and every child starts with `exec`.
+
 ## Worker Configuration
 
 From `WorkerConfig`:
@@ -158,6 +193,7 @@ From `WorkerConfig`:
 | `queues` | Queue names to process |
 | `processes` | Child process count |
 | `drain_timeout_s` | Seconds to wait for running tasks at shutdown |
+| `child_preload` | What the preload parent imports: `library`, `app`, or `none` |
 | `parent_pool_size` | Worker coordinator SQLAlchemy pool size |
 | `parent_max_overflow` | Worker coordinator overflow connections |
 | `child_pool_min_size` | Minimum per-child psycopg pool size |

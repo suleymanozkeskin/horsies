@@ -32,6 +32,7 @@ horsies worker <module> [OPTIONS]
 | `--max-tasks-per-child N` | 100 | Recycle each worker child after it runs N tasks (`N >= 1`, per-child and staggered). `0` disables recycling. See [worker concurrency](workers/concurrency). |
 | `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
 | `--drain-timeout SECONDS` | 300 | Seconds to wait for running tasks at shutdown. At this deadline the worker kills their children. Set it below the stop window of your supervisor. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown). |
+| `--child-preload MODE` | library | What a Linux worker imports once before it forks children: `library`, `app`, or `none`. See [Preload Parent](workers/worker-architecture#preload-parent). |
 
 **Examples:**
 

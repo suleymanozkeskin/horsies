@@ -78,9 +78,10 @@ smooth (no synchronized restart).
 
 ### Child startup
 
-Each child is a new Python interpreter that imports the app. Children share no
-imported modules with the worker. This cost is the same with recycling on or
-off.
+On Linux, a [preload parent](worker-architecture#preload-parent) forks each child,
+so a recycle costs milliseconds and children share library pages. With `exec`,
+which other platforms always use, each child is a new Python interpreter that
+imports everything: a recycle then costs a full import.
 
 ### Choosing N
 

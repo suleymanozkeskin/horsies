@@ -12,10 +12,10 @@ and there is no migration contract between pre-1.0 versions.
 
 - **Workers run tasks in children that they own, one process and one socket
   per slot.** `ProcessPoolExecutor`, `multiprocessing`, and pickle are gone
-  from the task path. Each child is a new interpreter started with `exec`:
-  - `fork` is gone. With `max_tasks_per_child=0` on Linux, children no longer
-    share imported modules with the worker, so baseline memory and child start
-    time rise to the values of the default setting.
+  from the task path. On Linux a preload parent forks each child. Other
+  platforms start each child with `exec`:
+  - `--child-preload` selects what the preload parent imports: `library` (the
+    default), `app`, or `none`.
   - `multiprocessing.parent_process()` returns `None` in a child, and
     `multiprocessing.current_process().name` is `horsies-child-<slot>`.
   - An app locator of `__main__:app` is refused at worker start. A child does
@@ -432,6 +432,13 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Worker children on Linux start in milliseconds and share memory.** A
+  preload parent imports code once, and each child is a fork of it. With 8
+  children and task work against Postgres, on a small app: next child 618 ms to
+  27 ms, summed PSS 461 MiB to 169 MiB. With `--child-preload=app`, on an app
+  that imports pandas: next child 1,174 ms to 26 ms, summed PSS 715 MiB to
+  236 MiB. The worker stays the real parent of each child, and a dead preload
+  parent stops no running task.
 - **`WorkerConfig.drain_timeout_s` and `horsies worker --drain-timeout` set the
   shutdown drain.** The default stays 300 seconds. At the deadline the worker
   kills the children that still run a task, and each task takes the crash path,
