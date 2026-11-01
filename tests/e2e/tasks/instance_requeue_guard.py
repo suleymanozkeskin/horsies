@@ -5,7 +5,7 @@ task stops getting its lease renewed quickly and becomes reclaimable.
 
 When the env var INJECT_REQUEUE_DB_ERROR=1 is set (worker A subprocess only),
 the Worker class is monkeypatched at import time so that:
-  - _dispatch_one always fails (simulates executor unavailable)
+  - _dispatch_one always fails (simulates a task that reaches no child)
   - _requeue_claimed_task always returns DB_ERROR
 
 This keeps worker A alive (heartbeat loop running) but orphans every claimed
@@ -99,7 +99,7 @@ if os.environ.get('INJECT_REQUEUE_DB_ERROR') == '1':
         timeout_ms: Optional[int] = None,  # noqa: ARG001
         claimed_at: Optional[datetime] = None,  # noqa: ARG001
     ) -> None:
-        # Simulate: executor unavailable → requeue → DB_ERROR
+        # Simulate: no child takes the task → requeue → DB_ERROR
         outcome = await self._requeue_claimed_task(task_id, 'INJECTED dispatch failure')
         if outcome is _RequeueOutcome.DB_ERROR:
             import logging

@@ -1606,17 +1606,15 @@ class TestCallerUnwrapContract:
         _stub_startup_coverage(worker, monkeypatch)
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
-        worker._executor = None
+        worker._slots = None
         worker._service_tasks = set()
         worker._finalizer_tasks = set()
-        worker._create_executor = MagicMock(return_value=MagicMock())
-        worker._warm_executor = AsyncMock()
+        worker._start_slots = AsyncMock()
         worker._preload_modules_main = MagicMock()
 
         with pytest.raises(OperationalError, match='listener conn refused'):
             await worker.start()
-        worker._create_executor.assert_called_once()
-        worker._warm_executor.assert_awaited_once()
+        worker._start_slots.assert_awaited_once()
         mock_listener.close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1653,15 +1651,13 @@ class TestCallerUnwrapContract:
         _stub_startup_coverage(worker, monkeypatch)
         worker.listener = mock_listener
         worker._stop = asyncio.Event()
-        worker._executor = None
+        worker._slots = None
         worker._service_tasks = set()
         worker._finalizer_tasks = set()
-        worker._create_executor = MagicMock(return_value=MagicMock())
-        worker._warm_executor = AsyncMock()
+        worker._start_slots = AsyncMock()
         worker._preload_modules_main = MagicMock()
 
         with pytest.raises(OperationalError, match='subscribe failed'):
             await worker.start()
-        worker._create_executor.assert_called_once()
-        worker._warm_executor.assert_awaited_once()
+        worker._start_slots.assert_awaited_once()
         mock_listener.close.assert_awaited_once()

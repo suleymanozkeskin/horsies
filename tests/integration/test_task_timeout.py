@@ -2,17 +2,14 @@
 """Integration tests for per-task timeout enforcement.
 
 Covers Worker._handle_task_timeout: the parent-side handler invoked when a
-dispatched task outruns TaskOptions.timeout_ms. The SIGKILL targets the
-row's recorded worker_pid, confined to live children of the current
-executor; these workers have no executor, so the containment skip runs
-instead of killing anything.
+dispatched task outruns TaskOptions.timeout_ms. The kill goes through the
+task's slot handle; these handles hold no child, so nothing is killed.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -24,7 +21,9 @@ from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.slots import SlotHandle
 from horsies.core.worker.worker import Worker, _parse_timeout_ms
+from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
@@ -35,21 +34,15 @@ pytestmark = [pytest.mark.integration]
 TEST_WORKER_ID = 'w-timeout-test'
 OTHER_WORKER_ID = 'w-timeout-other'
 
-# A pid that cannot exist (pid_max is far below this on macOS and Linux);
-# it is also never in the executor's process map, so the containment check
-# skips the kill.
+# A pid that cannot exist: pid_max is far below this on macOS and Linux.
 FAKE_DEAD_PID = 2**22 - 1
 
 
-def _make_worker_without_engine() -> Worker:
-    cfg = WorkerConfig(
-        dsn='postgresql+psycopg://u:p@localhost/db',
-        psycopg_dsn='postgresql://u:p@localhost/db',
-        queues=['default'],
-    )
-    worker = Worker(session_factory=MagicMock(), listener=MagicMock(), cfg=cfg)
-    worker.worker_instance_id = TEST_WORKER_ID
-    return worker
+def _handle_with_child() -> tuple[SlotHandle, MagicMock]:
+    handle = unbound_handle()
+    child = MagicMock()
+    handle.bind_child(child)
+    return handle, child
 
 
 def _make_worker(engine: AsyncEngine) -> Worker:
@@ -138,7 +131,8 @@ async def test_timeout_marks_running_task_failed(
     task_id = await _insert_task(session)
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -153,6 +147,7 @@ async def test_timeout_marks_running_task_failed(
     assert attempts[0].outcome == 'FAILED'
     assert attempts[0].will_retry is False
     assert attempts[0].error_code == OutcomeCode.TASK_TIMEOUT.value
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -168,9 +163,9 @@ async def test_timeout_replay_uses_committed_result_without_duplicate_attempt(
         return_value=Ok(None),
     )
 
-    await worker._handle_task_timeout(task_id, 5_000)
+    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
     worker._finalize_workflow_phase.reset_mock()
-    await worker._handle_task_timeout(task_id, 5_000)
+    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
 
     worker._finalize_workflow_phase.assert_awaited_once()
     persisted_result = worker._finalize_workflow_phase.await_args.args[1]
@@ -191,12 +186,14 @@ async def test_timeout_respects_ownership(
     task_id = await _insert_task(session, owner=OTHER_WORKER_ID)
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.claimed_by_worker_id == OTHER_WORKER_ID
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -209,12 +206,14 @@ async def test_timeout_requeues_claimed_task(
     task_id = await _insert_task(session, status='CLAIMED')
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
     assert row.status == 'PENDING'
     assert row.claimed_by_worker_id is None
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -243,7 +242,8 @@ async def test_timeout_retries_when_opted_in(
     )
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -262,61 +262,7 @@ async def test_timeout_retries_when_opted_in(
     assert attempt is not None
     assert attempt.will_retry is True
     assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
-
-
-class TestKillContainment:
-    """The timeout SIGKILL only targets live children of the current executor.
-
-    Regression for pid-reuse containment: a concurrent timeout or broken
-    pool can restart the executor and reap the child before the kill
-    fires, after which the OS may recycle the pid for an unrelated
-    process. A raw os.kill on the stale pid would hit that process.
-    """
-
-    @staticmethod
-    def _kill_recorder(monkeypatch: pytest.MonkeyPatch) -> list[int]:
-        import horsies.core.worker.worker as worker_module
-
-        killed: list[int] = []
-
-        def recording_kill(pid: int, sig: int) -> None:
-            killed.append(pid)
-
-        monkeypatch.setattr(worker_module.os, 'kill', recording_kill)
-        return killed
-
-    def test_pid_in_live_executor_is_killed(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        killed = self._kill_recorder(monkeypatch)
-        worker = _make_worker_without_engine()
-        worker._executor = SimpleNamespace(  # type: ignore[assignment]
-            _processes={FAKE_DEAD_PID: object()},
-        )
-
-        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
-
-        assert killed == [FAKE_DEAD_PID]
-
-    def test_stale_pid_not_in_executor_is_skipped(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        killed = self._kill_recorder(monkeypatch)
-        worker = _make_worker_without_engine()
-        worker._executor = SimpleNamespace(_processes={})  # type: ignore[assignment]
-
-        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
-
-        assert killed == []
-
-    def test_no_executor_skips_kill(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        killed = self._kill_recorder(monkeypatch)
-        worker = _make_worker_without_engine()
-
-        worker._kill_owned_child(FAKE_DEAD_PID, 't', 5_000)
-
-        assert killed == []
-
+    child.kill_for_caller.assert_called_once_with()
 
 class TestTimeoutWireRoundTrip:
     """serialize_task_options must carry timeout_ms to the claim-side parser.

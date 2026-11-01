@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,6 +18,7 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.types.result import is_err
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
+from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 
 _TEST_APP: Horsies | None = None
@@ -154,16 +154,13 @@ async def test_finalize_phase2_failure_keeps_terminal_task_result_durable(
     serialized = dumps_json(envelope)
     assert not is_err(serialized)
 
-    loop = asyncio.get_running_loop()
-    fut: asyncio.Future[tuple[bool, str, str | None]] = loop.create_future()
-    fut.set_result((True, serialized.ok_value, None))
+    handle = task_finished_handle(True, serialized.ok_value, None)
 
     # Should return Err (for callback-driven handling) but keep phase-1 durability.
     finalize_r = await worker._finalize_after(
-        fut,
+        handle,
         task_id,
         task_name='two_phase_finalize_test',
-        executor=MagicMock(),
     )
     assert is_err(finalize_r)
 

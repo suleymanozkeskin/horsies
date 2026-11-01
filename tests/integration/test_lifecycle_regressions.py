@@ -34,6 +34,7 @@ from horsies.core.worker.worker import (
     _RequeueOutcome,
 )
 from horsies.core.workflows.lifecycle import pause_workflow
+from tests.fixtures.slots.handles import task_finished_handle
 from tests.integration.conftest import compute_test_enqueue_sha
 from tests.integration.history_seeding import read_attempts
 
@@ -381,16 +382,14 @@ async def test_finalize_worker_failure_runs_phase2(
         return Ok(None)
 
     worker._finalize_workflow_phase = _phase2  # type: ignore[method-assign]
-    fut = asyncio.get_running_loop().create_future()
-    fut.set_result((False, '', 'bookkeeping failed'))
+    handle = task_finished_handle(False, '', 'bookkeeping failed')
 
     result = await worker._finalize_after(
-        fut,
+        handle,
         task_id,
         queue_name='default',
         is_workflow_task=False,
         task_name='lifecycle_regression_test',
-        executor=MagicMock(),
     )
 
     assert is_ok(result)

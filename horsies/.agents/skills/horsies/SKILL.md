@@ -359,20 +359,19 @@ horsies get-docs --ref main              # download the main branch docs (needed
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)
 
 # Recycle each child after N tasks to bound memory (default 100, per-child,
-# staggered; forces spawn). Tune per deployment; 0 disables (keeps fork).
+# staggered). Tune per deployment; 0 disables.
 horsies worker myapp.config:app --max-tasks-per-child=500
 ```
 
 `horsies check` runs phased validation (config, imports, DAG, builders, policies,
 optional live DB check). Worker and scheduler also run check at startup.
 
-Two knobs recycle executor children to bound memory, with **OR** semantics (a
+Two knobs recycle worker children to bound memory, with **OR** semantics (a
 child exits when either limit is reached). `--max-tasks-per-child` (default
-`100`) recycles after N tasks; `--max-memory-per-child-mb` (default off,
-CPython-only) recycles once a child's own RSS reaches N MB after a task — the
+`100`) recycles after N tasks; `--max-memory-per-child-mb` (default
+off) recycles once a child's own RSS reaches N MB after a task — the
 primary guard for memory-quota deployments, since it maps to the RSS the quota
-charges. A threshold at or below the warmed child baseline fails startup. Either
-knob forces the `spawn` start method (incompatible with `fork`), so children
-re-import the app. Recommended default: memory recycling on, count high as a
+charges. A threshold at or below the warmed child baseline fails startup.
+Recommended default: memory recycling on, count high as a
 backstop, tuned against the `children_memory_mb` field on `WorkerStateSnapshot`.
 See `configs.md` and website docs `workers/concurrency`.

@@ -177,10 +177,8 @@ def catalog_import_chunk(
 @app.task(
     'flaky_export',
     queue_name=QUEUE_ANALYTICS,
-    # A longer backoff than every other task here, and deliberately so: this
-    # task breaks the executor pool on purpose, and the pool needs time to warm
-    # a full set of children before the retry lands. See
-    # `tuning.CHAOS_EXPORT_RETRY_INTERVALS_SECONDS`.
+    # A longer backoff than every other task here, so that each crash is easy
+    # to watch. See `tuning.CHAOS_EXPORT_RETRY_INTERVALS_SECONDS`.
     retry_policy=RetryPolicy.fixed(
         tuning.CHAOS_EXPORT_RETRY_INTERVALS_SECONDS,
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
