@@ -2078,6 +2078,8 @@ class TestResumeCommitSplit:
         assert status_r.ok_value == WorkflowStatus.PAUSED
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
 class TestUnknownStoredWorkflowStatus:
     """horsies_workflows.status has no CHECK constraint; a value outside WorkflowStatus does not parse."""
 
@@ -2149,6 +2151,8 @@ class TestUnknownStoredWorkflowStatus:
         assert 'NOT_A_STATUS' in (result.unwrap_err().message or '')
 
 
+@pytest.mark.integration
+@pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowHandleInfraErrors:
     """Tests for infrastructure error handling in WorkflowHandle methods."""
 
