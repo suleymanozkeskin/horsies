@@ -381,6 +381,9 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Action responses no longer carry `next_attempt_number`.** The field was
+  always `null` after the manual retry was removed. The web UI action
+  responses keep `outcome`, `was_status` and `warning`.
 - New command `horsies skills install --target DIR [--force]`. It copies
   the skill folder from the installed package to `DIR/horsies/`. `--target`
   is required, because each agent tool reads a different skills directory.
