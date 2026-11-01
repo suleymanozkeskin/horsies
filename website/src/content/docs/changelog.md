@@ -497,6 +497,23 @@ there is no migration contract between pre-1.0 versions.
   `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`. Any other `TypeError`
   from the dump is a defect and propagates, for example from a computed
   field.
+- **Breaking: `encode_value` raises `ValueValidationError` for a value that
+  holds itself.** Such a value is a list or a dict that contains itself, or
+  an instance of a self-referencing model that links to itself. The text
+  names the kwarg. Before, a raw `ValueError` left `encode_value`. What each
+  caller gets now:
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `ValueValidationError` as `exception`. Before, it raised.
+  - `prepare_schedules` refuses the schedule with `CONFIG_INVALID_SCHEDULE`.
+    Before, it raised.
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+    raised.
+  - A task that returns such a value, or whose `TaskError.data` holds one,
+    ends with `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`.
+
+  Any other `ValueError` from the dump propagates, also the `Circular
+  reference detected (depth exceeded)` of a value that is only deep.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

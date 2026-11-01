@@ -16,6 +16,7 @@ from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
 from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
@@ -76,6 +77,12 @@ class _EchoingModel(BaseModel):
     @classmethod
     def refuse(cls, value: str) -> str:
         raise ValueError(f'bad name {value}')
+
+
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
 
 
 class _AssertingModel(BaseModel):
@@ -1577,6 +1584,28 @@ class TestCreateTaskWrapperSend:
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: a validation error '
             'holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        app.get_broker.assert_not_called()
+
+    def test_send_value_that_holds_itself_returns_validation_error(self) -> None:
+        """A self-referencing model can hold itself; the send stays in its
+        catalog. Before, the raw `ValueError` left `.send()`."""
+        def good_fn(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        node = _Linked()
+        node.next = node
+
+        result = wrapper.send(x=node)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert result.err_value.message == (
+            'Failed to encode kwargs for test.good_fn: x: serialization failed: '
+            'Circular reference detected (id repeated)'
         )
         app.get_broker.assert_not_called()
 

@@ -138,6 +138,11 @@ _NO_JSON_KEY_TEXT: Final = re.compile(r'`\w+` not valid as object key')
 key without a JSON form. Its one placeholder is a type name, so it holds no
 input value. `_dump` matches all of it: any other `TypeError` is a defect."""
 
+_CIRCULAR_REFERENCE_TEXT: Final = 'Circular reference detected (id repeated)'
+"""The text of the plain `ValueError` from `dump_python` for a value that holds
+itself. `_dump` compares all of it: any other `ValueError` propagates, also the
+`Circular reference detected (depth exceeded)` of a value that is only deep."""
+
 
 # ---------------------------------------------------------------------------
 # TypeAdapter cache
@@ -196,8 +201,8 @@ def encode_value(
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
        A dict key with a lone surrogate raises at a position without a
        declared key type; `_dump` makes that a `StrictJsonError`. A dict key
-       without a JSON form raises too; `_dump` makes that a
-       `ValueValidationError`.
+       without a JSON form, and a value that holds itself, raise too; `_dump`
+       makes those a `ValueValidationError`.
     4. `_scan_wire_json` rejects non-finite floats and strings with a lone
        surrogate at any depth, so `encode_value` refuses each string that
        `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
@@ -342,6 +347,12 @@ def _dump(
     computed field or a generator, so the text must match in full. Any other
     `TypeError` propagates. A pydantic that changes the text gives the raw
     `TypeError` again, not a wrong refusal.
+
+    Pydantic raises a plain `ValueError` for a value that holds itself. The
+    same rule applies: only the full text is this refusal. Any other
+    `ValueError` propagates, for example from a computed field. The arm comes
+    after the arms for `PydanticSerializationError` and `UnicodeEncodeError`,
+    because both are a `ValueError`.
     """
     failure: StrictJsonError | ValueValidationError
     try:
@@ -352,6 +363,12 @@ def _dump(
         failure = StrictJsonError(lone_surrogate_text('a dict key', location))
     except TypeError as error:
         if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
+            raise
+        failure = ValueValidationError(
+            _with_location(f'serialization failed: {error}', location),
+        )
+    except ValueError as error:
+        if str(error) != _CIRCULAR_REFERENCE_TEXT:
             raise
         failure = ValueValidationError(
             _with_location(f'serialization failed: {error}', location),

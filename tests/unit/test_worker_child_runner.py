@@ -885,6 +885,12 @@ def _constant_surrogate_task(*, x: _ConstantSurrogateModel) -> None:
 _LONE_SURROGATE_NAME: Any = {'name': f'text{chr(0xd800)}'}
 
 
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
+
+
 def _registered_tasks() -> dict[str, Any]:
     """Registered tasks: the worker calls their wrapper, not a mock."""
     app = Horsies(AppConfig(
@@ -901,7 +907,26 @@ def _registered_tasks() -> dict[str, Any]:
     def returns_custom_error() -> TaskResult[_CustomErrorModel, TaskError]:
         return TaskResult(ok=_LONE_SURROGATE_NAME)
 
-    return {'value-error': returns_echoing, 'custom-error-context': returns_custom_error}
+    @app.task('circular.returned')
+    def returns_itself() -> TaskResult[_Linked, TaskError]:
+        node = _Linked()
+        node.next = node
+        return TaskResult(ok=node)
+
+    @app.task('circular.error_data')
+    def error_data_holds_itself() -> TaskResult[int, TaskError]:
+        value: list[Any] = []
+        value.append(value)
+        return TaskResult(
+            err=TaskError(error_code='MY_ERROR', message='m', data=value),
+        )
+
+    return {
+        'value-error': returns_echoing,
+        'custom-error-context': returns_custom_error,
+        'returned-model': returns_itself,
+        'error-data': error_data_holds_itself,
+    }
 
 
 _LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
@@ -1254,6 +1279,30 @@ class TestRunTaskEntryErrorPaths:
         }
         assert 'a validation error holds a lone surrogate' in parsed['err']['message']
         assert parsed['err']['exception'] is None
+
+    @pytest.mark.parametrize('form', ['returned-model', 'error-data'])
+    def test_a_value_that_holds_itself_ends_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        form: str,
+    ) -> None:
+        """The encode refuses the value through its catalog, so the code is
+        WORKER_SERIALIZATION_ERROR and not TASK_EXCEPTION for a raw exception."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()[form],
+        )
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert 'Circular reference detected (id repeated)' in parsed['err']['message']
 
     def test_a_validator_text_with_a_lone_surrogate_fails_the_kwargs_decode(
         self,

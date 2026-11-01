@@ -47,6 +47,12 @@ class _EchoingModel(BaseModel):
         raise ValueError(f'bad name {value}')
 
 
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
+
+
 def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
     """Build a minimal mock app for collect_schedule_errors."""
     app = MagicMock()
@@ -178,6 +184,30 @@ class TestPrepareSchedules:
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: a validation error holds a lone surrogate'
+                    in ' '.join(errors[0].notes)
+                )
+            case Ok(encoded_kwargs):
+                raise AssertionError(f'expected a refusal, got {encoded_kwargs!r}')
+
+    def test_a_value_that_holds_itself_is_refused_at_boot(self) -> None:
+        def fn(x: _Linked) -> str:
+            return str(x)
+
+        node = _Linked()
+        node.next = node
+        config = ScheduleConfig(schedules=[_schedule(kwargs={'x': node})])
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        match result:
+            case Err(errors):
+                assert len(errors) == 1
+                assert isinstance(errors[0], ConfigurationError)
+                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert 'not encodable' in errors[0].message
+                assert (
+                    'x: serialization failed: Circular reference detected'
                     in ' '.join(errors[0].notes)
                 )
             case Ok(encoded_kwargs):

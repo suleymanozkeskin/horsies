@@ -699,6 +699,70 @@ class TestDictKeyWithoutAJsonForm:
         )
 
 
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
+
+
+class TestValueThatHoldsItself:
+    """Before, the raw `ValueError` left `app.workflow()`."""
+
+    def test_a_task_node_kwarg_is_hrs_031(self) -> None:
+        app = _real_app()
+
+        @app.task('circular.linked')
+        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        node = _Linked()
+        node.next = node
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='circular-task-node',
+                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                definition_key=_key('circular_task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (id repeated)' in ' '.join(
+            raised.value.notes,
+        )
+
+    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+        """Registration does not check a `build_with()` parameter, so `Any`
+        is possible there."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'circular-child'
+            definition_key = _key('circular_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, labels: Any = None, **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        value: list[Any] = []
+        value.append(value)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='circular-sub-node',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                )],
+                definition_key=_key('circular_sub_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (id repeated)' in ' '.join(
+            raised.value.notes,
+        )
+
+
 class TestChildStartOfALoneSurrogate:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
