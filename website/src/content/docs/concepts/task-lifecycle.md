@@ -91,7 +91,7 @@ TASK_TERMINAL_STATES  # frozenset({TaskStatus.COMPLETED, TaskStatus.FAILED, Task
 
 ### CLAIMED → RUNNING
 
-- Task dispatched to worker's process pool
+- Task dispatched to one of the worker's child processes
 - Child process sets `status=RUNNING`, `started_at=NOW()`
 - Heartbeat thread begins sending runner heartbeats
 - Non-workflow tasks skip workflow-status preflight work; workflow tasks update

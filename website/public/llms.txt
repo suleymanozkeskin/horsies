@@ -693,7 +693,7 @@ Each entry: Title -- summary -> URL
 - Retention Config -- record lifetime, retention classes, per-queue retention, partition upkeep -> /horsies/configuration/retention-config/
 
 ### Workers
-- Worker Architecture -- process pool model -> /horsies/workers/worker-architecture/
+- Worker Architecture -- worker-owned child processes -> /horsies/workers/worker-architecture/
 - Concurrency -- worker/queue/cluster limits -> /horsies/workers/concurrency/
 - Heartbeats & Recovery -- crash detection -> /horsies/workers/heartbeats-recovery/
 - Child-Process Hooks -- per-child-process setup with @app.on_child_process_start -> /horsies/workers/child-process-hooks/
@@ -773,7 +773,7 @@ WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
 schedule, delay, TaskFunction.schedule, resend_on_transient_err -> /horsies/tasks/sending-tasks/
-worker, process pool, claim, execute -> /horsies/workers/worker-architecture/
+worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
 syce, dashboard, TUI, monitor -> /horsies/monitoring/syce-overview/

@@ -132,6 +132,14 @@ Yes — and read the version number as an API-contract statement, not an engine-
 - The claim/finalize semantics are cross-validated against an independent Rust reimplementation of the engine.
 - A codebase with ~300 task definitions and recurring schedules, migrated off Celery, runs its full background workload on horsies.
 
+## What happens to other tasks when one task crashes or hangs?
+
+Nothing. Each task runs in its own child process, and the worker talks to each child over its own socket. A crash, an out-of-memory kill, or a timeout kill ends that child only. The other tasks finish, and the slot gets a new child. See [Failure Isolation](../workers/worker-architecture#failure-isolation).
+
+## How much memory does a worker use?
+
+It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `--child-preload=none`. With `--child-preload=app`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
+
 ## Throughput expectations and comparisons
 
 Compared with Redis/RabbitMQ-backed systems such as Celery, Dramatiq, RQ, Huey, or arq, Horsies chooses transactional execution semantics over raw broker throughput. 

@@ -10,6 +10,34 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Workers run tasks in children that they own, one process and one socket
+  per slot.** `ProcessPoolExecutor`, `multiprocessing`, and pickle are gone
+  from the task path. On Linux a preload parent forks each child. Other
+  platforms start each child with `exec`:
+  - `--child-preload` selects what the preload parent imports: `library` (the
+    default), `app`, or `none`.
+  - Horsies' libraries load before your app. A setting that a library reads at
+    import, such as `PSYCOPG_IMPL`, must be in the process environment, not in
+    a `.env` file that your app loads.
+  - A forked child shows the preload parent's command line in `ps`, so a
+    monitor that counts `multiprocessing-fork` processes needs a change.
+  - `children_memory_mb` counts shared pages once per child, so it reads above
+    real use. Read the container or cgroup total.
+  - `multiprocessing.parent_process()` returns `None` in a child, and
+    `multiprocessing.current_process().name` is `horsies-child-<slot>`.
+  - An app locator of `__main__:app` is refused at worker start. A child does
+    not run your script as `__main__`.
+  - A child no longer imports `__main__` again as `__mp_main__`.
+- **`timeout_ms` starts when a child takes the task.** Before, the clock started
+  at dispatch, so time spent waiting for a free child counted.
+- **A row waiting for a child returns to `PENDING` at worker stop.** Before, it
+  waited for its claim lease to end.
+- **`max_tasks_per_child` accepts `1`.** The floor was 2.
+- **`max_memory_per_child_mb` no longer depends on the CPython version.** The
+  CPython 3.13 gate is gone with `horsies.core.worker.mem_pool`.
+- **`ExecutorRestartFailedError` is renamed `ChildStartFailedError`.** There is
+  no alias.
+
 - **Breaking: a workflow whose recovery raises on every pass now fails.** After
   `workflow_recovery_failure_limit` reaper passes (default 25) with a persistent
   raise, the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A persistent
@@ -678,6 +706,20 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Worker children on Linux start in milliseconds and share memory.** A
+  preload parent imports code once, and each child is a fork of it. With 8
+  children and task work against Postgres, on a small app: next child 618 ms to
+  27 ms, summed PSS 461 MiB to 169 MiB. With `--child-preload=app`, on an app
+  that imports pandas: next child 1,174 ms to 26 ms, summed PSS 715 MiB to
+  236 MiB. With the default `max_tasks_per_child=100` and 10,000 no-op tasks,
+  throughput goes from 437 to 803 tasks/s with a hard cap, and from 484 to
+  1,032 tasks/s with prefetch 8. The worker stays the real parent of each
+  child, and a dead preload parent stops no running task.
+- **`WorkerConfig.drain_timeout_s` and `horsies worker --drain-timeout` set the
+  shutdown drain.** The default stays 300 seconds. At the deadline the worker
+  kills the children that still run a task, and each task takes the crash path,
+  so its row does not wait for the reaper. Set it below the stop window of your
+  supervisor.
 - Workflow recovery has a limit. A workflow whose recovery raises a persistent
   error in `workflow_recovery_failure_limit` reaper passes fails closed. The
   node that raised goes `FAILED`, other `PENDING` and `READY` nodes go
@@ -908,6 +950,25 @@ and there is no migration contract between pre-1.0 versions.
   stays: the transcode decoder set reads it.
 
 ### Fixed
+
+- **A timeout or a crash in one child no longer touches other tasks on the
+  worker.** Before, one lost child broke the shared pool, and every started
+  task on that worker failed with `WORKER_CRASHED`. Now only the task of that
+  child is recovered, and only that slot starts a new child. (#375)
+- **A child stops when its worker dies.** Before, the child ran its task to the
+  end, sent heartbeats, and wrote to the row with no parent to read the result.
+  (#410)
+- **SIGTERM to every process no longer fails running tasks.** Heroku and systemd
+  `KillMode=control-group` signal the whole tree. Children now ignore SIGTERM
+  and SIGINT, and the worker drains them. (#411)
+- **`timeout_ms` no longer counts the wait for a free child.** (#412)
+- **A timeout kill cannot reach the next task.** The kill is bound to the task,
+  so it does nothing once the result is read. (#413)
+- **A timeout kill reaches the subprocesses of the task.** The kill goes to the
+  session of the child. A subprocess that calls `setsid` leaves that session.
+  (#414)
+- **A forked helper cannot hide a dead child.** The worker takes a child's death
+  from the process exit, not from the socket. (#415)
 
 - **The docs say what `SuccessPolicy.optional` does.** The field records which
   nodes may fail, and it has no runtime effect: the engine stores it and reads

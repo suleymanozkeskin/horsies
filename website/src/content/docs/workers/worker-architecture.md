@@ -1,8 +1,8 @@
 ---
 title: Worker Architecture
-summary: Process pool model for claiming and executing tasks.
+summary: Worker-owned child processes for claiming and executing tasks.
 related: [concurrency, heartbeats-recovery, ../../concepts/architecture]
-tags: [workers, architecture, process-pool]
+tags: [workers, architecture, child-processes]
 ---
 
 ## Overview
@@ -14,11 +14,11 @@ tags: [workers, architecture, process-pool]
 │  Worker Process (Main)                                  │
 │  - Subscribes to NOTIFY channels                        │
 │  - Claims tasks from PostgreSQL                         │
-│  - Dispatches to process pool                           │
+│  - Assigns tasks to child slots                         │
 │  - Writes results back                                  │
 │                                                         │
 │  ┌─────────────────────────────────────────────────┐    │
-│  │  ProcessPoolExecutor                            │    │
+│  │  Slots (one child, one socket each)             │    │
 │  │  ┌─────────┐ ┌─────────┐ ┌─────────┐            │    │
 │  │  │ Child 1 │ │ Child 2 │ │ Child N │  ...       │    │
 │  │  │ Task A  │ │ Task B  │ │ (idle)  │            │    │
@@ -29,17 +29,36 @@ tags: [workers, architecture, process-pool]
 
 ## Process Model
 
-Workers use Python's `ProcessPoolExecutor`:
+A worker owns one child process per slot:
 
 - **Main process**: Coordinates claiming, dispatching, result handling
-- **Child processes**: Execute task code in isolation
-- **N workers**: Configurable via `--processes` flag
+- **Child processes**: Execute task code in isolation, one task at a time
+- **N children**: Configurable via `--processes` flag
+
+Each child:
+
+- Starts from the [preload parent](#preload-parent) on Linux, and with `exec` on other platforms. It inherits no socket or lock from the worker.
+- Has its own session, so a kill also reaches the subprocesses of its task.
+- Has its own socket to the worker. Tasks and results move over it as JSON frames.
 
 Benefits:
 
 - GIL doesn't block concurrent task execution
-- Crashed tasks don't kill the main worker
+- A crash, a timeout, or an exit in one child affects only the task of that child
 - Memory isolation between tasks
+
+## Failure Isolation
+
+Each child holds one task, so a failure stays with that task.
+
+| Case | Result |
+| ---- | ------ |
+| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed, and the task fails with `TASK_TIMEOUT`. Other tasks continue |
+| A child crashes (segfault, out-of-memory kill, `os._exit()`) | The worker sees the exit at once and recovers that task. Other tasks continue |
+| The worker dies | Each child stops at once, also while C code holds the GIL. A subprocess that a task started keeps running, because the child cannot act after a SIGKILL |
+| A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
+| A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
+| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task |
 
 ## Execution Flow
 
@@ -52,9 +71,10 @@ horsies worker myapp.instance:app --processes=8
 
 1. Load app from module
 2. Import task modules (for registry population)
-3. Subscribe to NOTIFY channels
-4. Create ProcessPoolExecutor with N workers
-5. Initialize child processes (each loads app independently)
+3. Start the preload parent (Linux)
+4. Start N children (each loads app independently)
+5. Wait until each child reports ready
+6. Subscribe to NOTIFY channels
 
 ### 2. Main Loop
 
@@ -66,7 +86,7 @@ while not stopped:
 ```
 
 1. **Claim pass**: Query for available tasks, claim them
-2. **Dispatch**: Submit claimed tasks to process pool
+2. **Dispatch**: Assign claimed tasks to child slots, oldest first
 3. **Wait**: Block on NOTIFY until new tasks arrive
 4. Repeat
 
@@ -119,10 +139,11 @@ Main process receives result from child:
 
 Each child process:
 
-1. Loads app via `_child_initializer()`
-2. Imports task modules
-3. Populates local task registry
-4. Suppresses sends during import (prevents side effects)
+1. Reads its settings from the worker over its socket. The database URL is not in `argv`, because `ps` shows `argv`.
+2. Loads app via `_child_initializer()`
+3. Imports task modules
+4. Populates local task registry
+5. Suppresses sends during import (prevents side effects)
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -135,6 +156,81 @@ def _child_initializer(app_locator, imports):
     app.suppress_sends(False)
 ```
 
+A child differs from a `multiprocessing` process:
+
+- `multiprocessing.parent_process()` returns `None`.
+- `multiprocessing.current_process().name` is `horsies-child-<slot>`.
+- `__main__` is the child program, not your script. The worker refuses a `__main__:app` locator at startup.
+
+## Preload Parent
+
+On Linux, a worker starts one extra process: the preload parent. It imports code once, then forks each child. A child then starts in milliseconds and shares those memory pages with the other children.
+
+`--child-preload` selects what it imports:
+
+| Mode | Imports | Use it when |
+| ---- | ------- | ----------- |
+| `library` (default) | Horsies and its dependencies | Always. Each child still imports your app |
+| `app` | Horsies, its dependencies, and your app | Your app has no side effect at import |
+| `none` | Nothing, and there is no preload parent | You must rule the preload parent out. Every child starts with `exec` |
+
+Conditions: 8 children, Linux, tasks that run pydantic, SQLAlchemy, and pandas (pandas app only), Postgres in the loop. Memory is the summed PSS of the children and the preload parent.
+
+| App | `--child-preload` | Next child, p50 | Memory |
+| --- | ----------------- | --------------- | ------ |
+| Small | `none` | 618 ms | 461 MiB |
+| Small | `library` | 27 ms | 169 MiB |
+| Small | `app` | 20 ms | 151 MiB |
+| With pandas | `none` | 1,174 ms | 715 MiB |
+| With pandas | `library` | 486 ms | 472 MiB |
+| With pandas | `app` | 26 ms | 236 MiB |
+
+With `app`:
+
+- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](child-process-hooks), which still runs in every child.
+- The worker refuses to start if the import leaves a Python thread or a socket. A fork copies a lock in whatever state another thread left it, and all children would share one socket.
+
+With 4 children, the whole worker at start, including its main process, is measured as summed PSS:
+
+| App | `none` | `library` | `app` |
+| --- | ------ | --------- | ----- |
+| Small | 290 MiB | 159 MiB | 146 MiB |
+| With pandas | 445 MiB | 342 MiB | 212 MiB |
+
+Throughput is on the [performance](../internals/performance#worker-start-paths) page.
+
+The worker stays the real parent of each child, so exit codes, kills, and parent-death behavior do not change.
+
+If the preload parent dies, running children continue, and new children start with `exec`. The worker replaces it after 5 seconds, up to 5 times. In `ps`, a forked child shows the command line of the preload parent.
+
+Other platforms have no preload parent, and every child starts with `exec`. Linux also falls back to `exec` if the kernel has no `pidfd_open` (below 5.3) or blocks `prctl`.
+
+### Choosing a Mode
+
+Keep `library` unless memory is your limit. Most of the gain from `library` is Horsies and its dependencies, so an app with heavy imports gains little from it. With 4 children, an app that imports boto3, openai, google-genai, firebase-admin, and lxml uses 651 MiB on 0.4.6, 575 MiB with `library`, and 298 MiB with `app`.
+
+Before you use `app` in production, run it on staging with real calls to every client library inside tasks. An import that passes the guard does not prove that a library works after a fork.
+
+### Limits of Each Mode
+
+Both preload modes:
+
+| Limit | Effect |
+| ----- | ------ |
+| Library code loads before your app | Anything your app sets first arrives too late. See [Things to Avoid](#things-to-avoid) |
+| A recycled child does not reload library code | After an in-place package upgrade, restart the worker |
+| Copied pages grow as tasks run | Python reference counts write to shared pages, so memory rises after start |
+| One more process | The preload parent uses about 20–30 MiB. The tables above include it |
+
+`app` only:
+
+| Limit | Effect |
+| ----- | ------ |
+| Your module code runs once | Anything built at import is shared by all children |
+| A recycled child does not reload your code | New app code needs a worker restart. Recycling still returns memory |
+| The guard does not see native threads | A BLAS pool or a gRPC client built at import passes the guard. It may hang or fail in a child |
+| Native libraries may not be fork-safe | Build their clients in a hook, after the fork |
+
 ## Worker Configuration
 
 From `WorkerConfig`:
@@ -146,6 +242,8 @@ From `WorkerConfig`:
 | `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | Queue names to process |
 | `processes` | Child process count |
+| `drain_timeout_s` | Seconds to wait for running tasks at shutdown |
+| `child_preload` | What the preload parent imports: `library`, `app`, or `none` |
 | `parent_pool_size` | Worker coordinator SQLAlchemy pool size |
 | `parent_max_overflow` | Worker coordinator overflow connections |
 | `child_pool_min_size` | Minimum per-child psycopg pool size |
@@ -160,31 +258,37 @@ PgBouncer, configure `PostgresConfig.session_database_url` with a direct or
 session-capable URL. Workers fail startup instead of silently switching to
 poll-only dispatch if `LISTEN` is unavailable.
 
-Child database pools are initialized inside the child process, after the process
-pool starts. Psycopg connections are not process-safe and must not be opened in
-the parent and shared across forked children. Workers warm child processes
-before opening parent listener/coordinator sockets; child DB connections remain
-lazy by default when `worker_child_pool_min_size=0`.
-
-If a process pool must be replaced after startup, the worker uses a
-non-inheriting process start method for the replacement so live parent database
-sockets are not forked into new children.
+Child database pools are initialized inside the child process. Psycopg
+connections are not process-safe. A child starts with `exec`, so it inherits no
+parent database socket. Child DB connections remain lazy by default when
+`worker_child_pool_min_size=0`.
 
 ## Graceful Shutdown
 
-On SIGTERM/SIGINT:
+On SIGTERM/SIGINT the worker:
 
-1. Stop accepting new claims
-2. Wait for running tasks to complete
-3. Close process pool
-4. Close database connections
+1. Stops new claims
+2. Returns tasks that wait for a child to `PENDING`, because they have not started
+3. Waits up to `--drain-timeout` seconds for running tasks (default 300)
+4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path
+5. Waits for pending result writes
+6. Closes database connections
 
-```python
-async def stop(self):
-    self._stop.set()
-    await self.listener.close()
-    self._executor.shutdown(wait=True)
-```
+Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once.
+
+| Supervisor | Default stop window | Signal goes to |
+| ---------- | ------------------- | -------------- |
+| Fly.io | 5 s (`kill_timeout`), SIGINT | Main process |
+| Docker | 10 s (`docker stop --time`) | Main process |
+| Kubernetes | 30 s (`terminationGracePeriodSeconds`) | Main process |
+| Amazon ECS | 30 s (`stopTimeout`) | Main process |
+| Heroku | 30 s | Every process |
+| systemd | 90 s (`TimeoutStopSec`) | Every process, or the main process with `KillMode=mixed` |
+
+
+Children ignore SIGTERM and SIGINT. The worker decides when a child stops, so a task continues when a supervisor signals every process. A subprocess that a task starts does not ignore these signals. To keep such a subprocess running on systemd, set `KillMode=mixed`.
+
+If the worker process dies, each child stops at once. A child that continues has no way to write its result, and a retry could overlap it. The reaper recovers these rows. See [Recovery Time After a Worker Stops](heartbeats-recovery#recovery-time-after-a-worker-stops).
 
 ## Resilience
 
@@ -194,7 +298,8 @@ Workers recover from transient infrastructure failures without operator interven
 
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up.
-- **Broken process pool**: If child processes crash, the process pool is recreated. Tasks still in CLAIMED status are requeued back to PENDING. Tasks already in RUNNING status are recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
+- **Child loss**: If a child dies, the worker starts a new child in that slot. Other children continue. A task still in CLAIMED status is requeued back to PENDING. A task already in RUNNING status is recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
+- **Child start failure**: A child that fails to start gets three attempts. If they all fail, or the OS refuses to start a process, the worker exits non-zero so that a supervisor restarts it. A failed [child hook](child-process-hooks) stops the worker at once, because a retry runs the same hook. An outside SIGKILL of a booting replacement child, such as an out-of-memory kill, does not use an attempt while another child is serving: the worker waits up to 5 seconds and starts another. A kill during the first start counts, and so does a kill when no other child is serving, because a worker that does no work must fail where a supervisor can see it.
 
 ### Configuration
 
@@ -243,7 +348,7 @@ This list is passed to child processes for import.
 | Task exception | Wrapped in TaskResult(err=...) |
 | Serialization error | WORKER_SERIALIZATION_ERROR |
 | Task not found | WORKER_RESOLUTION_ERROR |
-| Child crash | Detected via heartbeat, marked FAILED |
+| Child crash | Detected at once, `WORKER_CRASHED` for that task only |
 
 ## Multiple Workers
 
@@ -261,3 +366,39 @@ horsies worker myapp.instance:app --processes=8
 - `SKIP LOCKED` prevents duplicate claims
 - Advisory locks serialize certain operations
 - `cluster_wide_cap` limits total concurrency
+
+## Things to Avoid
+
+**Don't build a client at import with `--child-preload=app`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
+
+```python
+# Wrong: this runs once, in the preload parent
+client = firestore.Client()
+
+# Correct: this runs in every child, after the fork
+client = None
+
+@app.on_child_process_start
+def build_client() -> None:
+    global client
+    client = firestore.Client()
+```
+
+**Don't set a library's import-time setting in `.env` that your app loads.** `library` and `app` both import psycopg, SQLAlchemy, and pydantic before your app runs, so `load_dotenv()` in your app is too late for `PSYCOPG_IMPL`. Set such a value in the process environment.
+
+```bash
+# Wrong: in a .env file that the app loads
+PSYCOPG_IMPL=binary
+
+# Correct: in the environment of the worker process
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app
+```
+
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `--child-preload=none`.
+
+**Don't expect a recycle to load new code with `--child-preload=app`.** A recycled child is a new fork of the same preload parent. Restart the worker.
+
+**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than `--processes`. Read `processes` in [worker health](../monitoring/worker-health).
+
+**Don't add `children_memory_mb` to get the real footprint.** It sums RSS, so with preload it counts each shared page once per child. Read the container or cgroup total.
+
