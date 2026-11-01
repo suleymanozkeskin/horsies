@@ -165,7 +165,7 @@ def _parse_marker(
     match parsed.group('kind'):
         case 'alone':
             return Ok(BlockMode.ALONE)
-        case 'skip' if False:
+        case 'skip' if skip_kind is None:
             return Err(SkipWithoutKind(page=page, line=line))
         case 'skip' if not reason:
             return Err(SkipWithoutReason(page=page, line=line))
