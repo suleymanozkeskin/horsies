@@ -43,7 +43,7 @@ Errors from task execution, broker, and worker internals.
 | `BROKER_ERROR` | Database or broker failure during operation | No |
 | `WORKER_RESOLUTION_ERROR` | Failed to resolve task by name | No |
 | `WORKER_SERIALIZATION_ERROR` | Failed to serialize/deserialize task data | No |
-| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized | No |
+| `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
 
@@ -327,6 +327,7 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 Domain-specific errors use string codes:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 
@@ -432,9 +433,11 @@ The library default `UNHANDLED_EXCEPTION` is intentionally a built-in code and i
 Example collision that `horsies check` catches:
 
 ```python
+from pydantic import SecretStr
+
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url='postgresql+psycopg://...'),
+        broker=PostgresConfig(database_url=SecretStr('postgresql+psycopg://...')),
         # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
         exception_mapper={ValueError: 'BROKER_ERROR'},
     ),
@@ -561,6 +564,7 @@ error[HRS-007]: cycle detected in workflow DAG
 
 Access fields programmatically when catching the exception:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies.core.errors import HorsiesError
 

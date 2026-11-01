@@ -17,11 +17,12 @@ The health API answers three operational questions: is Postgres reachable, which
 `ping_*` are active, right-now probes. `list_worker_states` is the last self-reported snapshot, not a live check.
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
     ),
 ))
 ```

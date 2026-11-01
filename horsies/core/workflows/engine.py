@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,7 +29,12 @@ from horsies.core.codec.kwargs import (
     encode_subworkflow_kwargs,
     underlying_task_fn,
 )
-from horsies.core.codec.json_io import dumps_json, loads_json, SerdeResult
+from horsies.core.codec.json_io import (
+    SerdeResult,
+    SerializationError,
+    dumps_json,
+    loads_json,
+)
 from horsies.core.codec.payload_guard import warn_if_payload_large
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
@@ -316,6 +321,59 @@ def _deser_json(raw: str | None, context: str, fallback: Any = None) -> Any:
         logger.warning(f'JSON parse failed ({context}): {r.err_value}')
         return fallback
     return r.ok_value
+
+
+def _child_task_options_json(child_task: TaskNode[Any]) -> str | None:
+    """The task options JSON of a child TaskNode, with its ``good_until`` set.
+
+    The child workflow start reads the options from the task function: the
+    task decorator's own serialization of a validated ``TaskOptions``, not a
+    stored row. So options that do not parse to a JSON object, or merged
+    options that do not serialize, are a defect. They raise, as in the
+    workflow start transaction, and the caller's transaction rolls back.
+    The promotion path reads the stored copy of the options and fails only
+    its node.
+
+    Returns:
+        The options JSON of the task function when the node has no
+        ``good_until``; else that JSON with ``good_until`` set.
+
+    Raises:
+        SerializationError: the options do not parse to a JSON object, or
+            the merged options do not serialize. The message names the
+            node.
+    """
+    options_json = child_task.fn.task_options_json
+    if child_task.good_until is None:
+        return options_json
+    base_options: dict[str, Json] = {}
+    if options_json:
+        match loads_json(options_json):
+            case Ok(dict() as parsed_options):
+                base_options = parsed_options
+            case Ok(not_an_object):
+                raise SerializationError(
+                    f'Task options for child node {child_task.name} are not '
+                    f'a JSON object: got {type(not_an_object).__name__}',
+                )
+            case Err(parse_error):
+                raise SerializationError(
+                    f'Corrupt task_options for child node {child_task.name}: '
+                    f'{parse_error}',
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+    base_options['good_until'] = child_task.good_until.isoformat()
+    match dumps_json(base_options):
+        case Ok(merged_json):
+            return merged_json
+        case Err(dump_error):
+            raise SerializationError(
+                f'Failed to serialize task_options for child node '
+                f'{child_task.name}: {dump_error}',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _validate_args_from_map(raw: dict[str, Any]) -> dict[str, int] | None:
@@ -864,6 +922,9 @@ async def enqueue_subworkflow_task(
     Start a child workflow for a SubWorkflowNode.
 
     Raises:
+        SerializationError: the task options of a child root, or of a child
+            task with ``good_until``, do not parse. They come from the task
+            function, so this is a defect; it raises before any INSERT.
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the workflow start path folds a database or driver
             error into WorkflowStartEnqueueFailed with its own retry loop,
@@ -1102,10 +1163,9 @@ async def enqueue_subworkflow_task(
     # cannot carry args_from/workflow_ctx_from (spec validation requires
     # both to reference waits_for, and roots have none), so they are
     # inserted directly as ENQUEUED with their task rows. SubWorkflowNode
-    # roots recurse; a root whose task_options fail to parse is demoted to
-    # the per-node path so corruption keeps failing THAT child root (not
-    # the parent), exactly as before.
-    from horsies.core.codec.json_io import SerializationError
+    # roots recurse. Task options that do not parse are a defect (they come
+    # from the task function) and raise SerializationError before any
+    # INSERT; the caller's transaction rolls back.
     from horsies.core.workflows.lifecycle import root_retry_and_deadline
 
     child_node_params: list[dict[str, Any]] = []
@@ -1220,37 +1280,9 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            child_task_options_json: str | None = child_task.fn.task_options_json
-            if child_task.good_until is not None:
-                child_base_options: dict[str, Any] = {}
-                if child_task_options_json:
-                    parsed = _deser_json(child_task_options_json, 'child task_options')
-                    if parsed is None:
-                        await _fail_enqueued_task(
-                            session,
-                            workflow_id,
-                            task_index,
-                            f'Corrupt child task_options for {child_task.name}',
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
-                    if not isinstance(parsed, dict):
-                        await _fail_enqueued_task(
-                            session,
-                            workflow_id,
-                            task_index,
-                            (
-                                f'Invalid child task_options payload for {child_task.name}: '
-                                'expected object'
-                            ),
-                            broker,
-                            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                        )
-                        return None
-                    child_base_options = cast(dict[str, Any], parsed)
-                child_base_options['good_until'] = child_task.good_until.isoformat()
-                child_task_options_json = _ser(dumps_json(child_base_options), 'child task_options')
+            # Raises SerializationError for options that do not parse: a
+            # defect, see _child_task_options_json.
+            child_task_options_json = _child_task_options_json(child_task)
 
             # Strict-serde: route child TaskNode kwargs through the typed
             # codec so reserved-namespace keys (`__h_*` / `__horsies_*`)
@@ -1319,18 +1351,14 @@ async def enqueue_subworkflow_task(
             good_until_str: str | None = None
             good_until_dt: datetime | None = None
             if is_fast_root:
-                try:
-                    max_retries, good_until_str, good_until_dt = (
-                        root_retry_and_deadline(
-                            child_task_options_json, child_task.name,
-                        )
+                # The options come from the task function, not from a
+                # stored row, so a SerializationError here is a defect and
+                # propagates, as in the workflow start transaction.
+                max_retries, good_until_str, good_until_dt = (
+                    root_retry_and_deadline(
+                        child_task_options_json, child_task.name,
                     )
-                except SerializationError:
-                    # Corrupt decorator-attached options: demote to the
-                    # per-node path so the failure lands on THIS child
-                    # root (identical message/code to the old behavior),
-                    # not the parent node.
-                    is_fast_root = False
+                )
             if is_fast_root and child_task.index is not None:
                 child_task_id = mint_task_id()
                 # Task-row kwargs = node kwargs + workflow_meta (mirrors
@@ -1453,9 +1481,9 @@ async def enqueue_subworkflow_task(
     )
 
     # 8. Slow roots first: SubWorkflowNode roots start their own child
-    # workflows; demoted TaskNode roots (unparseable options) take the
-    # per-node path. A slow root's failure may pause THIS child workflow
-    # (its on_error policy), which must gate the fast roots below.
+    # workflows; args_from/ctx_from TaskNode roots take the per-node path.
+    # A slow root's failure may pause THIS child workflow (its on_error
+    # policy), which must gate the fast roots below.
     for child_root in slow_child_roots:
         if child_root.index is not None:
             if isinstance(child_root, SubWorkflowNode):

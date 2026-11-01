@@ -19,11 +19,12 @@ uv add horsies
 ## Basic Configuration
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 
@@ -41,8 +42,8 @@ from horsies import Horsies, AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ["DATABASE_URL_POOLED"],
-        session_database_url=os.environ["DATABASE_URL_DIRECT"],
+        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
+        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
         pgbouncer_transaction_mode=True,
     ),
 )
@@ -71,7 +72,7 @@ config = AppConfig(
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/db_name",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/db_name"),
     ),
 )
 

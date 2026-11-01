@@ -17,7 +17,7 @@ Workflows in Horsies are Directed Acyclic Graphs (DAGs) where:
 ```
 PENDING → RUNNING → COMPLETED
                   ↘ FAILED
-                  ↘ PAUSED (if on_error="pause") → EXPIRED (paused past the declared age policy)
+                  ↘ PAUSED (if on_error=OnError.PAUSE) → EXPIRED (paused past the declared age policy)
                   ↘ CANCELLED (manual)
 ```
 
@@ -116,7 +116,7 @@ When a task is terminal but its result is missing, recovery synthesizes errors:
 
 ### When is a workflow marked FAILED?
 
-A workflow is marked **FAILED** if **any task fails** (when `on_error="fail"`, the default).
+A workflow is marked **FAILED** if **any task fails** (when `on_error=OnError.FAIL`, the default).
 
 The failure flow:
 1. Task fails → workflow stores error, but status remains `RUNNING`
@@ -136,7 +136,7 @@ This design allows recovery handlers (`allow_failed_deps=True`) to execute befor
 
 Horsies does **not** stop the entire workflow on first failure. It resolves the DAG to terminal state and applies failure rules **per dependency**. Short-circuiting happens **along the failed path**, not globally.
 
-**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error="fail"`):**
+**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error=OnError.FAIL`):**
 
 - When a dependency fails or is skipped, any downstream task that requires all dependencies is **SKIPPED**.
 - That skip propagates to its dependents.
@@ -167,7 +167,7 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 
 **Pause behaves differently:**
 
-- `on_error="pause"` does not kill running tasks.
+- `on_error=OnError.PAUSE` does not kill running tasks.
 - It blocks new enqueues and waits for `resume()` or `cancel()`.
 
 **Result access is separate:**
@@ -183,11 +183,12 @@ When an upstream task fails and the downstream task uses `join="all"` (the defau
 - **`allow_failed_deps=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
 - **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream `TaskResult` with `is_err() == True`.
 
-`on_error="fail"` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
+`on_error=OnError.FAIL` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
 
 With `join="any"`, a downstream task runs when **any** dependency succeeds, so a single upstream failure does not cause a skip unless **all** dependencies fail. With `join="quorum"`, the task runs when `min_success` dependencies succeed, so failures only matter if they make the threshold unreachable.
 
 ```python
+from pydantic import SecretStr
 from horsies import (
     Horsies,
     AppConfig,
@@ -199,7 +200,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -239,7 +240,7 @@ The manual `is_err()` check is the intended pattern when `allow_failed_deps=True
 
 ### PAUSE Semantics (Cooperative Stop)
 
-When a task fails with `on_error="pause"`:
+When a task fails with `on_error=OnError.PAUSE`:
 
 1. **Immediate status change**: Workflow status becomes `PAUSED`
 2. **New enqueues blocked**: No new tasks will transition from PENDING → READY or READY → ENQUEUED
@@ -280,14 +281,20 @@ behavior without declaring the rule.
 
 A paused workflow can be resumed via `WorkflowHandle.resume()` or `WorkflowHandle.resume_async()`.
 
+<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-start_result = await spec.start_async()
-handle = start_result.ok_value
+from horsies import Err, Ok
+
+match await spec.start_async():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # ... workflow pauses due to task failure ...
 
 # Resume the workflow
-resumed = await handle.resume_async()  # Returns HandleResult[bool] — unwrap with .ok_value
+resumed = await handle.resume_async()  # Ok(bool) or Err(HandleOperationError): match on it
 ```
 
 **Resume behavior:**
@@ -340,6 +347,7 @@ Task runs when: ALL dependencies are in terminal state (COMPLETED/FAILED/SKIPPED
 
 ### OR-join (join="any")
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Task runs when any dependency succeeds
 aggregator = TaskNode(
@@ -356,6 +364,7 @@ aggregator = TaskNode(
 
 ### Quorum Join (join="quorum")
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Task runs when at least 2 of 3 dependencies succeed
 quorum_task = TaskNode(
@@ -387,6 +396,7 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 - **FAILED deps**: Receive the actual `TaskResult` with the original error
 - **SKIPPED deps**: Receive a sentinel `TaskResult` with `error_code=UPSTREAM_SKIPPED`
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import OutcomeCode, RetrievalCode
 
@@ -406,6 +416,7 @@ def recovery_handler(*, input_result: TaskResult[Data, TaskError]) -> TaskResult
 
 When a dependency is SKIPPED (due to upstream failure), tasks with `allow_failed_deps=True` receive a sentinel `TaskResult` instead of missing kwargs:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskResult(err=TaskError(
     error_code=OutcomeCode.UPSTREAM_SKIPPED,
@@ -511,6 +522,7 @@ a ── b ─┤
 
 **Scenario:** "Generate tasks at runtime based on input data"
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Wanted (not implemented):
 @workflow
@@ -570,6 +582,7 @@ By default, any task failure marks the workflow as **FAILED**. The `success_poli
 
 ### SuccessCase and SuccessPolicy
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import SuccessPolicy, SuccessCase
 
@@ -601,6 +614,7 @@ workflow = app.workflow(
 
 A package delivery workflow where multiple delivery outcomes are acceptable:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Define tasks
 pickup = TaskNode(fn=pickup_package)
@@ -643,6 +657,7 @@ When no success case is satisfied:
 
 ### 1. Use allow_failed_deps for Recovery
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Primary task that can fail
 primary = TaskNode(fn=fetch_data)
@@ -660,6 +675,7 @@ recovery = TaskNode(
 
 Structure DAGs so failures are visible in one node's result. The workflow is still FAILED, so read the aggregator with `result_for(final)`:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
@@ -669,18 +685,25 @@ final = TaskNode(
 )
 ```
 
-### 3. Use on_error="pause" for Critical Workflows
+### 3. Use OnError.PAUSE for Critical Workflows
 
 ```python
+from horsies import OnError, TaskError, TaskNode, TaskResult
+
+@app.task("review_step")
+def review_step() -> TaskResult[str, TaskError]:
+    return TaskResult(ok="done")
+
 workflow = app.workflow(
     "critical_pipeline",
-    tasks=[...],
-    on_error="pause",  # Stop for manual review on failure
+    tasks=[TaskNode(fn=review_step, node_id="review")],
+    on_error=OnError.PAUSE,  # Stop for manual review on failure
 )
 ```
 
 ### 4. Explicit Output Task
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Designate which task's result is the workflow output
 workflow = app.workflow(
@@ -702,15 +725,24 @@ fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
 fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(name="parallel_fetch", tasks=[fetch_a, fetch_b], broker=broker)
-start_result = await spec.start_async()
-handle = start_result.ok_value
+
+# start_async() returns Ok(handle) or Err(WorkflowStartError)
+match await spec.start_async():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # Wait for workflow completion first
 await handle.get_async(timeout_ms=30000)
 
 # Now safe to access individual results (node_id keys)
-results_handle = handle.results()
-results = results_handle.ok_value  # HandleResult[dict[...]] → unwrap
+# results() returns Ok(dict) or Err(HandleOperationError)
+match handle.results():
+    case Err(results_error):
+        raise RuntimeError(results_error.message)
+    case Ok(results):
+        pass
 result_a = results["parallel_fetch:0"]  # First fetch
 result_b = results["parallel_fetch:1"]  # Second fetch
 
@@ -736,6 +768,7 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns `RESULT_NOT_READY` if the task hasn't completed.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import WorkflowContext, TaskNode, TaskResult, TaskError
 
@@ -769,6 +802,7 @@ def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summ
 
 `result_for(node: TaskNode[T] | NodeKey[T])` returns `TaskResult[T, TaskError]` where `T` matches the node's generic parameter. This enables static type checking:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Type checker knows these types
 a_result: TaskResult[int, TaskError] = ctx.result_for(node_a)      # node_a is TaskNode[int]
@@ -783,6 +817,7 @@ if a_result.is_ok():
 `WorkflowContext` looks up results by **node_id**, not object identity. This means you can safely use
 `TaskNode` instances or typed `NodeKey` objects:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 key_a = node_a.key()  # NodeKey[int]
 result = workflow_ctx.result_for(key_a)
@@ -803,7 +838,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -834,6 +869,7 @@ WorkflowSpec construction using the format `{slugified_workflow_name}:{task_inde
 Workflow names can contain any characters (including spaces). The `slugify()`
 function converts spaces to underscores and removes invalid characters:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import slugify
 
@@ -903,7 +939,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -938,18 +974,25 @@ node_b: TaskNode[str] = TaskNode(
 
 ```python
 # Fire-and-forget: start workflow without waiting
-start_result = spec.start()
-handle = start_result.ok_value
-
-# Immediately call result_for() - task likely hasn't completed yet
-result = handle.result_for(node)  # Returns RESULT_NOT_READY error
+match spec.start():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        # Immediately call result_for() - task likely hasn't completed yet
+        result = handle.result_for(node)  # Returns RESULT_NOT_READY error
 ```
 
 **Do this instead:**
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
-start_result = spec.start()
-handle = start_result.ok_value
+from horsies import Err, Ok
+
+match spec.start():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # Option 1: Wait for workflow completion first
 handle.get(timeout_ms=30000)

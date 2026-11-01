@@ -59,6 +59,7 @@ match divide.send(a=10, b=2):
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
+<!-- check: skip elided -- a return statement shown without its function -->
 ```python
 return TaskResult(err=TaskError(
     error_code="VALIDATION_FAILED",
@@ -82,7 +83,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | `BROKER_ERROR` | Broker failed while retrieving the result |
 | `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
 | `WORKER_SERIALIZATION_ERROR` | Result couldn't be serialized |
-| `RESULT_DESERIALIZATION_ERROR` | Stored result JSON is corrupt or could not be deserialized |
+| `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed during enqueue/build |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded |
 
@@ -157,6 +158,7 @@ Both cases result in `TaskResult(err=...)`, but the error codes differ.
 
 Horsies validates that your returned value matches the declared type:
 
+<!-- check: skip elided -- returns a wrong type on purpose, to show the runtime check -->
 ```python
 @app.task("typed_task")
 def typed_task() -> TaskResult[int, TaskError]:
@@ -169,6 +171,7 @@ This validation happens at runtime using Pydantic's `TypeAdapter`.
 
 `TaskResult[None, TaskError]` is valid for tasks that don't return a value:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("fire_and_forget")
 def fire_and_forget() -> TaskResult[None, TaskError]:
@@ -178,6 +181,7 @@ def fire_and_forget() -> TaskResult[None, TaskError]:
 
 ## Convenience Properties
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 result = handle.get()
 

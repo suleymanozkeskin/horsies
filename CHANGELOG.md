@@ -399,6 +399,24 @@ and there is no migration contract between pre-1.0 versions.
   `Ok({})` and `Ok([])`, the same values as an existing workflow without
   results or nodes. An existing workflow before its first stored result
   still gives `Ok({})`.
+- **Breaking: `WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND`
+  when the row of a completed workflow is removed after its status was
+  read.** Retention can delete a terminal workflow between the status read
+  and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
+  success, for that case. A `COMPLETED` row without a stored result still
+  gives `TaskResult(ok=None)`.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a stored workflow error that is JSON but not an object.** This is
+  true for a failed, cancelled or expired workflow. The message names the
+  Python type of the decoded value, for example `got list`. Before, `get()`
+  read such a value as no stored error and returned the `OutcomeCode` of
+  the status (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or
+  `WORKFLOW_EXPIRED`).
+- **Breaking: a defect in the stored-error decode of `WorkflowHandle.get()`
+  propagates.** `get()` returns `RESULT_DESERIALIZATION_ERROR` only for
+  the two refusals of the decode, `StrictJsonError` and
+  `ValueValidationError`. Before, it returned `RESULT_DESERIALIZATION_ERROR`
+  for every exception from the decode.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -424,6 +442,21 @@ and there is no migration contract between pre-1.0 versions.
   that was changed after registration. Before, the start returned it as
   `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
   is written.
+- **Breaking: task options that do not parse in a child workflow start
+  propagate.** When the engine starts the child workflow of a
+  `SubWorkflowNode`, it parses the task options of each child root and of
+  each child task with `good_until`. It reads them from the task function,
+  as the workflow start transaction does. Options that do not parse to a
+  JSON object are a defect, for example `task_options_json` that was
+  changed after registration. The child start raises
+  `SerializationError` with the node name before it writes a row. The
+  caller rolls back its transaction: `start_workflow()` and `resume()`
+  raise the error, the worker's workflow finalize phase returns a
+  finalize error, and the reaper logs the recovery candidate as failed.
+  Before, a child root with such options ended `FAILED` inside the child
+  workflow, and a child task with `good_until` failed the
+  `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. The promotion of a
+  node whose stored options do not parse still fails only that node.
 - **Breaking: the agent skill files moved into one skill folder.** The
   five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
   `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
