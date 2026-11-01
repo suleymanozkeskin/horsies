@@ -310,11 +310,12 @@ async def get_async(self, timeout_ms: int | None = None) -> TaskResult[OutT, Tas
 def result_for(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 async def result_for_async(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 
-# All results keyed by node_id
+# All results keyed by node_id. Ok({}) before any node has a result;
+# Err(HandleWorkflowNotFound) when no workflow has the id.
 def results(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 async def results_async(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 
-# Task info list
+# Task info list. Err(HandleWorkflowNotFound) when no workflow has the id.
 def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]
 async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]
 

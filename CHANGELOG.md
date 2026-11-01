@@ -276,6 +276,13 @@ and there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **Breaking: `WorkflowHandle.results()` and `tasks()` return
+  `HandleWorkflowNotFound` for an id that has no workflow.** The same is
+  true for `results_async()` and `tasks_async()`. Each method reads the
+  workflow row and its nodes in one statement. Before, an unknown id gave
+  `Ok({})` and `Ok([])`, the same values as an existing workflow without
+  results or nodes. An existing workflow before its first stored result
+  still gives `Ok({})`.
 
 ### Changed
 

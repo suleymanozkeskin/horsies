@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import (
@@ -134,11 +135,17 @@ GET_WORKFLOW_ERROR_SQL = text("""
     SELECT error FROM horsies_workflows WHERE id = :wf_id
 """)
 
+# The node reads start from the workflow row, so one statement tells "no
+# workflow" (no row) from "no matching node" (one row whose
+# workflow_task_id is NULL). See ``_workflow_node_rows``.
 GET_WORKFLOW_TASK_RESULTS_SQL = text("""
-    SELECT node_id, task_name, result, is_subworkflow, sub_definition_key
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND result IS NOT NULL
+    SELECT wt.id AS workflow_task_id, wt.node_id, wt.task_name, wt.result,
+           wt.is_subworkflow, wt.sub_definition_key
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt
+           ON wt.workflow_id = w.id
+          AND wt.result IS NOT NULL
+    WHERE w.id = :wf_id
 """)
 
 GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
@@ -150,12 +157,14 @@ GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
 """)
 
 GET_WORKFLOW_TASKS_SQL = text("""
-    SELECT node_id, task_index, task_name, status, result,
-           started_at, completed_at, sub_workflow_id, sub_workflow_summary,
-           is_subworkflow, sub_definition_key
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-    ORDER BY task_index
+    SELECT wt.id AS workflow_task_id, wt.node_id, wt.task_index, wt.task_name,
+           wt.status, wt.result, wt.started_at, wt.completed_at,
+           wt.sub_workflow_id, wt.sub_workflow_summary,
+           wt.is_subworkflow, wt.sub_definition_key
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
+    WHERE w.id = :wf_id
+    ORDER BY wt.task_index
 """)
 
 CANCEL_WORKFLOW_SQL = text("""
@@ -1194,12 +1203,35 @@ class WorkflowHandle(Generic[OutT]):
 
     # ─── results ─────────────────────────────────────────────────────
 
+    def _workflow_node_rows(
+        self, rows: Sequence[Any],
+    ) -> Result[Sequence[Any], HandleWorkflowNotFound]:
+        """Split the rows of the workflow row LEFT JOIN its nodes.
+
+        No row: no workflow has this id. One row whose ``workflow_task_id``
+        is NULL: the workflow exists and no node matched, so ``Ok([])``.
+        Otherwise every row is a node.
+        """
+        match rows:
+            case []:
+                return Err(HandleWorkflowNotFound(
+                    message=f'Workflow {self.workflow_id} not found',
+                    workflow_id=self.workflow_id,
+                ))
+            case [only] if only.workflow_task_id is None:
+                return Ok([])
+            case _:
+                return Ok(rows)
+
     def results(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]:
         """
         Get all task results keyed by unique identifier.
 
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
+
+        ``Ok({})``: the workflow exists and no node has a stored result yet.
+        ``Err(HandleWorkflowNotFound)``: no workflow has this id.
         """
         return self._sync_call(self.results_async, 'results')
 
@@ -1222,9 +1254,14 @@ class WorkflowHandle(Generic[OutT]):
                     GET_WORKFLOW_TASK_RESULTS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+                match self._workflow_node_rows(result.fetchall()):
+                    case Err() as not_found:
+                        return not_found
+                    case Ok(node_rows):
+                        pass
 
                 out: dict[str, TaskResult[Any, TaskError]] = {}
-                for row in result.fetchall():
+                for row in node_rows:
                     loads_r = loads_json(row.result)
                     if is_err(loads_r):
                         out[row.node_id] = TaskResult(
@@ -1255,7 +1292,11 @@ class WorkflowHandle(Generic[OutT]):
     # ─── tasks ───────────────────────────────────────────────────────
 
     def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]:
-        """Get status of all tasks in workflow."""
+        """Get status of all tasks in workflow.
+
+        ``Ok([])``: the workflow exists and has no node.
+        ``Err(HandleWorkflowNotFound)``: no workflow has this id.
+        """
         return self._sync_call(self.tasks_async, 'tasks')
 
     async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
@@ -1272,9 +1313,14 @@ class WorkflowHandle(Generic[OutT]):
                     GET_WORKFLOW_TASKS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+                match self._workflow_node_rows(result.fetchall()):
+                    case Err() as not_found:
+                        return not_found
+                    case Ok(node_rows):
+                        pass
 
                 out: list[WorkflowTaskInfo] = []
-                for row in result.fetchall():
+                for row in node_rows:
                     task_result_value: TaskResult[Any, TaskError] | None = None
                     if row.result:
                         loads_r = loads_json(row.result)
