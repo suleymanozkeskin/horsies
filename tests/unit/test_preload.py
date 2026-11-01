@@ -268,7 +268,17 @@ class TestForkReplies:
         """The sweep must never see a pid that only a later await would register."""
         parent = self._parent()
         parent._lock = asyncio.Lock()
-        monkeypatch.setattr(preload, '_set_subreaper', lambda _enabled: True)
+        parent._sock = MagicMock()
+
+        def allow(_enabled: bool) -> bool:
+            return True
+
+        def record(pids: set[int]) -> None:
+            swept.append(pids)
+
+        swept: list[set[int]] = []
+        monkeypatch.setattr(preload, '_set_subreaper', allow)
+        monkeypatch.setattr(preload, 'reap_landed_orphans', record)
         monkeypatch.setattr(preload.socket, 'send_fds', MagicMock())
         monkeypatch.setattr(
             parent,
@@ -276,8 +286,6 @@ class TestForkReplies:
             AsyncMock(return_value=ChildForkedFrame(pid=4321)),
         )
         monkeypatch.setattr(parent, '_child_from', MagicMock())
-        swept: list[set[int]] = []
-        monkeypatch.setattr(preload, 'reap_landed_orphans', lambda pids: swept.append(pids))
         live_pids: set[int] = set()
 
         await parent.fork_child(MagicMock(), live_pids)

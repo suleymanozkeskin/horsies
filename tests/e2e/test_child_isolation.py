@@ -87,6 +87,7 @@ def _ready_check(task: Any) -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
+        assert handle is not None
         return handle.get(timeout_ms=2000).is_ok()
 
     return _check
