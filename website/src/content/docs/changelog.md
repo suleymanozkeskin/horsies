@@ -328,6 +328,17 @@ there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **Breaking: `list_tasks`, `task_breakdown` and `list_workflow_runs` take a
+  page value.** `list_tasks` takes `page: TaskPage` in place of `offset` and
+  `limit`, `task_breakdown` takes `limit: BreakdownLimit`, and
+  `list_workflow_runs` takes `limit: WorkflowRunsLimit`. Build each with
+  `parse`, which returns `Err(PageRefused)` for a value outside its bounds:
+  `offset` 0 or more, `limit` 1 to 200 and `offset + limit` at most 500 for
+  `list_tasks`, `limit` 1 to 500 for `task_breakdown`, and `limit` 1 to 200 for
+  `list_workflow_runs`. `list_tasks` no longer raises `ValueError`. Before, a
+  negative `limit` gave a different result in each read, and a direct
+  `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
+  answers do not change.
 
 ### Changed
 
