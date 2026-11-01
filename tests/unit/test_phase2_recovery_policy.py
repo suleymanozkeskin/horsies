@@ -188,6 +188,5 @@ class TestRecoveredFailureResult:
         assert result.is_err()
         error = result.unwrap_err()
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert error.message is not None
         assert cause in error.message
         assert error.data == {'task_status': 'FAILED'}

@@ -21,12 +21,12 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
-| `error_code` | `BuiltInTaskCode \| str \| None` | Library or domain error code |
-| `message` | `str \| None` | Human-readable description |
+| `error_code` | `BuiltInTaskCode \| str` | Required. Library or domain error code |
+| `message` | `str` | Required. Human-readable description |
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
-`TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key is stored data that does not parse: see [decode-error surfaces](../../internals/serialization#decoding-consumer-side).
+`error_code` and `message` must not be null. `TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key, or without `error_code` or `message`, is stored data that does not parse: see [decode-error surfaces](../../internals/serialization#decoding-consumer-side).
 
 ### BuiltInTaskCode (4-Family Split)
 
@@ -416,12 +416,12 @@ deployment pattern.
 
 All string values used by the built-in error code families (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`) are **reserved**. User-defined error codes must not collide with these values.
 
-**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
+**Runtime enforcement**: `TaskError(error_code="BROKER_ERROR", message="db down")` raises `ValueError` at construction time. Built-in codes must be passed as enum members. User-defined codes must be plain `str`, not `str, Enum` subclasses:
 
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # correct
-TaskError(error_code="MY_CUSTOM_CODE")                   # correct — user string
-TaskError(error_code="BROKER_ERROR")                     # ValueError — reserved
+TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # correct
+TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # correct — user string
+TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
 ```
 
 **Serialization**: built-in codes are serialized as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved through standard `model_validate()` / `model_validate_json()`. User strings are serialized as plain strings. This tagged format eliminates wire-format ambiguity between built-in and user codes, allowing `model_validate()` to work correctly everywhere — including nested models.

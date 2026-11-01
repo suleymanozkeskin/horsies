@@ -60,8 +60,10 @@ from horsies.core.types.status import TaskStatus
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.engine import (
+    _ChildOutputUnreadable,  # pyright: ignore[reportPrivateUsage]
     _decode_err_only,  # pyright: ignore[reportPrivateUsage]
     _decode_stored_task_result,  # pyright: ignore[reportPrivateUsage]
+    _parse_child_output,  # pyright: ignore[reportPrivateUsage]
     get_workflow_failure_error,
 )
 from horsies.core.workflows.phase2_recovery import (
@@ -79,12 +81,22 @@ _DECLARED: dict[str, Json] = {'error_code': 'MY_CODE', 'message': 'm'}
 _NOT_A_TASK_ERROR: list[tuple[dict[str, Json], str]] = [
     ({'nope': 1}, 'nope'),
     ({**_DECLARED, 'nope': 1}, 'nope'),
+    ({}, 'error_code'),
+    ({'message': 'm'}, 'error_code'),
+    ({'error_code': 'MY_CODE'}, 'message'),
+    ({'error_code': None, 'message': 'm', 'data': None, 'exception': None}, 'error_code'),
+    ({'error_code': 'MY_CODE', 'message': None, 'data': None, 'exception': None}, 'message'),
 ]
 """An err slot that does not parse, with a word of the cause that it gives."""
 
 _NOT_A_TASK_ERROR_IDS = [
     'only-an-unknown-key',
     'an-unknown-key-beside-valid-fields',
+    'empty',
+    'no-code',
+    'no-message',
+    'older-row-with-a-null-code',
+    'older-row-with-a-null-message',
 ]
 
 _SUMMARY: dict[str, Json] = {
@@ -136,8 +148,55 @@ def _assert_stored_data_error(result: TaskResult[Any, TaskError], cause: str) ->
     assert result.is_err()
     error = result.unwrap_err()
     assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-    assert error.message is not None
     assert cause in error.message
+
+
+class TestRequiredFields:
+    """``error_code`` and ``message`` are required, and the other two are not."""
+
+    def test_a_null_code_gives_one_cause(self) -> None:
+        with pytest.raises(ValueValidationError) as refusal:
+            decode_task_error({'error_code': None, 'message': 'm'})
+        assert 'error_code must not be null' in str(refusal.value)
+        assert 'UNHANDLED_EXCEPTION' not in str(refusal.value)
+
+    def test_an_empty_value_names_both_fields(self) -> None:
+        with pytest.raises(ValueValidationError) as refusal:
+            decode_task_error({})
+        assert 'error_code: Field required' in str(refusal.value)
+        assert 'message: Field required' in str(refusal.value)
+
+    def test_data_and_exception_stay_optional(self) -> None:
+        decoded = decode_task_error(_DECLARED)
+        assert decoded.data is None
+        assert decoded.exception is None
+
+    def test_a_user_code_stays_a_free_string(self) -> None:
+        decoded = decode_task_error({'error_code': 'any text at all', 'message': 'm'})
+        assert decoded.error_code == 'any text at all'
+        assert type(decoded.error_code) is str
+
+    def test_the_constructor_requires_a_code(self) -> None:
+        with pytest.raises(ValidationError, match='error_code'):
+            TaskError(message='m')  # pyright: ignore[reportCallIssue]
+
+    def test_the_constructor_requires_a_message(self) -> None:
+        with pytest.raises(ValidationError, match='message'):
+            TaskError(error_code='MY_CODE')  # pyright: ignore[reportCallIssue]
+
+    def test_a_task_that_builds_no_message_ends_unhandled_with_the_cause(self) -> None:
+        app = _make_app()
+
+        @app.task('builds_no_message')
+        def builds_no_message() -> TaskResult[int, TaskError]:
+            return TaskResult(
+                err=TaskError(error_code='RATE_LIMITED'),  # pyright: ignore[reportCallIssue]
+            )
+
+        error = builds_no_message().unwrap_err()
+
+        assert error.error_code is OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert 'message: Field required' in error.message
 
 
 class TestDecodeTaskError:
@@ -233,6 +292,17 @@ class TestDecodeTaskError:
         assert isinstance(encoded, dict)
         assert set(encoded) == set(TaskError.model_fields)
         assert decode_task_error(encoded) == error
+
+    def test_a_subclass_with_its_own_field_is_refused(self) -> None:
+        class WithOwnField(TaskError):
+            retry_hint: int
+
+        encoded = encode_task_error(
+            WithOwnField(error_code='MY_CODE', message='m', retry_hint=1),
+        )
+
+        with pytest.raises(ValueValidationError, match='retry_hint'):
+            decode_task_error(encoded)
 
     def test_a_key_with_a_lone_surrogate_is_refused_without_the_key(self) -> None:
         key = f'key{chr(0xd800)}'
@@ -373,6 +443,16 @@ class TestEngineReaders:
         _assert_stored_data_error(result, cause)
 
     @_REFUSED
+    def test_a_child_output_is_unreadable_with_the_cause(
+        self, err_slot: dict[str, Json], cause: str,
+    ) -> None:
+        match _parse_child_output(_stored(err_slot)):
+            case _ChildOutputUnreadable(cause=text):
+                assert cause in text
+            case parsed:
+                pytest.fail(f'unexpected variant: {parsed!r}')
+
+    @_REFUSED
     def test_decode_err_only_gives_the_stored_data_error(
         self, err_slot: dict[str, Json], cause: str,
     ) -> None:
@@ -412,7 +492,7 @@ class TestEngineReaders:
         assert stored_error is not None
         decoded = decode_task_error(loads_json(stored_error).unwrap())
         assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in (decoded.message or '')
+        assert cause in decoded.message
 
     @_REFUSED
     @pytest.mark.asyncio
@@ -436,7 +516,7 @@ class TestEngineReaders:
         assert stored_error is not None
         decoded = decode_task_error(loads_json(stored_error).unwrap())
         assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in (decoded.message or '')
+        assert cause in decoded.message
 
 
 class TestRecoveryReaders:

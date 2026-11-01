@@ -52,10 +52,9 @@ class TestTaggedSerialization:
         data = te.model_dump(mode='json')
         assert data['error_code'] == 'MY_CUSTOM_CODE'
 
-    def test_none_serializes_as_null(self) -> None:
-        te = TaskError(error_code=None, message='none')
-        data = te.model_dump(mode='json')
-        assert data['error_code'] is None
+    def test_none_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='error_code must not be null'):
+            TaskError.model_validate({'error_code': None, 'message': 'none'})
 
     @pytest.mark.parametrize(
         'code',
@@ -174,10 +173,9 @@ class TestUserStringPassthrough:
         assert restored.error_code == user_code
         assert type(restored.error_code) is str
 
-    def test_none_stays_none(self) -> None:
-        original = TaskError(error_code=None, message='test')
-        restored = TaskError.model_validate_json(original.model_dump_json())
-        assert restored.error_code is None
+    def test_a_null_code_does_not_round_trip(self) -> None:
+        with pytest.raises(ValidationError, match='error_code must not be null'):
+            TaskError.model_validate_json('{"error_code": null, "message": "test"}')
 
     def test_former_hydration_code_is_a_user_code(self) -> None:
         """``'PYDANTIC_HYDRATION_ERROR'`` is not reserved: it stays a
@@ -201,24 +199,24 @@ class TestStrictConstruction:
 
     def test_reserved_string_rejected(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='WORKFLOW_PAUSED')
+            TaskError(error_code='WORKFLOW_PAUSED', message='m')
 
     def test_reserved_string_rejected_operational(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='BROKER_ERROR')
+            TaskError(error_code='BROKER_ERROR', message='m')
 
     def test_reserved_string_rejected_contract(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='RETURN_TYPE_MISMATCH')
+            TaskError(error_code='RETURN_TYPE_MISMATCH', message='m')
 
     def test_reserved_string_rejected_retrieval(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='RESULT_NOT_READY')
+            TaskError(error_code='RESULT_NOT_READY', message='m')
 
     def test_dynamically_constructed_reserved_string_rejected(self) -> None:
         code = 'WORKFLOW' + '_' + 'PAUSED'
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code=code)
+            TaskError(error_code=code, message='m')
 
     def test_enum_member_accepted(self) -> None:
         te = TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED, message='ok')
@@ -234,14 +232,14 @@ class TestStrictConstruction:
             pass
 
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code=Sneaky('BROKER_ERROR'))
+            TaskError(error_code=Sneaky('BROKER_ERROR'), message='m')
 
     def test_user_str_enum_with_reserved_value_rejected(self) -> None:
         class UserCode(str, _Enum):
             COLLIDES = 'BROKER_ERROR'
 
         with pytest.raises(ValueError, match='User error codes must be plain str'):
-            TaskError(error_code=UserCode.COLLIDES)
+            TaskError(error_code=UserCode.COLLIDES, message='m')
 
     def test_user_str_enum_with_nonreserved_value_rejected(self) -> None:
         """Foreign str,Enum types are always rejected, even for non-reserved values."""
@@ -250,7 +248,7 @@ class TestStrictConstruction:
             CUSTOM = 'MY_CUSTOM_CODE'
 
         with pytest.raises(ValueError, match='User error codes must be plain str'):
-            TaskError(error_code=UserCode.CUSTOM)
+            TaskError(error_code=UserCode.CUSTOM, message='m')
 
     def test_unknown_tagged_dict_rejected(self) -> None:
         with pytest.raises(ValidationError):

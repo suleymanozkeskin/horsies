@@ -512,7 +512,10 @@ class WorkflowContext(BaseModel):
 @app.task("aggregate")
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Report, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(err=TaskError(error_code="NO_CTX"))
+        return TaskResult(err=TaskError(
+            error_code="NO_CTX",
+            message="aggregate ran without a workflow context",
+        ))
     ra = workflow_ctx.result_for(ParallelPipeline.a)  # TaskResult[int, TaskError]
     rb = workflow_ctx.result_for(ParallelPipeline.b)
     ...

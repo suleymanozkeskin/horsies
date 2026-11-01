@@ -532,6 +532,7 @@ class TestTaskErrorRoundTrip:
         err = TaskError(
             error_code=OperationalErrorCode.BROKER_ERROR,
             data={'__h_evil__': 1},
+            message='m',
         )
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(err, TaskError)
@@ -542,6 +543,7 @@ class TestTaskErrorRoundTrip:
         err = TaskError(
             error_code=OperationalErrorCode.BROKER_ERROR,
             data={'__h_taskresult_envelope__': True},
+            message='m',
         )
         with pytest.raises(StrictJsonError, match='reserved key'):
             encode_value(err, TaskError)

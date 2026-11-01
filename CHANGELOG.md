@@ -605,6 +605,22 @@ and there is no migration contract between pre-1.0 versions.
   read as an error with no code and no message. A task that returns a
   `TaskError` subclass with its own fields fails with
   `WORKER_SERIALIZATION_ERROR`. Before, those fields were dropped.
+- **Breaking: `TaskError.error_code` and `TaskError.message` are required and
+  must not be null, on the wire and in the type.** `data` and `exception` stay
+  optional, and `error_code` stays `BuiltInTaskCode | str`. Before:
+  `TaskError(error_code='RATE_LIMITED')` and `TaskError(message='m')` built an
+  error, and `TaskError()` built an empty one. Now each raises `ValidationError`
+  (a `ValueError`). In a task body, that exception ends the task with
+  `UNHANDLED_EXCEPTION`, so an `auto_retry_for` on the code of that error does
+  not match. Pyright reports these calls.
+- **Breaking: a stored error without a code or a message does not decode.**
+  This includes rows that an earlier version wrote: an error with a null
+  `error_code`, or an error that a task built with no `message`. No migration
+  rewrites them. `TaskHandle.get()`, `WorkflowHandle.get()` and `result_for()`
+  return `RESULT_DESERIALIZATION_ERROR` with the cause. `app.get_result()` and
+  `app.get_task_info(include_result=True)` return
+  `Err(BrokerInvalidJsonPayload)`. `app.get_raw_result()` still returns the
+  stored value.
 
 ### Changed
 

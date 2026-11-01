@@ -87,7 +87,7 @@ envelope = encode_task_result(
 The consumer holds the declared `ok_type` (from the task registry) and calls `decode_task_result(envelope, ok_type)`:
 
 1. `validate_task_result_envelope` checks the marker and structural shape.
-2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally. It refuses a key that the error type does not declare, and the refusal names the key.
+2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally. It refuses a key that the error type does not declare, and an error without `error_code` or `message`. The refusal names the key.
 3. Otherwise `TypeAdapter[ok_type].validate_python(envelope["ok"])` materializes the typed value.
 
 Distinct decode-error surfaces:

@@ -81,10 +81,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .ok_value -> T (raises on err), .err_value -> E (raises on ok)
 
 ### TaskError
-- error_code: str | BuiltInTaskCode | None
-- message: str | None
+- error_code: str | BuiltInTaskCode (required, not null)
+- message: str (required, not null)
 - data: Any | None
 - exception: dict[str, Any] | BaseException | None
+- Unknown keys are refused, at construction and at decode
 
 ### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
@@ -95,8 +96,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
 - User-defined error codes are plain str only (foreign str,Enum types rejected)
-- Strict construction: TaskError(error_code="BROKER_ERROR") raises ValueError (reserved string)
-- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR) — accepted
+- Strict construction: TaskError(error_code="BROKER_ERROR", message="...") raises ValueError (reserved string)
+- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
 - Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
 - Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
 

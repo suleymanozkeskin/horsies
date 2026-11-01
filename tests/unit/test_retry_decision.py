@@ -85,7 +85,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -100,7 +100,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="TIMEOUT")
+        error = TaskError(error_code="TIMEOUT", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -110,7 +110,7 @@ class TestShouldRetryTask:
     async def test_task_not_found_returns_false(self) -> None:
         """fetchone() returning None means task not found, returns False."""
         session = _mock_session(row=None)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -125,7 +125,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -140,7 +140,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -155,7 +155,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["UNHANDLED_EXCEPTION"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code=OperationalErrorCode.UNHANDLED_EXCEPTION)
+        error = TaskError(error_code=OperationalErrorCode.UNHANDLED_EXCEPTION, message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -170,7 +170,7 @@ class TestShouldRetryTask:
             task_options='NOT_JSON{',
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -185,7 +185,7 @@ class TestShouldRetryTask:
             task_options='"just_a_string"',
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -200,7 +200,7 @@ class TestShouldRetryTask:
             task_options=json.dumps({"retry_policy": "string"}),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -215,7 +215,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json([]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -230,22 +230,22 @@ class TestShouldRetryTask:
             task_options=json.dumps({"retry_policy": {"backoff_strategy": "fixed"}}),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
         assert result == Ok(False)
 
     @pytest.mark.asyncio
-    async def test_none_error_code_returns_false(self) -> None:
-        """TaskError with error_code=None returns False (code is falsy)."""
+    async def test_empty_error_code_returns_false(self) -> None:
+        """TaskError with an empty error_code returns False (code is falsy)."""
         row = _make_row(
             retry_count=0,
             max_retries=3,
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code=None)
+        error = TaskError(error_code="", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -260,7 +260,7 @@ class TestShouldRetryTask:
             task_options=_task_options_json(["A_CODE", "B_CODE", "C_CODE"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code="B_CODE")
+        error = TaskError(error_code="B_CODE", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -278,7 +278,7 @@ class TestShouldRetryTask:
             db_now=db_now,
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -294,7 +294,7 @@ class TestShouldRetryTask:
             good_until=None,
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -312,7 +312,7 @@ class TestShouldRetryTask:
             db_now=db_now,
         )
         session = _mock_session(row)
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -499,7 +499,7 @@ class TestRetryDecisionChain:
             task_default=None,
             global_default="UNHANDLED",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -526,7 +526,7 @@ class TestRetryDecisionChain:
             task_default=None,
             global_default="UNHANDLED",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -554,7 +554,7 @@ class TestRetryDecisionChain:
             task_default=None,
             global_default="UNHANDLED",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -582,7 +582,7 @@ class TestRetryDecisionChain:
             task_default=None,
             global_default="UNHANDLED",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -608,7 +608,7 @@ class TestRetryDecisionChain:
             task_default=None,
             global_default="UNHANDLED",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -634,7 +634,7 @@ class TestRetryDecisionChain:
             task_default="TASK_DEFAULT",
             global_default="GLOBAL_DEFAULT",
         )
-        error = TaskError(error_code=code)
+        error = TaskError(error_code=code, message="boom")
 
         row = _make_row(
             retry_count=0,
@@ -847,7 +847,7 @@ class TestRetryDbErrors:
         """A failing retry-info read maps to Err(BROKER_ERROR), not a raise."""
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=RuntimeError('boom'))
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
@@ -865,7 +865,7 @@ class TestRetryDbErrors:
         session.execute = AsyncMock(
             side_effect=PsycopgOperationalError('server closed the connection')
         )
-        error = TaskError(error_code="RATE_LIMITED")
+        error = TaskError(error_code="RATE_LIMITED", message="boom")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 
