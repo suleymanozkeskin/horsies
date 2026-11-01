@@ -104,6 +104,8 @@ for a demo, not for production:
 RecoveryConfig(
     worker_state_snapshot_interval_ms=10_000,  # lively charts, more writes
     check_interval_ms=10_000,                  # frequent reaper passes
+)
+RetentionConfig(
     terminal_record_retention_hours=24,        # short retention
 )
 ```
