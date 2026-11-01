@@ -104,7 +104,7 @@ class TestTaskDoneFanout:
         # Enqueue one task so the UPDATE trigger has a row to fire on
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args_json='[0]',
+            kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
@@ -159,7 +159,7 @@ class TestTaskDoneFanout:
 
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args_json='[0]',
+            kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
@@ -243,7 +243,7 @@ class TestTaskDoneFanout:
         for i in range(M_COMPLETIONS):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json=f'[{i}]',
+                kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -331,7 +331,7 @@ class TestTaskDoneFanout:
             for i in range(M):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
-                    args_json=f'[{i}]',
+                    kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
@@ -408,7 +408,7 @@ class TestFanoutBoundary:
         # Fire a completion with zero subscribers; should be a safe no-op.
         task_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args_json='[0]',
+            kwargs_json='{"x": 0}',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
@@ -427,7 +427,7 @@ class TestFanoutBoundary:
         try:
             task_id_2 = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json='[1]',
+                kwargs_json='{"x": 1}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -453,7 +453,7 @@ class TestFanoutBoundary:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json='[0]',
+                kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -499,7 +499,7 @@ class TestFanoutBoundary:
         for i in range(20):
             tid = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json=f'[{i}]',
+                kwargs_json=f'{{"x": {i}}}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -508,7 +508,7 @@ class TestFanoutBoundary:
 
         post_id = (await broker.enqueue_async(
             task_name='e2e_simple',
-            args_json='[99]',
+            kwargs_json='{"x": 99}',
             queue_name='default',
             task_id=str(uuid4()),
             enqueue_sha='test-sha',
@@ -658,7 +658,7 @@ class TestFanoutErrorPaths:
             for i in range(3):
                 tid = (await broker.enqueue_async(
                     task_name='e2e_simple',
-                    args_json=f'[{i}]',
+                    kwargs_json=f'{{"x": {i}}}',
                     queue_name='default',
                     task_id=str(uuid4()),
                     enqueue_sha='test-sha',
@@ -705,7 +705,7 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json='[0]',
+                kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -742,7 +742,7 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json='[0]',
+                kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',
@@ -791,7 +791,7 @@ class TestFanoutContracts:
         try:
             task_id = (await broker.enqueue_async(
                 task_name='e2e_simple',
-                args_json='[0]',
+                kwargs_json='{"x": 0}',
                 queue_name='default',
                 task_id=str(uuid4()),
                 enqueue_sha='test-sha',

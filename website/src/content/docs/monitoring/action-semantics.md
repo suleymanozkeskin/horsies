@@ -80,7 +80,8 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | `COMPLETED` | Refused, `RerunNotEligible(COMPLETED_SOURCE)` — a succeeded request is not re-executed by replay |
 | Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, `RerunSourceLive` — its own lifecycle owns retry |
 | Input not retained or undecodable | Refused, `RerunInputUnavailable` or `RerunInputCorrupt` |
-| Not found in live or history | Refused, `RerunSourceAbsent` |
+| History row does not decode (for example a stored status that is not a `TaskStatus` member) | Refused, `RerunSourceCorrupt` with the `HistoryContractError` as `exception`; nothing is written |
+| Not found in live or history | Refused, `RerunSourceAbsent`; its `reason` is a `TaskAbsenceReason`; it says whether retention can explain the absence |
 | Row is a workflow node | Refused, `RerunNotEligible(WORKFLOW_TASK)` |
 | Caller key already used | `RerunKeyReplay` (same request) or `RerunKeyConflict` (different request under that key) |
 

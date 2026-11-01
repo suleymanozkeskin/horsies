@@ -4,7 +4,8 @@ This package is part of horsies core: it needs no optional extra and never
 imports the web layer. Every query takes a ``PostgresBroker``, is async, and
 returns ``MonitoringResult[T]``. ``Err`` holds a ``MonitoringQueryError``
 variant: a database failure, the event loop limit, or history data that
-does not decode. A missing row is ``Ok(None)``.
+does not decode. A missing row is ``Ok(None)``; ``get_task_detail`` returns
+``Ok(TaskDetailNotFound)`` with a ``TaskAbsenceReason``.
 
 The response models are the wire contract for the monitoring UI and are
 unstable pre-1.0.
@@ -52,8 +53,10 @@ from horsies.monitoring.models import (
     LivenessReport,
     ScheduleStateInfo,
     StatusCount,
+    TaskAbsenceReason,
     TaskAttemptInfo,
     TaskDetail,
+    TaskDetailNotFound,
     TaskListPage,
     TaskSummary,
     WorkerHistoryPoint,
@@ -167,8 +170,10 @@ __all__ = [
     'LivenessReport',
     'ScheduleStateInfo',
     'StatusCount',
+    'TaskAbsenceReason',
     'TaskAttemptInfo',
     'TaskDetail',
+    'TaskDetailNotFound',
     'TaskListPage',
     'TaskSummary',
     'WorkerHistoryPoint',

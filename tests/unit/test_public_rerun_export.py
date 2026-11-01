@@ -23,12 +23,14 @@ RERUN_EXPORTS = (
     'RerunEnqueued',
     'RerunSourceLive',
     'RerunSourceAbsent',
+    'RerunSourceCorrupt',
     'RerunNotEligible',
     'RerunInputUnavailable',
     'RerunInputCorrupt',
     'RerunKeyConflict',
     'RerunKeyReplay',
     'NotEligibleReason',
+    'TaskAbsenceReason',
 )
 
 
@@ -45,6 +47,7 @@ def test_exported_outcome_union_covers_every_outcome_dataclass() -> None:
         horsies.RerunEnqueued,
         horsies.RerunSourceLive,
         horsies.RerunSourceAbsent,
+        horsies.RerunSourceCorrupt,
         horsies.RerunNotEligible,
         horsies.RerunInputUnavailable,
         horsies.RerunInputCorrupt,

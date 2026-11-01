@@ -13,9 +13,12 @@ These models are unstable pre-1.0.
 from __future__ import annotations
 
 import enum
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import BaseModel
+
+from horsies.core.history.reads.detail import TaskAbsenceReason
 
 
 class ErrorCategory(str, enum.Enum):
@@ -200,6 +203,14 @@ class TaskDetail(BaseModel):
     attempts: list[TaskAttemptInfo]
     workflow_id: str | None
     workflow_task_index: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDetailNotFound:
+    """No live row and no history row has this task id."""
+
+    task_id: str
+    reason: TaskAbsenceReason
 
 
 # --------------------------------------------------------------------------- #

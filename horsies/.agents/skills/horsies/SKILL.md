@@ -274,8 +274,9 @@ from datetime import timedelta
 
 from horsies import (
     rerun_task, RerunTask, RerunEnqueuePolicy,
-    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
-    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay,
 )
 
 outcome = await rerun_task(
@@ -300,6 +301,8 @@ match outcome:
         ...
     case RerunInputUnavailable() | RerunInputCorrupt():
         ...
+    case RerunSourceCorrupt(exception=cause):
+        ...  # the source history row does not decode; nothing was written
     case RerunKeyConflict() | RerunKeyReplay():
         ...
 ```
@@ -308,6 +311,8 @@ match outcome:
 checking one variant. Eligibility is decided **at enqueue** by
 `retain_rerun_input_default` (per-task override available): a task whose input
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
+`RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
+retention can explain that no record has the id (see `monitoring.md`).
 
 ## Result Types
 

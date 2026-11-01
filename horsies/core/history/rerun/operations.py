@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from horsies.core.codec.json_io import dumps_canonical_json
 
+from ..errors import HistoryContractError
 from ..identity.fingerprint import EnqueueCommandV1
 from ..names import RETENTION_CLASSES
 from ..identity.keys import (
@@ -52,6 +53,7 @@ from horsies.core.utils.fingerprint import enqueue_fingerprint
 from ..reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
+    TaskAbsenceReason,
     TaskDetailAbsent,
     read_task_detail,
 )
@@ -116,11 +118,27 @@ class RerunSourceLive:
 
 @dataclass(frozen=True, slots=True)
 class RerunSourceAbsent:
-    """No retained record. True means the identifier predates all
-    retained history; None means unclassifiable."""
+    """No live or history record has the source id.
+
+    ``reason`` says whether retention can explain the absence. Nothing is
+    written."""
 
     task_id: str
-    predates_retained_floor: bool | None
+    reason: TaskAbsenceReason
+
+
+@dataclass(frozen=True, slots=True)
+class RerunSourceCorrupt:
+    """The source history row does not decode; fail closed.
+
+    ``exception`` is the ``HistoryContractError`` of the source read: a
+    stored status that is not a ``TaskStatus`` member, an attempt snapshot
+    that does not decode, or a location that the staged read does not
+    define. Nothing is written. A repeat gives the same result until the
+    stored row or the server changes."""
+
+    task_id: str
+    exception: HistoryContractError
 
 
 @dataclass(frozen=True, slots=True)
@@ -170,6 +188,7 @@ type RerunOutcome = (
     RerunEnqueued
     | RerunSourceLive
     | RerunSourceAbsent
+    | RerunSourceCorrupt
     | RerunNotEligible
     | RerunInputUnavailable
     | RerunInputCorrupt
@@ -204,16 +223,21 @@ async def rerun_task(
             'the new request would have no history partition; register '
             'the class before rerunning into it'
         )
-    detail = await read_task_detail(
-        connection, task_id=command.source_task_id
-    )
+    try:
+        detail = await read_task_detail(
+            connection, task_id=command.source_task_id
+        )
+    except HistoryContractError as exc:
+        return RerunSourceCorrupt(
+            task_id=command.source_task_id, exception=exc,
+        )
     match detail:
         case LiveTaskLocation():
             return RerunSourceLive(task_id=command.source_task_id)
-        case TaskDetailAbsent(predates_retained_floor=predates):
+        case TaskDetailAbsent(reason=reason):
             return RerunSourceAbsent(
                 task_id=command.source_task_id,
-                predates_retained_floor=predates,
+                reason=reason,
             )
         case HistoryTaskDetail():
             pass

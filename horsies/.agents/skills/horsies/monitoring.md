@@ -90,7 +90,8 @@ migrations; instead the stored schema version is probed (cached 60 s):
 
 All functions are async, take `broker: PostgresBroker` first, and return
 `MonitoringResult[T] = Result[T, MonitoringQueryError]`. **An absent row is
-`Ok(None)`, not an error.** `MonitoringQueryError` is a union of frozen
+`Ok(None)`, not an error;** `get_task_detail` returns
+`Ok(TaskDetailNotFound(task_id, reason))` instead. `MonitoringQueryError` is a union of frozen
 variants, one per `MonitoringQueryErrorCode` member; match on the variant.
 Every variant has `code`, `message` and `retryable`. A query is a read, so no
 error changes stored data. HTTP is the status of the web read routes.
@@ -100,14 +101,14 @@ error changes stored data. HTTP is the status of the web read routes.
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
 | `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 ```python
 task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
 task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
 task_breakdown(broker, *, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
 list_tasks(broker, *, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
-get_task_detail(broker, task_id)                        # Ok(None) when absent
+get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
 list_workflow_names(broker)
 list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
@@ -134,7 +135,18 @@ list_schedules(broker)
 A task that reaches a terminal status leaves `horsies_tasks` for the
 `horsies_task_history` archive in the same transaction. Detail, result, and
 attempt-history reads resolve on **both** sides, so a moved task still
-answers.
+answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
+READ snapshot, so the live read and the history read see the same rows.
+
+`TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
+404 for each reason.
+
+<!-- members: TaskAbsenceReason -->
+| Reason | Meaning |
+|---|---|
+| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the oldest retained history; retention can have removed the task |
+| `WITHIN_RETAINED_HISTORY` | Retained history covers the id's birth and has no row: the task did not exist, or its history partition was removed out of band |
+| `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
 
 List and aggregate reads are **window-scoped** and take a `HistoryWindow`
 (`resolve_monitoring_window(since=..., until=...)` builds one): the default
