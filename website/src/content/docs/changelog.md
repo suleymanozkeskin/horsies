@@ -20,6 +20,13 @@ there is no migration contract between pre-1.0 versions.
   platforms start each child with `exec`:
   - `--child-preload` selects what the preload parent imports: `library` (the
     default), `app`, or `none`.
+  - Horsies' libraries load before your app. A setting that a library reads at
+    import, such as `PSYCOPG_IMPL`, must be in the process environment, not in
+    a `.env` file that your app loads.
+  - A forked child shows the preload parent's command line in `ps`, so a
+    monitor that counts `multiprocessing-fork` processes needs a change.
+  - `children_memory_mb` counts shared pages once per child, so it reads above
+    real use. Read the container or cgroup total.
   - `multiprocessing.parent_process()` returns `None` in a child, and
     `multiprocessing.current_process().name` is `horsies-child-<slot>`.
   - An app locator of `__main__:app` is refused at worker start. A child does

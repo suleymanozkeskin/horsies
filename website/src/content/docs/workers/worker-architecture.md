@@ -201,7 +201,33 @@ The worker stays the real parent of each child, so exit codes, kills, and parent
 
 If the preload parent dies, running children continue, and new children start with `exec`. The worker replaces it after 5 seconds, up to 5 times. In `ps`, a forked child shows the command line of the preload parent.
 
-Other platforms have no preload parent, and every child starts with `exec`.
+Other platforms have no preload parent, and every child starts with `exec`. Linux also falls back to `exec` if the kernel has no `pidfd_open` (below 5.3) or blocks `prctl`.
+
+### Choosing a Mode
+
+Keep `library` unless memory is your limit. Most of the gain from `library` is Horsies and its dependencies, so an app with heavy imports gains little from it. With 4 children, an app that imports boto3, openai, google-genai, firebase-admin, and lxml uses 651 MiB on 0.4.6, 575 MiB with `library`, and 298 MiB with `app`.
+
+Before you use `app` in production, run it on staging with real calls to every client library inside tasks. An import that passes the guard does not prove that a library works after a fork.
+
+### Limits of Each Mode
+
+Both preload modes:
+
+| Limit | Effect |
+| ----- | ------ |
+| Library code loads before your app | Anything your app sets first arrives too late. See [Things to Avoid](#things-to-avoid) |
+| A recycled child does not reload library code | After an in-place package upgrade, restart the worker |
+| Copied pages grow as tasks run | Python reference counts write to shared pages, so memory rises after start |
+| One more process | The preload parent uses about 20–30 MiB. The tables above include it |
+
+`app` only:
+
+| Limit | Effect |
+| ----- | ------ |
+| Your module code runs once | Anything built at import is shared by all children |
+| A recycled child does not reload your code | New app code needs a worker restart. Recycling still returns memory |
+| The guard does not see native threads | A BLAS pool or a gRPC client built at import passes the guard. It may hang or fail in a child |
+| Native libraries may not be fork-safe | Build their clients in a hook, after the fork |
 
 ## Worker Configuration
 
@@ -338,3 +364,39 @@ horsies worker myapp.instance:app --processes=8
 - `SKIP LOCKED` prevents duplicate claims
 - Advisory locks serialize certain operations
 - `cluster_wide_cap` limits total concurrency
+
+## Things to Avoid
+
+**Don't build a client at import with `--child-preload=app`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
+
+```python
+# Wrong: this runs once, in the preload parent
+client = firestore.Client()
+
+# Correct: this runs in every child, after the fork
+client = None
+
+@app.on_child_process_start
+def build_client() -> None:
+    global client
+    client = firestore.Client()
+```
+
+**Don't set a library's import-time setting in `.env` that your app loads.** `library` and `app` both import psycopg, SQLAlchemy, and pydantic before your app runs, so `load_dotenv()` in your app is too late for `PSYCOPG_IMPL`. Set such a value in the process environment.
+
+```bash
+# Wrong: in a .env file that the app loads
+PSYCOPG_IMPL=binary
+
+# Correct: in the environment of the worker process
+PSYCOPG_IMPL=binary horsies worker myapp.instance:app
+```
+
+Monkeypatching has the same limit: a patch that must run before those imports, such as gevent, is too late. Use `--child-preload=none`.
+
+**Don't expect a recycle to load new code with `--child-preload=app`.** A recycled child is a new fork of the same preload parent. Restart the worker.
+
+**Don't count children by process name.** A forked child shows the command line of the preload parent, and there is one more process than `--processes`. Read `processes` in [worker health](../monitoring/worker-health).
+
+**Don't add `children_memory_mb` to get the real footprint.** It sums RSS, so with preload it counts each shared page once per child. Read the container or cgroup total.
+

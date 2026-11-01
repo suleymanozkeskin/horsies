@@ -49,7 +49,7 @@ def reset_db_for_child() -> None:  # idempotent, sync
 
 Hooks run in registration order and fire on every child start, including replacement children — bodies must be idempotent. Register hooks in the app module or a discovered task module; a module the child never imports cannot fire its hooks.
 
-With `--child-preload=app`, your app module runs once, in the preload parent, before any child exists. Hooks still run in every child, so build per-child engines in the hook, and do not open a connection at import: the worker refuses to start if the import leaves a socket.
+With `--child-preload=app`, your app module runs once, in the preload parent, before any child exists. Hooks still run in every child, so build per-child engines in the hook, and do not open a connection at import: the worker refuses to start if the import leaves a socket. Build clients of native libraries, such as gRPC, in the hook too: the guard does not see their threads.
 
 ### Pool policy
 

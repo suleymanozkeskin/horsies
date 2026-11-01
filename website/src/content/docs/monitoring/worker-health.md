@@ -183,6 +183,9 @@ configuration snapshot, refreshed with each snapshot:
 `memory_usage_mb` is the **parent** process only. Task code runs in the worker's
 children, so per-child memory growth is invisible there; `children_memory_mb`
 captures it. The platform memory quota (e.g. Heroku R14) is measured against the
-whole process tree, so use `memory_usage_mb + children_memory_mb` to track the
-footprint that quota enforces. To bound it, see
+whole process tree. `children_memory_mb` sums RSS, so with a
+[preload parent](../workers/worker-architecture#preload-parent) it counts each
+shared page once per child, and it reads above real use. Use it to see one child
+grow, and read the container or cgroup total for the footprint that the quota
+enforces. To bound it, see
 [`--max-tasks-per-child`](../workers/concurrency).

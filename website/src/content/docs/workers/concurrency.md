@@ -90,9 +90,10 @@ child connection pool. On Linux a preload parent makes that start cheap: with 10
 no-op tasks and 8 children, `N=100` drains 803 tasks/s against 853 with recycling
 off. With `exec` the same test drains 437 against 819. Pick the **highest N whose
 peak memory stays under the platform quota**. Use the `children_memory_mb` column in
-[worker health](../monitoring/worker-health) snapshots to size it — it reports
+[worker health](../monitoring/worker-health) snapshots to watch growth — it reports
 the summed RSS of the worker's children, which the parent-only `memory_usage_mb`
-metric does not capture.
+metric does not capture. With preload, that sum counts shared pages once per child,
+so size against the container or cgroup total.
 
 - Low N (e.g. 3): tight memory bound, high cold-start and connection churn.
 - High N (e.g. 500): negligible per-task overhead, larger memory headroom needed.
