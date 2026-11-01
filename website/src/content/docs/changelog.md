@@ -14,6 +14,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
+  whitespace at the start or the end, or is longer than 100 characters (the
+  length of the database `queue_name` column).** The config raises
+  `ConfigurationError` (`HRS-200`) when it is built. Only configs that were
+  already unusable change: a task could not target such a queue, or the
+  database refused the name.
 - **Breaking: a sync call inside a running event loop returns
   `ASYNC_CONTEXT`.** Code that makes a sync call from a coroutine or a
   Jupyter cell must call the `*_async` form. Before, the call blocked that
