@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -54,7 +55,12 @@ from horsies.core.worker.worker import (
 )
 from horsies.core.models.recovery import OrphanTaskAuditReport, RecoveryConfig
 from horsies.core.models.tasks import OperationalErrorCode
-from horsies.core.worker.child_protocol import RssMb, RssUnreadable, RunFrame
+from horsies.core.worker.child_protocol import (
+    RssMb,
+    RssUnreadable,
+    RunFrame,
+    encode_parent_frame,
+)
 from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
@@ -1239,6 +1245,23 @@ class TestFinalizeAfterSlotOutcome:
         worker._recover_worker_future_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_a_failed_requeue_is_retried(self) -> None:
+        """The row is still CLAIMED, so the outcome must not read as done."""
+        worker = _make_worker()
+        worker._requeue_claimed_task = AsyncMock(  # type: ignore[method-assign]
+            return_value=_RequeueOutcome.DB_ERROR,
+        )
+
+        result = await worker._finalize_after(
+            _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
+            'task-13',
+            task_name='helper_task',
+        )
+
+        assert isinstance(result, Err)
+        assert result.err_value.retryable is True
+
+    @pytest.mark.asyncio
     async def test_finished_task_goes_to_persist(self) -> None:
         worker = _make_worker()
         worker._persist_task_terminal_state = AsyncMock(  # type: ignore[method-assign]
@@ -1450,6 +1473,32 @@ class TestSlotPoolSetup:
         assert config.init.database_url == 'postgresql://u:p@localhost/db'
         assert config.init.parent_sys_path == (os.getcwd(), '/srv/app')
 
+    def test_a_path_object_on_sys_path_reaches_the_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Python skips such an entry, so it must not stop the worker."""
+        worker = _make_worker()
+        monkeypatch.setattr(sys, 'path', [Path('/srv/app'), 7, 'bad\udcff', '/srv/lib'])
+
+        config = worker._slot_pool_config()
+
+        monkeypatch.undo()
+        assert config.init.parent_sys_path == ('/srv/app', '/srv/lib')
+        assert encode_parent_frame(config.init).head
+
+    def test_argv_that_is_not_utf8_can_be_framed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        worker = _make_worker()
+        monkeypatch.setattr(sys, 'argv', ['horsies', 'bad\udcff'])
+
+        config = worker._slot_pool_config()
+
+        monkeypatch.undo()
+        assert encode_parent_frame(config.init).head
+
     def test_pending_limit_covers_the_claim_budget(self) -> None:
         worker = _make_worker()
         worker.cfg.processes = 2
@@ -1489,6 +1538,21 @@ class TestSlotPoolSetup:
                 await worker._start_slots()
 
         assert worker._slots is pool
+
+
+@pytest.mark.unit
+class TestStopDuringStart:
+    @pytest.mark.asyncio
+    async def test_a_start_that_ends_stopped_still_stops_the_children(self) -> None:
+        worker = _make_worker()
+        worker._start_with_resilience_config = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.stop = AsyncMock()  # type: ignore[method-assign]
+
+        await worker.run_forever()
+
+        worker.stop.assert_awaited_once_with()
 
 
 @pytest.mark.unit
@@ -1557,6 +1621,19 @@ class TestTimedOutChildKill:
         handle.bind_child(child)
 
         worker._kill_timed_out_child(handle, 'task-1', 1000)
+
+        child.kill_for_caller.assert_called_once_with()
+
+    @pytest.mark.asyncio
+    async def test_a_database_error_at_the_timeout_still_kills_the_child(self) -> None:
+        """The slot is held until the child exits, so the kill cannot wait on the row."""
+        worker = _make_worker()
+        worker.sf = MagicMock(side_effect=OperationalError('db down'))
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        child = MagicMock()
+        handle.bind_child(child)
+
+        await worker._handle_task_timeout(handle, 'task-1', 1000)
 
         child.kill_for_caller.assert_called_once_with()
 
@@ -3933,6 +4010,17 @@ class TestWorkerConfigRecycleValidation:
                 psycopg_dsn='postgresql://u:p@localhost/db',
                 queues=['default'],
                 max_tasks_per_child=-1,
+            )
+
+    def test_no_children_rejected(self) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        with pytest.raises(ValueError, match='processes'):
+            WorkerConfig(
+                dsn='postgresql+psycopg://u:p@localhost/db',
+                psycopg_dsn='postgresql://u:p@localhost/db',
+                queues=['default'],
+                processes=0,
             )
 
     def test_zero_disables_allowed(self) -> None:

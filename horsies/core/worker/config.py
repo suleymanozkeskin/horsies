@@ -108,6 +108,8 @@ class WorkerConfig:
     max_memory_per_child_mb: Optional[int] = None
 
     def __post_init__(self) -> None:
+        if self.processes < 1:
+            raise ValueError(f'processes must be >= 1; got {self.processes}')
         if self.max_tasks_per_child < 0:
             raise ValueError(
                 'max_tasks_per_child must be >= 1, or 0 to disable recycling; '
