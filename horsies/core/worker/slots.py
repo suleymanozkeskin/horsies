@@ -26,7 +26,7 @@ import socket
 import sys
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Final, TypeAlias, assert_never, cast
@@ -34,6 +34,16 @@ from typing import Final, TypeAlias, assert_never, cast
 from horsies.core.logging import get_logger
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.preload import (
+    ChildProcess,
+    PreloadParent,
+    PreloadRefused,
+    PreloadStartFailed,
+    PreloadSupported,
+    PreloadUnsupported,
+    preload_support,
+)
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     ChildFrame,
@@ -56,6 +66,9 @@ from horsies.core.worker.child_protocol import (
 logger = get_logger('worker')
 
 CHILD_ENTRY: Final[tuple[str, ...]] = ('-m', 'horsies.core.worker.child_main')
+PRELOAD_ENTRY: Final[tuple[str, ...]] = ('-m', 'horsies.core.worker.preload_main')
+PRELOAD_RESTART_LIMIT: Final = 5
+PRELOAD_RESTART_DELAY_S: Final = 5.0
 SOCKET_BUFFER_BYTES: Final = 4 << 20
 CHILD_BOOT_ATTEMPTS: Final = 3
 CHILD_BOOT_RETRY_DELAY_S: Final = 0.5
@@ -220,7 +233,9 @@ class BootAttemptsExhausted:
     last_detail: str
 
 
-PoolFailure: TypeAlias = SpawnFailed | ChildHookFailed | BootAttemptsExhausted
+PoolFailure: TypeAlias = (
+    SpawnFailed | ChildHookFailed | BootAttemptsExhausted | PreloadRefused
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +280,8 @@ class SlotPoolConfig:
     max_tasks_per_child: int
     max_memory_per_child_mb: int | None
     child_entry: tuple[str, ...] = CHILD_ENTRY
+    child_preload: ChildPreload = ChildPreload.NONE
+    preload_entry: tuple[str, ...] = PRELOAD_ENTRY
 
 
 def interpreter_flags() -> tuple[str, ...]:
@@ -382,7 +399,7 @@ class Child:
 
     def __init__(
         self,
-        process: asyncio.subprocess.Process,
+        process: ChildProcess,
         protocol: FrameProtocol,
         transport: asyncio.Transport,
         frames: deque[ChildFrame],
@@ -404,28 +421,22 @@ class Child:
         cls,
         config: SlotPoolConfig,
         init: InitFrame,
+        preload: PreloadParent | None = None,
+        known_pids: Collection[int] = (),
     ) -> Result['Child', SpawnFailed]:
         """Start a process and send its init frame.
 
-        Must run on a long-lived thread: on Linux the child's parent-death
-        signal fires when the spawning thread ends. Does not wait for the
-        child to be ready.
+        A child comes from ``preload`` when one is given and it can serve the
+        request, otherwise from ``exec``. Must run on a long-lived thread: on
+        Linux the child's parent-death signal fires when the spawning thread
+        ends. Does not wait for the child to be ready.
         """
         parent_sock, child_sock = socket.socketpair()
         try:
             for sock in (parent_sock, child_sock):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
-            process = await asyncio.create_subprocess_exec(
-                sys.executable,
-                *interpreter_flags(),
-                *config.child_entry,
-                str(child_sock.fileno()),
-                str(os.getpid()),
-                stdin=asyncio.subprocess.DEVNULL,
-                pass_fds=(child_sock.fileno(),),
-                start_new_session=True,
-            )
+            process = await cls._launch(config, child_sock, preload, known_pids)
         except OSError as exc:
             parent_sock.close()
             return Err(SpawnFailed(f'{type(exc).__name__}: {exc}'))
@@ -433,10 +444,35 @@ class Child:
             child_sock.close()
         return Ok(await cls._attach(process, parent_sock, init))
 
+    @staticmethod
+    async def _launch(
+        config: SlotPoolConfig,
+        child_sock: socket.socket,
+        preload: PreloadParent | None,
+        known_pids: Collection[int],
+    ) -> ChildProcess:
+        """Return a running process on ``child_sock``. Raises ``OSError``."""
+        if preload is not None:
+            match await preload.fork_child(child_sock, known_pids):
+                case Ok(process):
+                    return process
+                case Err(down):
+                    logger.warning('Preload parent gave no child: %s', down.detail)
+        return await asyncio.create_subprocess_exec(
+            sys.executable,
+            *interpreter_flags(),
+            *config.child_entry,
+            str(child_sock.fileno()),
+            str(os.getpid()),
+            stdin=asyncio.subprocess.DEVNULL,
+            pass_fds=(child_sock.fileno(),),
+            start_new_session=True,
+        )
+
     @classmethod
     async def _attach(
         cls,
-        process: asyncio.subprocess.Process,
+        process: ChildProcess,
         parent_sock: socket.socket,
         init: InitFrame,
     ) -> 'Child':
@@ -480,7 +516,22 @@ class Child:
         """
         try:
             os.killpg(self.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
+        except ProcessLookupError:
+            self._kill_before_session()
+        except PermissionError:
+            return
+
+    def _kill_before_session(self) -> None:
+        """A forked child is not its own group until it calls ``setsid``.
+
+        Only an unreaped child is signaled, so its pid cannot be another
+        process's.
+        """
+        if self.process.returncode is not None:
+            return
+        try:
+            os.kill(self.pid, signal.SIGKILL)
+        except ProcessLookupError:
             return
 
     def kill_for_caller(self) -> None:
@@ -694,12 +745,18 @@ class SlotPool:
         self._failed: asyncio.Future[PoolFailure] = self._loop.create_future()
         self._baselines: list[ChildBaseline] = []
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
+        self._preload: PreloadParent | None = None
+        self._preload_watch: asyncio.Task[None] | None = None
 
     async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure]:
         """Boot every slot. Returns when all are ready, or on the first failure.
 
         After a failure, ``stop`` is still required.
         """
+        refused = await self._start_preload()
+        if refused is not None:
+            self._record_failure(refused)
+            return Err(refused)
         self._tasks = [
             asyncio.ensure_future(self._serve_slot(slot)) for slot in self._slots
         ]
@@ -728,6 +785,90 @@ class SlotPool:
         self._pending.append(handle)
         self._wake_slots()
         return handle
+
+    async def _start_preload(self) -> PreloadRefused | None:
+        """Start the preload parent, if this mode and this host use one.
+
+        Only the app mode can refuse: the user chose it, so a failure there is
+        reported. In the library mode a failure costs child start time, so
+        children use ``exec`` and the worker continues.
+        """
+        mode = self._config.child_preload
+        if mode is ChildPreload.NONE:
+            return None
+        match preload_support():
+            case PreloadSupported():
+                pass
+            case PreloadUnsupported(reason=reason):
+                if mode is ChildPreload.APP:
+                    logger.warning('App preload needs Linux: %s. Using exec.', reason)
+                return None
+            case _ as unreachable:
+                assert_never(unreachable)
+        match await self._launch_preload():
+            case Ok(parent):
+                self._preload = parent
+                self._preload_watch = asyncio.ensure_future(self._watch_preload(parent))
+                return None
+            case Err(failure) if mode is ChildPreload.APP:
+                match failure:
+                    case PreloadRefused():
+                        return failure
+                    case PreloadStartFailed(detail=detail):
+                        return PreloadRefused(detail)
+                    case _ as unreachable:
+                        assert_never(unreachable)
+            case Err(failure):
+                logger.warning('No preload parent, using exec: %s', failure)
+                return None
+
+    async def _launch_preload(
+        self,
+    ) -> Result[PreloadParent, PreloadRefused | PreloadStartFailed]:
+        return await PreloadParent.start(
+            (*interpreter_flags(), *self._config.preload_entry),
+            self._config.child_preload,
+            self._config.init,
+        )
+
+    async def _watch_preload(self, parent: PreloadParent) -> None:
+        """Replace a dead preload parent, bounded.
+
+        Running children are not affected: they are this process's children.
+        New children use ``exec`` until a replacement is up, and for the rest
+        of this worker's life if the bound is reached.
+        """
+        for restart in range(1, PRELOAD_RESTART_LIMIT + 1):
+            await parent.process.wait()
+            self._preload = None
+            if self._stopping:
+                return
+            logger.error(
+                'Preload parent pid=%s exited with %s; new children use exec',
+                parent.process.pid,
+                parent.process.returncode,
+            )
+            await asyncio.sleep(PRELOAD_RESTART_DELAY_S)
+            match await self._launch_preload():
+                case Ok(replacement):
+                    parent = replacement
+                    if self._stopping:
+                        await replacement.stop()
+                        return
+                    self._preload = replacement
+                    logger.info('Preload parent restarted, attempt %s', restart)
+                case Err(failure):
+                    logger.error('Preload parent did not restart: %s', failure)
+                    return
+        await parent.process.wait()
+        self._preload = None
+        logger.critical(
+            'Preload parent exited %s times; children use exec from now on',
+            PRELOAD_RESTART_LIMIT + 1,
+        )
+
+    def _known_pids(self) -> set[int]:
+        return {slot.child.pid for slot in self._slots if slot.child is not None}
 
     async def wait_failed(self) -> PoolFailure:
         """Wait until no replacement child can start. Fatal to the worker."""
@@ -794,7 +935,12 @@ class SlotPool:
             process_name=f'{self._config.init.process_name}-{slot.index}',
         )
         for attempt in range(1, CHILD_BOOT_ATTEMPTS + 1):
-            match await Child.start(self._config, init):
+            match await Child.start(
+                self._config,
+                init,
+                self._preload,
+                self._known_pids(),
+            ):
                 case Err(spawn_failed):
                     return Err(spawn_failed)
                 case Ok(child):
@@ -954,6 +1100,21 @@ class SlotPool:
         is killed with its session, and its handle gets ``ChildLost``. Cancels
         no task early. Does not touch task rows.
         """
+        report = await self._stop_slots(drain_timeout_s)
+        await self._stop_preload()
+        return report
+
+    async def _stop_preload(self) -> None:
+        """Stop the preload parent after the slots, so that no fork is in flight."""
+        if self._preload_watch is not None:
+            self._preload_watch.cancel()
+            await asyncio.wait({self._preload_watch})
+            self._preload_watch = None
+        parent, self._preload = self._preload, None
+        if parent is not None:
+            await parent.stop()
+
+    async def _stop_slots(self, drain_timeout_s: float) -> StopReport:
         self._stopping = True
         self._release_pending()
         self._wake_slots()

@@ -18,7 +18,8 @@ import sys
 import threading
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, cast
 
@@ -26,6 +27,8 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.preload import PreloadUnsupported, preload_support
 from horsies.core.worker.child_protocol import (
     InitFrame,
     ResultFrame,
@@ -63,6 +66,7 @@ from horsies.core.worker.slots import (
 )
 
 SCRIPTED_CHILD = str(Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py')
+SCRIPTED_PRELOAD = str(Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_preload.py')
 linux_only = pytest.mark.skipif(
     sys.platform != 'linux',
     reason='opens a crash dialog on macOS',
@@ -70,6 +74,31 @@ linux_only = pytest.mark.skipif(
 OUTCOME_TIMEOUT_S = 30.0
 NO_SUCH_PID = 2**30
 PoolFactory = Callable[..., Awaitable[SlotPool]]
+
+
+@dataclass(slots=True)
+class _StartPath:
+    mode: ChildPreload = ChildPreload.NONE
+
+
+_start_path = _StartPath()
+
+
+@pytest.fixture(
+    autouse=True,
+    params=[ChildPreload.NONE, ChildPreload.LIBRARY],
+    ids=['exec', 'preload'],
+)
+def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Run every test here on both start paths. ``preload`` needs Linux."""
+    if request.param is ChildPreload.LIBRARY and isinstance(
+        preload_support(),
+        PreloadUnsupported,
+    ):
+        pytest.skip('this host cannot run the preload parent')
+    _start_path.mode = request.param
+    yield
+    _start_path.mode = ChildPreload.NONE
 
 
 def _init(app_locator: str = 'ok', imports: tuple[str, ...] = ()) -> InitFrame:
@@ -95,14 +124,17 @@ def _config(
     init: InitFrame | None = None,
     max_tasks_per_child: int = 0,
     max_memory_per_child_mb: int | None = None,
-    child_entry: tuple[str, ...] = (SCRIPTED_CHILD,),
+    child_entry: tuple[str, ...] | None = None,
 ) -> SlotPoolConfig:
+    """Build a config. An explicit ``child_entry`` tests that program, so ``exec``."""
     return SlotPoolConfig(
         slots=slots,
         init=init or _init(),
         max_tasks_per_child=max_tasks_per_child,
         max_memory_per_child_mb=max_memory_per_child_mb,
-        child_entry=child_entry,
+        child_entry=child_entry or (SCRIPTED_CHILD,),
+        child_preload=ChildPreload.NONE if child_entry else _start_path.mode,
+        preload_entry=(SCRIPTED_PRELOAD,),
     )
 
 

@@ -22,7 +22,7 @@ import socket
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from typing import Final, NoReturn, assert_never
+from typing import TYPE_CHECKING, Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
@@ -47,6 +47,9 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
+
+if TYPE_CHECKING:
+    from horsies.core.app import Horsies
 
 logger = get_logger('worker')
 
@@ -122,7 +125,7 @@ def _read_parent_frames(
         os._exit(PARENT_GONE_EXIT_CODE)
 
 
-def _bind_to_parent(parent_pid: int) -> None:
+def bind_to_parent(parent_pid: int) -> None:
     """Exit with the parent, also when C code in a task holds the GIL.
 
     Linux only: the control thread needs the GIL, this kernel signal does not.
@@ -136,7 +139,7 @@ def _bind_to_parent(parent_pid: int) -> None:
         os._exit(PARENT_GONE_EXIT_CODE)
 
 
-def _ignore_stop_signals() -> None:
+def ignore_stop_signals() -> None:
     """Leave shutdown to the parent, also when a signal reaches every process.
 
     SIGTERM gets a handler, not ``SIG_IGN``: ``exec`` resets a handler but
@@ -147,7 +150,7 @@ def _ignore_stop_signals() -> None:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
 
-def _read_init_frame(sock: socket.socket) -> InitFrame:
+def read_init_frame(sock: socket.socket) -> InitFrame:
     """Read the first frame, bounded. Exits when the parent never sends it."""
     sock.settimeout(INIT_FRAME_TIMEOUT_S)
     try:
@@ -212,9 +215,9 @@ def serve(
     ``run_task`` propagates: the parent sees the exit and recovers the row by
     its status. Does not write to the database itself.
     """
-    _ignore_stop_signals()
-    _bind_to_parent(parent_pid)
-    init = _read_init_frame(sock)
+    ignore_stop_signals()
+    bind_to_parent(parent_pid)
+    init = read_init_frame(sock)
     work: queue.SimpleQueue[RunFrame | StopFrame] = queue.SimpleQueue()
     threading.Thread(
         target=_read_parent_frames,
@@ -248,13 +251,18 @@ def serve(
                 assert_never(unreachable)
 
 
-def _boot_app(init: InitFrame) -> None:
-    """Restore the parent's import state, then run the child initializer."""
-    from horsies.core.worker.child_runner import _child_initializer
-
+def restore_parent_state(init: InitFrame) -> None:
+    """Restore the import state and the names that the worker's process had."""
     sys.path[:] = list(init.parent_sys_path)
     sys.argv[:] = list(init.parent_argv)
     multiprocessing.current_process().name = init.process_name
+
+
+def boot_app(init: InitFrame) -> None:
+    """Restore the parent's import state, then run the child initializer."""
+    from horsies.core.worker.child_runner import _child_initializer
+
+    restore_parent_state(init)
     _child_initializer(
         init.app_locator,
         list(init.imports),
@@ -268,7 +276,26 @@ def _boot_app(init: InitFrame) -> None:
     )
 
 
-def _run_task(frame: RunFrame, init: InitFrame) -> WireResult:
+def boot_with_preloaded_app(app: Horsies) -> BootFn:
+    """Return a boot step for a child that inherited ``app`` through a fork."""
+
+    def boot(init: InitFrame) -> None:
+        from horsies.core.worker.child_runner import finish_child_start
+
+        restore_parent_state(init)
+        finish_child_start(
+            app,
+            init.database_url,
+            dict(init.connect_kwargs),
+            init.child_pool_min_size,
+            init.child_pool_max_size,
+            init.child_pool_check,
+        )
+
+    return boot
+
+
+def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:
     from horsies.core.worker.child_runner import _run_task_entry
 
     return _run_task_entry(
@@ -299,7 +326,7 @@ def main(argv: Sequence[str]) -> NoReturn:
         sys.stderr.write(f'child_main: bad arguments: {list(argv)!r}\n')
         sys.exit(BAD_ARGUMENTS_EXIT_CODE)
     fd, parent_pid = parsed
-    serve(socket.socket(fileno=fd), parent_pid, _boot_app, _run_task)
+    serve(socket.socket(fileno=fd), parent_pid, boot_app, run_child_task)
     sys.exit(0)
 
 
