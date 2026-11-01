@@ -168,21 +168,26 @@ class TestRecoveredFailureResult:
         assert result.unwrap_err().error_code.value == 'WORKER_CRASHED'
 
     @pytest.mark.parametrize(
-        'stored',
+        ('stored', 'cause'),
         [
             # StrictJsonError: the envelope has no __h_task_result__ marker.
-            '{"ok": null, "err": {"message": "m"}}',
+            ('{"ok": null, "err": {"message": "m"}}', '__h_task_result__'),
             # ValueValidationError: the err slot is not a TaskError, because
             # its message is not a string.
-            '{"__h_task_result__": true, "ok": null, "err": {"message": 5}}',
+            (
+                '{"__h_task_result__": true, "ok": null, "err": {"message": 5}}',
+                'message',
+            ),
         ],
         ids=['envelope-refusal', 'error-refusal'],
     )
-    def test_a_stored_value_that_does_not_decode_names_the_terminal_status(
-        self, stored: str,
+    def test_a_stored_value_that_does_not_decode_names_the_cause(
+        self, stored: str, cause: str,
     ) -> None:
         result = _recovered_failure_result('FAILED', stored)
         assert result.is_err()
         error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.WORKER_CRASHED
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
+        assert cause in error.message
         assert error.data == {'task_status': 'FAILED'}

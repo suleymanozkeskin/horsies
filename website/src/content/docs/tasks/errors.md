@@ -26,6 +26,8 @@ Each execution attempt is also recorded in `horsies_task_attempts` with per-atte
 | `data` | `Any \| None` | Additional context (task_id, etc.) |
 | `exception` | `BaseException \| FlattenedException \| None` | Live exception in-process; flattened to a `FlattenedException` TypedDict (`type`, `module`, `message`, `repr`, `traceback`) when serialized to the wire |
 
+`TaskError` refuses a key that it does not declare, at construction and at decode. `SubWorkflowError` adds `sub_workflow_id` and `sub_workflow_summary`, and it refuses any other key. A stored error with an unknown key is stored data that does not parse: see [decode-error surfaces](../../internals/serialization#decoding-consumer-side).
+
 ### BuiltInTaskCode (4-Family Split)
 
 All library-defined error codes are grouped into four families. The umbrella type alias `BuiltInTaskCode` is the union of all four enums. User code should handle these explicitly.

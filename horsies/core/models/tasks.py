@@ -183,9 +183,14 @@ class TaskError(BaseModel):
     **Deserialization**: use standard ``model_validate()`` /
     ``model_validate_json()`` everywhere — including nested models.
     No special rehydration methods needed.
+
+    **Unknown keys**: refused at construction and at decode. A stored value
+    with a key that this class does not declare is stored data that does not
+    parse. Subclasses inherit the rule, so ``SubWorkflowError`` accepts its
+    own fields and no others.
     """
 
-    model_config = {'arbitrary_types_allowed': True}
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     exception: BaseException | FlattenedException | None = None
     error_code: Optional[Union[BuiltInTaskCode, str]] = None

@@ -279,6 +279,11 @@ def _decode_err_only(
     populated. Malformed envelopes return ``None`` so the caller falls
     through to legacy handling rather than crashing.
 
+    An err slot that ``decode_task_error`` refuses is stored data that does
+    not parse: it returns ``RESULT_DESERIALIZATION_ERROR`` with the cause in
+    the message. The cause can hold text from a stored row, so a lone
+    surrogate in it is escaped: the caller encodes this error.
+
     Routes through ``decode_task_error`` (polymorphic) so subclass
     types like ``SubWorkflowError`` survive the decode. The base
     ``decode_value(_, TaskError)`` path would silently drop
@@ -298,8 +303,15 @@ def _decode_err_only(
         return None
     try:
         decoded_err = decode_task_error(err_slot)
-    except (StrictJsonError, ValueValidationError):
-        return None
+    except (StrictJsonError, ValueValidationError) as exc:
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=escape_lone_surrogates(
+                    f'Stored task error does not decode: {exc}',
+                ),
+            ),
+        )
     if not isinstance(decoded_err, TaskError):
         return None
     return TaskResult(err=decoded_err)

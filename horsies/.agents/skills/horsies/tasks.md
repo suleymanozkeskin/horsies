@@ -98,6 +98,8 @@ TaskError(error_code="BROKER_ERROR")                     # ValueError — reserv
 
 **Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
 
+**Unknown keys**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key is stored data that does not parse: `TaskHandle.get()` and `WorkflowHandle.get()` return `RESULT_DESERIALIZATION_ERROR` with the cause, and `app.get_result()` returns `Err(BrokerInvalidJsonPayload)`.
+
 ### `SubWorkflowError`
 
 Extends `TaskError` with `sub_workflow_id: str` and `sub_workflow_summary: SubWorkflowSummary[Any]`. Distinguish via pattern matching:
