@@ -170,10 +170,10 @@ class TaskError(BaseModel):
     (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a plain user-defined ``str``.
 
-    **Required fields**: ``error_code`` and ``message`` are required and must
-    not be null, on the wire and in the type. ``data`` and ``exception`` stay
-    optional. A stored error without one of the two is stored data that does
-    not parse.
+    **Required field**: ``error_code`` is required and must not be null, on
+    the wire and in the type, because retry matching and outcome routing read
+    it. A stored error without a code is stored data that does not parse.
+    ``message``, ``data`` and ``exception`` are optional.
 
     **Construction**: built-in code values must be passed as enum
     members, not raw strings.  ``TaskError(error_code="BROKER_ERROR",
@@ -206,7 +206,7 @@ class TaskError(BaseModel):
     # mode='json' dump on the wire (tuple/set → list, Decimal → str) and
     # do not round-trip type-faithfully.
     data: Optional[Any] = None
-    message: str
+    message: str | None = None
 
     @field_validator('error_code', mode='before')
     @classmethod

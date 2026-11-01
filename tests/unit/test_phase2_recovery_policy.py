@@ -167,6 +167,7 @@ class TestRecoveredFailureResult:
         assert result.is_err()
         error = result.unwrap_err()
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
         assert 'JSON parse failed' in error.message
         assert error.data == {'task_status': 'FAILED'}
 
@@ -199,5 +200,6 @@ class TestRecoveredFailureResult:
         assert result.is_err()
         error = result.unwrap_err()
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
         assert cause in error.message
         assert error.data == {'task_status': 'FAILED'}

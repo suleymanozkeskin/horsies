@@ -2107,6 +2107,7 @@ class TestDecodeErrOnly:
         assert result is not None
         error = result.unwrap_err()
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
         assert cause in error.message
 
     def _make_err_envelope_json(self) -> str:

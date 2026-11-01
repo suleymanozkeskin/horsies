@@ -293,6 +293,8 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
         ))
 ```
 
+`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
+
 ### Database Transaction with Deadlock Retry
 
 <!-- check: skip partial -- uses names that the page does not define -->

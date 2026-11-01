@@ -78,12 +78,12 @@ The task wrapper validates the returned value against declared `T` using Pydanti
 ```python
 class TaskError(BaseModel):
     error_code: BuiltInTaskCode | str
-    message: str
+    message: str | None = None
     data: Any | None = None
     exception: dict[str, Any] | BaseException | None = None
 ```
 
-`error_code` and `message` are required and must not be null. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+`error_code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
 **Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
 
@@ -92,14 +92,14 @@ class TaskError(BaseModel):
 TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
 TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # OK
 TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
-TaskError(error_code="MY_CUSTOM_CODE")                                      # ValueError — no message
+TaskError(message="card declined")                                          # ValueError — no code
 ```
 
 **Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
 
 **Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
 
-**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code` or `message`, is stored data that does not parse: `TaskHandle.get()` and `WorkflowHandle.get()` return `RESULT_DESERIALIZATION_ERROR` with the cause, and `app.get_result()` returns `Err(BrokerInvalidJsonPayload)`.
+**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()` and `WorkflowHandle.get()` return `RESULT_DESERIALIZATION_ERROR` with the cause, and `app.get_result()` returns `Err(BrokerInvalidJsonPayload)`.
 
 ### `SubWorkflowError`
 

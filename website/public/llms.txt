@@ -82,7 +82,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskError
 - error_code: str | BuiltInTaskCode (required, not null)
-- message: str (required, not null)
+- message: str | None
 - data: Any | None
 - exception: dict[str, Any] | BaseException | None
 - Unknown keys are refused, at construction and at decode

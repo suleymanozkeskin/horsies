@@ -60,6 +60,7 @@ from horsies.core.types.status import TaskStatus
 from horsies.core.worker.config import WorkerConfig
 from horsies.core.worker.worker import Worker
 from horsies.core.workflows.engine import (
+    _ChildOutputError,  # pyright: ignore[reportPrivateUsage]
     _ChildOutputUnreadable,  # pyright: ignore[reportPrivateUsage]
     _decode_err_only,  # pyright: ignore[reportPrivateUsage]
     _decode_stored_task_result,  # pyright: ignore[reportPrivateUsage]
@@ -83,9 +84,7 @@ _NOT_A_TASK_ERROR: list[tuple[dict[str, Json], str]] = [
     ({**_DECLARED, 'nope': 1}, 'nope'),
     ({}, 'error_code'),
     ({'message': 'm'}, 'error_code'),
-    ({'error_code': 'MY_CODE'}, 'message'),
     ({'error_code': None, 'message': 'm', 'data': None, 'exception': None}, 'error_code'),
-    ({'error_code': 'MY_CODE', 'message': None, 'data': None, 'exception': None}, 'message'),
 ]
 """An err slot that does not parse, with a word of the cause that it gives."""
 
@@ -94,9 +93,7 @@ _NOT_A_TASK_ERROR_IDS = [
     'an-unknown-key-beside-valid-fields',
     'empty',
     'no-code',
-    'no-message',
     'older-row-with-a-null-code',
-    'older-row-with-a-null-message',
 ]
 
 _SUMMARY: dict[str, Json] = {
@@ -112,6 +109,22 @@ _SUMMARY: dict[str, Json] = {
 _REFUSED = pytest.mark.parametrize(
     ('err_slot', 'cause'), _NOT_A_TASK_ERROR, ids=_NOT_A_TASK_ERROR_IDS,
 )
+
+_NO_MESSAGE = pytest.mark.parametrize(
+    'err_slot',
+    [
+        {
+            'error_code': 'RATE_LIMITED',
+            'message': None,
+            'data': None,
+            'exception': None,
+        },
+        {'error_code': 'RATE_LIMITED', 'message': None},
+        {'error_code': 'RATE_LIMITED'},
+    ],
+    ids=['row-of-a-code-only-error', 'null-message', 'no-message-key'],
+)
+"""An err slot with a code and no message: an error, not stored junk."""
 
 _NOT_AN_ENVELOPE = pytest.mark.parametrize(
     ('stored', 'cause'),
@@ -158,7 +171,23 @@ def _assert_stored_data_error(result: TaskResult[Any, TaskError], cause: str) ->
     assert result.is_err()
     error = result.unwrap_err()
     assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    assert error.message is not None
     assert cause in error.message
+
+
+def _assert_code_without_message(result: TaskResult[Any, TaskError]) -> None:
+    assert result.is_err()
+    error = result.unwrap_err()
+    assert error.error_code == 'RATE_LIMITED'
+    assert error.message is None
+
+
+def _assert_stored_workflow_error(stored_error: str | None, cause: str) -> None:
+    assert stored_error is not None
+    decoded = decode_task_error(loads_json(stored_error).unwrap())
+    assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    assert decoded.message is not None
+    assert cause in decoded.message
 
 
 def _session_with_row(stored: str) -> AsyncMock:
@@ -192,10 +221,7 @@ class TestStoredTextThatDoesNotParse:
         stored_error = await get_workflow_failure_error(session, 'wf-1', None)
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_TASK_RESULT_SQL
-        assert stored_error is not None
-        decoded = decode_task_error(loads_json(stored_error).unwrap())
-        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in decoded.message
+        _assert_stored_workflow_error(stored_error, cause)
 
     @_NOT_AN_ENVELOPE
     @pytest.mark.asyncio
@@ -209,10 +235,7 @@ class TestStoredTextThatDoesNotParse:
         )
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_REQUIRED_TASK_SQL
-        assert stored_error is not None
-        decoded = decode_task_error(loads_json(stored_error).unwrap())
-        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in decoded.message
+        _assert_stored_workflow_error(stored_error, cause)
 
     @_NOT_AN_ENVELOPE
     def test_phase2_recovery_gives_the_stored_data_error(
@@ -250,11 +273,11 @@ class TestRequiredFields:
         assert 'error_code must not be null' in str(refusal.value)
         assert 'UNHANDLED_EXCEPTION' not in str(refusal.value)
 
-    def test_an_empty_value_names_both_fields(self) -> None:
+    def test_an_empty_value_names_the_code_only(self) -> None:
         with pytest.raises(ValueValidationError) as refusal:
             decode_task_error({})
         assert 'error_code: Field required' in str(refusal.value)
-        assert 'message: Field required' in str(refusal.value)
+        assert 'message' not in str(refusal.value)
 
     def test_a_bad_code_shape_does_not_offer_null(self) -> None:
         with pytest.raises(StrictJsonError) as refusal:
@@ -276,23 +299,210 @@ class TestRequiredFields:
         with pytest.raises(ValidationError, match='error_code'):
             TaskError(message='m')  # pyright: ignore[reportCallIssue]
 
-    def test_the_constructor_requires_a_message(self) -> None:
-        with pytest.raises(ValidationError, match='message'):
-            TaskError(error_code='MY_CODE')  # pyright: ignore[reportCallIssue]
+    def test_a_code_only_error_builds(self) -> None:
+        error = TaskError(error_code='MY_CODE')
+        assert error.error_code == 'MY_CODE'
+        assert error.message is None
 
-    def test_a_task_that_builds_no_message_ends_unhandled_with_the_cause(self) -> None:
+    def test_a_code_only_error_writes_a_null_message(self) -> None:
+        encoded = encode_task_error(TaskError(error_code='MY_CODE'))
+        assert isinstance(encoded, dict)
+        assert encoded['message'] is None
+
+    def test_a_task_that_builds_no_code_ends_unhandled_with_the_cause(self) -> None:
+        app = _make_app()
+
+        @app.task('builds_no_code')
+        def builds_no_code() -> TaskResult[int, TaskError]:
+            return TaskResult(
+                err=TaskError(message='m'),  # pyright: ignore[reportCallIssue]
+            )
+
+        error = builds_no_code().unwrap_err()
+
+        assert error.error_code is OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert error.message is not None
+        assert 'error_code: Field required' in error.message
+
+    def test_a_task_that_builds_no_message_keeps_its_code(self) -> None:
         app = _make_app()
 
         @app.task('builds_no_message')
         def builds_no_message() -> TaskResult[int, TaskError]:
-            return TaskResult(
-                err=TaskError(error_code='RATE_LIMITED'),  # pyright: ignore[reportCallIssue]
+            return TaskResult(err=TaskError(error_code='RATE_LIMITED'))
+
+        _assert_code_without_message(builds_no_message())
+
+
+class TestErrorWithNoMessage:
+    """A code with no message is an error: each reader returns it as stored.
+
+    ``message`` is for a human, and no library decision branches on it. Earlier
+    versions stored this form, and the docs taught it.
+    """
+
+    @_NO_MESSAGE
+    def test_the_decode_keeps_the_code(self, err_slot: dict[str, Json]) -> None:
+        decoded = decode_task_error(err_slot)
+        assert decoded.error_code == 'RATE_LIMITED'
+        assert decoded.message is None
+
+    @_NO_MESSAGE
+    @pytest.mark.asyncio
+    async def test_task_handle_get_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        broker = MagicMock()
+        broker.get_raw_result_record_async = AsyncMock(
+            return_value=Ok(
+                RawResultRecord(
+                    task_id='task-1',
+                    task_name='t',
+                    status=TaskStatus.FAILED,
+                    raw_result=_envelope(err_slot),
+                ),
+            ),
+        )
+        app = MagicMock()
+        app.get_broker = MagicMock(return_value=broker)
+        handle: TaskHandle[int] = TaskHandle(
+            task_id='task-1', app=app, broker_mode=True, ok_type=int,
+        )
+
+        _assert_code_without_message(await handle.get_async())
+
+    @_NO_MESSAGE
+    @pytest.mark.asyncio
+    async def test_app_get_result_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        app = _make_app()
+        broker = MagicMock()
+        broker.get_raw_result_record_async = AsyncMock(
+            return_value=Ok(
+                RawResultRecord(
+                    task_id='task-1',
+                    task_name='t',
+                    status=TaskStatus.FAILED,
+                    raw_result=_envelope(err_slot),
+                ),
+            ),
+        )
+        app.get_broker = MagicMock(return_value=broker)  # type: ignore[method-assign]
+
+        result = await app.get_result_async('task-1')
+
+        _assert_code_without_message(result.unwrap())
+
+    @_NO_MESSAGE
+    def test_a_stored_workflow_error_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        _assert_code_without_message(
+            _decode_stored_workflow_error(
+                'wf-1', WorkflowStatus.FAILED, dumps_json(err_slot).unwrap(),
+            ),
+        )
+
+    @_NO_MESSAGE
+    def test_a_stored_workflow_envelope_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        _assert_code_without_message(
+            _decode_workflow_envelope(
+                _envelope(err_slot), int, app=None, workflow_id='wf-1',
+            ),
+        )
+
+    @_NO_MESSAGE
+    def test_a_per_node_envelope_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        app = MagicMock()
+        app.tasks = {'t': SimpleNamespace(task_ok_type=int)}
+        _assert_code_without_message(
+            _decode_per_task_envelope(
+                _envelope(err_slot), app=app, task_name='t', node_id='n1',
+            ),
+        )
+
+    @_NO_MESSAGE
+    def test_a_dependency_result_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        app = cast(
+            Horsies,
+            SimpleNamespace(tasks={'t': SimpleNamespace(task_ok_type=int)}),
+        )
+        _assert_code_without_message(
+            _decode_stored_task_result(
+                _stored(err_slot), app=app, task_name='t', context={},
+            ),
+        )
+
+    @_NO_MESSAGE
+    def test_decode_err_only_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        result = _decode_err_only(_stored(err_slot))
+        assert result is not None
+        _assert_code_without_message(result)
+
+    @_NO_MESSAGE
+    @pytest.mark.asyncio
+    async def test_the_workflow_error_keeps_the_code(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        stored_error = await get_workflow_failure_error(
+            _session_with_row(_stored(err_slot)), 'wf-1', None,
+        )
+
+        assert stored_error is not None
+        decoded = decode_task_error(loads_json(stored_error).unwrap())
+        assert decoded.error_code == 'RATE_LIMITED'
+        assert decoded.message is None
+
+    @_NO_MESSAGE
+    def test_phase2_recovery_returns_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        _assert_code_without_message(
+            _recovered_failure_result('FAILED', _stored(err_slot)),
+        )
+
+    @_NO_MESSAGE
+    def test_a_child_output_is_an_error(self, err_slot: dict[str, Json]) -> None:
+        match _parse_child_output(_stored(err_slot)):
+            case _ChildOutputError(error=error):
+                assert error.error_code == 'RATE_LIMITED'
+                assert error.message is None
+            case parsed:
+                pytest.fail(f'unexpected variant: {parsed!r}')
+
+    @_NO_MESSAGE
+    @pytest.mark.asyncio
+    async def test_phase2_replay_loads_the_error(
+        self, err_slot: dict[str, Json],
+    ) -> None:
+        worker = _make_worker()
+        with patch.object(
+            worker,
+            '_read_persisted_task_row',
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    status='FAILED',
+                    task_name='t',
+                    queue_name='default',
+                    is_workflow_task=True,
+                    result=_stored(err_slot),
+                ),
+            ),
+        ):
+            outcome = await worker._read_persisted_task_result(  # pyright: ignore[reportPrivateUsage]
+                'task-1', MagicMock(),
             )
 
-        error = builds_no_message().unwrap_err()
-
-        assert error.error_code is OperationalErrorCode.UNHANDLED_EXCEPTION
-        assert 'message: Field required' in error.message
+        _assert_code_without_message(outcome.unwrap().result)
 
 
 class TestDecodeTaskError:
@@ -585,10 +795,7 @@ class TestEngineReaders:
         stored_error = await get_workflow_failure_error(session, 'wf-1', None)
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_TASK_RESULT_SQL
-        assert stored_error is not None
-        decoded = decode_task_error(loads_json(stored_error).unwrap())
-        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in decoded.message
+        _assert_stored_workflow_error(stored_error, cause)
 
     @_REFUSED
     @pytest.mark.asyncio
@@ -609,10 +816,7 @@ class TestEngineReaders:
         )
 
         assert session.execute.await_args.args[0] is GET_FIRST_FAILED_REQUIRED_TASK_SQL
-        assert stored_error is not None
-        decoded = decode_task_error(loads_json(stored_error).unwrap())
-        assert decoded.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert cause in decoded.message
+        _assert_stored_workflow_error(stored_error, cause)
 
 
 class TestRecoveryReaders:

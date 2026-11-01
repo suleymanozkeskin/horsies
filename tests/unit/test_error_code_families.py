@@ -199,24 +199,24 @@ class TestStrictConstruction:
 
     def test_reserved_string_rejected(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='WORKFLOW_PAUSED', message='m')
+            TaskError(error_code='WORKFLOW_PAUSED')
 
     def test_reserved_string_rejected_operational(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='BROKER_ERROR', message='m')
+            TaskError(error_code='BROKER_ERROR')
 
     def test_reserved_string_rejected_contract(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='RETURN_TYPE_MISMATCH', message='m')
+            TaskError(error_code='RETURN_TYPE_MISMATCH')
 
     def test_reserved_string_rejected_retrieval(self) -> None:
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code='RESULT_NOT_READY', message='m')
+            TaskError(error_code='RESULT_NOT_READY')
 
     def test_dynamically_constructed_reserved_string_rejected(self) -> None:
         code = 'WORKFLOW' + '_' + 'PAUSED'
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code=code, message='m')
+            TaskError(error_code=code)
 
     def test_enum_member_accepted(self) -> None:
         te = TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED, message='ok')
@@ -232,14 +232,14 @@ class TestStrictConstruction:
             pass
 
         with pytest.raises(ValueError, match='reserved built-in error code'):
-            TaskError(error_code=Sneaky('BROKER_ERROR'), message='m')
+            TaskError(error_code=Sneaky('BROKER_ERROR'))
 
     def test_user_str_enum_with_reserved_value_rejected(self) -> None:
         class UserCode(str, _Enum):
             COLLIDES = 'BROKER_ERROR'
 
         with pytest.raises(ValueError, match='User error codes must be plain str'):
-            TaskError(error_code=UserCode.COLLIDES, message='m')
+            TaskError(error_code=UserCode.COLLIDES)
 
     def test_user_str_enum_with_nonreserved_value_rejected(self) -> None:
         """Foreign str,Enum types are always rejected, even for non-reserved values."""
@@ -248,7 +248,7 @@ class TestStrictConstruction:
             CUSTOM = 'MY_CUSTOM_CODE'
 
         with pytest.raises(ValueError, match='User error codes must be plain str'):
-            TaskError(error_code=UserCode.CUSTOM, message='m')
+            TaskError(error_code=UserCode.CUSTOM)
 
     def test_unknown_tagged_dict_rejected(self) -> None:
         with pytest.raises(ValidationError):
