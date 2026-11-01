@@ -197,7 +197,10 @@ def encode_value(
        the `mode='python'` dump. `mode='json'` writes U+FFFD in place of a
        lone surrogate in a key with a declared type, so the first scan
        cannot see that surrogate. `mode='python'` keeps the key. U+FFFD is
-       a valid character, so a key that truly holds it is accepted.
+       a valid character, so a key that truly holds it is accepted. A key
+       text that only the `mode='json'` dump produces, for example from a
+       `field_serializer(when_used='json')`, stays accepted with U+FFFD:
+       the surrogate is in code, not in runtime data.
     6. `_scan_reserved_keys` rejects user-originated reserved-namespace keys
        (`__h_*` and `__builtin_task_code__`) at any depth.
 

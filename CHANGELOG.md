@@ -729,7 +729,9 @@ and there is no migration contract between pre-1.0 versions.
   text.** The text of an exception from `build_with()` can hold one, for
   example a file name. The node now fails with the text, with the surrogate
   written as a `\udXXX` escape. Before, the node stored the fixed text
-  `secondary serialization failure`.
+  `secondary serialization failure`. A node whose completion result does not
+  encode keeps its failure text in the same way. Before, that node stored
+  the text `null`.
 - **The `VALIDATION_FAILED` row of the workflow start codes on the errors
   page states that a `SerializationError` in the start transaction
   propagates.** The row said that a serialization error refused the start,

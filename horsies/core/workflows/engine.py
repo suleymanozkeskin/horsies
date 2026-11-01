@@ -1758,7 +1758,9 @@ async def on_workflow_task_complete(
         # phase-2 finalize retries forever (this is the only completion-path
         # encode that was unwrapped). Degrade to a FAILED node carrying a
         # serialization error; the err-only envelope encode below is
-        # fixed-schema and total.
+        # fixed-schema and total. The text of ``exc`` can come from user
+        # code, for example a validator, so a lone surrogate in it is
+        # escaped: this encode refuses one.
         from horsies.core.models.tasks import TaskError, TaskResult
 
         logger.error(
@@ -1771,7 +1773,10 @@ async def on_workflow_task_complete(
         result = TaskResult(
             err=TaskError(
                 error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                message=f'Failed to encode completion result: {exc}',
+                message=(
+                    'Failed to encode completion result: '
+                    f'{escape_lone_surrogates(str(exc))}'
+                ),
                 data={'task_id': task_id, 'task_name': task_name},
             ),
         )
