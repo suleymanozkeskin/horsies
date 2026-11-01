@@ -13,6 +13,12 @@ import pytest
 from horsies.core.docs_fetcher import (
     DEFAULT_OUTPUT_DIR,
     DocsFetchError,
+    MainBranch,
+    ReleaseTag,
+    VersionHasNoTag,
+    _git_ref_name,
+    _tarball_url,
+    resolve_docs_ref,
     _assemble_output,
     _fetch_via_sparse_checkout,
     _fetch_via_tarball,
@@ -21,6 +27,8 @@ from horsies.core.docs_fetcher import (
 )
 
 pytestmark = pytest.mark.unit
+
+_REF = ReleaseTag(name='v0.5.5')
 
 
 # =============================================================================
@@ -219,7 +227,7 @@ class TestFetchViaSparseCheckout:
 
         output = tmp_path / 'output'
         with mock.patch('horsies.core.docs_fetcher.subprocess.run', side_effect=fake_run):
-            count = _fetch_via_sparse_checkout(output)
+            count = _fetch_via_sparse_checkout(output, _REF)
 
         assert count == 2  # index.mdx + llms.txt
         assert len(calls) == 4
@@ -236,7 +244,7 @@ class TestFetchViaSparseCheckout:
             return_value=mock.Mock(returncode=128, stderr='fatal: repo not found'),
         ):
             with pytest.raises(DocsFetchError, match='git clone failed'):
-                _fetch_via_sparse_checkout(tmp_path / 'output')
+                _fetch_via_sparse_checkout(tmp_path / 'output', _REF)
 
     def test_raises_on_timeout(self, tmp_path: Path) -> None:
         with mock.patch(
@@ -244,7 +252,7 @@ class TestFetchViaSparseCheckout:
             side_effect=subprocess.TimeoutExpired(cmd='git', timeout=60),
         ):
             with pytest.raises(DocsFetchError, match='timed out'):
-                _fetch_via_sparse_checkout(tmp_path / 'output')
+                _fetch_via_sparse_checkout(tmp_path / 'output', _REF)
 
 
 # =============================================================================
@@ -266,7 +274,7 @@ class TestFetchViaTarball:
             'horsies.core.docs_fetcher.urllib.request.urlopen',
             side_effect=fake_urlopen,
         ):
-            count = _fetch_via_tarball(output)
+            count = _fetch_via_tarball(output, _REF)
 
         assert count == 3  # index.mdx + cli.md + llms.txt
         assert (output / 'index.mdx').exists()
@@ -284,7 +292,7 @@ class TestFetchViaTarball:
             'horsies.core.docs_fetcher.urllib.request.urlopen',
             side_effect=fake_urlopen,
         ):
-            count = _fetch_via_tarball(output)
+            count = _fetch_via_tarball(output, _REF)
 
         assert count == 3
 
@@ -302,7 +310,7 @@ class TestFetchViaTarball:
             'horsies.core.docs_fetcher.urllib.request.urlopen',
             side_effect=fake_urlopen,
         ):
-            _fetch_via_tarball(tmp_path / 'output')
+            _fetch_via_tarball(tmp_path / 'output', _REF)
 
         assert isinstance(captured.get('timeout'), (int, float))
         assert captured['timeout'] is not None and captured['timeout'] > 0
@@ -313,7 +321,7 @@ class TestFetchViaTarball:
             side_effect=Exception('connection refused'),
         ):
             with pytest.raises(DocsFetchError, match='failed to download tarball'):
-                _fetch_via_tarball(tmp_path / 'output')
+                _fetch_via_tarball(tmp_path / 'output', _REF)
 
     def test_raises_on_corrupt_tarball(self, tmp_path: Path) -> None:
         def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
@@ -324,7 +332,7 @@ class TestFetchViaTarball:
             side_effect=fake_urlopen,
         ):
             with pytest.raises(DocsFetchError, match='corrupt tarball'):
-                _fetch_via_tarball(tmp_path / 'output')
+                _fetch_via_tarball(tmp_path / 'output', _REF)
 
     def test_raises_on_empty_tarball(self, tmp_path: Path) -> None:
         buf = io.BytesIO()
@@ -340,7 +348,7 @@ class TestFetchViaTarball:
             side_effect=fake_urlopen,
         ):
             with pytest.raises(DocsFetchError, match='tarball is empty'):
-                _fetch_via_tarball(tmp_path / 'output')
+                _fetch_via_tarball(tmp_path / 'output', _REF)
 
     def test_raises_on_inconsistent_prefix(self, tmp_path: Path) -> None:
         """A tarball whose members don't share one top-level dir fails loudly."""
@@ -361,7 +369,7 @@ class TestFetchViaTarball:
             side_effect=fake_urlopen,
         ):
             with pytest.raises(DocsFetchError, match='unexpected tarball layout'):
-                _fetch_via_tarball(tmp_path / 'output')
+                _fetch_via_tarball(tmp_path / 'output', _REF)
 
 
 # =============================================================================
@@ -382,10 +390,10 @@ class TestFetchDocs:
             ) as mock_git,
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
-            count = fetch_docs(output_dir=str(output))
+            count = fetch_docs(ref=_REF, output_dir=str(output))
 
         assert count == 10
-        mock_git.assert_called_once_with(output)
+        mock_git.assert_called_once_with(output, _REF)
 
     def test_falls_back_when_no_git(self, tmp_path: Path) -> None:
         output = tmp_path / 'docs'
@@ -397,10 +405,10 @@ class TestFetchDocs:
             ) as mock_tarball,
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
-            count = fetch_docs(output_dir=str(output))
+            count = fetch_docs(ref=_REF, output_dir=str(output))
 
         assert count == 5
-        mock_tarball.assert_called_once_with(output)
+        mock_tarball.assert_called_once_with(output, _REF)
 
     def test_falls_back_when_git_fails(self, tmp_path: Path) -> None:
         output = tmp_path / 'docs'
@@ -416,10 +424,10 @@ class TestFetchDocs:
             ) as mock_tarball,
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
-            count = fetch_docs(output_dir=str(output))
+            count = fetch_docs(ref=_REF, output_dir=str(output))
 
         assert count == 7
-        mock_tarball.assert_called_once_with(output)
+        mock_tarball.assert_called_once_with(output, _REF)
 
     def test_creates_parent_dirs(self, tmp_path: Path) -> None:
         output = tmp_path / 'nested' / 'deep' / 'docs'
@@ -431,7 +439,7 @@ class TestFetchDocs:
             ),
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
-            fetch_docs(output_dir=str(output))
+            fetch_docs(ref=_REF, output_dir=str(output))
 
         assert (tmp_path / 'nested' / 'deep').is_dir()
 
@@ -448,9 +456,9 @@ class TestFetchDocs:
             ) as mock_tarball,
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
-            fetch_docs(output_dir=str(custom))
+            fetch_docs(ref=_REF, output_dir=str(custom))
 
-        mock_tarball.assert_called_once_with(custom)
+        mock_tarball.assert_called_once_with(custom, _REF)
 
     def test_propagates_tarball_error_when_both_fail(self, tmp_path: Path) -> None:
         output = tmp_path / 'docs'
@@ -467,4 +475,87 @@ class TestFetchDocs:
             mock.patch('horsies.core.docs_fetcher._print_status'),
         ):
             with pytest.raises(DocsFetchError, match='download failed'):
-                fetch_docs(output_dir=str(output))
+                fetch_docs(ref=_REF, output_dir=str(output))
+
+
+# =============================================================================
+# Ref selection
+# =============================================================================
+
+
+class TestResolveDocsRef:
+    """Tests for resolve_docs_ref: the installed version picks the tag."""
+
+    def test_release_version_selects_its_tag(self) -> None:
+        result = resolve_docs_ref(installed_version='0.5.5', use_main_branch=False)
+
+        assert result.unwrap() == ReleaseTag(name='v0.5.5')
+
+    @pytest.mark.parametrize(
+        'version',
+        ['0.5.6.dev0', '0.5.5+local', '0.6.0rc1', '0.5', 'unknown', ''],
+    )
+    def test_non_release_version_fails_closed(self, version: str) -> None:
+        result = resolve_docs_ref(installed_version=version, use_main_branch=False)
+
+        error = result.unwrap_err()
+        assert error == VersionHasNoTag(installed_version=version)
+        assert '--ref main' in error.message()
+        assert repr(version) in error.message()
+
+    def test_main_flag_selects_main_for_a_dev_version(self) -> None:
+        result = resolve_docs_ref(installed_version='0.5.6.dev0', use_main_branch=True)
+
+        assert result.unwrap() == MainBranch()
+
+    def test_main_flag_selects_main_for_a_release_version(self) -> None:
+        result = resolve_docs_ref(installed_version='0.5.5', use_main_branch=True)
+
+        assert result.unwrap() == MainBranch()
+
+
+class TestRefLocations:
+    """Tests that a ref reaches the git argument and the tarball URL."""
+
+    def test_tag_git_name_and_tarball_url(self) -> None:
+        assert _git_ref_name(_REF) == 'v0.5.5'
+        assert _tarball_url(_REF).endswith('/archive/refs/tags/v0.5.5.tar.gz')
+
+    def test_main_git_name_and_tarball_url(self) -> None:
+        assert _git_ref_name(MainBranch()) == 'main'
+        assert _tarball_url(MainBranch()).endswith('/archive/refs/heads/main.tar.gz')
+
+    def test_sparse_checkout_clones_and_checks_out_the_tag(self, tmp_path: Path) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> mock.Mock:
+            calls.append(args)
+            if args[1] == 'checkout':
+                cwd = kwargs['cwd']
+                assert isinstance(cwd, Path)
+                docs_dir = cwd / 'website' / 'src' / 'content' / 'docs'
+                docs_dir.mkdir(parents=True)
+                (docs_dir / 'index.mdx').write_text('# Index')
+            return mock.Mock(returncode=0, stderr='')
+
+        with mock.patch('horsies.core.docs_fetcher.subprocess.run', side_effect=fake_run):
+            _fetch_via_sparse_checkout(tmp_path / 'output', _REF)
+
+        clone = calls[0]
+        assert clone[clone.index('--branch') + 1] == 'v0.5.5'
+        assert calls[3][1:] == ['checkout', 'v0.5.5']
+
+    def test_tarball_downloads_the_tag_url(self, tmp_path: Path) -> None:
+        urls: list[str] = []
+
+        def fake_urlopen(url: str, timeout: float | None = None) -> io.BytesIO:
+            urls.append(url)
+            return io.BytesIO(_make_test_tarball(prefix='horsies-0.5.5'))
+
+        with mock.patch(
+            'horsies.core.docs_fetcher.urllib.request.urlopen',
+            side_effect=fake_urlopen,
+        ):
+            _fetch_via_tarball(tmp_path / 'output', _REF)
+
+        assert urls == [_tarball_url(_REF)]

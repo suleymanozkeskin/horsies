@@ -11,8 +11,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 > All public symbols: `from horsies import <name>`
 
 ## Agent Skills (Repository Guidance)
-- Skills ship in the wheel, in the package folder: `horsies/.agents/skills/` (a source checkout has the same path)
-- `SKILL.md` -> quick orientation and routing
+- Skills ship in the wheel as one skill folder: `horsies/.agents/skills/horsies/` (a source checkout has the same path)
+- `horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
+- `SKILL.md` -> quick orientation and routing (the only file with frontmatter)
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
 - `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-033 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
@@ -635,7 +636,8 @@ Registry (HRS-300-HRS-399):
   - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
   - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
   - `--enable-actions` allows cancel/retry/pause/resume
-- `horsies get-docs [--output DIR]` — fetch docs locally for AI agents (default: .horsies-docs/)
+- `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
+- `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)
 - Auto-discovery: if module has exactly one Horsies instance, `:name` can be omitted
 - Exit codes: 0 = success, 1 = error, 2 = bad invocation (argument error)
@@ -788,7 +790,7 @@ SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/
 horsies check, app.check, phased validation, startup validation -> /horsies/cli/
 get-docs, AI agent, local docs, offline docs -> /horsies/cli/
-agent skills, SKILL.md, tasks.md, workflows.md, configs.md, monitoring.md, horsies/.agents/skills -> /horsies/cli/
+agent skills, SKILL.md, tasks.md, workflows.md, configs.md, monitoring.md, horsies/.agents/skills/horsies, horsies skills install -> /horsies/cli/
 discover_tasks, import_task_modules, expand_module_globs -> /horsies/quick-start/01-configuring-horsies/
 slugify, node_id, NODE_ID_PATTERN -> /horsies/concepts/workflows/workflow-semantics/
 showcase, demo app, example application -> /horsies/quick-start/06-showcase/

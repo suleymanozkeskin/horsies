@@ -244,9 +244,27 @@ there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **Breaking: the agent skill files moved into one skill folder.** The
+  five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
+  `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
+  `horsies/.agents/skills/`. Only `SKILL.md` has frontmatter (`name:
+  horsies`); the four reference files have none. Copy or link the new
+  folder, and remove the old paths from any agent tool setup.
+- **Breaking: `horsies get-docs` downloads the docs of the release tag
+  `v{installed version}`, not the `main` branch.** A development version
+  (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
+  exits with code 1. Pass `--ref main` to download the `main` branch docs.
 
 ### Changed
 
+- New command `horsies skills install --target DIR [--force]`. It copies
+  the skill folder from the installed package to `DIR/horsies/`. `--target`
+  is required, because each agent tool reads a different skills directory.
+  The command leaves an identical copy as it is, refuses to replace a copy
+  that differs unless `--force` is given, and exits with code 1 on any
+  failure. `get-docs` has a new option `--ref main`.
+- The release workflow checks that the built wheel contains the skill
+  folder.
 - Three operations guides are new: Atomic Enqueue and Topology, Deploying
   Code Changes and Testing. The Testing guide documents
   `HORSIES_SUPPRESS_SENDS`.
