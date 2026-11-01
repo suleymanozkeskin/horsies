@@ -10,13 +10,13 @@ This module is pure. It does no I/O and holds no state.
 
 from __future__ import annotations
 
-import json
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, TypeAlias, assert_never, cast
 
+from horsies.core.codec.json_io import dumps_json, loads_json_bytes
 from horsies.core.types.result import Err, Ok, Result
 
 FRAME_HEADER: Final = struct.Struct('>IQ')
@@ -142,7 +142,13 @@ class _BadField(Exception):
 
 
 def _pack(meta: Mapping[str, object], body: bytes) -> EncodedFrame:
-    meta_bytes = json.dumps(meta, separators=(',', ':')).encode('utf-8')
+    match dumps_json(dict(meta)):
+        case Ok(text):
+            meta_bytes = text.encode('utf-8')
+        case Err(exc):
+            # Frame fields are built here and in worker config, not from
+            # user input, so a field that is not JSON is a defect.
+            raise AssertionError(f'frame metadata is not JSON: {exc}')
     return EncodedFrame(
         head=FRAME_HEADER.pack(len(meta_bytes), len(body)) + meta_bytes,
         body=body,
@@ -160,7 +166,7 @@ def _rss_field(rss: RssReading) -> float | None:
 
 
 def encode_parent_frame(frame: ParentFrame) -> EncodedFrame:
-    """Encode a parent frame. Raises ``TypeError`` on a non-JSON connect kwarg."""
+    """Encode a parent frame."""
     match frame:
         case InitFrame():
             return _pack(
@@ -301,10 +307,13 @@ def _rss(meta: Mapping[str, Any]) -> RssReading:
 
 
 def _load_meta(meta_bytes: bytes) -> Mapping[str, Any]:
-    value = json.loads(meta_bytes)
-    if not isinstance(value, dict):
-        raise _BadField('metadata is not an object')
-    return cast('Mapping[str, Any]', value)
+    match loads_json_bytes(meta_bytes):
+        case Ok(value) if isinstance(value, dict):
+            return cast('Mapping[str, Any]', value)
+        case Ok(_):
+            raise _BadField('metadata is not an object')
+        case Err(exc):
+            raise _BadField(f'metadata is not JSON: {exc}')
 
 
 def _decode_init(meta: Mapping[str, Any]) -> InitFrame:

@@ -150,6 +150,7 @@ class NotRunCause(str, Enum):
 
     POOL_STOPPING = 'worker is stopping'
     POOL_FAILED = 'no child could start'
+    QUEUE_FULL = 'too many tasks wait for a slot'
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,8 +677,9 @@ class _Slot:
 class SlotPool:
     """A FIFO in the parent and one coroutine per slot.
 
-    ``submit`` never blocks and never fails. The claim budget bounds the FIFO,
-    so ``pending_limit`` guards a defect and is not flow control.
+    ``submit`` never blocks. The claim budget already bounds the FIFO, so
+    ``pending_limit`` is a backstop: past it a task is refused, not queued, and
+    its row returns to the queue through the caller.
     """
 
     def __init__(self, config: SlotPoolConfig, pending_limit: int) -> None:
@@ -710,15 +712,19 @@ class SlotPool:
         return Ok(tuple(self._baselines))
 
     def submit(self, frame: RunFrame) -> SlotHandle:
-        """Queue a task. A stopped or failed pool answers ``NotDispatched`` at once."""
+        """Queue a task. A pool that cannot take it answers ``NotDispatched`` at once."""
         handle = SlotHandle(frame, self._loop)
         if self._stopping or self._failure is not None:
             handle.finish(NotDispatched(self._not_run_cause()))
             return handle
-        assert len(self._pending) < self._pending_limit, (
-            f'{len(self._pending)} tasks wait for a slot, above the claim budget '
-            f'of {self._pending_limit}'
-        )
+        if len(self._pending) >= self._pending_limit:
+            logger.error(
+                'Refusing task %s: %s tasks already wait for a slot',
+                frame.task_id,
+                len(self._pending),
+            )
+            handle.finish(NotDispatched(NotRunCause.QUEUE_FULL))
+            return handle
         self._pending.append(handle)
         self._wake_slots()
         return handle

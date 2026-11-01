@@ -848,6 +848,17 @@ class TestStop:
         assert isinstance(lost, ChildLost)
         assert lost.cause is LossCause.KILLED_BY_PARENT
 
+    async def test_queue_past_its_limit_refuses_the_task(self) -> None:
+        pool = SlotPool(_config(), pending_limit=1)
+        assert isinstance(await pool.start(), Ok)
+        running = pool.submit(_frame('sleep', '0.3'))
+        await asyncio.wait_for(running.assigned, 5)
+        queued = pool.submit(_frame('echo', 'x'))
+        refused = pool.submit(_frame('echo', 'y'))
+        assert refused.outcome.result() == NotDispatched(NotRunCause.QUEUE_FULL)
+        assert isinstance(await _outcome(queued), TaskFinished)
+        await pool.stop(5)
+
     async def test_submit_after_stop_is_not_dispatched(self) -> None:
         pool = await _started_pool(_config())
         await pool.stop(5)

@@ -171,10 +171,17 @@ def _read_rss() -> RssReading:
 
 
 def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
-    """Replace a result that could never be stored with a typed failure."""
+    """Make a wire result safe to frame.
+
+    A result too large to ever be stored becomes a typed failure. A failure
+    reason can carry text from an exception, so it may hold a lone surrogate,
+    which JSON text cannot encode.
+    """
     ok, result_json, failed_reason = wire
     size = len(result_json.encode('utf-8'))
     if size <= MAX_BODY_BYTES:
+        if failed_reason is not None:
+            failed_reason = failed_reason.encode('utf-8', 'backslashreplace').decode('utf-8')
         return ok, result_json, failed_reason
     message = (
         f'result of task {frame.task_name} is {size} bytes, above the '

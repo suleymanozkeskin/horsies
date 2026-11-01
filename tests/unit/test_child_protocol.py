@@ -1,5 +1,7 @@
 """Tests for the parent-child wire protocol."""
 
+# pyright: reportPrivateUsage=false
+
 from __future__ import annotations
 
 import dataclasses
@@ -9,6 +11,8 @@ from datetime import datetime, timezone
 import pytest
 
 from horsies.core.types.result import Err, Ok
+from horsies.core.worker import child_main
+from horsies.core.worker.child_main import _bounded_result
 from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
@@ -252,6 +256,15 @@ class TestMalformedMetadata:
         assert isinstance(decode_child_frame(json.dumps(fields).encode(), body), Err)
 
 
+class TestStrictJson:
+    def test_non_finite_rss_is_a_defect_not_a_frame(self) -> None:
+        with pytest.raises(AssertionError, match='not JSON'):
+            encode_child_frame(ReadyFrame(1, RssMb(float('nan'))))
+
+    def test_non_finite_number_on_the_wire_is_malformed(self) -> None:
+        assert isinstance(decode_child_frame(b'{"kind":"ready","pid":1,"rss_mb":NaN}', b''), Err)
+
+
 class TestFieldCoverage:
     """A new field must not skip the wire: each one needs a round trip above."""
 
@@ -265,3 +278,21 @@ class TestFieldCoverage:
         names = {field.name for field in dataclasses.fields(InitFrame)}
         wire = set(json.loads(_split(encode_parent_frame(_init_frame()))[0]))
         assert names == wire - {'kind'}
+
+
+class TestFailureReasonText:
+    def test_lone_surrogate_in_a_reason_can_be_framed(self) -> None:
+        wire = _bounded_result(_run_frame(), (False, '', 'bad \ud800 text'))
+        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable())
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
+
+    def test_result_too_large_to_store_becomes_a_typed_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(child_main, 'MAX_BODY_BYTES', 4)
+        ok, result_json, reason = _bounded_result(_run_frame(), (True, 'x' * 5, None))
+        assert ok is True
+        assert 'WORKER_SERIALIZATION_ERROR' in result_json
+        assert reason is not None and 'above the' in reason
