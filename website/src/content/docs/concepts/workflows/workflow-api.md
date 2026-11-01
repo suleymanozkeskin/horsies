@@ -82,7 +82,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -130,9 +130,9 @@ match spec.start():
 | `.workflow_id` | `str` | Workflow UUID |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
 | `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout |
-| `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id |
+| `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
 | `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> TaskResult[T, TaskError]` | Single node result (non-blocking) |
-| `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks |
+| `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks; `HandleWorkflowNotFound` when no workflow has the id |
 | `.cancel()` / `.cancel_async()` | `-> HandleResult[None]` | Cancel workflow |
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
 | `.resume()` / `.resume_async()` | `-> HandleResult[bool]` | Resume paused workflow |

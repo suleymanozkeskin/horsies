@@ -1,11 +1,13 @@
 """Workflow start: what prevalidation and the start transaction catch.
 
 Prevalidation returns ``WorkflowStartValidationFailed`` only for a
-``WorkflowValidationError``. The start transaction returns it only for a
-``SerializationError``. Any other exception from either part is a defect and
-propagates. The transaction asserts the facts that spec construction and
-prevalidation guarantee, and it takes the node queue from the rule that
-``app.workflow()`` uses.
+``WorkflowValidationError``. The start transaction returns no
+``WorkflowStartValidationFailed``: it encodes only values that the process
+built and validated before the start, so a ``SerializationError`` there is a
+defect too. Any other exception from either part, except a database or
+driver error in the transaction, is a defect and propagates. The transaction
+asserts the facts that spec construction and prevalidation guarantee, and it
+takes the node queue from the rule that ``app.workflow()`` uses.
 """
 
 from __future__ import annotations
@@ -184,6 +186,55 @@ class TestTransactionValueError:
             side_effect=defect,
         ):
             with pytest.raises(ValueError) as exc_info:
+                await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
+
+        assert exc_info.value is defect
+        session.commit.assert_not_awaited()
+
+
+class TestTransactionSerializationError:
+    """The start transaction has no ``SerializationError`` arm."""
+
+    @pytest.mark.asyncio
+    async def test_corrupt_task_options_of_a_root_propagate_and_nothing_commits(
+        self,
+    ) -> None:
+        app = _default_app()
+        echo = _register_echo(app)
+        # Only a defect or a write to the private attribute makes this.
+        setattr(echo, 'task_options_json', '{not-json')
+        spec = app.workflow(
+            name='corrupt-options-wf',
+            tasks=[echo.node()(value=1)],
+            definition_key=_definition_key('corrupt_options'),
+        )
+        session = _accepting_session(app)
+
+        with pytest.raises(SerializationError) as exc_info:
+            await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
+
+        assert 'start_catches.echo' in str(exc_info.value)
+        session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_a_serialization_error_in_the_transaction_propagates_and_nothing_commits(
+        self,
+    ) -> None:
+        app = _default_app()
+        echo = _register_echo(app)
+        spec = app.workflow(
+            name='serialization-error-wf',
+            tasks=[echo.node()(value=1)],
+            definition_key=_definition_key('serialization_error'),
+        )
+        session = _accepting_session(app)
+        defect = SerializationError(DEFECT_MARKER)
+
+        with patch(
+            'horsies.core.workflows.lifecycle._encode_node_kwargs_or_raise',
+            side_effect=defect,
+        ):
+            with pytest.raises(SerializationError) as exc_info:
                 await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert exc_info.value is defect

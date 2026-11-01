@@ -2303,12 +2303,12 @@ class TestWorkflowHandleInfraErrors:
         assert resume_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
         results_r = await handle.results_async()
-        assert is_ok(results_r)
-        assert results_r.ok_value == {}
+        assert is_err(results_r)
+        assert results_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
         tasks_r = await handle.tasks_async()
-        assert is_ok(tasks_r)
-        assert tasks_r.ok_value == []
+        assert is_err(tasks_r)
+        assert tasks_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
         # Fold-strategy: get returns typed error
         get_r = await handle.get_async(timeout_ms=500)

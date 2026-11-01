@@ -69,7 +69,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | ---- | ----------- | ----------- |
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
-| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
