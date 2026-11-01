@@ -57,7 +57,11 @@ from horsies.core.history.partitions.catalog import (
     read_manifest_leaf_rows,
 )
 from horsies.core.history.partitions.manager import create_daily_leaf
-from horsies.core.history.reads.detail import TaskDetailAbsent, read_task_detail
+from horsies.core.history.reads.detail import (
+    TaskAbsenceReason,
+    TaskDetailAbsent,
+    read_task_detail,
+)
 from horsies.core.history.reads.publisher import (
     StagedLoaderPublisher,
     published_manifest_absent_leaves,
@@ -233,8 +237,8 @@ class TestMissingLeafBreaksAndHeals:
         """A destroyed leaf's tasks did not predate retained history.
 
         The row is gone either way. What must stay true is the REASON:
-        `predates_retained_floor` is a published value that reaches the
-        rerun surface, and reporting True here would present an
+        `reason` is a published value that reaches the
+        rerun surface, and reporting PREDATES_RETAINED_HISTORY here would present an
         accidental drop as ordinary ageing. Fails if the birth floor is
         narrowed to the probe list.
         """
@@ -259,7 +263,7 @@ class TestMissingLeafBreaksAndHeals:
         async with history_schema.engine.connect() as connection:
             detail = await read_task_detail(connection, task_id=task_id)
         assert isinstance(detail, TaskDetailAbsent), detail
-        assert detail.predates_retained_floor is False, (
+        assert detail.reason is TaskAbsenceReason.WITHIN_RETAINED_HISTORY, (
             'a task whose leaf was destroyed out of band does not predate '
             'retained history; True would report the drop as ageing'
         )

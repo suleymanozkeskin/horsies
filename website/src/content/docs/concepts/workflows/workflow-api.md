@@ -129,7 +129,7 @@ match spec.start():
 |---|---|---|
 | `.workflow_id` | `str` | Workflow UUID |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
-| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout |
+| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout. A COMPLETED workflow whose output node is SKIPPED returns `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
 | `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
 | `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> TaskResult[T, TaskError]` | Single node result (non-blocking) |
 | `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks; `HandleWorkflowNotFound` when no workflow has the id |
@@ -161,6 +161,7 @@ See [Errors Reference](../../tasks/errors#workflow-handle-errors-handleresult) f
 
 **Usage:**
 
+<!-- check: skip partial -- handle comes from a block that is not checked -->
 ```python
 from horsies import Err, HandleResumeRecoveryFailed, Ok
 
@@ -218,6 +219,7 @@ See [Typed Node Builder](typed-node-builder) for usage examples.
 
 Register a function that builds a `WorkflowSpec` for validation during `horsies check`. Registered builders are executed under send suppression (no tasks are enqueued) so the returned `WorkflowSpec` can be fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, etc.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Horsies, WorkflowSpec
 

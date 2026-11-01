@@ -21,11 +21,12 @@ uv add horsies
 Create `instance.py`:
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 
@@ -65,6 +66,7 @@ Requirements:
 
 Create `producer.py`:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 from instance import app, add_numbers, process_data

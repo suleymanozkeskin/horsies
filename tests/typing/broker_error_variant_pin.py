@@ -196,6 +196,7 @@ async def enqueue_helpers_return_their_subsets(
         priority=100,
         args_json=None,
         kwargs_json=None,
+        kwargs={},
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options=None,

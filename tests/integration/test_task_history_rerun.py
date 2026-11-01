@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.identity.keys import ScopedIdempotencyKey
+from horsies.core.history.reads.detail import TaskAbsenceReason
 from horsies.core.history.identity.reservations import (
     ReservationApplied,
     claim_key_reservation,
@@ -340,6 +341,7 @@ class TestTypedRefusals:
             )
             assert isinstance(outcome, RerunSourceAbsent)
             assert outcome.task_id == ghost
+            assert outcome.reason is TaskAbsenceReason.NOT_CLASSIFIED
 
     @pytest.mark.asyncio
     async def test_completed_source_is_not_eligible(

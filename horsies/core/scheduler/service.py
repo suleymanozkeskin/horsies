@@ -7,7 +7,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional, assert_never
+from typing import Optional
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from horsies.core.app import Horsies
@@ -16,26 +16,19 @@ from horsies.core.models.retention import resolve_queue_retention_class
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.scheduler.state import ScheduleStateManager
-from horsies.core.scheduler.validation import collect_schedule_errors
+from horsies.core.scheduler.validation import (
+    EncodedScheduleKwargs,
+    prepare_schedules,
+)
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import (
     BrokerEnqueueError,
-    BrokerInvalidInput,
     broker_error_cause,
 )
 from horsies.core.types.error_detail import NoCause
 
-from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.codec.kwargs import encode_kwargs, underlying_task_fn
-from horsies.core.codec.json_io import dumps_json
-from horsies.core.codec.payload_guard import (
-    PayloadOverLimit,
-    PayloadWithinLimit,
-    check_payload_size,
-    warn_if_payload_large,
-)
-from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.codec.payload_guard import warn_if_payload_large
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.worker import import_by_path
@@ -93,6 +86,8 @@ class Scheduler:
         self._lock_database: Optional[ScheduleLockDatabase] = None
         self._stop = asyncio.Event()
         self._initialized = False
+        # Set by start(). The tick reads this text and does not encode.
+        self._encoded_kwargs: EncodedScheduleKwargs = {}
         # 0 -> the next tick runs the missing-row existence check.
         self._ticks_until_existence_check = 0
 
@@ -874,15 +869,37 @@ class Scheduler:
         return self.app.validate_queue_name(queue_name)
 
     def _validate_schedules(self) -> None:
-        """Fail fast on the first invalid schedule (boot guard).
+        """Fail fast on the first invalid schedule and keep the encoded kwargs.
 
-        Shares :func:`collect_schedule_errors` with ``Horsies.check()``;
-        ``errors[0]`` is the first bad schedule in iteration order, preserving
-        the original raise-on-first behaviour. ``check`` collects all of them.
+        Shares :func:`prepare_schedules` with ``Horsies.check()``; ``errors[0]``
+        is the first bad schedule in iteration order, preserving the original
+        raise-on-first behaviour. ``check`` collects all of them.
         """
-        errors = collect_schedule_errors(self.app, self.schedule_config)
-        if errors:
-            raise errors[0]
+        match prepare_schedules(self.app, self.schedule_config):
+            case Ok(encoded_kwargs):
+                self._encoded_kwargs = encoded_kwargs
+            case Err(errors):
+                raise errors[0]
+
+    def _stored_kwargs_json(self, schedule: TaskSchedule) -> str | None:
+        """Return the wire text ``start()`` encoded for this schedule.
+
+        None means the schedule has no kwargs. Raises RuntimeError when
+        ``start()`` did not run: a programming error.
+        """
+        if schedule.name not in self._encoded_kwargs:
+            raise RuntimeError(
+                f"Schedule '{schedule.name}' has no encoded kwargs: start() did not run",
+            )
+        kwargs_json = self._encoded_kwargs[schedule.name]
+        if kwargs_json is not None:
+            warn_if_payload_large(
+                self.app.config.payload,
+                task_name=schedule.task_name,
+                kind='kwargs',
+                encoded_len=len(kwargs_json),
+            )
+        return kwargs_json
 
     async def _enqueue_scheduled_task(
         self,
@@ -898,7 +915,8 @@ class Scheduler:
         making the INSERT idempotent via ON CONFLICT DO NOTHING.
 
         Returns Ok(task_id) on success, Err(BrokerEnqueueError) on broker failure.
-        Raises ValueError/RuntimeError for programming errors (missing task, bad queue).
+        Raises ValueError/RuntimeError for programming errors (missing task,
+        bad queue, start() not run).
         """
         if not self.broker:
             raise RuntimeError('Broker not initialized')
@@ -919,56 +937,9 @@ class Scheduler:
 
         # Schedules are kwargs-only (TaskSchedule has no args field); the wire
         # carries no positional representation, matching the `.send()` contract.
-        kwargs_json: str | None = None
-        if schedule.kwargs:
-            # Strict-serde phase 3 routes through encode_kwargs.
-            task = self.app.tasks.get(schedule.task_name)
-            task_fn = underlying_task_fn(task)
-            try:
-                encoded_kwargs = encode_kwargs(task_fn, schedule.kwargs)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerInvalidInput(
-                    message=f"Failed to encode kwargs for schedule '{schedule.name}': {exc}",
-                    exception=exc,
-                ))
-            kwargs_r = dumps_json(encoded_kwargs)
-            if is_err(kwargs_r):
-                return Err(BrokerInvalidInput(
-                    message=f"Failed to serialize encoded kwargs for schedule '{schedule.name}': {kwargs_r.err_value}",
-                    exception=kwargs_r.err_value,
-                ))
-            kwargs_json = kwargs_r.ok_value
-
-            # Schedule kwargs are static config, so a violation repeats on
-            # every fire — the warn rate-limit collapses that to one line
-            # and the reject surfaces per-slot through the schedule's
-            # normal enqueue-failure logging.
-            warn_if_payload_large(
-                self.app.config.payload,
-                task_name=schedule.task_name,
-                kind='kwargs',
-                encoded_len=len(kwargs_json),
-            )
-            match check_payload_size(
-                self.app.config.payload,
-                encoded_len=len(kwargs_json),
-            ):
-                case PayloadWithinLimit():
-                    pass
-                case PayloadOverLimit(
-                    size_bytes=size_bytes,
-                    limit_bytes=limit_bytes,
-                ):
-                    return Err(BrokerInvalidInput(
-                        message=(
-                            f"kwargs payload for schedule '{schedule.name}' is "
-                            f'{size_bytes} bytes, exceeding payload.reject_bytes='
-                            f'{limit_bytes}; slot not enqueued'
-                        ),
-                        exception=NoCause(),
-                    ))
-                case _ as unreachable:
-                    assert_never(unreachable)
+        # start() encoded the kwargs once, so a slot has no refusal of its own
+        # and a retry of the slot sends the same text.
+        kwargs_json = self._stored_kwargs_json(schedule)
 
         # Deterministic sent_at — same slot produces same SHA across ticks.
         sent_at = slot_time

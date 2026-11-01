@@ -118,6 +118,7 @@ Values flowing through a task signature must classify as **one** of:
 
 Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Horsies, TaskResult, TaskError, JsonValue
 from pydantic import BaseModel
@@ -151,6 +152,7 @@ def validate_input(
 Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or an `Optional` / `Union` containing it) as the parameter type; the engine decodes the upstream envelope and binds a typed `TaskResult` into the consumer's kwargs.
 
 ```python
+from pydantic import SecretStr
 from datetime import datetime, timezone
 from pydantic import BaseModel
 from horsies import (
@@ -164,7 +166,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -234,8 +236,11 @@ Cheap shape check before per-slot decode. Returns the envelope as `dict[str, Jso
 
 Primitive entry points for non-`TaskResult` values (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
 
+**Raises:** `encode_value` raises `ValueValidationError` for a dict key without a JSON form (a `frozenset`, or an Enum member whose value is a list, a dict or a set) and for a value that holds itself. Any other `TypeError` or `ValueError` from the dump propagates, for example from a computed field, or for a value that is too deep.
+
 ### `JsonValue`
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type JsonValue = (
     None | bool | int | float | str
@@ -248,12 +253,13 @@ PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 
 ### `StrictJsonError`
 
-Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair is one valid character and stays accepted. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
+Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair in JSON text is one valid character and stays accepted. `encode_value` refuses each string that `dumps_json` refuses: a lone surrogate in a string or in a dict key raises `StrictJsonError` at any depth. In a Python `str`, a surrogate pair is two code points, so it is refused too. `encode_value` and `decode_value` also raise `StrictJsonError` when the error text of a validator holds a lone surrogate, because pydantic cannot build that text. The text names the kwarg and holds no input value. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
 
 ## Things to Avoid
 
 **Don't use `Any`, `object`, or bare containers in task signatures.** They are rejected at registration time.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong — raises SignatureValidationError
 @app.task("bad")

@@ -74,6 +74,7 @@ from .enums import (
     WF_TASK_TERMINAL_VALUES,
     WorkflowStatus,
     WorkflowTaskStatus,
+    stored_node_status,
 )
 from .handle_types import (
     HandleAsyncContext,
@@ -335,6 +336,151 @@ def _terminal_outcome_code(status: _TerminalErrorStatus) -> OutcomeCode:
             return OutcomeCode.WORKFLOW_EXPIRED
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _removed_after_status_read(
+    workflow_id: str,
+    status: Literal[WorkflowStatus.COMPLETED] | _TerminalErrorStatus,
+) -> TaskResult[Any, TaskError]:
+    """``WORKFLOW_NOT_FOUND`` for a workflow row that is gone at the second
+    read of ``get()``: retention deleted it after the status read."""
+    return TaskResult(
+        err=TaskError(
+            error_code=RetrievalCode.WORKFLOW_NOT_FOUND,
+            message=(
+                f'Workflow {workflow_id} not found: the row was removed '
+                f'after its {status.value} status was read'
+            ),
+        ),
+    )
+
+
+def _completed_without_stored_result(
+    workflow_id: str, stored_form: Literal['NULL', 'empty'],
+) -> TaskResult[Any, TaskError]:
+    """``RESULT_DESERIALIZATION_ERROR`` for a ``COMPLETED`` workflow row whose
+    result column is NULL or empty.
+
+    The library writes a result in the same statement that sets
+    ``COMPLETED``: the output node's stored result, an error envelope for an
+    output node with no result, the outputless envelope, or the JSON text
+    ``null`` when that envelope does not serialize. So a NULL or empty result
+    is stored data that does not parse, not a success.
+    """
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=(
+                f'Workflow {workflow_id} is COMPLETED and its stored result '
+                f'is {stored_form}'
+            ),
+            data={'workflow_id': workflow_id},
+        ),
+    )
+
+
+def _empty_stored_error(workflow_id: str) -> TaskResult[Any, TaskError]:
+    """``RESULT_DESERIALIZATION_ERROR`` for an empty stored workflow error.
+
+    No library writer stores an empty error, so it is stored data that does
+    not parse. A NULL error is not: a cancel does not write the error, and
+    the failure finalize keeps the earlier error, which can be NULL.
+    """
+    logger.warning('Workflow %s error payload is empty', workflow_id)
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message='Workflow error payload is empty',
+            data={'workflow_id': workflow_id},
+        ),
+    )
+
+
+def _decode_stored_workflow_error(
+    workflow_id: str, status: _TerminalErrorStatus, stored_error: str,
+) -> TaskResult[Any, TaskError]:
+    """Decode a stored workflow error that is not NULL and not empty.
+
+    Outcomes:
+        - An error object that decodes: that ``TaskError``.
+        - The plain expiry text that 0.5.0 and 0.5.1 stored for an
+          ``EXPIRED`` workflow: ``OutcomeCode.WORKFLOW_EXPIRED``.
+        - Text that is not JSON, JSON that is not an object, or an object
+          that does not decode: ``RESULT_DESERIALIZATION_ERROR``, with the
+          cause in the message.
+
+    Raises:
+        Exception: a defect in the decode. Only ``StrictJsonError`` and
+            ``ValueValidationError``, the refusals of ``decode_task_error``,
+            are folded.
+    """
+    loads_r = loads_json(stored_error)
+    if is_err(loads_r):
+        if (
+            status is WorkflowStatus.EXPIRED
+            and stored_error.startswith('paused_workflow_auto_cancel_after:')
+        ):
+            # 0.5.0/0.5.1 stored this policy outcome as plain text. Preserve
+            # readability of already-expired workflows without treating
+            # arbitrary corrupt JSON as a valid terminal error.
+            return TaskResult(
+                err=TaskError(
+                    error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                    message=stored_error,
+                ),
+            )
+        logger.warning(
+            'Workflow %s error payload corrupt: %s',
+            workflow_id,
+            loads_r.err_value,
+        )
+        return TaskResult(
+            err=TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'Workflow error payload corrupt: {loads_r.err_value}',
+                data={'workflow_id': workflow_id},
+            ),
+        )
+    match loads_r.ok_value:
+        case dict() as error_object:
+            try:
+                # Polymorphic decode preserves SubWorkflowError subclass
+                # fields (sub_workflow_id / sub_workflow_summary);
+                # TaskError.model_validate would silently downcast.
+                validated_err = decode_task_error(error_object)
+            except (StrictJsonError, ValueValidationError) as exc:
+                # The two refusals decode_task_error raises for an object
+                # that is not a TaskError. Any other exception is a defect
+                # and propagates.
+                logger.warning(
+                    'Workflow %s error payload validation failed: %s',
+                    workflow_id,
+                    exc,
+                )
+                return TaskResult(
+                    err=TaskError(
+                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                        message=f'Workflow error payload validation failed: {exc}',
+                        data={'workflow_id': workflow_id},
+                    ),
+                )
+            return TaskResult(err=validated_err)
+        case not_an_object:
+            logger.warning(
+                'Workflow %s error payload is not a JSON object: %s',
+                workflow_id,
+                type(not_an_object).__name__,
+            )
+            return TaskResult(
+                err=TaskError(
+                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    message=(
+                        'Workflow error payload is not a JSON '
+                        f'object: got {type(not_an_object).__name__}'
+                    ),
+                    data={'workflow_id': workflow_id},
+                ),
+            )
 
 
 class _OutputlessTerminals:
@@ -769,7 +915,9 @@ class WorkflowHandle(Generic[OutT]):
         Block until workflow completes or timeout.
 
         Returns:
-            If output task specified: that task's TaskResult
+            If output task specified: that task's TaskResult. A COMPLETED
+            workflow whose output task is SKIPPED returns
+            ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED``.
             Otherwise: TaskResult containing dict of terminal task results
         """
         return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
@@ -933,7 +1081,23 @@ class WorkflowHandle(Generic[OutT]):
                 return
 
     async def _get_result(self, resources: BrokerResources) -> TaskResult[OutT, TaskError]:
-        """Fetch completed workflow result."""
+        """Read the stored result of a workflow whose COMPLETED status was read.
+
+        A terminal status does not change, so this read does not read it
+        again.
+
+        Outcomes:
+            - No row (retention deleted the workflow after the status
+              read): ``RetrievalCode.WORKFLOW_NOT_FOUND``.
+            - A NULL or empty stored result:
+              ``RESULT_DESERIALIZATION_ERROR``. The library always stores a
+              result with ``COMPLETED``.
+            - A stored result that is not JSON:
+              ``RESULT_DESERIALIZATION_ERROR``.
+            - A stored result that is JSON: the outcome of
+              ``_decode_workflow_envelope``.
+            - A database error: ``BROKER_ERROR``.
+        """
         try:
             async with resources.session_factory() as session:
                 result = await session.execute(
@@ -941,23 +1105,44 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
                 row = result.fetchone()
-                if row and row.result:
-                    loads_r = loads_json(row.result)
-                    if is_err(loads_r):
-                        return cast('TaskResult[OutT, TaskError]', TaskResult(
-                            err=TaskError(
-                                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                message=f'Workflow result JSON corrupt: {loads_r.err_value}',
-                            ),
-                        ))
-                    decoded = _decode_workflow_envelope(
-                        loads_r.ok_value,
-                        self.out_type,
-                        app=self.broker.app,
-                        workflow_id=self.workflow_id,
+                if row is None:
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        _removed_after_status_read(
+                            self.workflow_id, WorkflowStatus.COMPLETED,
+                        ),
                     )
-                    return cast('TaskResult[OutT, TaskError]', decoded)
-                return cast('TaskResult[OutT, TaskError]', TaskResult(ok=None))
+                match row.result:
+                    case None:
+                        return cast(
+                            'TaskResult[OutT, TaskError]',
+                            _completed_without_stored_result(
+                                self.workflow_id, 'NULL',
+                            ),
+                        )
+                    case '':
+                        return cast(
+                            'TaskResult[OutT, TaskError]',
+                            _completed_without_stored_result(
+                                self.workflow_id, 'empty',
+                            ),
+                        )
+                    case stored_result:
+                        loads_r = loads_json(stored_result)
+                        if is_err(loads_r):
+                            return cast('TaskResult[OutT, TaskError]', TaskResult(
+                                err=TaskError(
+                                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                    message=f'Workflow result JSON corrupt: {loads_r.err_value}',
+                                ),
+                            ))
+                        decoded = _decode_workflow_envelope(
+                            loads_r.ok_value,
+                            self.out_type,
+                            app=self.broker.app,
+                            workflow_id=self.workflow_id,
+                        )
+                        return cast('TaskResult[OutT, TaskError]', decoded)
         except SQLAlchemyError as exc:
             return cast(
                 'TaskResult[OutT, TaskError]',
@@ -977,12 +1162,17 @@ class WorkflowHandle(Generic[OutT]):
         Outcomes:
             - No row (retention deleted the workflow after the status
               read): ``RetrievalCode.WORKFLOW_NOT_FOUND``.
-            - A stored error object that decodes: that ``TaskError``.
-            - A stored error that is not JSON, or an object that does not
-              decode: ``RESULT_DESERIALIZATION_ERROR``.
-            - No stored error, or stored JSON that is not an object: the
-              ``OutcomeCode`` of ``status``.
+            - A NULL stored error (no stored error): the ``OutcomeCode`` of
+              ``status``.
+            - An empty stored error: ``RESULT_DESERIALIZATION_ERROR``.
+            - Any other stored error: the outcome of
+              ``_decode_stored_workflow_error``.
             - A database error: ``BROKER_ERROR``.
+
+        Raises:
+            Exception: a defect in the decode. Only ``StrictJsonError`` and
+                ``ValueValidationError``, the refusals of
+                ``decode_task_error``, are folded.
         """
         try:
             async with resources.session_factory() as session:
@@ -994,93 +1184,31 @@ class WorkflowHandle(Generic[OutT]):
                 if row is None:
                     return cast(
                         'TaskResult[OutT, TaskError]',
-                        TaskResult(
-                            err=TaskError(
-                                error_code=RetrievalCode.WORKFLOW_NOT_FOUND,
-                                message=(
-                                    f'Workflow {self.workflow_id} not found: '
-                                    'the row was removed after its '
-                                    f'{status.value} status was read'
-                                ),
-                            )
-                        ),
+                        _removed_after_status_read(self.workflow_id, status),
                     )
-                if row.error:
-                    loads_r = loads_json(row.error)
-                    if is_err(loads_r):
-                        if (
-                            status is WorkflowStatus.EXPIRED
-                            and str(row.error).startswith(
-                                'paused_workflow_auto_cancel_after:'
-                            )
-                        ):
-                            # 0.5.0/0.5.1 stored this policy outcome as plain
-                            # text. Preserve readability of already-expired
-                            # workflows without treating arbitrary corrupt
-                            # JSON as a valid terminal error.
-                            return cast(
-                                'TaskResult[OutT, TaskError]',
-                                TaskResult(
-                                    err=TaskError(
-                                        error_code=(
-                                            OutcomeCode.WORKFLOW_EXPIRED
-                                        ),
-                                        message=str(row.error),
-                                    )
-                                ),
-                            )
-                        logger.warning(
-                            'Workflow %s error payload corrupt: %s',
-                            self.workflow_id,
-                            loads_r.err_value,
-                        )
+                match row.error:
+                    case None:
                         return cast(
                             'TaskResult[OutT, TaskError]',
                             TaskResult(
                                 err=TaskError(
-                                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                    message=f'Workflow error payload corrupt: {loads_r.err_value}',
-                                    data={'workflow_id': self.workflow_id},
-                                )
+                                    error_code=_terminal_outcome_code(status),
+                                    message=f'Workflow {status.value.lower()}',
+                                ),
                             ),
                         )
-                    error_data = loads_r.ok_value
-                    if isinstance(error_data, dict):
-                        try:
-                            # Polymorphic decode preserves SubWorkflowError
-                            # subclass fields (sub_workflow_id /
-                            # sub_workflow_summary); TaskError.model_validate
-                            # would silently downcast.
-                            validated_err = decode_task_error(error_data)
-                        except Exception as exc:
-                            logger.warning(
-                                'Workflow %s error payload validation failed: %s',
-                                self.workflow_id,
-                                exc,
-                            )
-                            return cast(
-                                'TaskResult[OutT, TaskError]',
-                                TaskResult(
-                                    err=TaskError(
-                                        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                        message=f'Workflow error payload validation failed: {exc}',
-                                        data={'workflow_id': self.workflow_id},
-                                    ),
-                                ),
-                            )
+                    case '':
                         return cast(
                             'TaskResult[OutT, TaskError]',
-                            TaskResult(err=validated_err),
+                            _empty_stored_error(self.workflow_id),
                         )
-                return cast(
-                    'TaskResult[OutT, TaskError]',
-                    TaskResult(
-                        err=TaskError(
-                            error_code=_terminal_outcome_code(status),
-                            message=f'Workflow {status.value.lower()}',
+                    case stored_error:
+                        return cast(
+                            'TaskResult[OutT, TaskError]',
+                            _decode_stored_workflow_error(
+                                self.workflow_id, status, stored_error,
+                            ),
                         )
-                    ),
-                )
         except SQLAlchemyError as exc:
             return cast(
                 'TaskResult[OutT, TaskError]',
@@ -1373,7 +1501,11 @@ class WorkflowHandle(Generic[OutT]):
                         node_id=row.node_id,
                         index=row.task_index,
                         name=row.task_name,
-                        status=WorkflowTaskStatus(row.status),
+                        status=stored_node_status(
+                            workflow_id=self.workflow_id,
+                            node_id=row.node_id,
+                            stored=row.status,
+                        ),
                         result=task_result_value,
                         started_at=row.started_at,
                         completed_at=row.completed_at,
