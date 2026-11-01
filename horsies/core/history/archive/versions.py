@@ -26,9 +26,6 @@ ARCHIVE_VERSION_1: Final = 1
 JSON_UTF8_CODEC: Final = 'json-utf8'
 JSON_CONTENT_TYPE: Final = 'application/json'
 
-DIGEST_LENGTH_BYTES: Final = 32
-"""Every archive digest is a 32-byte SHA-256 over the stored payload bytes."""
-
 
 class ArchiveDomain(StrEnum):
     """The four independently versioned archive domains."""
