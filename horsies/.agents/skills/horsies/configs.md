@@ -196,14 +196,60 @@ worker_pool_size + worker_max_overflow
 ```
 
 Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
-is a new interpreter started with `exec`, so it inherits no parent database
-socket.
+inherits no database socket from the worker.
+
+### Child process model
+
+A worker owns one child process and one private socket per slot. On Linux a
+preload parent imports code once and forks each child. Other platforms start
+each child with `exec`. `--child-preload` selects the mode:
+
+| Mode | Imports before the fork | Effect |
+|---|---|---|
+| `library` (default) | Horsies and its dependencies | Each child still imports the app |
+| `app` | Also the app | Module code runs once, hooks still run in every child, and the worker refuses to start if the import leaves a Python thread or a socket |
+| `none` | No preload parent | Every child starts with `exec` |
+
+8 children, real task work, Postgres in the loop. Memory is summed PSS:
+
+| App | Mode | Next child, p50 | Memory |
+|---|---|---:|---:|
+| Small | `none` | 618 ms | 461 MiB |
+| Small | `library` | 27 ms | 169 MiB |
+| Small | `app` | 20 ms | 151 MiB |
+| With pandas | `none` | 1,174 ms | 715 MiB |
+| With pandas | `library` | 486 ms | 472 MiB |
+| With pandas | `app` | 26 ms | 236 MiB |
+
+With 4 children, the whole worker at start is 290 / 159 / 146 MiB on the small
+app and 445 / 342 / 212 MiB with pandas (`none` / `library` / `app`).
+
+Failures stay with one task:
+
+- A timeout kills that child and the subprocesses in its session. A subprocess
+  that calls `setsid` leaves the session and is not killed.
+- A crash or an out-of-memory kill recovers that task only. Other tasks continue.
+- The worker's death stops each child at once.
+- SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
+  stop a running task. The worker drains it. Task subprocesses do get the signal.
+- A dead preload parent stops no task. New children use `exec` until it is back.
+
+A child differs from a `multiprocessing` process: `parent_process()` returns
+`None`, `current_process().name` is `horsies-child-<slot>`, and a `__main__:app`
+locator is refused at start. In `ps`, a forked child shows the preload parent's
+command line.
 
 ### Child process recycling
 
 Two knobs recycle worker children to bound memory. Recycling is per-child and
 staggered: each child has its own counter/threshold and is replaced
-individually, never in lockstep.
+individually, never in lockstep. The worker decides, from the task count and
+the RSS in each result. On Linux a recycle is cheap: with 10,000 no-op tasks and
+8 children, `N=100` drains 803 tasks/s against 853 with recycling off, and with
+`exec` it drains 437 against 819.
+
+RSS counts pages shared with the preload parent. Set the memory knob against
+RSS, and use the cgroup total or PSS for the real footprint.
 
 **Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
 default `100`): recycle each child after N tasks, returning retained memory
