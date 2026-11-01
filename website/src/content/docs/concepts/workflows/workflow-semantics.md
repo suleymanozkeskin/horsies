@@ -112,6 +112,17 @@ When a task is terminal but its result is missing, recovery synthesizes errors:
 - `RESULT_NOT_AVAILABLE` for completed tasks missing results
 - `WORKER_CRASHED` for failed tasks missing results
 
+### Recovery limit
+
+A recovery repair that raises rolls back, and the next reaper pass runs it again. After `workflow_recovery_failure_limit` passes with a persistent raise (default 25), the workflow fails closed with `WORKFLOW_RECOVERY_LIMIT_REACHED`:
+
+- The node that raised goes `FAILED`. Other `PENDING` and `READY` nodes go `SKIPPED`.
+- Live nodes finish, and the workflow goes `FAILED` when the last one ends. If no node is live, it goes `FAILED` at once.
+- `on_error=OnError.PAUSE` does not apply, because a limit must end the workflow.
+- A connection, lock or timeout error does not count, so a database outage cannot fail a workflow.
+
+See [Workflow recovery limit](/horsies/configuration/recovery-config/#workflow-recovery-limit) for the rules of the count.
+
 ## Failure Semantics
 
 ### When is a workflow marked FAILED?

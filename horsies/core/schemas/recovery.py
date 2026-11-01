@@ -53,6 +53,24 @@ ON CONFLICT (scan_name) DO NOTHING
 """)
 
 
+# The count of the workflow recovery limit: one row for each workflow whose
+# recovery raised a persistent error. No foreign key: a varchar-born database
+# creates this table before its offline cutover, and `horsies_workflows.id` is
+# not uuid there. The retention pass deletes a row after its workflow is gone.
+CREATE_WORKFLOW_RECOVERY_FAILURES_SQL = text("""
+CREATE TABLE IF NOT EXISTS horsies_workflow_recovery_failures (
+    workflow_id uuid PRIMARY KEY,
+    failed_passes integer NOT NULL CHECK (failed_passes >= 1),
+    last_pass_id uuid NOT NULL,
+    first_failed_at timestamptz NOT NULL,
+    last_failed_at timestamptz NOT NULL,
+    last_case varchar(64) NOT NULL,
+    last_task_index integer,
+    last_exception_type varchar(255) NOT NULL
+)
+""")
+
+
 @dataclass(frozen=True)
 class RecoveryIndex:
     """One fixed recovery index and its expected owner."""

@@ -48,6 +48,7 @@ Errors from task execution, broker, and worker internals.
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized | No |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed after READY->ENQUEUED transition during enqueue/build | No |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded | No |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed | No |
 
 #### ContractCode
 
@@ -281,7 +282,7 @@ For a validation failure, the cause names the field, the message and the type, n
 
 Workflow-specific error codes are distributed across the four families above:
 
-- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`
+- **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`, `WORKFLOW_RECOVERY_LIMIT_REACHED`
 - **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`
 - **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`

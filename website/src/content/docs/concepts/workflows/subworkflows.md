@@ -510,6 +510,8 @@ Rules for this pattern:
 - The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
 - `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.workflow_builder`.
+- A raise in the child start stops in the reaper's recovery, and the [recovery limit](/horsies/concepts/workflows/workflow-semantics/#recovery-limit) bounds it. At the limit, the `SubWorkflowNode` goes `FAILED` with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+- A child workflow that reaches the recovery limit goes `FAILED`. Its parent node then goes `FAILED` with `SUBWORKFLOW_FAILED`, and `sub_workflow_summary.error_summary` holds the message of the child.
 
 ### 6.4 Accessing Subworkflow Health: SubWorkflowSummary
 

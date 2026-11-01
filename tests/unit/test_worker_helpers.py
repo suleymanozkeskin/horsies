@@ -26,6 +26,7 @@ from horsies.core.worker.finalize import (
 )
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.worker.sql import DELETE_ORPHANED_RECOVERY_FAILURES_SQL
 from horsies.core.worker.worker import (
     Worker,
     WorkerConfig,
@@ -704,6 +705,7 @@ class TestReaperRetentionPass:
             auto_terminate_orphaned_workflow_tasks=False,
             auto_fail_stale_running=False,
             check_interval_ms=1_000,
+            workflow_recovery_failure_limit=7,
         )
         worker.cfg.retention_config = RetentionConfig(
             worker_state_retention_hours=24,
@@ -756,6 +758,11 @@ class TestReaperRetentionPass:
         assert any(
             stmt is DELETE_EXPIRED_WORKFLOWS_SQL for stmt in executed
         )
+        assert any(
+            stmt is DELETE_ORPHANED_RECOVERY_FAILURES_SQL for stmt in executed
+        )
+        assert recover_mock.await_args is not None
+        assert recover_mock.await_args.kwargs['failure_limit'] == 7
         assert len(created_brokers) == 1
         created_brokers[0].close_async.assert_awaited_once()
 

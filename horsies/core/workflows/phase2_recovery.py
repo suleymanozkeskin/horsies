@@ -27,9 +27,10 @@ per interval under the reaper's cluster-wide gate.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from horsies.core.codec.json_io import SerializationError, loads_json
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
@@ -60,6 +61,15 @@ from horsies.core.types.result import is_err
 from horsies.core.workflows.engine import (
     apply_node_progression,
     node_status_for_terminal_task,
+)
+from horsies.core.workflows.recovery_limit import (
+    RecoveryCandidateOutcome,
+    RecoveryCase,
+    RecoveryRaise,
+    RecoveryRaiseClass,
+    apply_recovery_limit,
+    classify_recovery_raise,
+    report_recovery_limit,
 )
 
 if TYPE_CHECKING:
@@ -117,7 +127,22 @@ RECORD_RETAINING_ATTEMPT_SQL = text(f"""
 The count rides the pending row as a column, never process memory: a
 worker restart, a different holder next pass, or a crashed pass all see
 the same count. Written in the same transaction as the consumption call
-that produced the disposition."""
+that produced the disposition. A row whose progression raised writes it
+in a new transaction, because the raise rolled back the first one."""
+
+
+RAISED_ROW_CONTEXT_SQL = text(f"""
+    SELECT pending.workflow_id, node.task_index
+    FROM {WORKFLOW_PHASE2_PENDING} pending
+    JOIN horsies_workflow_tasks node
+      ON node.id = pending.workflow_node_row_id
+    WHERE pending.task_id = CAST(:task_id AS uuid)
+""")
+"""The workflow and the node of a row whose transaction rolled back."""
+
+
+RAISED_FAILURE_CLASS = 'RAISED'
+"""`last_failure_class` of a row whose progression raised."""
 
 
 COUNT_OVER_ATTEMPT_BOUND_SQL = text(f"""
@@ -151,6 +176,9 @@ class Phase2RecoverySummary:
     quarantined: int = 0
     """Rows whose attempt count reached the bound this pass and whose
     evidence was repointed at the quarantine table (or already was)."""
+    raised_counted: int = 0
+    """Rows whose progression raised a persistent error this pass, counted
+    toward the attempt bound."""
     over_attempt_bound: int = 0
     """Standing population at or over the bound — the rows discovery no
     longer retries, visible as a count rather than as silence."""
@@ -172,7 +200,7 @@ def _undecodable_failure_result(
 
     ``cause`` can hold text from a stored row, so a lone surrogate in it is
     escaped: the failure handler encodes this error, and a raise there would
-    repeat on each recovery pass.
+    repeat on each recovery pass until the recovery limit fails the workflow.
     """
     logger.error(
         'Phase-2 recovery could not decode the stored result (%s: %s)',
@@ -322,8 +350,11 @@ async def drive_phase2_recovery(
     same transaction; at the bound the row's evidence is quarantined —
     copied, verified, and repointed by the database-owned quarantine
     function — and the discovery predicate stops selecting it either
-    way. Exception failures do NOT count toward the bound: a database
-    outage must not march healthy rows toward quarantine.
+    way. A transient raise does NOT count toward the bound: a database
+    outage must not march healthy rows toward quarantine. A persistent
+    raise counts, in a new transaction because its own rolled back; at the
+    bound the workflow also fails closed, because discovery stops and no
+    other path would end it.
 
     Caller owns the one-holder guarantee. The reaper runs this inside a
     pass already gated by the cluster-wide advisory lock, so no second
@@ -354,6 +385,7 @@ async def drive_phase2_recovery(
     retained = 0
     failed = 0
     quarantined = 0
+    raised_counted = 0
     details: list[str] = []
     quarantine_refusals: list[str] = []
 
@@ -405,9 +437,9 @@ async def drive_phase2_recovery(
                 await session.commit()
         except Exception as exc:
             # This row keeps its evidence and is seen again next pass;
-            # the rows behind it still run. Deliberately uncounted
-            # toward the attempt bound: an outage is not the row's
-            # fault.
+            # the rows behind it still run. A transient raise stays
+            # uncounted toward the attempt bound: an outage is not the
+            # row's fault.
             failed += 1
             logger.error(
                 'Phase-2 recovery failed for task %s: %s: %s',
@@ -415,6 +447,30 @@ async def drive_phase2_recovery(
                 type(exc).__name__,
                 exc,
             )
+            match classify_recovery_raise(exc):
+                case RecoveryRaiseClass.TRANSIENT:
+                    pass
+                case RecoveryRaiseClass.PERSISTENT:
+                    match await _record_raised_row(
+                        session_factory,
+                        task_id=task_id,
+                        exc=exc,
+                        quarantine_after_attempts=quarantine_after_attempts,
+                    ):
+                        case _RaisedRowNotRecorded():
+                            pass
+                        case _RaisedRowRecorded(
+                            quarantined=row_quarantined,
+                            quarantine_refusal=row_refusal,
+                        ):
+                            raised_counted += 1
+                            quarantined += int(row_quarantined)
+                            if row_refusal is not None:
+                                quarantine_refusals.append(row_refusal)
+                        case _ as unreachable:
+                            assert_never(unreachable)
+                case _ as unreachable:
+                    assert_never(unreachable)
             continue
 
         match disposition.disposition:
@@ -448,10 +504,114 @@ async def drive_phase2_recovery(
         retained=retained,
         failed=failed,
         quarantined=quarantined,
+        raised_counted=raised_counted,
         over_attempt_bound=int(over_bound),
         retained_details=tuple(details),
         quarantine_refusals=tuple(quarantine_refusals),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class _RaisedRowRecorded:
+    """The attempt of a raised row is stored."""
+
+    quarantined: bool
+    quarantine_refusal: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RaisedRowNotRecorded:
+    """Nothing changed. The row is seen again next pass."""
+
+
+type _RaisedRow = _RaisedRowRecorded | _RaisedRowNotRecorded
+
+
+async def _record_raised_row(
+    session_factory: 'async_sessionmaker[AsyncSession]',
+    *,
+    task_id: str,
+    exc: Exception,
+    quarantine_after_attempts: int,
+) -> _RaisedRow:
+    """Count one persistent raise of a row, and stop its workflow at the bound.
+
+    Runs in a new transaction, because the raise rolled back the transaction
+    of the row. Discovery stops at the bound, so the bound must not be
+    reached unless the limit applied. A limit write that fails, or that a
+    PAUSED workflow refuses, rolls this attempt back. The row then stays
+    under the bound. A later pass, after a resume, raises again and applies
+    the limit to a RUNNING workflow.
+
+    Returns:
+        `_RaisedRowRecorded` when the attempt committed;
+        `_RaisedRowNotRecorded` when a write failed, when the limit was
+        refused, or when the row is gone. After that outcome nothing changed.
+    """
+    try:
+        async with session_factory() as session:
+            context = (
+                await session.execute(
+                    RAISED_ROW_CONTEXT_SQL, {'task_id': task_id},
+                )
+            ).first()
+            attempt_count = (
+                await session.execute(
+                    RECORD_RETAINING_ATTEMPT_SQL,
+                    {'task_id': task_id, 'failure_class': RAISED_FAILURE_CLASS},
+                )
+            ).scalar_one_or_none()
+            if context is None or attempt_count is None:
+                await session.rollback()
+                return _RaisedRowNotRecorded()
+            if int(attempt_count) < quarantine_after_attempts:
+                await session.commit()
+                return _RaisedRowRecorded(
+                    quarantined=False,
+                    quarantine_refusal=None,
+                )
+            failure = RecoveryRaise.of(
+                exc,
+                workflow_id=str(context.workflow_id),
+                task_index=int(context.task_index),
+                case=RecoveryCase.PHASE2_PROGRESSION,
+            )
+            record = report_recovery_limit(
+                await apply_recovery_limit(
+                    session, failure, int(attempt_count),
+                ),
+                failure,
+                int(attempt_count),
+            )
+            match record:
+                case RecoveryCandidateOutcome.LIMIT_REACHED:
+                    quarantined, refusal = await _quarantine_exhausted_row(
+                        session,
+                        task_id=task_id,
+                        attempt_count=int(attempt_count),
+                        disposition=RAISED_FAILURE_CLASS,
+                    )
+                    await session.commit()
+                    return _RaisedRowRecorded(
+                        quarantined=quarantined,
+                        quarantine_refusal=refusal,
+                    )
+                case (
+                    RecoveryCandidateOutcome.COUNTED
+                    | RecoveryCandidateOutcome.NOT_COUNTED
+                ):
+                    await session.rollback()
+                    return _RaisedRowNotRecorded()
+                case _ as unreachable:
+                    assert_never(unreachable)
+    except SQLAlchemyError as write_error:
+        logger.error(
+            'Phase-2 recovery could not record the raise of task %s: %s: %s',
+            task_id,
+            type(write_error).__name__,
+            write_error,
+        )
+        return _RaisedRowNotRecorded()
 
 
 async def _quarantine_exhausted_row(

@@ -202,6 +202,7 @@ Differences from `TaskNode`:
 - `args_from` injects upstream `TaskResult` into `build_with()`.
 - The node follows the child's output: child COMPLETED with an ok output → node COMPLETED with output; child COMPLETED with an err output → node FAILED with that err (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowError`.
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- A raise in the child start stops in the reaper's recovery, and the recovery limit bounds it (see Failure Semantics).
 - An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
 - The child start encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them (a value that does not fit is `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, and the node fails with `WORKFLOW_ENQUEUE_FAILED`), so a refusal at the child start is a defect: it raises `SerializationError` and the transaction rolls back.
 
@@ -453,6 +454,8 @@ class WorkflowTaskInfo:
 5. Only `handle.resume()` or `handle.cancel()` can un-pause.
 6. Cascades: pause propagates to all running child workflows (BFS). Resume propagates similarly.
 
+`OnError.PAUSE` does not apply at the recovery limit: a limit must end the workflow.
+
 ## SuccessPolicy / SuccessCase
 
 <!-- check: skip partial -- uses names that the page does not define -->
@@ -568,6 +571,17 @@ class SubWorkflowSummary(Generic[OkT]):
 Accessed via `workflow_ctx.summary_for(subworkflow_node)`.
 
 ## Failure Semantics
+
+### Recovery limit
+
+A recovery repair that raises rolls back, and the next reaper pass runs it again. A workflow fails closed after `RecoveryConfig.workflow_recovery_failure_limit` passes (default 25, 3–1000) with a persistent raise, with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+
+- Transient: `OperationalError`, `InterfaceError`, a pool timeout, a disconnect, and the error after a lost connection. It does not count, so a database outage cannot fail a workflow.
+- Persistent: a defect, stored data that the engine cannot use, and a SQL error outside `OperationalError`. It counts once per pass, for the workflow.
+- The count is stored in `horsies_workflow_recovery_failures`, so a restart keeps it. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner.
+- At the limit: the node that raised goes `FAILED`, other `PENDING` and `READY` nodes go `SKIPPED`, and a stored first error stays. Live nodes finish, and the workflow goes `FAILED` at the last one. A `success_policy` that nodes met can then end it `COMPLETED`. With no live node it goes `FAILED` at once, with no `success_policy` evaluation.
+- A child at the limit fails its parent node with `SUBWORKFLOW_FAILED`.
+- A phase-2 row whose progression raises counts toward `phase2_quarantine_after_attempts`. At that bound the row moves to quarantine and the workflow fails the same way.
 
 ### SKIPPED cascade
 
