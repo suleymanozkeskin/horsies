@@ -22,7 +22,7 @@ ambiguity to the browser:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, assert_never
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -39,8 +39,13 @@ from horsies.core.models.workflow.handle_types import (
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import pause_workflow, resume_workflow
 from horsies.monitoring import (
+    TaskActionDbOperationFailed,
     TaskActionError,
-    TaskActionErrorCode,
+    TaskActionEventLoopLimit,
+    TaskActionNotCancellable,
+    TaskActionNotFound,
+    TaskActionStoredDataInvalid,
+    TaskActionWorkflowTask,
     cancel_task,
 )
 
@@ -99,21 +104,26 @@ def _conflict(code: str, current_status: str | None) -> _Outcome:
 
 
 def _task_action_failed(error: TaskActionError) -> _Outcome:
-    """Map a task action failure onto its response."""
-    match error.code:
-        case TaskActionErrorCode.TASK_NOT_FOUND:
+    """Map a task action failure onto its response.
+
+    Stored data that does not parse is 500: the request was valid, and a
+    repeat gives the same answer until the stored row changes.
+    """
+    match error:
+        case TaskActionNotFound():
             return _Outcome(status_code=404, content={'detail': error.message})
-        case TaskActionErrorCode.TASK_IS_WORKFLOW_TASK:
+        case TaskActionWorkflowTask():
             return _Outcome(status_code=400, content={'code': error.code.value})
-        case TaskActionErrorCode.TASK_NOT_CANCELLABLE:
-            current = error.current_status
-            return _conflict(
-                error.code.value, current.value if current is not None else None
-            )
-        case TaskActionErrorCode.DB_OPERATION_FAILED:
+        case TaskActionNotCancellable(current_status=current_status):
+            return _conflict(error.code.value, current_status.value)
+        case TaskActionDbOperationFailed():
             return _Outcome(status_code=503, content={'detail': error.message})
-        case TaskActionErrorCode.EVENT_LOOP_LIMIT:
+        case TaskActionEventLoopLimit():
             return _Outcome(status_code=503, content={'detail': error.message})
+        case TaskActionStoredDataInvalid():
+            return _Outcome(status_code=500, content={'detail': error.message})
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _handle_failed(error: HandleOperationError) -> _Outcome:

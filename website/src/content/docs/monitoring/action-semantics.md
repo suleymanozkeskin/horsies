@@ -29,6 +29,7 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 | `RUNNING` | Cancelled **only when the caller opts in**. See below |
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
+| Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
 
 A committed `CANCELLED` is final. Every lifecycle transition is a CAS with an
 expected status, so claim, finalize, auto-retry, and the reaper all no-op
@@ -238,6 +239,7 @@ concurrency control.
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
 | 404 | The row no longer exists | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
+| 500 | A task cancel read stored data that does not parse, for example a history status that is not a task status | Nothing was committed. A repeat gives the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
 
 A failed request is not proof that nothing happened. A network error in

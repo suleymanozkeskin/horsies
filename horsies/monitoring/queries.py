@@ -1,11 +1,20 @@
 """Read queries backing the monitoring UI.
 
 Every query takes the broker, selects its resources once, opens one
-session, and returns a ``MonitoringResult``. When the broker already holds
-resource sets for its limit of open event loops and the query runs on a new
-one, the query returns ``EVENT_LOOP_LIMIT`` and runs nothing. ``SQLAlchemyError`` is caught at the session boundary and
-mapped to ``MonitoringQueryError``; nothing else is caught. A row that does
-not exist is ``Ok(None)``, not an error.
+session, and returns a ``MonitoringResult``. The error side has three
+states:
+
+* ``MonitoringQueryEventLoopLimit``: the broker already holds resource sets
+  for its limit of open event loops and the query runs on a new one.
+  Nothing runs.
+* ``MonitoringQueryDbOperationFailed``: a ``SQLAlchemyError`` at the
+  session boundary.
+* ``MonitoringQueryHistoryContractViolation``: a ``HistoryContractError``
+  from the history reads of ``list_tasks``, ``get_task_detail`` and
+  ``get_workflow_node``: stored history data that does not decode.
+
+Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
+error.
 
 Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
@@ -85,8 +94,9 @@ from horsies.core.types.result import Err, Ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.monitoring.errors import (
-    MonitoringQueryError,
-    MonitoringQueryErrorCode,
+    MonitoringQueryDbOperationFailed,
+    MonitoringQueryEventLoopLimit,
+    MonitoringQueryHistoryContractViolation,
     MonitoringResult,
 )
 from horsies.monitoring.models import (
@@ -304,11 +314,12 @@ def _is_uuid_text(value: str) -> bool:
     return True
 
 
-def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
+def _db_err(
+    operation: str, exc: SQLAlchemyError,
+) -> Err[MonitoringQueryDbOperationFailed]:
     """Wrap a session-boundary failure, classifying transient errors."""
     return Err(
-        MonitoringQueryError(
-            code=MonitoringQueryErrorCode.DB_OPERATION_FAILED,
+        MonitoringQueryDbOperationFailed(
             message=f'{operation} failed: {exc}',
             retryable=is_retryable_connection_error(exc),
             exception=exc,
@@ -318,13 +329,24 @@ def _db_err(operation: str, exc: SQLAlchemyError) -> Err[MonitoringQueryError]:
 
 def _loop_limit_err(
     operation: str, loop_limit: EventLoopLimit,
-) -> Err[MonitoringQueryError]:
+) -> Err[MonitoringQueryEventLoopLimit]:
     """The broker already serves its limit of event loops. Nothing ran."""
     return Err(
-        MonitoringQueryError(
-            code=MonitoringQueryErrorCode.EVENT_LOOP_LIMIT,
+        MonitoringQueryEventLoopLimit(
             message=f'{operation}: {loop_limit.describe()}',
-            retryable=False,
+            loop_limit=loop_limit,
+        )
+    )
+
+
+def _contract_err(
+    operation: str, exc: HistoryContractError,
+) -> Err[MonitoringQueryHistoryContractViolation]:
+    """Wrap stored history data that does not decode. Nothing changed."""
+    return Err(
+        MonitoringQueryHistoryContractViolation(
+            message=f'{operation} failed: {exc}',
+            exception=exc,
         )
     )
 
@@ -509,10 +531,12 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
     live rows carried for cancelled and expired tasks.
     """
     completed_at = (
-        detail.terminal_at if detail.status == 'COMPLETED' else None
+        detail.terminal_at if detail.status is TaskStatus.COMPLETED else None
     )
     failed_at = (
-        detail.terminal_at if detail.status != 'COMPLETED' else None
+        detail.terminal_at
+        if detail.status is not TaskStatus.COMPLETED
+        else None
     )
     end = detail.terminal_at
     queue_s = span_s(
@@ -521,7 +545,7 @@ def _history_leaf(detail: 'HistoryTaskDetail') -> LeafTaskInfo:
     exec_s = span_s(detail.started_at, end, live=False)
     return LeafTaskInfo(
         task_id=detail.task_id,
-        status=detail.status,
+        status=detail.status.value,
         error_code=nz(detail.error_code),
         failed_reason=nz(detail.final_failed_reason),
         retry_count=detail.retry_count,
@@ -1267,8 +1291,9 @@ async def _estimated_history_total(
     every scanned relation to at least one row, so its figure there is
     clamp noise, not information (the sibling of the live arm's
     ``reltuples = -1`` rule). A payload the decoder does not recognize
-    raises ``HistoryContractError``; the caller returns it as a typed
-    error, never a silent exact fallback.
+    raises ``HistoryContractError``; ``list_tasks`` returns it as
+    ``MonitoringQueryHistoryContractViolation``, never a silent exact
+    fallback.
     """
     nonempty = (
         await session.execute(text(HISTORY_NONEMPTY_PROBE_SQL))
@@ -1394,14 +1419,7 @@ async def list_tasks(
     except SQLAlchemyError as exc:
         return _db_err('task list query', exc)
     except HistoryContractError as exc:
-        return Err(
-            MonitoringQueryError(
-                code=MonitoringQueryErrorCode.DB_OPERATION_FAILED,
-                message=f'task list estimate decode failed: {exc}',
-                retryable=False,
-                exception=exc,
-            )
-        )
+        return _contract_err('task list estimate decode', exc)
 
     summaries = [_task_summary(task) for task in tasks]
     summaries.extend(_history_summary(row) for row in history_rows)
@@ -1426,7 +1444,9 @@ async def get_task_detail(
     """A single task with its attempt history, or None when it does not exist.
 
     The attempt history is where a task's cause lives: ``error_message``
-    carries the unhandled exception per try, including retries.
+    carries the unhandled exception per try, including retries. A history
+    row that does not decode returns
+    ``MonitoringQueryHistoryContractViolation``.
     """
     if not _is_uuid_text(task_id):
         return Ok(None)
@@ -1480,6 +1500,8 @@ async def get_task_detail(
             node = (await session.execute(node_stmt)).tuples().first()
     except SQLAlchemyError as exc:
         return _db_err('task detail query', exc)
+    except HistoryContractError as exc:
+        return _contract_err('task detail history read', exc)
 
     workflow_id, workflow_task_index = node if node is not None else (None, None)
     return Ok(
@@ -1701,7 +1723,9 @@ async def get_workflow_node(
     Returns None when the run has no node at that index. Subworkflow nodes
     have no backing task; drill into the child run instead. ``leaf`` is also
     None when the backing task row has been removed by retention, while its
-    attempt rows are still reported if present.
+    attempt rows are still reported if present. A history row of the
+    backing task that does not decode returns
+    ``MonitoringQueryHistoryContractViolation``.
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
@@ -1748,6 +1772,8 @@ async def get_workflow_node(
                 )
     except SQLAlchemyError as exc:
         return _db_err('workflow node detail query', exc)
+    except HistoryContractError as exc:
+        return _contract_err('workflow node history read', exc)
 
     if history is not None:
         leaf = _history_leaf(history)

@@ -19,6 +19,8 @@ unchanged.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from hashlib import sha256
 from typing import Any
@@ -420,6 +422,41 @@ async def route_rows(session: AsyncSession, rows: tuple[Any, ...]) -> None:
             )
     session.add_all(live_rows)
     await session.commit()
+
+
+@asynccontextmanager
+async def stored_history_status(
+    session: AsyncSession, task_id: str, value: str,
+) -> AsyncGenerator[None, None]:
+    """Store ``value`` as the history status of ``task_id`` for the block.
+
+    Schema v49 drops the status CHECK of the history parent, so an
+    out-of-band write can store a value that is not a ``TaskStatus``
+    member. The block writes the previous status back, so later tests read
+    a valid row.
+    """
+    previous = (
+        await session.execute(
+            text(
+                'SELECT status FROM horsies_task_history '
+                'WHERE task_id = CAST(:task_id AS uuid)'
+            ),
+            {'task_id': task_id},
+        )
+    ).scalar_one()
+    status_sql = text(
+        'UPDATE horsies_task_history SET status = :status '
+        'WHERE task_id = CAST(:task_id AS uuid)'
+    )
+    _ = await session.execute(status_sql, {'status': value, 'task_id': task_id})
+    await session.commit()
+    try:
+        yield
+    finally:
+        _ = await session.execute(
+            status_sql, {'status': previous, 'task_id': task_id},
+        )
+        await session.commit()
 
 
 async def force_terminal(

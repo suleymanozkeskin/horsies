@@ -2520,7 +2520,7 @@ class PostgresBroker:
         return self._history_raw_result_record(
             task_id,
             detail.task_name,
-            TaskStatus(detail.status),
+            detail.status,
             detail.result_payload,
             detail.result_digest,
         )
@@ -3886,7 +3886,7 @@ class PostgresBroker:
             case _:
                 return Ok(None)
 
-        status = TaskStatus(detail.status)
+        status = detail.status
         completed_at = (
             detail.terminal_at if status is TaskStatus.COMPLETED else None
         )
