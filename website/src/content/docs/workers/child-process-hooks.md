@@ -17,6 +17,7 @@ Use the hook to set a worker-specific pool policy (e.g. a warm pool for web traf
 
 Task code must read the engine through indirection — an `Engine`'s pool class is fixed at `create_engine()` time, so the hook replaces the engine object rather than mutating it:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # app/databases/postgres.py
 from sqlalchemy import Engine, create_engine, QueuePool
@@ -36,6 +37,7 @@ def get_engine() -> Engine:  # task code reads via this, never the global
     return _app_engine
 ```
 
+<!-- check: skip -- imports a placeholder module -->
 ```python
 # app/configs/horsies.py
 from app.databases import postgres
@@ -71,6 +73,7 @@ Fail-closed: a hook that raises, or runs past its 10-second budget, terminates t
 
 **Don't read the engine through a captured reference.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong — task captured the engine before the hook replaced it
 from app.databases.postgres import get_engine

@@ -9,6 +9,7 @@ For full scheduler documentation, see [Scheduler Overview](/scheduling/scheduler
 
 ## Scheduled Tasks
 
+<!-- check: skip -- imports a placeholder module -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 from .config import app
@@ -37,6 +38,7 @@ def cleanup_completed_orders() -> TaskResult[dict[str, JsonValue], TaskError]:
 ## Schedule Configuration
 
 ```python
+from pydantic import SecretStr
 from datetime import time as datetime_time
 from horsies import AppConfig, PostgresConfig, QueueMode, CustomQueueConfig
 from horsies import (
@@ -81,7 +83,7 @@ config = AppConfig(
         CustomQueueConfig(name="low", priority=100, max_concurrency=5),
     ],
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/shipping_db",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/shipping_db"),
     ),
     schedule=schedule_config,
 )

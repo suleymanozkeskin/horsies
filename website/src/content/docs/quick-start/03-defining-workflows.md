@@ -62,6 +62,7 @@ Each `TaskNode` requires a `node_id` for identification within the workflow.
 - **Stable observability:** Index-based IDs shift when you reorder tasks
 - **Meaningful tracing:** `validate_order` is clearer than `order_processing:0` in logs
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Recommended: explicit node_id
 TaskNode(fn=validate_order, node_id="validate_order")
@@ -76,6 +77,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 Define nodes at module level with explicit `node_id`, then assign to class attributes:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
@@ -161,6 +163,7 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
 
 ## Starting a Workflow
 
+<!-- check: skip -- does not type-check: reportAttributeAccessIssue -->
 ```python
 spec = OrderProcessingWorkflow.build(app)
 reveal_type(spec)  # WorkflowSpec
@@ -191,6 +194,7 @@ else:
 
 Define nodes within a function scope, then pass to `app.workflow()`:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
@@ -292,6 +296,7 @@ def start_order_processing(order: Order) -> None:
 
 **Note:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task("check_inventory", queue_name="standard")
 def check_inventory(
@@ -316,6 +321,7 @@ def check_inventory(
 
 When multiple nodes converge into a single task (fan-in), each upstream result arrives as a separate keyword argument:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task("reserve_inventory", queue_name="urgent")
 def reserve_inventory(

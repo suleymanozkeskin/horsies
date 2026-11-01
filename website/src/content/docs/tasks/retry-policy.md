@@ -156,8 +156,10 @@ def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
 Set a global mapper on `AppConfig` to apply to all tasks:
 
 ```python
+from pydantic import SecretStr
+
 config = AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -287,6 +289,7 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
 
 ### Database Transaction with Deadlock Retry
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(
     "update_inventory",

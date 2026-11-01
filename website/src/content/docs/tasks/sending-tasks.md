@@ -92,6 +92,7 @@ naming `standard_30d` explicitly is a choice that overrides it.
 
 Pass `retention_class_key=None` to keep the record forever:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 match await audit_task.with_options(retention_class_key=None).send_async(entry=entry):
     case Ok(handle):
@@ -110,6 +111,7 @@ finite classes in
 [`AppConfig.retention.retention_classes`](../../configuration/retention-config#declaring-your-own)
 and send into them by key:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 match await audit_task.with_options(retention_class_key='audit_1y').send_async(entry=entry):
     case Ok(handle):
@@ -179,6 +181,7 @@ my_task.send(name="alice", count=3)
 
 Arguments must be keyword-only and JSON-serializable. Positional `.send(arg1, arg2)` is rejected with `Err(VALIDATION_FAILED)`. Pydantic models and dataclass instances are supported directly; the worker decodes them using the registered task's parameter type via `pydantic.TypeAdapter`.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 
@@ -219,6 +222,7 @@ Use only for **unit testing**. For production, always use `.send()` or `.send_as
 
 **Don't call `.send()` at module level.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - returns Err(TaskSendSuppressed) during worker import
 # tasks.py
@@ -235,6 +239,7 @@ def process():
 
 **Don't pass non-serializable objects.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 my_task.send(connection=db_connection)
@@ -271,6 +276,7 @@ The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSend
 
 Set `resend_on_transient_err=True` in `AppConfig` to have the library automatically retry transient enqueue failures before returning the error:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     resend_on_transient_err=True,

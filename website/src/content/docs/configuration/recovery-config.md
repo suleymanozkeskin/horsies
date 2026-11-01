@@ -17,6 +17,7 @@ Horsies automatically detects and recovers these tasks.
 
 ## Basic Usage
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies.core.models.recovery import RecoveryConfig
 

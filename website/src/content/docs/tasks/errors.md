@@ -327,6 +327,7 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 Domain-specific errors use string codes:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 
@@ -432,9 +433,11 @@ The library default `UNHANDLED_EXCEPTION` is intentionally a built-in code and i
 Example collision that `horsies check` catches:
 
 ```python
+from pydantic import SecretStr
+
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url='postgresql+psycopg://...'),
+        broker=PostgresConfig(database_url=SecretStr('postgresql+psycopg://...')),
         # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
         exception_mapper={ValueError: 'BROKER_ERROR'},
     ),
@@ -561,6 +564,7 @@ error[HRS-007]: cycle detected in workflow DAG
 
 Access fields programmatically when catching the exception:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies.core.errors import HorsiesError
 

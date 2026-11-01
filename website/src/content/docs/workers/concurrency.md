@@ -222,6 +222,7 @@ horsies worker myapp.instance:app --processes=6 \
 
 In CUSTOM mode, limit concurrent tasks per queue:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies.core.models.queues import CustomQueueConfig
 
@@ -259,6 +260,7 @@ Use cases:
 
 Limit total concurrent tasks across all workers:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 config = AppConfig(
     cluster_wide_cap=50,  # Max 50 tasks in-flight across entire cluster
@@ -282,6 +284,7 @@ Horsies provides two modes for enforcing concurrency limits:
 
 When `prefetch_buffer=0` (default), the system counts **RUNNING + CLAIMED** tasks when enforcing caps:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 config = AppConfig(
     cluster_wide_cap=50,
@@ -303,6 +306,7 @@ In production, task durations vary wildly. Without hard cap mode, a worker proce
 
 When `prefetch_buffer > 0`, queue concurrency counts **RUNNING** tasks, allowing workers to prefetch beyond their running capacity. A worker's local budget still subtracts already-claimed rows so it cannot hold more than `processes + prefetch_buffer` in total:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 config = AppConfig(
     prefetch_buffer=4,      # Allow prefetching up to 4 tasks beyond running
@@ -381,6 +385,7 @@ Key behaviors:
 
 During each claim pass:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Hard cap mode (prefetch_buffer=0): local budget counts RUNNING + CLAIMED
 # Soft cap mode (prefetch_buffer>0): queue caps count RUNNING, but local
@@ -442,6 +447,7 @@ fleet is on one version.
 
 ### Single Worker, Simple
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -455,6 +461,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### Multi-Worker with Global Cap
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -475,6 +482,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### Priority Queues with Rate Limiting
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

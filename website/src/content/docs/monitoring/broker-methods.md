@@ -10,11 +10,12 @@ tags: [monitoring, broker, api]
 All broker methods return `BrokerResult[T]` — either `Ok(value)` on success or `Err(BrokerOperationError)` on failure. `BrokerOperationError` is a union of frozen variants; match on the variant ([Broker Errors](../tasks/errors#broker-errors-brokerresult)). Every variant carries a `retryable` flag: `True` when the driver classifies the cause as transient (connection blip), `False` when it does not clear by itself (a refused argument, schema drift, code bug).
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, is_ok, is_err
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
     ),
 ))
 
@@ -117,6 +118,7 @@ Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not 
 **Returns:** `BrokerResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
 Sync wrapper: `broker.get_task_info(...)`.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 result = await broker.get_task_info_async(
     task_id,

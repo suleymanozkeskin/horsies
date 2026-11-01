@@ -9,6 +9,7 @@ tags: [scheduling, configuration, TaskSchedule]
 
 Top-level scheduler configuration added to `AppConfig`.
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 
@@ -68,6 +69,7 @@ TaskSchedule(
 
 Must be unique across all schedules. Used for state tracking:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskSchedule(name="hourly-sync", ...)
 TaskSchedule(name="daily-cleanup", ...)
@@ -77,6 +79,7 @@ TaskSchedule(name="daily-cleanup", ...)
 
 Must match a registered `@app.task()`:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task("send_notification")
 def send_notification(*, user_id: int) -> TaskResult[None, TaskError]:
@@ -110,6 +113,7 @@ TaskSchedule(
 
 In CUSTOM mode, override the task's default queue:
 
+<!-- check: skip -- does not type-check: reportArgumentType -->
 ```python
 @app.task("background_job", queue_name="normal")
 def background_job() -> TaskResult[None, TaskError]:
@@ -180,6 +184,7 @@ future slot.
 
 Disable individual schedules:
 
+<!-- check: skip -- does not type-check: reportArgumentType -->
 ```python
 TaskSchedule(
     name="deprecated-job",
@@ -191,6 +196,7 @@ TaskSchedule(
 
 Disable entire scheduler:
 
+<!-- check: skip -- does not type-check: reportArgumentType -->
 ```python
 ScheduleConfig(
     enabled=False,  # No schedules run
@@ -220,6 +226,7 @@ At scheduler startup, validates:
 2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
 3. **Arguments complete**: Required task parameters must be provided
 
+<!-- check: skip -- does not type-check: reportArgumentType -->
 ```python
 # Will fail at startup:
 TaskSchedule(

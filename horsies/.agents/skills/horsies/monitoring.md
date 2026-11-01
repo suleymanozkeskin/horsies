@@ -58,6 +58,7 @@ to serve). The `--database-url` form is registry-less by design:
 
 ## Authorization
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 class MonitoringAuthPolicy(Protocol):
     async def can_view(self, request: Request) -> bool: ...
@@ -102,6 +103,7 @@ error changes stored data. HTTP is the status of the web read routes.
 | `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
 | `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; a repeat gives the same result until the stored row or the server changes |
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
 task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
@@ -149,6 +151,7 @@ unfiltered total as an exact count.
 
 ## Task Actions — `cancel_task`
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, TaskActionError]
 ```

@@ -8,11 +8,12 @@ tags: [configuration, AppConfig]
 ## Basic Usage
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 )
 app = Horsies(config)
 ```
@@ -42,6 +43,7 @@ Every config model refuses unknown keys. This includes the nested models (`Postg
 
 ### DEFAULT Mode
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -52,6 +54,7 @@ config = AppConfig(
 
 ### CUSTOM Mode
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies import CustomQueueConfig
 
@@ -71,6 +74,7 @@ See [Queue Modes](../../concepts/queue-modes) for details.
 
 Limit total in-flight tasks across all workers:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -87,6 +91,7 @@ Set to `None` (default) for unlimited.
 
 Control whether workers can prefetch tasks beyond their running capacity:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 # Hard cap mode (default) - strict enforcement, fair distribution
 config = AppConfig(
@@ -149,6 +154,7 @@ nothing.
 
 Override crash recovery defaults:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies import RecoveryConfig
 
@@ -170,6 +176,7 @@ See [Recovery Config](recovery-config.md) for all options.
 
 Configure worker retry/backoff and NOTIFY fallback polling:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies import WorkerResilienceConfig
 
@@ -188,6 +195,7 @@ config = AppConfig(
 
 Enable scheduled tasks:
 
+<!-- check: skip -- does not type-check: reportCallIssue -->
 ```python
 from horsies import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
@@ -240,6 +248,7 @@ else:
 
 **Signature:**
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 def check(self, *, live: bool = False) -> list[HorsiesError]
 ```

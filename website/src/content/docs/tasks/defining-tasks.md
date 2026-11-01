@@ -16,10 +16,11 @@ Define tasks by decorating functions with `@app.task()` and returning `TaskResul
 ### Basic Task
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
 
 config = AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 )
 app = Horsies(config)
 
@@ -51,6 +52,7 @@ def compute(*, x: int) -> TaskResult[int, TaskError]:
 
 For void tasks:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task("fire_and_forget")
 def fire_and_forget() -> TaskResult[None, TaskError]:
@@ -90,6 +92,7 @@ def might_crash() -> TaskResult[str, TaskError]:
 
 With explicit try/except:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
 
@@ -113,6 +116,7 @@ def some_api_call() -> TaskResult[dict[str, JsonValue], TaskError]:
 
 Or with the exception mapper (no try/except needed):
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(
     "some_api_call",
@@ -181,6 +185,7 @@ app.discover_tasks(["tasks.py", "more_tasks.py"])
 
 **Don't omit the return type annotation.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - raises TypeError at definition time
 @app.task("bad_task")

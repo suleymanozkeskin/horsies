@@ -201,6 +201,7 @@ there is no migration contract between pre-1.0 versions.
   documented `class Meta: output = save` raised `NameError`, and working
   code set `Meta.output` after the class. Before:
 
+  <!-- check: skip -- uses names that the page does not define -->
   ```python
   class Pipeline(WorkflowDefinition[SaveResult]):
       name = 'pipeline'
@@ -216,6 +217,7 @@ there is no migration contract between pre-1.0 versions.
 
   After:
 
+  <!-- check: skip -- uses names that the page does not define -->
   ```python
   class Pipeline(WorkflowDefinition[SaveResult]):
       name = 'pipeline'

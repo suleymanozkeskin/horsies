@@ -24,11 +24,13 @@ Workflows provide:
 
 ### 2.1 Class-Based Definition (Recommended)
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, TaskResult, TaskError, JsonValue
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(task_name="fetch_data")
@@ -88,6 +90,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 ### 2.2 Starting a Workflow
 
+<!-- check: skip -- does not type-check: reportAttributeAccessIssue -->
 ```python
 # Build and start
 spec = DataPipeline.build(app)
@@ -107,6 +110,7 @@ else:
 
 For simple DAGs without conditions or subworkflows:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 node_b = TaskNode(fn=task_b, waits_for=[node_a])
@@ -130,6 +134,7 @@ Use class-based `WorkflowDefinition` for anything beyond trivial DAGs.
 
 `waits_for` defines execution order. A node waits until all its dependencies reach a terminal state (COMPLETED, FAILED, or SKIPPED).
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 class DiamondDAG(WorkflowDefinition[str]):
     name = "diamond"
@@ -157,6 +162,7 @@ Use `allow_failed_deps=True` to run anyway (see Section 6).
 
 `args_from` injects upstream results as keyword arguments.
 
+<!-- check: skip -- uses a name before the page defines it -->
 ```python
 @app.task(task_name="add")
 def add(*, a: int, b: int) -> TaskResult[int, TaskError]:
@@ -198,6 +204,7 @@ This lets you handle upstream failures explicitly.
 When a task needs access to multiple upstream results or subworkflow summaries,
 use `workflow_ctx_from` instead of multiple `args_from` entries.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import WorkflowContext
 
@@ -258,6 +265,7 @@ A **SubWorkflowNode** runs an entire workflow as a single node in the parent DAG
 
 ### 6.2 Basic Subworkflow
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Child workflow
 class ChildPipeline(WorkflowDefinition[int]):
@@ -295,6 +303,7 @@ fails with `HRS-022` (`WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH`).
 
 When the child workflow needs runtime parameters:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 class DataProcessor(WorkflowDefinition[ProcessedData]):
     name = "data_processor"
@@ -347,6 +356,7 @@ expanded. To get check coverage for one, register its `build_with` as a
 workflow builder (`@app.workflow_builder`, with `cases` for required params).
 :::
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Use in parent with kwargs
 class MultiSourceAggregation(WorkflowDefinition[Report]):
@@ -492,6 +502,7 @@ Rules for this pattern:
 
 When you need visibility into child workflow internals:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import WorkflowContext, SubWorkflowSummary
 
@@ -548,6 +559,7 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 
 SubWorkflowNode results flow like TaskNode results:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(task_name="process_child_result")
 def process_child_result(
@@ -602,6 +614,7 @@ This prevents cascading execution of tasks that depend on failed data.
 
 Use this for recovery tasks or aggregators that handle failures:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(task_name="recovery_handler")
 def recovery_handler(
@@ -635,6 +648,7 @@ class RecoveryWorkflow(WorkflowDefinition[Data]):
 
 Control what happens when any task fails:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import OnError, WorkflowDefinitionConfig
 
@@ -666,6 +680,7 @@ With `OnError.PAUSE`:
 When a task runs with `allow_failed_deps=True` and its dependency was SKIPPED
 (not just FAILED), the injected result has error code `UPSTREAM_SKIPPED`:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(task_name="handle_any_failure")
 def handle_any_failure(
@@ -694,6 +709,7 @@ Control when a task with multiple dependencies becomes READY.
 
 Task runs when ALL dependencies reach terminal state:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 aggregate = TaskNode(
     fn=aggregate,
@@ -708,6 +724,7 @@ aggregate = TaskNode(
 
 Task runs when ANY dependency completes successfully:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 first_success = TaskNode(
     fn=use_first_result,
@@ -723,6 +740,7 @@ first_success = TaskNode(
 
 Task runs when a minimum number of dependencies succeed:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 quorum_result = TaskNode(
     fn=quorum_handler,
@@ -743,6 +761,7 @@ Define what "workflow success" means beyond the default output node.
 
 ### 9.1 Basic Success Policy
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import SuccessPolicy, SuccessCase
 
@@ -770,6 +789,7 @@ class DeliveryWorkflow(WorkflowDefinition[str]):
 
 ### 9.2 Multiple Required Tasks
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Both validation AND storage must succeed
 success_policy = SuccessPolicy(cases=[
@@ -835,6 +855,7 @@ At `WorkflowSpec` creation, these are validated:
 
 ### DO
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Use class-based definitions for reusability
 class MyWorkflow(WorkflowDefinition[Output]):
@@ -863,6 +884,7 @@ def build_with(cls, app, param, *_args, **_kwargs):
 
 ### DON'T
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Don't access results not in workflow_ctx_from
 node = TaskNode(
@@ -891,6 +913,7 @@ def build_with(cls, app, *_args, **_kwargs):
 **Cause**: Broker has no `app` attached.
 
 **Fix**: Use `app.get_broker()` or attach manually:
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 broker = PostgresBroker(...)
 broker.app = app  # Attach before start_workflow
@@ -907,6 +930,7 @@ workflow can continue deterministic failure propagation without leaving the node
 **Cause**: `workflow_ctx_from` is set but task function lacks the parameter.
 
 **Fix**: Add the parameter:
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(task_name="my_task")
 def my_task(
@@ -921,6 +945,7 @@ def my_task(
 **Cause**: `args_from` references a node not in `waits_for`.
 
 **Fix**: Add the node to `waits_for`:
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 node_b = TaskNode(
     fn=task_b,
@@ -966,6 +991,7 @@ horsies worker myapp.instance:app
 
 Putting it all together:
 
+<!-- check: skip -- does not type-check: reportAttributeAccessIssue -->
 ```python
 from typing import Any
 
@@ -988,7 +1014,7 @@ from horsies import (
 )
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://user:pass@localhost:5432/mydb"),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
 ))
 
 

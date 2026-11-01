@@ -91,6 +91,7 @@ enqueued without a retained input cannot be rerun later.
 
 Programmatic callers use the same contract:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from datetime import timedelta
 

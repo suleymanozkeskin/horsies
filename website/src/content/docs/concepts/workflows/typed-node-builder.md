@@ -14,10 +14,11 @@ The `.node()` method on `TaskFunction` creates `TaskNode` instances with static 
 ### Basic Usage
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 
 app = Horsies(AppConfig(
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 ))
 
 @app.task(task_name='compute_score')
@@ -41,6 +42,7 @@ node = compute_score.node(node_id='score')(
 
 The API separates workflow configuration from task arguments:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 task.node(workflow_options)(task_arguments)
 ```
@@ -49,6 +51,7 @@ Stage 1 accepts workflow options (keyword-only): `waits_for`, `args_from`, `work
 
 Stage 2 accepts task arguments matching the function signature.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Separate stages
 factory = fetch_user.node(
@@ -90,6 +93,7 @@ _score_c = compute_score.node(
 
 Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import from_node
 
@@ -123,6 +127,7 @@ process_node = process_user.node(node_id='process')(
 
 You can also use `TaskNode` directly for tasks receiving `args_from` injections:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import TaskNode
 
@@ -167,6 +172,7 @@ class ScoreWorkflow(WorkflowDefinition[int]):
 
 **Don't pass `args_from` parameters as positional arguments to `.node()()`.**
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 # Wrong - user_data is injected at runtime, not known at construction
 process_node = process_user.node(node_id='process')(

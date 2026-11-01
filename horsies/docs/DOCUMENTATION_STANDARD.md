@@ -192,6 +192,22 @@ docs/
 
 ---
 
+## Python Code Blocks Are Type-Checked
+
+CI type-checks every `python` block of the docs and the skill files.
+
+- The blocks of one page share names: a block can use the names that the blocks above it define.
+- `from prelude import *` is added to each page. It gives `app`, `my_task`, `broker`, `handle`, `spec`, `ctx` and common standard-library names. The stand-ins are in `tests/docs_examples/stubs/`.
+- A block that must not be checked has a marker on the line directly above the fence, with a reason:
+  - `.md`: `<!-- check: skip -- reason -->`
+  - `.mdx`: `{/* check: skip -- reason */}`
+- `check: alone` (same form, no reason) checks a block on its own, with no names from other blocks.
+- A block that does not parse needs `skip`. Use `skip` for pseudo-code, a signature, a wrong form shown next to the right one, and a block that needs names the page does not define.
+- Pass `SecretStr(...)` to `PostgresConfig(database_url=...)`.
+- Run the check: `uv run python tests/docs_examples/extract.py build/doc_examples && uv run pyright -p pyrightconfig.docs.json`
+
+---
+
 ## Checklist Before Committing
 
 - [ ] Frontmatter present with title, summary, related, tags

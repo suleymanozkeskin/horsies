@@ -58,6 +58,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### 2. Main Loop
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 while not stopped:
     await claim_and_dispatch_all()
@@ -123,6 +124,7 @@ Each child process:
 3. Populates local task registry
 4. Suppresses sends during import (prevents side effects)
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 def _child_initializer(app_locator, imports):
     app = _locate_app(app_locator)

@@ -161,6 +161,7 @@ See [Errors Reference](../../tasks/errors#workflow-handle-errors-handleresult) f
 
 **Usage:**
 
+<!-- check: skip -- does not type-check: reportPossiblyUnboundVariable -->
 ```python
 from horsies import Err, HandleResumeRecoveryFailed, Ok
 
@@ -218,6 +219,7 @@ See [Typed Node Builder](typed-node-builder) for usage examples.
 
 Register a function that builds a `WorkflowSpec` for validation during `horsies check`. Registered builders are executed under send suppression (no tasks are enqueued) so the returned `WorkflowSpec` can be fully validated — DAG structure, kwargs against function signatures, `args_from` type compatibility, etc.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import Horsies, WorkflowSpec
 

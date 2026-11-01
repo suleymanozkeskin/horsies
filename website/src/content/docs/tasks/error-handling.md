@@ -63,6 +63,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
 > concrete class you expect (this matters when retry policies key on
 > the mapped error code).
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 @app.task(
     "fetch_api_data",
@@ -88,6 +89,7 @@ See [retry-policy](../retry-policy) for configuration details.
 Tasks wired with `args_from` receive the upstream `TaskResult`, not just the raw success value. Use this workflow example as the canonical guard pattern:
 
 ```python
+from pydantic import SecretStr
 from dataclasses import dataclass
 
 from horsies import (
@@ -104,7 +106,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -198,6 +200,7 @@ This pattern only runs when the downstream task actually executes. With `join="a
 
 Prefer explicit returns over raising exceptions:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import RetrievalCode, Ok, Err
 from instance import my_task
@@ -237,6 +240,7 @@ Create a handler that **returns actions**, not just logs.
 
 **Don't raise exceptions for flow control.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - exceptions break control flow
 if result.is_err():
@@ -250,6 +254,7 @@ if result.is_err():
 
 **Don't ignore errors after logging.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - logs but continues as if nothing happened
 if result.is_err():
@@ -264,6 +269,7 @@ if result.is_err():
 
 **Don't manually retry errors that should be auto-retried.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - duplicates library retry logic
 if error.error_code == "RATE_LIMITED":

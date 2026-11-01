@@ -188,6 +188,7 @@ When an upstream task fails and the downstream task uses `join="all"` (the defau
 With `join="any"`, a downstream task runs when **any** dependency succeeds, so a single upstream failure does not cause a skip unless **all** dependencies fail. With `join="quorum"`, the task runs when `min_success` dependencies succeed, so failures only matter if they make the threshold unreachable.
 
 ```python
+from pydantic import SecretStr
 from horsies import (
     Horsies,
     AppConfig,
@@ -199,7 +200,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -280,6 +281,7 @@ behavior without declaring the rule.
 
 A paused workflow can be resumed via `WorkflowHandle.resume()` or `WorkflowHandle.resume_async()`.
 
+<!-- check: skip -- uses a name before the page defines it -->
 ```python
 start_result = await spec.start_async()
 handle = start_result.ok_value
@@ -340,6 +342,7 @@ Task runs when: ALL dependencies are in terminal state (COMPLETED/FAILED/SKIPPED
 
 ### OR-join (join="any")
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Task runs when any dependency succeeds
 aggregator = TaskNode(
@@ -356,6 +359,7 @@ aggregator = TaskNode(
 
 ### Quorum Join (join="quorum")
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Task runs when at least 2 of 3 dependencies succeed
 quorum_task = TaskNode(
@@ -387,6 +391,7 @@ Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
 - **FAILED deps**: Receive the actual `TaskResult` with the original error
 - **SKIPPED deps**: Receive a sentinel `TaskResult` with `error_code=UPSTREAM_SKIPPED`
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import OutcomeCode, RetrievalCode
 
@@ -406,6 +411,7 @@ def recovery_handler(*, input_result: TaskResult[Data, TaskError]) -> TaskResult
 
 When a dependency is SKIPPED (due to upstream failure), tasks with `allow_failed_deps=True` receive a sentinel `TaskResult` instead of missing kwargs:
 
+<!-- check: skip -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskResult(err=TaskError(
     error_code=OutcomeCode.UPSTREAM_SKIPPED,
@@ -511,6 +517,7 @@ a ── b ─┤
 
 **Scenario:** "Generate tasks at runtime based on input data"
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Wanted (not implemented):
 @workflow
@@ -570,6 +577,7 @@ By default, any task failure marks the workflow as **FAILED**. The `success_poli
 
 ### SuccessCase and SuccessPolicy
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import SuccessPolicy, SuccessCase
 
@@ -601,6 +609,7 @@ workflow = app.workflow(
 
 A package delivery workflow where multiple delivery outcomes are acceptable:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Define tasks
 pickup = TaskNode(fn=pickup_package)
@@ -643,6 +652,7 @@ When no success case is satisfied:
 
 ### 1. Use allow_failed_deps for Recovery
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Primary task that can fail
 primary = TaskNode(fn=fetch_data)
@@ -660,6 +670,7 @@ recovery = TaskNode(
 
 Structure DAGs so failures are visible in one node's result. The workflow is still FAILED, so read the aggregator with `result_for(final)`:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
@@ -671,6 +682,7 @@ final = TaskNode(
 
 ### 3. Use on_error="pause" for Critical Workflows
 
+<!-- check: skip -- does not type-check: reportArgumentType -->
 ```python
 workflow = app.workflow(
     "critical_pipeline",
@@ -681,6 +693,7 @@ workflow = app.workflow(
 
 ### 4. Explicit Output Task
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Designate which task's result is the workflow output
 workflow = app.workflow(
@@ -696,6 +709,7 @@ Results from `WorkflowHandle.results()` and `WorkflowHandle.get()` (when no outp
 
 This ensures no result collisions when the same task function is used multiple times in a workflow.
 
+<!-- check: skip -- does not type-check: reportAttributeAccessIssue -->
 ```python
 # Same task used twice
 fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
@@ -736,6 +750,7 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns `RESULT_NOT_READY` if the task hasn't completed.
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import WorkflowContext, TaskNode, TaskResult, TaskError
 
@@ -769,6 +784,7 @@ def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Summ
 
 `result_for(node: TaskNode[T] | NodeKey[T])` returns `TaskResult[T, TaskError]` where `T` matches the node's generic parameter. This enables static type checking:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 # Type checker knows these types
 a_result: TaskResult[int, TaskError] = ctx.result_for(node_a)      # node_a is TaskNode[int]
@@ -783,6 +799,7 @@ if a_result.is_ok():
 `WorkflowContext` looks up results by **node_id**, not object identity. This means you can safely use
 `TaskNode` instances or typed `NodeKey` objects:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 key_a = node_a.key()  # NodeKey[int]
 result = workflow_ctx.result_for(key_a)
@@ -803,7 +820,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -834,6 +851,7 @@ WorkflowSpec construction using the format `{slugified_workflow_name}:{task_inde
 Workflow names can contain any characters (including spaces). The `slugify()`
 function converts spaces to underscores and removes invalid characters:
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 from horsies import slugify
 
@@ -903,7 +921,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -936,6 +954,7 @@ node_b: TaskNode[str] = TaskNode(
 
 **Don't do this:**
 
+<!-- check: skip -- does not type-check: reportAttributeAccessIssue -->
 ```python
 # Fire-and-forget: start workflow without waiting
 start_result = spec.start()
@@ -947,6 +966,7 @@ result = handle.result_for(node)  # Returns RESULT_NOT_READY error
 
 **Do this instead:**
 
+<!-- check: skip -- uses names that the page does not define -->
 ```python
 start_result = spec.start()
 handle = start_result.ok_value

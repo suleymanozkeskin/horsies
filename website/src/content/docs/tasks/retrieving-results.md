@@ -136,6 +136,7 @@ def test_my_task():
 
 **Don't silently ignore errors by only logging them.**
 
+<!-- check: skip -- shows a wrong form next to the right one -->
 ```python
 # Wrong - logs error but takes no action
 result = handle.get()
