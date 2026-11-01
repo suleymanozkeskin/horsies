@@ -103,6 +103,7 @@ from horsies.monitoring.errors import (
     MonitoringQueryHistoryContractViolation,
     MonitoringResult,
 )
+from horsies.monitoring.pages import BreakdownLimit, TaskPage, WorkflowRunsLimit
 from horsies.monitoring.models import (
     Breakdown,
     ErrorCategory,
@@ -146,9 +147,6 @@ type TaskSortField = Literal[
 type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
 type SortDirection = Literal['asc', 'desc']
-
-MAX_TASK_PAGE_REACH = 500
-"""Maximum ``offset + limit`` accepted by the bounded two-side merge."""
 
 # Sort key -> the expression it orders by, tagged with nullability.
 # ``queue_s`` and ``exec_s`` sort by the pure-SQL spans (dispatch->start,
@@ -1056,7 +1054,7 @@ async def task_breakdown(
     error_codes: list[str],
     error_categories: list[ErrorCategory],
     retried_only: bool,
-    limit: int,
+    limit: BreakdownLimit,
 ) -> MonitoringResult[Breakdown]:
     """Per-group status pivot with a rollup TOTAL row.
 
@@ -1217,7 +1215,7 @@ async def task_breakdown(
     return Ok(
         Breakdown(
             group_by=group_by,
-            groups=ordered[:limit],
+            groups=ordered[:limit.value],
             total=total_row,
             group_count=len(ordered),
         )
@@ -1326,8 +1324,7 @@ async def list_tasks(
     retried_only: bool,
     sort_by: TaskSortField,
     sort_dir: SortDirection,
-    offset: int,
-    limit: int,
+    page: TaskPage,
 ) -> MonitoringResult[TaskListPage]:
     """A paginated, server-sorted, server-filtered slice of tasks.
 
@@ -1349,11 +1346,7 @@ async def list_tasks(
     # Each side over-fetches the page's reach (offset + limit) sorted
     # by the SAME key, and the merge re-sorts and slices — correct for
     # any page within the capped reach, with cost bounded by the caps.
-    reach = offset + limit
-    if reach > MAX_TASK_PAGE_REACH:
-        raise ValueError(
-            f'offset + limit must be <= {MAX_TASK_PAGE_REACH}; got {reach}'
-        )
+    reach = page.reach
     rows_stmt = list_rows_statement(
         scope=scope,
         sort_by=sort_by,
@@ -1373,7 +1366,7 @@ async def list_tasks(
     page_sql, page_params = history_page_statement(
         HistoryPageQuery(
             window=window,
-            limit=max(reach, 1),
+            limit=reach,
             offset=0,
             scope=history_scope,
             order_by=history_sort_expression(
@@ -1439,8 +1432,8 @@ async def list_tasks(
     # Nulls last in BOTH directions, matching the live SQL's
     # nulls_last discipline.
     ordered = [summary for _, summary in non_null] + nulls
-    page = ordered[offset : offset + limit]
-    return Ok(TaskListPage(rows=page, total=live_total + history_total))
+    rows = ordered[page.offset : page.reach]
+    return Ok(TaskListPage(rows=rows, total=live_total + history_total))
 
 
 async def get_task_detail(
@@ -1634,7 +1627,7 @@ async def list_workflow_runs(
     *,
     name: str | None,
     status: str | None,
-    limit: int,
+    limit: WorkflowRunsLimit,
 ) -> MonitoringResult[list[WorkflowRunSummary]]:
     """Recent root workflow runs, newest first.
 
@@ -1650,7 +1643,7 @@ async def list_workflow_runs(
         select(WorkflowModel)
         .where(*conditions)
         .order_by(WorkflowModel.created_at.desc())
-        .limit(limit)
+        .limit(limit.value)
     )
 
     match await broker.select_resources():

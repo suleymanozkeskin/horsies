@@ -29,6 +29,7 @@ from horsies.monitoring.errors import (
     MonitoringQueryEventLoopLimit,
     MonitoringQueryHistoryContractViolation,
 )
+from horsies.monitoring.pages import TaskPage
 from horsies.monitoring.queries import (
     get_task_detail,
     get_workflow_node,
@@ -225,8 +226,7 @@ class TestHistoryContractViolation:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_err(result)

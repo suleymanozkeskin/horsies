@@ -1,8 +1,3 @@
----
-name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-035. Use when building, validating, or troubleshooting workflows.
----
-
 # horsies — Workflows
 
 Detailed reference for building, starting, and managing workflow DAGs.
@@ -85,7 +80,11 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
 child = SubWorkflowNode(workflow_def=ChildPipeline, kwargs={"source_url": "https://..."})
 ```
 
-A `WorkflowSpec(...)` built directly has no broker and no bound queue or priority. Do not start it as a top-level workflow: `start()` returns `BROKER_NOT_CONFIGURED`. For a top-level workflow, use `app.workflow()` or `build(app)`.
+A `WorkflowSpec(...)` built directly has `broker=None` and no bound queue or priority on its `TaskNode` items.
+
+- `start()` returns `BROKER_NOT_CONFIGURED` only when `broker` is `None`.
+- With `broker=` passed, the start runs the checks. Each top-level `TaskNode` must have `queue` and `priority` set. If one is `None`, `start()` returns `VALIDATION_FAILED` with `HRS-014` (queue) or `HRS-015` (priority).
+- For a top-level workflow, use `app.workflow()` or `build(app)`. They set the broker and bind the queue and priority.
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).

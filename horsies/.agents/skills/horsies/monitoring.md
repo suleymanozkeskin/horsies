@@ -1,8 +1,3 @@
----
-name: horsies-monitoring
-description: Monitoring guidance for horsies, including the horsies.monitoring query API, the task cancel action, the horsies[web] dashboard, create_monitoring_app, the horsies web CLI, authorization policies, and schema-compatibility states. Use when embedding the dashboard, operating it, or building on the monitoring API.
----
-
 # horsies — Monitoring
 
 Detailed reference for the typed monitoring query API, task actions, and the
@@ -106,16 +101,16 @@ error changes stored data. HTTP is the status of the web read routes.
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
 | `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 ```python
 task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
 task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
-task_breakdown(broker, *, group_by, ..., limit)         # group_by: 'worker' | 'task_name' | 'queue'
-list_tasks(broker, *, statuses, ..., sort_by, sort_dir, offset, limit)
+task_breakdown(broker, *, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
+list_tasks(broker, *, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
 get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
 list_workflow_names(broker)
-list_workflow_runs(broker, *, name, status, limit)
+list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
 get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)

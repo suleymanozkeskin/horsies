@@ -23,13 +23,16 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_err
 from horsies.monitoring import (
     Breakdown,
+    BreakdownLimit,
     Facets,
+    MAX_BREAKDOWN_LIMIT,
+    MAX_TASK_PAGE_LIMIT,
     StatusCount,
     TaskAbsenceReason,
     TaskDetail,
     TaskDetailNotFound,
     TaskListPage,
-    MAX_TASK_PAGE_REACH,
+    TaskPage,
     get_task_detail,
     list_tasks,
     task_breakdown,
@@ -160,7 +163,7 @@ def build_router(
         error_code: list[str] = Query(default=[]),
         error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
-        limit: int = Query(default=50, ge=1, le=500),
+        limit: int = Query(default=50, ge=1, le=MAX_BREAKDOWN_LIMIT),
     ) -> Breakdown:
         """Per-group status pivot with a rollup TOTAL row."""
         result = await task_breakdown(
@@ -174,7 +177,7 @@ def build_router(
             error_codes=error_code,
             error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
-            limit=limit,
+            limit=BreakdownLimit(value=limit),
         )
         if is_err(result):
             raise query_failed('Task breakdown', result.err_value)
@@ -194,16 +197,14 @@ def build_router(
         sort_by: str = Query(default='enqueued_at'),
         sort_dir: Literal['asc', 'desc'] = Query(default='desc'),
         offset: int = Query(default=0, ge=0),
-        limit: int = Query(default=50, ge=1, le=200),
+        limit: int = Query(default=50, ge=1, le=MAX_TASK_PAGE_LIMIT),
     ) -> TaskListPage:
         """A paginated, server-sorted, server-filtered slice of tasks."""
-        if offset + limit > MAX_TASK_PAGE_REACH:
+        page = TaskPage.parse(offset, limit)
+        if is_err(page):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f'offset + limit must be <= {MAX_TASK_PAGE_REACH}; '
-                    f'got {offset + limit}'
-                ),
+                detail=page.err_value.reason,
             )
         result = await list_tasks(
             broker,
@@ -217,8 +218,7 @@ def build_router(
             retried_only=retried_only,
             sort_by=parse_sort_by(sort_by),
             sort_dir=sort_dir,
-            offset=offset,
-            limit=limit,
+            page=page.ok_value,
         )
         if is_err(result):
             raise query_failed('Task list', result.err_value)

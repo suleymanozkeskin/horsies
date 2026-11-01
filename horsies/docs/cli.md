@@ -123,6 +123,7 @@ horsies get-docs [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--output DIR` | .horsies-docs | Output directory for downloaded docs |
+| `--ref main` | (none) | Download the `main` branch docs. Without it, the docs of the release tag `v{installed version}` are downloaded, and a development version fails |
 
 **Examples:**
 

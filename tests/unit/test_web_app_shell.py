@@ -385,6 +385,26 @@ class TestRequestValidation:
         assert response.status_code == 400
         assert 'offset + limit must be <= 500' in response.json()['detail']
 
+    @pytest.mark.parametrize(
+        ('path', 'code'),
+        [
+            ('/api/tasks?limit=201', 422),
+            ('/api/tasks?limit=0', 422),
+            ('/api/tasks?offset=-1', 422),
+            ('/api/tasks/breakdown?limit=501', 422),
+            ('/api/workflows?limit=201', 422),
+        ],
+    )
+    async def test_http_page_bounds_keep_their_answer(
+        self, path: str, code: int,
+    ) -> None:
+        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+
+        async with client_for(app) as client:
+            response = await client.get(path)
+
+        assert response.status_code == code
+
 
 class TestStaticServing:
     """The SPA shell, its assets, and the config injected into the page."""

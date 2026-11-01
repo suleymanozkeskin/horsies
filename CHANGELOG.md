@@ -10,6 +10,12 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
+  whitespace at the start or the end, or is longer than 100 characters (the
+  length of the database `queue_name` column).** The config raises
+  `ConfigurationError` (`HRS-200`) when it is built. Only configs that were
+  already unusable change: a task could not target such a queue, or the
+  database refused the name.
 - **Breaking: a sync call inside a running event loop returns
   `ASYNC_CONTEXT`.** Code that makes a sync call from a coroutine or a
   Jupyter cell must call the `*_async` form. Before, the call blocked that
@@ -381,9 +387,38 @@ and there is no migration contract between pre-1.0 versions.
   that was changed after registration. Before, the start returned it as
   `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
   is written.
+- **Breaking: the agent skill files moved into one skill folder.** The
+  five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
+  `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
+  `horsies/.agents/skills/`. Only `SKILL.md` has frontmatter (`name:
+  horsies`); the four reference files have none. Copy or link the new
+  folder, and remove the old paths from any agent tool setup.
+- **Breaking: `horsies get-docs` downloads the docs of the release tag
+  `v{installed version}`, not the `main` branch.** A development version
+  (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
+  exits with code 1. Pass `--ref main` to download the `main` branch docs.
+- **Breaking: `list_tasks`, `task_breakdown` and `list_workflow_runs` take a
+  page value.** `list_tasks` takes `page: TaskPage` in place of `offset` and
+  `limit`, `task_breakdown` takes `limit: BreakdownLimit`, and
+  `list_workflow_runs` takes `limit: WorkflowRunsLimit`. Build each with
+  `parse`, which returns `Err(PageRefused)` for a value outside its bounds:
+  `offset` 0 or more, `limit` 1 to 200 and `offset + limit` at most 500 for
+  `list_tasks`, `limit` 1 to 500 for `task_breakdown`, and `limit` 1 to 200 for
+  `list_workflow_runs`. `list_tasks` no longer raises `ValueError`. Before, a
+  negative `limit` gave a different result in each read, and a direct
+  `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
+  answers do not change.
 
 ### Changed
 
+- New command `horsies skills install --target DIR [--force]`. It copies
+  the skill folder from the installed package to `DIR/horsies/`. `--target`
+  is required, because each agent tool reads a different skills directory.
+  The command leaves an identical copy as it is, refuses to replace a copy
+  that differs unless `--force` is given, and exits with code 1 on any
+  failure. `get-docs` has a new option `--ref main`.
+- The release workflow checks that the built wheel contains the skill
+  folder.
 - Three operations guides are new: Atomic Enqueue and Topology, Deploying
   Code Changes and Testing. The Testing guide documents
   `HORSIES_SUPPRESS_SENDS`.
@@ -548,9 +583,19 @@ and there is no migration contract between pre-1.0 versions.
   `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
   library. SQL functions write the stored bytes, and `decode_input_envelope`
   reads a stored rerun input.
+- **Unused archive helpers.** `select_result_payload`, its result types,
+  `decode_history_row_version`, and the registry accessors `is_retained` and
+  `retained_versions` had no caller in the library. `RETAINED_ARCHIVE_VERSIONS`
+  stays: the transcode decoder set reads it.
 
 ### Fixed
 
+- **A task cancel accepts every form of a task id that Python reads as a
+  UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
+  cancel now uses the canonical id text, and the result carries it.
+- **A cancel of a task in history reads only the status and the workflow
+  flag.** A history row whose attempt snapshot does not decode no longer
+  fails the cancel.
 - **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
   reports a version mismatch.** The stored and expected versions are equal in
   this state. The banner now names the one version, says that the offline
@@ -618,6 +663,15 @@ and there is no migration contract between pre-1.0 versions.
   `ValueError`. `CorruptArchiveValue.detail` for these failures is now
   `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
   `HistoryContractError` for the same text.
+- **`loads_json` refuses a lone UTF-16 surrogate.** An escape such as
+  `\ud800` decoded to a string that UTF-8 cannot encode, so the failure came
+  later: one such row aborted a cutover preparation batch, and a rerun of a
+  stored envelope raised `UnicodeEncodeError`. Each reader now refuses the
+  value: `enqueue_async` returns `INVALID_INPUT` and writes nothing, the worker
+  returns `WORKER_SERIALIZATION_ERROR`, cutover preparation counts the row as a
+  decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
+  refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
+  character and stays accepted.
 
 ## [0.5.5] - 2026-10-28
 
