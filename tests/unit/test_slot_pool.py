@@ -897,17 +897,38 @@ class TestBootKills:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """The other child keeps serving, so this slot only waits and retries."""
         monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
         kills = CHILD_BOOT_ATTEMPTS + 2
         marks = tmp_path / 'marks'
-        init = _init(f'killed_after_first:{marks}', (str(kills),))
-        pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
+        init = _init(f'killed_after_first:{marks}', (str(kills), '2'))
+        pool = await pool_factory(_config(2, init=init, max_tasks_per_child=1))
 
         assert await _result_json(pool.submit(_frame('echo', 'first'))) == 'first'
-        assert await _result_json(pool.submit(_frame('echo', 'next'))) == 'next'
+        for _ in range(1000):
+            if marks.exists() and len(marks.read_text()) == kills + 3:
+                break
+            await asyncio.sleep(0.01)
 
-        assert len(marks.read_text()) == kills + 2
+        assert len(marks.read_text()) == kills + 3
+        assert await _result_json(pool.submit(_frame('echo', 'next'))) == 'next'
         assert pool._failure is None
+
+    async def test_a_kill_counts_when_no_other_child_serves(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """No healthy task is at risk, and a worker that does no work must fail."""
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        init = _init(f'killed_after_first:{tmp_path / "marks"}', ('100', '1'))
+        pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
+
+        await _outcome(pool.submit(_frame('echo', 'first')))
+
+        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        assert isinstance(failure, BootAttemptsExhausted)
 
     async def test_a_kill_during_the_first_start_still_counts(self) -> None:
         pool = SlotPool(_config(init=_init('killed_always')), pending_limit=10)
@@ -925,7 +946,7 @@ class TestBootKills:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
-        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100',))
+        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100', '1'))
         pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
 
         await _outcome(pool.submit(_frame('echo', 'first')))

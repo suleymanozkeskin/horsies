@@ -59,12 +59,13 @@ def _boot(init: InitFrame) -> None:
         case 'killed_always':
             os.kill(os.getpid(), signal.SIGKILL)
         case 'killed_after_first' | 'fails_after_first':
-            # The first boot passes, then the next boots end, while marks last.
+            # The first boots pass, then the next boots end, while marks last.
             with open(argument, 'a+', encoding='ascii') as marks:
                 marks.write('x')
                 marks.seek(0)
                 seen = len(marks.read())
-            if 1 < seen <= 1 + int(init.imports[0]):
+            first_boots = int(init.imports[1])
+            if first_boots < seen <= first_boots + int(init.imports[0]):
                 if mode == 'killed_after_first':
                     os.kill(os.getpid(), signal.SIGKILL)
                 raise RuntimeError('scripted replacement boot failure')
