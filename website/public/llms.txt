@@ -700,6 +700,9 @@ Each entry: Title -- summary -> URL
 - Action Semantics -- what task cancel, task rerun, and workflow pause, resume, and cancel do -> /horsies/monitoring/action-semantics/
 
 ### Operations
+- Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
+- Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
+- Testing -- direct task calls, TaskResult kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
 ### Troubleshooting
@@ -796,6 +799,9 @@ web UI, horsies[web], dashboard, horsies web -> /horsies/monitoring/web-ui-overv
 create_monitoring_app, trusted-header, authentication, mounted mode, standalone mode -> /horsies/monitoring/web-ui-deployment/
 cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions -> /horsies/monitoring/action-semantics/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
+atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
+deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
+testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/
 operational indexes, history queries, opt-in DDL -> /horsies/internals/operational-indexes/
 performance, latency, hot path, statement cost -> /horsies/internals/performance/

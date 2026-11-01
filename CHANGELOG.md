@@ -214,9 +214,18 @@ and there is no migration contract between pre-1.0 versions.
   removed.** Use `ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; the value
   `HRS-026` does not change. Code that names the alias raises
   `AttributeError`.
+- **Breaking: the environment variable `TASKLIB_SUPPRESS_SENDS` is renamed
+  to `HORSIES_SUPPRESS_SENDS`.** The old name has no effect. Set
+  `HORSIES_SUPPRESS_SENDS=1` where the old variable was set. Without it,
+  a send or schedule is no longer a no-op, and it connects to the broker
+  database. The send error messages and the `TaskSendErrorCode`
+  documentation use the new name.
 
 ### Changed
 
+- Three operations guides are new: Atomic Enqueue and Topology, Deploying
+  Code Changes and Testing. The Testing guide documents
+  `HORSIES_SUPPRESS_SENDS`.
 - **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
   whose idempotency key is reserved by another task with a different
   command returns `TaskSendIdempotencyKeyConflict` instead of
@@ -369,6 +378,13 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
+  reports a version mismatch.** The stored and expected versions are equal in
+  this state. The banner now names the one version, says that the offline
+  task-history cutover is not complete, and tells the operator to run the
+  cutover stages through tighten and validation. The `MISMATCH` banner is
+  unchanged. `GET /api/meta` has a new field `schema_state` (a `SchemaState`
+  value); the UI reads it and no longer derives the state from the versions.
 - **The agent skills in the wheel and the docs state the codes and
   signatures that the code uses.** A raised exception in a task gives
   `UNHANDLED_EXCEPTION`; `TASK_EXCEPTION` means the task returned `None`.
