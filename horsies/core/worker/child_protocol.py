@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final, TypeAlias, assert_never, cast
 
@@ -21,6 +21,8 @@ from horsies.core.types.result import Err, Ok, Result
 
 FRAME_HEADER: Final = struct.Struct('>IQ')
 
+# Metadata is a JSON object, so ``{}`` is the smallest valid value.
+MIN_META_BYTES: Final = 2
 MAX_META_BYTES: Final = 1 << 20
 # Postgres cannot store a field of 1 GiB or more, so a larger result could
 # never be saved. This bound changes no outcome: it only fails earlier.
@@ -31,7 +33,8 @@ MAX_BODY_BYTES: Final = (1 << 30) - 1
 class InitFrame:
     """Parent to child, first frame: everything the child needs to boot.
 
-    Carries the database URL here because argv is visible in ``ps``.
+    Carries the database URL here because argv is visible in ``ps``. The URL
+    holds a password, so it stays out of the repr.
     """
 
     app_locator: str
@@ -40,7 +43,7 @@ class InitFrame:
     parent_sys_path: tuple[str, ...]
     parent_argv: tuple[str, ...]
     loglevel: int
-    database_url: str
+    database_url: str = field(repr=False)
     connect_kwargs: Mapping[str, object]
     child_pool_min_size: int
     child_pool_max_size: int
@@ -248,7 +251,7 @@ def parse_header(raw: bytes) -> Result[FrameSizes, FrameOverBound]:
     ``raw`` must be ``FRAME_HEADER.size`` bytes: the caller reads exactly that.
     """
     meta_bytes, body_bytes = FRAME_HEADER.unpack(raw)
-    if meta_bytes > MAX_META_BYTES or body_bytes > MAX_BODY_BYTES:
+    if not MIN_META_BYTES <= meta_bytes <= MAX_META_BYTES or body_bytes > MAX_BODY_BYTES:
         return Err(FrameOverBound(meta_bytes=meta_bytes, body_bytes=body_bytes))
     return Ok(FrameSizes(meta_bytes=meta_bytes, body_bytes=body_bytes))
 
@@ -373,7 +376,7 @@ def decode_parent_frame(
                 return Ok(StopFrame())
             case _:
                 return Err(MalformedFrame(f'unknown parent frame {kind!r}'))
-    except (_BadField, ValueError) as exc:
+    except (_BadField, ValueError, OverflowError, RecursionError) as exc:
         return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
 
 
@@ -400,5 +403,5 @@ def decode_child_frame(
                 )
             case _:
                 return Err(MalformedFrame(f'unknown child frame {kind!r}'))
-    except (_BadField, ValueError) as exc:
+    except (_BadField, ValueError, OverflowError, RecursionError) as exc:
         return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
