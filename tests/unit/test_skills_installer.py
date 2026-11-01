@@ -9,7 +9,7 @@ skill folder is shaped as the installer and the wheel expect.
 
 from __future__ import annotations
 
-import fnmatch
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -343,6 +343,15 @@ class TestSkillFolderShape:
         assert flat == []
 
 
+def _matches_package_glob(relative: str, pattern: str) -> bool:
+    """Match like setuptools: ``*`` stays inside one path part, ``**`` crosses parts."""
+    regex = ''.join(
+        '.*' if token == '**' else '[^/]*' if token == '*' else re.escape(token)
+        for token in re.split(r'(\*\*|\*)', pattern)
+    )
+    return re.fullmatch(regex, relative) is not None
+
+
 class TestPackageData:
     def test_package_data_covers_every_skill_file(self) -> None:
         config = tomllib.loads((_REPO_ROOT / 'pyproject.toml').read_text())
@@ -354,7 +363,7 @@ class TestPackageData:
             for path in sorted((package_root / '.agents').rglob('*'))
             if path.is_file()
             for relative in [path.relative_to(package_root).as_posix()]
-            if not any(fnmatch.fnmatchcase(relative, pattern) for pattern in patterns)
+            if not any(_matches_package_glob(relative, pattern) for pattern in patterns)
         ]
 
         assert uncovered == []
