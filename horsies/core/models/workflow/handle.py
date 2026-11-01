@@ -1016,10 +1016,13 @@ class WorkflowHandle(Generic[OutT]):
             - No row (retention deleted the workflow after the status
               read): ``RetrievalCode.WORKFLOW_NOT_FOUND``.
             - A stored error object that decodes: that ``TaskError``.
-            - A stored error that is not JSON, or an object that does not
-              decode: ``RESULT_DESERIALIZATION_ERROR``.
-            - No stored error, or stored JSON that is not an object: the
-              ``OutcomeCode`` of ``status``.
+            - The plain expiry text that 0.5.0 and 0.5.1 stored for an
+              ``EXPIRED`` workflow: ``OutcomeCode.WORKFLOW_EXPIRED``.
+            - A stored error that is not JSON, JSON that is not an object,
+              or an object that does not decode:
+              ``RESULT_DESERIALIZATION_ERROR``, with the cause in the
+              message.
+            - No stored error: the ``OutcomeCode`` of ``status``.
             - A database error: ``BROKER_ERROR``.
         """
         try:
@@ -1073,34 +1076,53 @@ class WorkflowHandle(Generic[OutT]):
                                 )
                             ),
                         )
-                    error_data = loads_r.ok_value
-                    if isinstance(error_data, dict):
-                        try:
-                            # Polymorphic decode preserves SubWorkflowError
-                            # subclass fields (sub_workflow_id /
-                            # sub_workflow_summary); TaskError.model_validate
-                            # would silently downcast.
-                            validated_err = decode_task_error(error_data)
-                        except Exception as exc:
+                    match loads_r.ok_value:
+                        case dict() as error_object:
+                            try:
+                                # Polymorphic decode preserves SubWorkflowError
+                                # subclass fields (sub_workflow_id /
+                                # sub_workflow_summary); TaskError.model_validate
+                                # would silently downcast.
+                                validated_err = decode_task_error(error_object)
+                            except Exception as exc:
+                                logger.warning(
+                                    'Workflow %s error payload validation failed: %s',
+                                    self.workflow_id,
+                                    exc,
+                                )
+                                return cast(
+                                    'TaskResult[OutT, TaskError]',
+                                    TaskResult(
+                                        err=TaskError(
+                                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                                            message=f'Workflow error payload validation failed: {exc}',
+                                            data={'workflow_id': self.workflow_id},
+                                        ),
+                                    ),
+                                )
+                            return cast(
+                                'TaskResult[OutT, TaskError]',
+                                TaskResult(err=validated_err),
+                            )
+                        case not_an_object:
                             logger.warning(
-                                'Workflow %s error payload validation failed: %s',
+                                'Workflow %s error payload is not a JSON object: %s',
                                 self.workflow_id,
-                                exc,
+                                type(not_an_object).__name__,
                             )
                             return cast(
                                 'TaskResult[OutT, TaskError]',
                                 TaskResult(
                                     err=TaskError(
                                         error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                                        message=f'Workflow error payload validation failed: {exc}',
+                                        message=(
+                                            'Workflow error payload is not a JSON '
+                                            f'object: got {type(not_an_object).__name__}'
+                                        ),
                                         data={'workflow_id': self.workflow_id},
                                     ),
                                 ),
                             )
-                        return cast(
-                            'TaskResult[OutT, TaskError]',
-                            TaskResult(err=validated_err),
-                        )
                 return cast(
                     'TaskResult[OutT, TaskError]',
                     TaskResult(

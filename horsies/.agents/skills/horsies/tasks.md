@@ -121,7 +121,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `BROKER_ERROR` — DB/broker failure during result retrieval
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
-- `RESULT_DESERIALIZATION_ERROR` — stored result JSON is corrupt
+- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 

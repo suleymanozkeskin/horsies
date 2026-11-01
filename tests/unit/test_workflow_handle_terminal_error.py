@@ -17,7 +17,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.brokers.resources import ListenerDisabled
-from horsies.core.models.tasks import OutcomeCode, RetrievalCode
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    OutcomeCode,
+    RetrievalCode,
+)
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import (
     GET_WORKFLOW_ERROR_SQL,
@@ -132,3 +136,35 @@ class TestLegacyExpiryText:
         error = result.unwrap_err()
         assert error.error_code is OutcomeCode.WORKFLOW_EXPIRED
         assert error.message == LEGACY_EXPIRY_TEXT
+
+
+class TestStoredErrorThatIsNotAnObject:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'type_name'),
+        [
+            ('"workflow failed"', 'str'),
+            ('[1, 2]', 'list'),
+            ('5', 'int'),
+            ('true', 'bool'),
+            ('null', 'NoneType'),
+        ],
+        ids=['string', 'array', 'number', 'boolean', 'null'],
+    )
+    async def test_it_is_a_deserialization_error_with_the_cause(
+        self,
+        stored: str,
+        type_name: str,
+    ) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == (
+            f'Workflow error payload is not a JSON object: got {type_name}'
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}

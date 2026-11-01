@@ -372,6 +372,13 @@ there is no migration contract between pre-1.0 versions.
   and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
   success, for that case. A `COMPLETED` row without a stored result still
   gives `TaskResult(ok=None)`.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a stored workflow error that is JSON but not an object.** This is
+  true for a failed, cancelled or expired workflow. The message names the
+  Python type of the decoded value, for example `got list`. Before, `get()`
+  read such a value as no stored error and returned the `OutcomeCode` of
+  the status (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or
+  `WORKFLOW_EXPIRED`).
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
