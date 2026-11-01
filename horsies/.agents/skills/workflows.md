@@ -132,6 +132,48 @@ Properties: `.name` → `fn.task_name`, `.key()` → `NodeKey[OkT]`.
 - In `app.workflow()`: `"{slugify(workflow_name)}:{index}"` (e.g., `"etl_pipeline:0"`)
 - Explicit: must match `[A-Za-z0-9_\-:.]+`, max 128 chars.
 
+### Set `node_id` explicitly
+
+Set `node_id` on every node. The docs site recommends it too.
+
+- An auto-assigned id in `app.workflow()` is `{slugify(name)}:{index}`. It changes when you reorder or insert tasks.
+- In a `WorkflowDefinition`, the auto id is the attribute name. A renamed attribute changes the id.
+- The id is the key of `handle.results()`, the lookup key of `result_for()`, and `WorkflowTaskInfo.node_id`.
+- An explicit id stays the same through reorders and renames.
+
+```python
+fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
+```
+
+**Import cycle with `result_for(Workflow.node)`.** A task that calls `ctx.result_for(MyWorkflow.fetch)` must import `MyWorkflow`. The workflow module imports the task module for `fn=`. The two modules import each other.
+
+`result_for()` accepts a `NodeKey` and looks up the result by `node_id`. Build the key from the explicit id string. The task module then does not import the workflow module.
+
+```python
+from horsies import NodeKey, TaskError, TaskResult, WorkflowContext
+
+FETCH_NODE_ID = "fetch"  # shared constant; the workflow passes it to node_id=
+
+
+@app.task("summarize_rows")
+def summarize_rows(
+    *,
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[int, TaskError]:
+    if workflow_ctx is None:
+        return TaskResult(
+            err=TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"),
+        )
+    rows = workflow_ctx.result_for(NodeKey[list[int]](FETCH_NODE_ID))
+    if rows.is_err():
+        return TaskResult(err=rows.err_value)
+    return TaskResult(ok=sum(rows.ok_value))
+```
+
+- The key's type argument (`list[int]`) is not checked against the node. Keep it equal to the node's `TaskNode[T]`.
+- The node must be in `workflow_ctx_from`. A missing result raises `KeyError`.
+- `NodeKey("fetch")` for an id that no node has also raises `KeyError`. Keep the id in one shared constant.
+
 ## SubWorkflowNode
 
 ```python

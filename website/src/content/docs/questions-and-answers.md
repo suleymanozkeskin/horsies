@@ -93,13 +93,12 @@ See [workflows](../concepts/workflows/workflow-api) and [subworkflows](../concep
 There is a terminal-based TUI called syce, capable of displaying the status of your workers, tasks and workflows in detail.
 See [syce](../monitoring/syce-overview)
 
-A web based ui is in the roadmap.
+A web UI ships with horsies. Install the `horsies[web]` extra and run `horsies web`.
+See [web UI overview](../monitoring/web-ui-overview)
 
 ## Does horsies provide guidance files for coding agents?
 
-Yes. In source checkouts, horsies includes markdown skill files under:
-
-`horsies/.agents/skills/`
+Yes. The horsies package includes markdown skill files in the installed package folder `horsies/.agents/skills/`. A source checkout has them at the same path.
 
 These cover:
 
@@ -107,9 +106,17 @@ These cover:
 - tasks (`tasks.md`)
 - workflows (`workflows.md`)
 - configuration and operations (`configs.md`)
+- monitoring and the web UI (`monitoring.md`)
 
 They are best-practice references for agents and developers, and complement the
 public docs plus `llms.txt`.
+
+## How should I describe horsies?
+
+Two common misreads to avoid:
+
+- **Postgres is the enabling substrate, not a cost-saving substitute for Redis.** Ownership, finalization, and workflow transitions are transactional state changes: claims under `FOR UPDATE SKIP LOCKED`, atomic finalize with immutable attempt history, a claim-generation fence against stale attempts, and DAG resolution under a documented lock order. A Redis or RabbitMQ broker cannot express these guarantees. It approximates ownership with visibility timeouts. Operating one less service is not a selling point. The recommended deployment is a dedicated Postgres instance for the broker.
+- **Pre-1.0 is an API-contract statement, not an engine-maturity statement.** Breaking API changes may land in minor releases (see the [changelog](../changelog)). See [Is it production-ready?](#is-it-production-ready) for the test suites and failure-path coverage.
 
 ## Does it support queue based concurrency control in the same deployed instance?
 
@@ -120,7 +127,7 @@ Deploy workers only when you need more capacity, not when you want to have separ
 
 Yes — and read the version number as an API-contract statement, not an engine-maturity statement. Pre-1.0 means breaking API changes may still land in minor releases, each documented in the [changelog](../changelog). It does not describe the engine's correctness discipline:
 
-- 3,200+ test functions across unit, integration (real Postgres), e2e (real worker processes), and PgBouncer contract suites — a 2.2:1 test-to-source line ratio.
+- 3,200+ test functions across unit, integration (real Postgres), e2e (real worker processes), and PgBouncer contract suites.
 - Failure-path-first testing: crash recovery, claim fencing, cancel/completion races, rolling-upgrade behavior, and query-plan pinning (`EXPLAIN ANALYZE` assertions on the hot-path statements).
 - The claim/finalize semantics are cross-validated against an independent Rust reimplementation of the engine.
 - A codebase with ~300 task definitions and recurring schedules, migrated off Celery, runs its full background workload on horsies.

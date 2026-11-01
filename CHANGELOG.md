@@ -259,8 +259,9 @@ and there is no migration contract between pre-1.0 versions.
   their operation's code (for example `CLOSE_FAILED`), and
   `start_workflow()` returned `INTERNAL_FAILED`. A send or schedule returns
   `TaskSendLoopRunnerFailed`, which has no `retryable` field and keeps the
-  task id and the payload; nothing was written, the sync retry methods
-  return the same error, and `retry_*_async(err)` completes the send.
+  task id and the payload; nothing was written. A stopped runner does not
+  start again, so the sync retry methods return the same error;
+  `retry_*_async(err)` completes the send.
   `TaskHandle.get()` maps it to `BROKER_ERROR`, not cached.
   `HandleErrorCode.LOOP_RUNNER_FAILED` is unchanged.
 - **The async send, schedule and result methods call the broker without an
