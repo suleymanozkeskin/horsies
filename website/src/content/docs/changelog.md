@@ -199,6 +199,33 @@ there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: a workflow task node with a `priority` outside 1–100 or a
+  naive `good_until` is refused when the spec is built.**
+  `app.workflow()`, `WorkflowDefinition.build()` and `WorkflowSpec(...)`
+  raise `WorkflowValidationError` with `WORKFLOW_INVALID_PRIORITY`
+  (`HRS-034`) or `WORKFLOW_NAIVE_GOOD_UNTIL` (`HRS-035`). The check covers
+  every task node, root or not, and `horsies check` reports it. A child
+  spec with such a node fails its build, and the engine marks the
+  subworkflow node `WORKFLOW_ENQUEUE_FAILED`. Before, a root node made the
+  start return `VALIDATION_FAILED`, and a node that is not a root started
+  and failed later, when the engine enqueued it.
+- **Breaking: `@app.task('')` raises `TaskDefinitionError` with
+  `TASK_INVALID_OPTIONS` (`HRS-102`).** Before, the task registered: a send
+  returned `ENQUEUE_FAILED` with `retryable=False`, and a workflow start
+  with the task as a root returned `VALIDATION_FAILED`.
+- **Breaking: a defect in the workflow start checks propagates.** The
+  checks before the start transaction return only a
+  `WorkflowValidationError` as `WorkflowStartValidationFailed`, and the
+  start transaction returns only a `SerializationError` as
+  `WorkflowStartValidationFailed`. Any other exception propagates, a
+  `ValueError` included. A node that has positional args or
+  `priority=None` when it reaches the start transaction (only possible
+  through `object.__setattr__` after construction) fails an `assert` that
+  names the node. Before, the start returned a `ValueError`,
+  `MultipleValidationErrors` or `SerializationError` from the checks, and a
+  `ValueError` from the transaction, as `VALIDATION_FAILED`.
+- **An exhaustive `match` on `ErrorCode` needs cases for
+  `WORKFLOW_INVALID_PRIORITY` and `WORKFLOW_NAIVE_GOOD_UNTIL`.**
 
 ### Changed
 

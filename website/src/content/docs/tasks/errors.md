@@ -284,7 +284,7 @@ Workflow-specific error codes are distributed across the four families above:
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -481,6 +481,8 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | A `WorkflowDefinition` class defines `Meta`, or sets `config` to a value that is not a `WorkflowDefinitionConfig`; raised when the class is created |
+| HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` sets a `priority` outside 1–100; raised when the spec is built |
+| HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` sets a naive `good_until` (no `tzinfo`); raised when the spec is built |
 
 ### Task Definition (HRS-100-HRS-199)
 

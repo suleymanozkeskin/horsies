@@ -533,6 +533,8 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
             ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
             ErrorCode.WORKFLOW_CHECK_UNDECORATED_BUILDER,
+            ErrorCode.WORKFLOW_INVALID_PRIORITY,
+            ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
         ]
         for code in workflow_codes:
             # HRS-001-HRS-099 range
