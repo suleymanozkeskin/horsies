@@ -7,8 +7,8 @@ own error.
 
 A ``SubWorkflowNode`` is COMPLETED only when the child's output is ok, as a task
 node is. An err output makes a FAILED node that holds the child's text. A stored
-child result that does not parse makes a FAILED node with
-``RESULT_DESERIALIZATION_ERROR``, so a COMPLETED node always holds an ok.
+child result that does not parse, or no result, makes a FAILED node that holds an
+envelope with ``RESULT_DESERIALIZATION_ERROR``, so each reader names the cause.
 
 An outputless workflow has no output node, so its terminal nodes are its output.
 A SKIPPED terminal gets the same code in its entry. The shape of that envelope
@@ -58,11 +58,12 @@ from horsies.core.models.workflow.handle import (
 )
 from horsies.core.types.result import Err
 from horsies.core.workflows.engine import (
-    _ChildOutputAbsent,
     _ChildOutputError,
     _ChildOutputless,
     _ChildOutputUnreadable,
     _ChildOutputValue,
+    _ParentNodeFailed,
+    _completed_child_node,
     _decode_err_only,
     _decode_stored_task_result,
     _parse_child_output,
@@ -70,6 +71,7 @@ from horsies.core.workflows.engine import (
     check_workflow_completion,
     get_dependency_results,
     get_dependency_results_with_names,
+    get_workflow_failure_error,
     get_workflow_final_result,
     on_subworkflow_complete,
 )
@@ -81,6 +83,7 @@ from horsies.core.workflows.sql import (
     GET_CHILD_WORKFLOW_INFO_SQL,
     GET_DEPENDENCY_RESULTS_SQL,
     GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
+    GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_OUTPUT_TASK_RESULT_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
@@ -122,6 +125,11 @@ UNREADABLE_TEXTS = {
     'not-an-envelope': '{"ok": 99}',
     'both-slots': '{"__h_task_result__":true,"ok":1,"err":{"message":"x"}}',
     'err-slot-refused': '{"__h_task_result__":true,"ok":null,"err":7}',
+}
+UNREADABLE_RESULTS: dict[str, str | None] = {
+    **UNREADABLE_TEXTS,
+    'sql-null': None,
+    'empty': '',
 }
 LIVE_STATUSES = [
     status for status in WorkflowTaskStatus if not status.is_terminal
@@ -628,7 +636,9 @@ class TestChildOutputParse:
 
     @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
     def test_no_text(self, stored: str | None) -> None:
-        assert _parse_child_output(stored) == _ChildOutputAbsent()
+        parsed = _parse_child_output(stored)
+
+        assert parsed == _ChildOutputUnreadable(cause='the result is NULL or empty')
 
     @pytest.mark.parametrize(
         'stored', UNREADABLE_TEXTS.values(), ids=UNREADABLE_TEXTS.keys(),
@@ -637,7 +647,6 @@ class TestChildOutputParse:
         parsed = _parse_child_output(stored)
 
         assert isinstance(parsed, _ChildOutputUnreadable)
-        assert parsed.text == stored
         assert parsed.cause
 
 
@@ -758,29 +767,12 @@ class TestParentNode:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        'stored', UNREADABLE_TEXTS.values(), ids=UNREADABLE_TEXTS.keys(),
+        'stored', UNREADABLE_RESULTS.values(), ids=UNREADABLE_RESULTS.keys(),
     )
-    async def test_text_that_does_not_parse_makes_a_failed_node(
-        self, stored: str,
-    ) -> None:
-        recorder = self._session(stored)
-
-        await self._complete_child(recorder)
-
-        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
-        assert params['status'] == 'FAILED'
-        assert params['result'] == stored
-        err = self._workflow_error(recorder)
-        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert 'child-1' in (err.message or '')
-        assert err.data == {'workflow_id': 'child-1'}
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
-    async def test_no_text_makes_a_failed_node_with_an_envelope(
+    async def test_stored_data_that_does_not_parse_makes_a_failed_node(
         self, stored: str | None,
     ) -> None:
-        """A node without a result gives its readers no entry."""
+        """The node holds an envelope, not the raw text, so each reader decodes."""
         recorder = self._session(stored)
 
         await self._complete_child(recorder)
@@ -790,14 +782,73 @@ class TestParentNode:
         err = _stored_err(params['result'])
         assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert err.data == {'workflow_id': 'child-1'}
+        message = err.message or ''
+        assert 'child-1' in message
+        cause = _parse_child_output(stored)
+        assert isinstance(cause, _ChildOutputUnreadable)
+        assert cause.cause in message
         assert self._workflow_error(recorder).message == err.message
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'stored', UNREADABLE_RESULTS.values(), ids=UNREADABLE_RESULTS.keys(),
+    )
+    async def test_required_node_reports_the_cause_at_the_parent(
+        self, stored: str | None,
+    ) -> None:
+        """The failure selection decodes the node, so the cause is not lost.
+
+        ``MARK_WORKFLOW_FAILED_SQL`` writes ``COALESCE(:error, error)``, so a
+        ``WORKFLOW_SUCCESS_CASE_NOT_MET`` here would replace the stored cause.
+        """
+        node_recorder = self._session(stored)
+        await self._complete_child(node_recorder)
+        node_result = node_recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['result']
+        parent = _Session({
+            GET_FIRST_FAILED_REQUIRED_TASK_SQL: [
+                SimpleNamespace(task_name='child', result=node_result),
+            ],
+        })
+
+        selected = await get_workflow_failure_error(
+            parent.session,
+            'wf-parent',
+            {'cases': [{'required_indices': [0]}]},
+        )
+
+        assert selected is not None
+        err = decode_task_error(json.loads(selected))
+        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'child-1' in (err.message or '')
+
+    @pytest.mark.asyncio
+    async def test_output_node_gives_the_next_level_the_cause(self) -> None:
+        """A parent case leaves the node out; the node is the parent's output."""
+        recorder = self._session('not{json')
+        await self._complete_child(recorder)
+        node_result = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['result']
+
+        parent_result = await _final_result(_output_row('FAILED', node_result))
+        next_level = self._session(parent_result)
+        await self._complete_child(next_level)
+
+        params = next_level.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'FAILED'
+        err = _stored_err(params['result'])
+        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'not JSON' in (err.message or '')
+
     def test_cause_with_a_lone_surrogate_is_escaped(self) -> None:
-        """The failure handler encodes this error and raises for a surrogate."""
-        err = _unreadable_child_error('child-1', f'bad {chr(0xdc80)} text')
+        """The node envelope and the failure handler both encode this error."""
+        cause = f'bad {chr(0xdc80)} text'
+
+        err = _unreadable_child_error('child-1', cause)
 
         assert '\\udc80' in (err.message or '')
         assert encode_task_error(err)
+        node = _completed_child_node('child-1', _ChildOutputUnreadable(cause=cause))
+        assert isinstance(node, _ParentNodeFailed)
+        assert '\\\\udc80' in node.result
 
     @pytest.mark.asyncio
     async def test_summary_of_a_failed_node_has_the_child_status(self) -> None:

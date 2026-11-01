@@ -702,7 +702,7 @@ If the node is also the parent's output node, the parent stores the same err, an
 
 **Nesting without a success policy.** The parent is FAILED, so the next level sees a failed child: its node holds a `SubWorkflowError` with `SUBWORKFLOW_FAILED`. The message of the first error is in `SubWorkflowSummary.error_summary`.
 
-**A child result that does not parse.** A COMPLETED child whose stored result is not a well-formed result envelope also makes a FAILED node, with `RESULT_DESERIALIZATION_ERROR`. The node keeps the stored text, and each reader reports that code. If the child stores no result, the node stores an error envelope with that code.
+**A child result that does not parse.** A COMPLETED child whose stored result is not a well-formed result envelope, or that stores no result, also makes a FAILED node. The node holds an error envelope with `RESULT_DESERIALIZATION_ERROR` that names the child and the cause, so each reader of the node, the parent's `get()` and the next level report that code. The stored text stays in the `result` column of the child workflow.
 
 An outputless workflow has no output node, so its terminal nodes are its output. In its `get()` map, the entry of a SKIPPED terminal node holds `WORKFLOW_OUTPUT_SKIPPED`, and `data` names that node.
 

@@ -461,9 +461,10 @@ and there is no migration contract between pre-1.0 versions.
   affected.
 - **Breaking: a `SubWorkflowNode` is `FAILED` with
   `RESULT_DESERIALIZATION_ERROR` when the stored result of its `COMPLETED` child
-  is not a well-formed result envelope.** The node keeps the stored text. If the
-  child stores no result, the node stores an error envelope with that code, so
-  each reader gets the code. Before, the node was `COMPLETED`.
+  is not a well-formed result envelope, or is NULL or empty.** The node holds an
+  error envelope that names the child and the cause, so each reader and the
+  `get()` of the parent report that code. The stored text stays on the child
+  workflow row. Before, the node was `COMPLETED` and held that text.
 - **Breaking: `encode_value` refuses a lone surrogate in a string or in a
   dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
   `dumps_json`. The text names the kwarg and holds no input value. A dict

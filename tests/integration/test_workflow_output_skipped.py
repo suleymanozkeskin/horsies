@@ -8,7 +8,9 @@ and the workflow context.
 
 A ``SubWorkflowNode`` is COMPLETED only when the child's output is ok. An err
 output, or a stored child result that does not parse, makes a FAILED node, so
-``allow_failed_deps=False``, ``join`` and ``SuccessCase`` hold by status.
+``allow_failed_deps=False``, ``join`` and ``SuccessCase`` hold by status. For a
+result that does not parse, the node holds an envelope that names the cause, and
+the raw text stays on the child row.
 """
 
 from __future__ import annotations
@@ -766,32 +768,10 @@ class TestOutputNodeUnderSuccessPolicy:
 
     @pytest.mark.parametrize(
         'stored',
-        ['null', 'not{json', '{"ok": 99}'],
-        ids=['text-null', 'not-json', 'not-an-envelope'],
+        ['null', 'not{json', '{"ok": 99}', None, ''],
+        ids=['text-null', 'not-json', 'not-an-envelope', 'sql-null', 'empty'],
     )
     async def test_child_text_that_does_not_parse_fails_the_node(
-        self,
-        setup: tuple[AsyncSession, PostgresBroker, Horsies],
-        stored: str,
-    ) -> None:
-        session, broker, app = setup
-        handle, sub = await self._parent_with_a_recovering_dependent(app, broker)
-        child_id = await self._child_of(session, handle.workflow_id, 0)
-
-        await self._complete_child_with_text(session, broker, child_id, stored)
-
-        node = await self._node(session, handle.workflow_id, 0)
-        assert node.status == 'FAILED'
-        assert node.result == stored
-        code = OperationalErrorCode.RESULT_DESERIALIZATION_ERROR.value
-        assert await self._injected_code(session, handle.workflow_id) == code
-        result_for = await handle.result_for_async(sub.key())
-        assert result_for.err_value.error_code is (
-            OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
-
-    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
-    async def test_child_without_a_result_stores_an_error_envelope(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
         stored: str | None,
@@ -804,13 +784,45 @@ class TestOutputNodeUnderSuccessPolicy:
 
         node = await self._node(session, handle.workflow_id, 0)
         assert node.status == 'FAILED'
+        assert node.result != stored
         assert child_id in node.result
+        assert (await self._workflow_row(session, child_id)).result == stored
         code = OperationalErrorCode.RESULT_DESERIALIZATION_ERROR.value
         assert await self._injected_code(session, handle.workflow_id) == code
         result_for = await handle.result_for_async(sub.key())
         assert result_for.err_value.error_code is (
             OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         )
+
+    @pytest.mark.parametrize(
+        'stored', ['null', 'not{json', None], ids=['text-null', 'not-json', 'sql-null'],
+    )
+    async def test_required_unreadable_node_reports_the_cause_at_get(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+        stored: str | None,
+    ) -> None:
+        session, broker, app = setup
+        sub: SubWorkflowNode[int] = SubWorkflowNode(workflow_def=SkippedOutputChild)
+        spec = app.workflow(
+            name='output_skipped_required_unreadable_parent',
+            tasks=[sub],
+            output=sub,
+            success_policy=SuccessPolicy(cases=[SuccessCase(required=[sub])]),
+            definition_key='tests.integration.output_skipped_required_unreadable.v1',
+        )
+        handle = await start_ok(spec, broker)
+        child_id = await self._child_of(session, handle.workflow_id, 0)
+
+        await self._complete_child_with_text(session, broker, child_id, stored)
+
+        row = await self._workflow_row(session, handle.workflow_id)
+        assert row.status == 'FAILED'
+        got = await handle.get_async(timeout_ms=2000)
+        assert got.err_value.error_code is (
+            OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert (got.err_value.data or {})['workflow_id'] == child_id
 
     async def test_outputless_skipped_terminal_holds_the_named_outcome(
         self, setup: tuple[AsyncSession, PostgresBroker, Horsies],

@@ -481,7 +481,7 @@ policy = SuccessPolicy(
   - `SubWorkflowSummary.status` is `COMPLETED` on this `FAILED` node. `SubWorkflowSummary.output` is `None`.
   - A parent can complete when the node is in `optional` or in no case. `OnError.FAIL` stores the node's error on the workflow, and the workflow stays `RUNNING`; the success case then decides. A `COMPLETED` parent keeps that error in its error column, as for a failed `TaskNode`. `OnError.PAUSE` pauses the parent.
   - The next level sees a parent that is `FAILED` as a failed child, with `SUBWORKFLOW_FAILED`. A parent that is `COMPLETED` with this node as its output stores the err, so the next level is `FAILED` with the same err.
-- A `COMPLETED` child whose stored result is not a well-formed result envelope makes a `FAILED` node with `RESULT_DESERIALIZATION_ERROR`. The node keeps the stored text. If the child stores no result, the node stores an error envelope with that code.
+- A `COMPLETED` child whose stored result is not a well-formed result envelope, or that stores no result, makes a `FAILED` node. The node holds an error envelope with `RESULT_DESERIALIZATION_ERROR` that names the child and the cause, so each reader and the parent's `get()` report that code. The stored text stays on the child workflow row.
 
 ## WorkflowContext
 

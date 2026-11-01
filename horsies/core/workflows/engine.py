@@ -2737,15 +2737,9 @@ class _ChildOutputError:
 
 @dataclass(frozen=True, slots=True)
 class _ChildOutputUnreadable:
-    """A stored text that is not a well-formed result envelope."""
+    """Stored data that is not a well-formed result envelope, or no text."""
 
     cause: str
-    text: str
-
-
-@dataclass(frozen=True, slots=True)
-class _ChildOutputAbsent:
-    """No stored text: the result column is NULL or empty."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -2757,7 +2751,6 @@ type _ChildOutput = (
     _ChildOutputValue
     | _ChildOutputError
     | _ChildOutputUnreadable
-    | _ChildOutputAbsent
     | _ChildOutputless
 )
 
@@ -2769,18 +2762,16 @@ def _parse_child_output(stored_result: str | None) -> _ChildOutput:
     the concern of the node that reads the output.
     """
     if not stored_result:
-        return _ChildOutputAbsent()
+        return _ChildOutputUnreadable(cause='the result is NULL or empty')
     loaded = loads_json(stored_result)
     if is_err(loaded):
-        return _ChildOutputUnreadable(
-            cause=f'not JSON: {loaded.err_value}', text=stored_result,
-        )
+        return _ChildOutputUnreadable(cause=f'not JSON: {loaded.err_value}')
     if _is_outputless_workflow_envelope(loaded.ok_value):
         return _ChildOutputless()
     try:
         envelope = validate_task_result_envelope(loaded.ok_value)
     except StrictJsonError as exc:
-        return _ChildOutputUnreadable(cause=str(exc), text=stored_result)
+        return _ChildOutputUnreadable(cause=str(exc))
     err_slot = envelope.get('err')
     if err_slot is None:
         return _ChildOutputValue(value=envelope.get('ok'), text=stored_result)
@@ -2789,7 +2780,7 @@ def _parse_child_output(stored_result: str | None) -> _ChildOutput:
             error=decode_task_error(err_slot), text=stored_result,
         )
     except (StrictJsonError, ValueValidationError) as exc:
-        return _ChildOutputUnreadable(cause=str(exc), text=stored_result)
+        return _ChildOutputUnreadable(cause=str(exc))
 
 
 @dataclass(frozen=True, slots=True)
@@ -2845,10 +2836,12 @@ def _completed_child_node(
           ``WorkflowHandle.get()`` only: stored in a node, later typed encode
           and decode paths read its nested ``__h_*`` markers as user data.
         - An err output: FAILED with the child's text and that error.
-        - A text that does not parse: FAILED with the child's text and
-          ``RESULT_DESERIALIZATION_ERROR``.
-        - No text: FAILED with an envelope of ``RESULT_DESERIALIZATION_ERROR``.
-          A node without a result gives its readers no entry.
+        - Stored data that does not parse, or no text: FAILED with an envelope
+          of ``RESULT_DESERIALIZATION_ERROR`` that names the child and the
+          cause. Each reader of the node, and a parent that reads this node
+          as its failure, then names the cause. A node without a result gives
+          its readers no entry, and a node with the raw text gives the failure
+          selection nothing to decode. The raw text stays on the child row.
 
     Raises:
         SerializationError: an envelope that this function built does not
@@ -2869,15 +2862,8 @@ def _completed_child_node(
             )
         case _ChildOutputError(error=error, text=text):
             return _ParentNodeFailed(result=text, error=error)
-        case _ChildOutputUnreadable(cause=cause, text=text):
-            return _ParentNodeFailed(
-                result=text,
-                error=_unreadable_child_error(child_workflow_id, cause),
-            )
-        case _ChildOutputAbsent():
-            error = _unreadable_child_error(
-                child_workflow_id, 'the result is NULL or empty',
-            )
+        case _ChildOutputUnreadable(cause=cause):
+            error = _unreadable_child_error(child_workflow_id, cause)
             return _ParentNodeFailed(
                 result=_ser_or_raise(
                     dumps_json(encode_task_result(TaskResult(err=error), Any)),
