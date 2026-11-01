@@ -19,8 +19,9 @@ import { ApiError } from '@/lib/http';
 import {
   NO_SCHEMA_MESSAGE,
   SCHEMA_UNREACHABLE_MESSAGE,
-  schemaMismatchMessage,
+  schemaBannerMessage,
   schemaState,
+  type BannerSchemaState,
 } from '@/lib/schema-state';
 import type { MonitoringMeta } from '@/types/meta';
 
@@ -50,8 +51,15 @@ function FullScreen({
   );
 }
 
-/** Read-only banner shown for the whole session while the schema mismatches. */
-function SchemaBanner({ meta }: { meta: MonitoringMeta }) {
+/** Read-only banner shown for the whole session while the schema mismatches
+ * or the offline cutover is incomplete. */
+function SchemaBanner({
+  meta,
+  state,
+}: {
+  meta: MonitoringMeta;
+  state: BannerSchemaState;
+}) {
   return (
     <div
       role="status"
@@ -66,7 +74,7 @@ function SchemaBanner({ meta }: { meta: MonitoringMeta }) {
         style={{ color: 'var(--warning-dark)' }}
         aria-hidden
       />
-      <span>{schemaMismatchMessage(meta)}</span>
+      <span>{schemaBannerMessage(meta, state)}</span>
     </div>
   );
 }
@@ -153,10 +161,13 @@ export function AppShell() {
     );
   }
 
+  const state = schemaState(meta);
   return (
     <CapabilityProvider meta={meta}>
       <div className="flex min-h-screen flex-col">
-        {schemaState(meta) === 'mismatch' && <SchemaBanner meta={meta} />}
+        {(state === 'mismatch' || state === 'cutover_required') && (
+          <SchemaBanner meta={meta} state={state} />
+        )}
         <header className="glass sticky top-0 z-40 flex flex-wrap items-center gap-4 border-b border-border px-4 py-3">
           <span className="font-mono text-sm font-semibold">horsies</span>
           <nav className="flex items-center gap-1">
