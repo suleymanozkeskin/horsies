@@ -215,7 +215,7 @@ def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
     return True, serialize_error_payload(failure), message
 
 
-def _flush_output() -> None:
+def flush_output() -> None:
     """Flush before ``os._exit``, which skips it. A closed stream is no failure."""
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -234,11 +234,11 @@ def _run_or_exit(run_task: RunTaskFn, frame: RunFrame, init: InitFrame) -> WireR
     try:
         return run_task(frame, init)
     except SystemExit as exc:
-        _flush_output()
+        flush_output()
         os._exit(exc.code if isinstance(exc.code, int) else 1)
     except BaseException:
         logger.critical('Task %s escaped the task runner', frame.task_id, exc_info=True)
-        _flush_output()
+        flush_output()
         os._exit(1)
 
 

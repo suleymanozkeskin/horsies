@@ -27,7 +27,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import Final, NoReturn, assert_never
 
-from horsies.core.logging import get_logger
+from horsies.core.logging import configure_logging, get_logger
 from horsies.core.worker.child_main import (
     BAD_ARGUMENTS_EXIT_CODE,
     BAD_PARENT_FRAME_EXIT_CODE,
@@ -36,6 +36,8 @@ from horsies.core.worker.child_main import (
     RunTaskFn,
     bind_to_parent,
     boot_app,
+    bounded_text,
+    flush_output,
     ignore_stop_signals,
     read_init_frame,
     restore_parent_state,
@@ -59,6 +61,7 @@ logger = get_logger('worker')
 REPARENT_FAILED_EXIT_CODE: Final = 74
 REPARENT_TIMEOUT_S: Final = 5.0
 REPARENT_POLL_S: Final = 0.0002
+MAX_REFUSAL_CHARS: Final = 4096
 # Importing these gives a child the library code that it would otherwise load
 # after its start. Task code stays out, so module state stays per child.
 LIBRARY_MODULES: Final[tuple[str, ...]] = (
@@ -77,6 +80,12 @@ def _send_frame(ctrl: socket.socket, frame: PreloadFrame) -> None:
         ctrl.sendall(encode_preload_frame(frame).head)
     except OSError:
         os._exit(PARENT_GONE_EXIT_CODE)
+
+
+def _refuse(ctrl: socket.socket, reason: str) -> NoReturn:
+    """Report why this process cannot fork, and exit."""
+    _send_frame(ctrl, PreloadRefusedFrame(bounded_text(reason, MAX_REFUSAL_CHARS)))
+    os._exit(1)
 
 
 def _prepare_library(init: InitFrame) -> BootFn:
@@ -184,8 +193,10 @@ def _run_middle(
         ctrl.close()
         os.close(write_end)
         _run_child(child_fd, worker_pid, boot, run_task)
-    os.write(write_end, str(child).encode('ascii'))
-    os._exit(0)
+    try:
+        os.write(write_end, str(child).encode('ascii'))
+    finally:
+        os._exit(0)
 
 
 def _fork_child(
@@ -196,7 +207,12 @@ def _fork_child(
     run_task: RunTaskFn,
 ) -> PreloadFrame:
     """Run one double fork. Returns after the middle process is reaped."""
-    read_end, write_end = os.pipe()
+    # Anything buffered would otherwise print once more from each fork.
+    flush_output()
+    try:
+        read_end, write_end = os.pipe()
+    except OSError as exc:
+        return ForkFailedFrame(f'{type(exc).__name__}: {exc}')
     try:
         middle = os.fork()
     except OSError as exc:
@@ -252,15 +268,14 @@ def run(
     ignore_stop_signals()
     bind_to_parent(worker_pid)
     init = read_init_frame(ctrl)
+    configure_logging(init.loglevel)
     try:
         boot = prepare(init)
-    except Exception as exc:
-        _send_frame(ctrl, PreloadRefusedFrame(f'{type(exc).__name__}: {exc}'))
-        os._exit(1)
+    except (Exception, SystemExit) as exc:
+        _refuse(ctrl, f'{type(exc).__name__}: {exc}')
     refusal = fork_refusal(ctrl.fileno())
     if refusal is not None:
-        _send_frame(ctrl, PreloadRefusedFrame(refusal))
-        os._exit(1)
+        _refuse(ctrl, refusal)
     gc.collect()
     gc.freeze()
     _send_frame(ctrl, PreloadReadyFrame(pid=os.getpid()))

@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
 
+import psutil
 import pytest
 import pytest_asyncio
 
@@ -53,6 +54,8 @@ pytestmark = [pytest.mark.unit]
 FIXTURES = Path(__file__).parent.parent / 'fixtures' / 'slots'
 SCRIPTED_CHILD = str(FIXTURES / 'scripted_child.py')
 SCRIPTED_PRELOAD = str(FIXTURES / 'scripted_preload.py')
+# A program that never answers, so a start waits on it until it is cancelled.
+SLOW_PRELOAD = str(FIXTURES / 'never_ready_preload.py')
 OUTCOME_TIMEOUT_S = 30.0
 PR_GET_CHILD_SUBREAPER = 37
 
@@ -148,6 +151,11 @@ async def _running_preload(pool: SlotPool) -> PreloadParent:
             return parent
         await asyncio.sleep(0.01)
     raise AssertionError('no preload parent came up')
+
+
+def _all_gone(processes: set[psutil.Process]) -> bool:
+    _, alive = psutil.wait_procs(list(processes), timeout=5)
+    return not alive
 
 
 class TestArguments:
@@ -321,12 +329,13 @@ class TestForkReplies:
 
     def test_a_failed_fork_leaves_the_parent_up(self) -> None:
         parent = self._parent()
-        assert parent._child_from(ForkFailedFrame('EAGAIN')) == Err(PreloadDown('EAGAIN'))
+        reply = parent._child_from(ForkFailedFrame('EAGAIN'), set())
+        assert reply == Err(PreloadDown('EAGAIN'))
         cast(MagicMock, parent.process).kill.assert_not_called()
 
     def test_an_unexpected_frame_ends_the_parent(self) -> None:
         parent = self._parent()
-        assert isinstance(parent._child_from(PreloadReadyFrame(pid=1)), Err)
+        assert isinstance(parent._child_from(PreloadReadyFrame(pid=1), set()), Err)
         cast(MagicMock, parent.process).kill.assert_called_once_with()
 
     def test_a_pid_that_cannot_be_watched_is_no_child(
@@ -336,12 +345,17 @@ class TestForkReplies:
         def refuse(_pid: int) -> int:
             raise OSError(24, 'too many files')
 
+        killed: list[int] = []
         monkeypatch.setattr(preload, '_open_pidfd', refuse)
-        match self._parent()._child_from(ChildForkedFrame(pid=1)):
+        monkeypatch.setattr(preload, '_kill_unwatched_child', killed.append)
+        live_pids = {4321}
+        match self._parent()._child_from(ChildForkedFrame(pid=4321), live_pids):
             case Err(PreloadDown(detail=detail)):
                 assert 'too many files' in detail
             case other:
                 raise AssertionError(other)
+        assert killed == [4321]
+        assert live_pids == set()
 
 
 @linux_only
@@ -514,6 +528,70 @@ class TestPreloadParentDeath:
         assert child is not None
         assert isinstance(child.process, asyncio.subprocess.Process)
         assert pool._preload is parent and parent.is_running
+
+    async def test_a_failed_restart_spends_one_attempt_only(
+        self,
+        started_pools: list[SlotPool],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'PRELOAD_RESTART_DELAY_S', 0.01)
+        pool = await _started(started_pools, _config())
+        real_launch = pool._launch_preload
+        failures = [PreloadStartFailed('first'), PreloadStartFailed('second')]
+
+        async def flaky() -> Result[PreloadParent, PreloadRefused | PreloadStartFailed]:
+            if failures:
+                return Err(failures.pop(0))
+            return await real_launch()
+
+        monkeypatch.setattr(pool, '_launch_preload', flaky)
+        first = await _running_preload(pool)
+        first.process.kill()
+        await first.process.wait()
+
+        replacement = await _running_preload(pool)
+
+        assert replacement is not first
+        assert failures == []
+
+    async def test_a_bad_fork_never_shares_a_socket_with_an_exec_child(
+        self,
+        started_pools: list[SlotPool],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The fork answers too late: the forked child exists and holds the socket."""
+        monkeypatch.setattr(preload, 'PRELOAD_FORK_TIMEOUT_S', 0.0)
+        pool = await _started(started_pools, _config(max_tasks_per_child=1))
+        monkeypatch.setattr(slots, 'PRELOAD_RESTART_DELAY_S', 60.0)
+
+        await _result(pool, 'echo', 'one')
+        assert await _result(pool, 'echo', 'two') == 'two'
+
+        child = pool._slots[0].child
+        assert child is not None
+        assert isinstance(child.process, asyncio.subprocess.Process)
+        for _ in range(500):
+            if {p.pid for p in psutil.Process().children()} == {child.pid}:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError('a stray child is still alive')
+
+    async def test_a_cancelled_start_ends_the_preload_parent(self) -> None:
+        pids_before = set(psutil.Process().children())
+        pool = SlotPool(_config(preload_entry=(SLOW_PRELOAD,)), pending_limit=10)
+        starting = asyncio.ensure_future(pool.start())
+        for _ in range(500):
+            if set(psutil.Process().children()) - pids_before:
+                break
+            await asyncio.sleep(0.01)
+        started = set(psutil.Process().children()) - pids_before
+        assert started
+
+        starting.cancel()
+        await asyncio.gather(starting, return_exceptions=True)
+        await pool.stop(0)
+
+        assert await asyncio.to_thread(_all_gone, started)
 
     async def test_restarts_are_bounded(
         self,

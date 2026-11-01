@@ -954,7 +954,7 @@ class TestStopDuringBoot:
         starting = asyncio.ensure_future(pool.start())
         first = await self._booting_child(pool)
 
-        await pool.stop(30)
+        await asyncio.wait_for(pool.stop(30), 5)
 
         await asyncio.wait_for(starting, 5)
         assert not _alive(first)

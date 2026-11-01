@@ -401,6 +401,15 @@ class FrameProtocol(asyncio.BufferedProtocol):
         self._on_closed()
 
 
+def _socket_pair() -> tuple[socket.socket, socket.socket]:
+    """Return a new (parent, child) pair with large buffers."""
+    parent_sock, child_sock = socket.socketpair()
+    for sock in (parent_sock, child_sock):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
+    return parent_sock, child_sock
+
+
 class Child:
     """One running process and its socket. Does not know about tasks."""
 
@@ -441,46 +450,75 @@ class Child:
         for the child to be ready.
         """
         registry = set[int]() if live_pids is None else live_pids
-        parent_sock, child_sock = socket.socketpair()
+        if preload is not None:
+            forked = await cls._start_forked(init, preload, registry)
+            if forked is not None:
+                return Ok(forked)
+        return await cls._start_exec(config, init, registry)
+
+    @classmethod
+    async def _start_forked(
+        cls,
+        init: InitFrame,
+        preload: PreloadParent,
+        registry: set[int],
+    ) -> 'Child | None':
+        """Return a forked child, or None.
+
+        After a failure this socket pair must not be used again: a forked child
+        may exist and hold it. Closing our end gives that child EOF.
+        """
+        parent_sock, child_sock = _socket_pair()
         try:
-            for sock in (parent_sock, child_sock):
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
-            process = await cls._launch(config, child_sock, preload, registry)
+            reply = await preload.fork_child(child_sock, registry)
+        finally:
+            child_sock.close()
+        match reply:
+            case Ok(process):
+                return await cls._attach_registered(process, parent_sock, init, registry)
+            case Err(down):
+                parent_sock.close()
+                logger.warning('Preload parent gave no child: %s', down.detail)
+                return None
+
+    @classmethod
+    async def _start_exec(
+        cls,
+        config: SlotPoolConfig,
+        init: InitFrame,
+        registry: set[int],
+    ) -> Result['Child', SpawnFailed]:
+        parent_sock, child_sock = _socket_pair()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                *interpreter_flags(),
+                *config.child_entry,
+                str(child_sock.fileno()),
+                str(os.getpid()),
+                stdin=asyncio.subprocess.DEVNULL,
+                pass_fds=(child_sock.fileno(),),
+                start_new_session=True,
+            )
         except OSError as exc:
             parent_sock.close()
             return Err(SpawnFailed(f'{type(exc).__name__}: {exc}'))
         finally:
             child_sock.close()
+        return Ok(await cls._attach_registered(process, parent_sock, init, registry))
+
+    @classmethod
+    async def _attach_registered(
+        cls,
+        process: ChildProcess,
+        parent_sock: socket.socket,
+        init: InitFrame,
+        registry: set[int],
+    ) -> 'Child':
         registry.add(process.pid)
         child = await cls._attach(process, parent_sock, init)
         child.notify_on_exit(lambda: registry.discard(process.pid))
-        return Ok(child)
-
-    @staticmethod
-    async def _launch(
-        config: SlotPoolConfig,
-        child_sock: socket.socket,
-        preload: PreloadParent | None,
-        live_pids: set[int],
-    ) -> ChildProcess:
-        """Return a running process on ``child_sock``. Raises ``OSError``."""
-        if preload is not None:
-            match await preload.fork_child(child_sock, live_pids):
-                case Ok(process):
-                    return process
-                case Err(down):
-                    logger.warning('Preload parent gave no child: %s', down.detail)
-        return await asyncio.create_subprocess_exec(
-            sys.executable,
-            *interpreter_flags(),
-            *config.child_entry,
-            str(child_sock.fileno()),
-            str(os.getpid()),
-            stdin=asyncio.subprocess.DEVNULL,
-            pass_fds=(child_sock.fileno(),),
-            start_new_session=True,
-        )
+        return child
 
     @classmethod
     async def _attach(
@@ -861,37 +899,46 @@ class SlotPool:
         """Replace a dead preload parent, bounded.
 
         Running children are not affected: they are this process's children.
-        New children use ``exec`` until a replacement is up, and for the rest
-        of this worker's life if the bound is reached.
+        New children use ``exec`` until a replacement is up. A failed restart
+        spends one attempt. At the bound, children use ``exec`` for the rest
+        of this worker's life.
         """
-        for restart in range(1, PRELOAD_RESTART_LIMIT + 1):
-            await parent.process.wait()
-            self._preload = None
+        current: PreloadParent | None = parent
+        for attempt in range(1, PRELOAD_RESTART_LIMIT + 1):
+            if current is not None:
+                await current.process.wait()
+                self._preload = None
+                logger.error(
+                    'Preload parent pid=%s exited with %s; new children use exec',
+                    current.process.pid,
+                    current.process.returncode,
+                )
             if self._stopping:
                 return
-            logger.error(
-                'Preload parent pid=%s exited with %s; new children use exec',
-                parent.process.pid,
-                parent.process.returncode,
-            )
             await asyncio.sleep(PRELOAD_RESTART_DELAY_S)
-            match await self._launch_preload():
-                case Ok(replacement):
-                    parent = replacement
-                    if self._stopping:
-                        await replacement.stop()
-                        return
-                    self._preload = replacement
-                    logger.info('Preload parent restarted, attempt %s', restart)
-                case Err(failure):
-                    logger.error('Preload parent did not restart: %s', failure)
-                    return
-        await parent.process.wait()
-        self._preload = None
+            current = await self._restart_preload(attempt)
+            if self._stopping:
+                return
+        if current is not None:
+            await current.process.wait()
+            self._preload = None
         logger.critical(
-            'Preload parent exited %s times; children use exec from now on',
-            PRELOAD_RESTART_LIMIT + 1,
+            'Preload parent is down after %s restarts; children use exec from now on',
+            PRELOAD_RESTART_LIMIT,
         )
+
+    async def _restart_preload(self, attempt: int) -> PreloadParent | None:
+        match await self._launch_preload():
+            case Ok(replacement):
+                if self._stopping:
+                    await replacement.stop()
+                    return None
+                self._preload = replacement
+                logger.info('Preload parent restarted, attempt %s', attempt)
+                return replacement
+            case Err(failure):
+                logger.error('Preload parent restart %s failed: %s', attempt, failure)
+                return None
 
     async def wait_failed(self) -> PoolFailure:
         """Wait until no replacement child can start. Fatal to the worker."""
@@ -957,7 +1004,9 @@ class SlotPool:
         match error:
             case PoolStopped():
                 return
-            case SpawnFailed() | ChildHookFailed() | BootAttemptsExhausted():
+            case (
+                SpawnFailed() | ChildHookFailed() | BootAttemptsExhausted() | PreloadRefused()
+            ):
                 self._record_failure(error)
             case _ as unreachable:
                 assert_never(unreachable)

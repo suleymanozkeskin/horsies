@@ -15,6 +15,7 @@ import asyncio
 import ctypes
 import errno
 import os
+import signal
 import socket
 import sys
 from collections.abc import Collection, Sequence
@@ -87,7 +88,12 @@ class PreloadStartFailed:
 
 @dataclass(frozen=True, slots=True)
 class PreloadDown:
-    """No child came from this request. The caller uses ``exec``."""
+    """This request gave no usable child. The caller uses ``exec``.
+
+    A forked child may still exist and hold its end of the socket pair. The
+    caller must close that pair and use a new one: a stray child then reads EOF
+    and exits, and two processes never share one socket.
+    """
 
     detail: str
 
@@ -99,9 +105,9 @@ def _set_subreaper(enabled: bool) -> bool:
 
 def _open_pidfd(pid: int) -> int:
     """Open a pidfd. Raises ``OSError`` when the kernel has none."""
-    if sys.platform == 'linux':
+    if sys.platform == 'linux' and hasattr(os, 'pidfd_open'):
         return os.pidfd_open(pid)
-    raise OSError(errno.ENOSYS, 'pidfd needs Linux')
+    raise OSError(errno.ENOSYS, 'this Python has no pidfd_open')
 
 
 def _next_exited_child() -> int | None:
@@ -178,6 +184,14 @@ def reap_landed_orphans(known_pids: Collection[int]) -> None:
             return
 
 
+def _kill_unwatched_child(pid: int) -> None:
+    """Kill a child that no one watches. It is unreaped, so the pid is still its own."""
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+
+
 class PreloadParent:
     """One running preload process. Serves one spawn request at a time."""
 
@@ -228,6 +242,11 @@ class PreloadParent:
         try:
             await self._loop.sock_sendall(self._sock, encoded.head + encoded.body)
             frame = await asyncio.wait_for(self._read_frame(), PRELOAD_READY_TIMEOUT_S)
+        except asyncio.CancelledError:
+            # No one else knows this process yet, so nothing else can stop it.
+            self._sock.close()
+            self._kill()
+            raise
         except (OSError, EOFError, TimeoutError) as exc:
             await self.stop()
             return Err(PreloadStartFailed(f'{type(exc).__name__}: {exc}'))
@@ -297,7 +316,8 @@ class PreloadParent:
                 self._kill()
                 return Err(PreloadDown(f'{type(exc).__name__}: {exc}'))
             finally:
-                _set_subreaper(False)
+                if not _set_subreaper(False):
+                    logger.critical('Could not clear the subreaper flag')
             match frame:
                 case ChildForkedFrame(pid=pid):
                     live_pids.add(pid)
@@ -306,14 +326,22 @@ class PreloadParent:
                 case _ as unreachable:
                     assert_never(unreachable)
             reap_landed_orphans({*live_pids, self.process.pid})
-        return self._child_from(frame)
+        return self._child_from(frame, live_pids)
 
-    def _child_from(self, frame: PreloadFrame) -> Result[ReparentedProcess, PreloadDown]:
+    def _child_from(
+        self,
+        frame: PreloadFrame,
+        live_pids: set[int],
+    ) -> Result[ReparentedProcess, PreloadDown]:
         match frame:
             case ChildForkedFrame(pid=pid):
                 try:
                     return Ok(ReparentedProcess(pid, self._loop))
                 except OSError as exc:
+                    # No exit can be seen for this child, so it must not run.
+                    # Leaving the registry lets a later sweep reap it.
+                    _kill_unwatched_child(pid)
+                    live_pids.discard(pid)
                     return Err(PreloadDown(f'pidfd_open: {exc}'))
             case ForkFailedFrame(reason=reason):
                 return Err(PreloadDown(reason))
