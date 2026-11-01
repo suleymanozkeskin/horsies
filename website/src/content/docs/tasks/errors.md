@@ -55,7 +55,6 @@ Errors from type/schema validation and structural contracts.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `PYDANTIC_HYDRATION_ERROR` | Legacy code. It stays in the enum as a reserved code, and the library does not return it | No |
 | `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 
@@ -109,6 +108,16 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 ### Broker Errors (BrokerResult)
 
 `app.get_result_async()` and broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
+
+Three broker methods return a subset of `BrokerOperationError`, their only failures:
+
+| Method | Returns |
+| ------ | ------- |
+| `enqueue_async()` | `Result[str, BrokerEnqueueError]` |
+| `enqueue()` | `Result[str, BrokerEnqueueError \| BrokerSyncCallError]` |
+| `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed \| BrokerEventLoopLimit]` |
+
+`BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
 
 <!-- members: BrokerErrorCode -->
 | Code | Description | Retryable |

@@ -3,7 +3,8 @@
 ``BrokerOperationError`` is a union with one frozen variant per state. The
 nine operation codes share ``BrokerOperationFailed``; every other code has a
 variant of its own. A variant's repr hides the message and the cause.
-``broker_error_cause`` gives the exception, or ``NoCause()``.
+``broker_error_cause`` gives the exception, or ``NoCause()``. A send sees
+only the variants of ``BrokerEnqueueError | BrokerSyncCallError``.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import pytest
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
+    BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerEventLoopLimit,
@@ -31,6 +33,7 @@ from horsies.core.brokers.result_types import (
     BrokerOperationFailed,
     BrokerOperationFailedCode,
     BrokerPayloadMismatch,
+    BrokerSyncCallError,
     broker_error_cause,
 )
 from horsies.core.cli import _raise_schema_error  # pyright: ignore[reportPrivateUsage]
@@ -98,6 +101,28 @@ def _every_variant(cause: BaseException) -> list[BrokerOperationError]:
     ]
 
 
+ENQUEUE_VARIANTS: frozenset[type[Any]] = frozenset(
+    get_args(BrokerEnqueueError.__value__)
+    + get_args(BrokerSyncCallError.__value__)
+)
+
+
+def _every_enqueue_variant(cause: BaseException) -> list[BrokerOperationError]:
+    """One value of each variant that ``PostgresBroker.enqueue`` returns."""
+    return [
+        error for error in _every_variant(cause) if type(error) in ENQUEUE_VARIANTS
+    ]
+
+
+def _every_other_variant(cause: BaseException) -> list[BrokerOperationError]:
+    """One value of each variant that ``PostgresBroker.enqueue`` does not return."""
+    return [
+        error
+        for error in _every_variant(cause)
+        if type(error) not in ENQUEUE_VARIANTS
+    ]
+
+
 CAUSED_VARIANTS = (
     BrokerOperationFailed,
     BrokerEnqueueFailed,
@@ -128,6 +153,13 @@ class TestVariantCatalog:
         built = {type(error) for error in _every_variant(RuntimeError('x'))}
 
         assert built == set(get_args(BrokerOperationError.__value__))
+
+    def test_the_enqueue_errors_are_disjoint_broker_errors(self) -> None:
+        enqueue = set(get_args(BrokerEnqueueError.__value__))
+        sync_call = set(get_args(BrokerSyncCallError.__value__))
+
+        assert enqueue.isdisjoint(sync_call)
+        assert enqueue | sync_call <= set(get_args(BrokerOperationError.__value__))
 
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError(CAUSE_MARKER)), ids=_variant_id
@@ -209,6 +241,7 @@ def _send_with_broker_error(error: BrokerOperationError) -> TaskSendError:
 
 
 SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
+    BrokerEnqueueFailed: TaskSendEnqueueFailed,
     BrokerPayloadMismatch: TaskSendPayloadMismatch,
     BrokerEventLoopLimit: TaskSendEventLoopLimit,
     BrokerIdempotencyKeyConflict: TaskSendIdempotencyKeyConflict,
@@ -220,35 +253,47 @@ SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
 
 
 class TestSendMapping:
+    def test_every_enqueue_variant_has_a_send_variant(self) -> None:
+        assert set(SEND_VARIANT_OF) == ENQUEUE_VARIANTS
+
     @pytest.mark.parametrize(
-        'error', _every_variant(RuntimeError('cause')), ids=_variant_id
+        'error', _every_enqueue_variant(RuntimeError('cause')), ids=_variant_id
     )
-    def test_each_broker_variant_maps_to_its_send_variant(
+    def test_each_enqueue_variant_maps_to_its_send_variant(
         self,
         error: BrokerOperationError,
     ) -> None:
         send_error = _send_with_broker_error(error)
 
-        assert type(send_error) is SEND_VARIANT_OF.get(
-            type(error), TaskSendEnqueueFailed
-        )
+        assert type(send_error) is SEND_VARIANT_OF[type(error)]
         assert send_error.message == error.message
 
-    @pytest.mark.parametrize(
-        'error', _every_variant(RuntimeError('cause')), ids=_variant_id
-    )
+    @pytest.mark.parametrize('cause', [RuntimeError('cause'), NoCause()], ids=repr)
+    @pytest.mark.parametrize('retryable', [True, False], ids=repr)
     def test_an_enqueue_failure_keeps_retryable_and_the_cause(
+        self,
+        retryable: bool,
+        cause: BaseException | NoCause,
+    ) -> None:
+        send_error = _send_with_broker_error(
+            BrokerEnqueueFailed(
+                message='write failed', retryable=retryable, exception=cause,
+            ),
+        )
+
+        assert isinstance(send_error, TaskSendEnqueueFailed)
+        assert send_error.retryable is retryable
+        assert send_error.exception is cause
+
+    @pytest.mark.parametrize(
+        'error', _every_other_variant(RuntimeError('cause')), ids=_variant_id
+    )
+    def test_a_variant_that_enqueue_does_not_return_is_a_defect(
         self,
         error: BrokerOperationError,
     ) -> None:
-        if type(error) in SEND_VARIANT_OF:
-            pytest.skip('maps to a send variant of its own')
-
-        send_error = _send_with_broker_error(error)
-
-        assert isinstance(send_error, TaskSendEnqueueFailed)
-        assert send_error.retryable is error.retryable
-        assert send_error.exception == broker_error_cause(error)
+        with pytest.raises(AssertionError, match=type(error).__name__):
+            _ = _send_with_broker_error(error)
 
     @pytest.mark.parametrize('cause', [RuntimeError('cause'), NoCause()], ids=repr)
     @pytest.mark.parametrize(

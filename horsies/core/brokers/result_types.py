@@ -9,11 +9,15 @@ The library uses two distinct error systems:
    error codes (``BuiltInTaskCode`` families) and user-defined error codes.
 
 2. ``BrokerResult[T]`` (this module) -- infrastructure operation outcomes.
-   Returned by broker methods (``enqueue_async``, ``get_task_info_async``,
-   ``ensure_schema_initialized``, etc.).  The error side is
-   ``BrokerOperationError``: a union with one frozen variant per state.
-   Every variant has ``code`` (a ``BrokerErrorCode`` member), ``message``
-   and ``retryable``. Callers match on the variant.
+   Returned by broker methods (``get_task_info_async``, ``close_async``,
+   etc.).  The error side is ``BrokerOperationError``: a union with one
+   frozen variant per state. Every variant has ``code`` (a
+   ``BrokerErrorCode`` member), ``message`` and ``retryable``. Callers
+   match on the variant. A method with fewer failures returns a subset:
+   ``enqueue_async`` returns ``Result[str, BrokerEnqueueError]``,
+   ``enqueue`` adds ``BrokerSyncCallError``, and
+   ``ensure_schema_initialized`` returns
+   ``Result[None, BrokerOperationFailed | BrokerEventLoopLimit]``.
 
 Where Result stops and exceptions take over (the "stop line"):
 
@@ -333,6 +337,21 @@ type BrokerOperationError = (
 
 
 type BrokerResult[T] = Result[T, BrokerOperationError]
+
+
+type BrokerEnqueueError = (
+    BrokerEnqueueFailed
+    | BrokerPayloadMismatch
+    | BrokerIdempotencyKeyConflict
+    | BrokerInvalidTaskOptions
+    | BrokerInvalidInput
+    | BrokerEventLoopLimit
+)
+"""Every failure of ``PostgresBroker.enqueue_async``."""
+
+
+type BrokerSyncCallError = BrokerAsyncContext | BrokerLoopRunnerFailed
+"""The failures that a sync facade adds to its async method. Nothing ran."""
 
 
 def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:

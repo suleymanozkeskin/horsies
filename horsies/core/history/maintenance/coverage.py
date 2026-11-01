@@ -645,7 +645,7 @@ def _expected_registrations(
         }
         for class_key, duration in declared_classes
     )
-    return json.dumps(classes, separators=(',', ':'))
+    return json.dumps(classes, separators=(',', ':'), allow_nan=False)
 
 
 def _timedelta_microseconds(value: timedelta) -> int:

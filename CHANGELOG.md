@@ -117,9 +117,29 @@ and there is no migration contract between pre-1.0 versions.
   `ENQUEUE_FAILED`, which `retry_start()` accepted.
 - **`PostgresBroker.ensure_schema_initialized()` returns
   `Result[None, BrokerOperationFailed | BrokerEventLoopLimit]`**, its only
-  failures. The run-time behavior does not change. A `match` on its error
-  with an arm for another broker variant fails strict pyright
-  (`reportUnnecessaryComparison`); remove that arm.
+  failures. The run-time behavior does not change. In a `match` on its
+  error, an arm for another broker variant is dead; remove it. Strict
+  pyright reports such an arm (`reportUnnecessaryComparison`) when it
+  stands alone or in an OR pattern without parentheses, not inside a
+  parenthesized OR pattern.
+- **`PostgresBroker.enqueue_async()` returns
+  `Result[str, BrokerEnqueueError]`, and `enqueue()` returns
+  `Result[str, BrokerEnqueueError | BrokerSyncCallError]`**, their only
+  failures. `BrokerEnqueueError` is `BrokerEnqueueFailed |
+  BrokerPayloadMismatch | BrokerIdempotencyKeyConflict |
+  BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`.
+  `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`.
+  Both are new names, exported from `horsies` and `horsies.core.brokers`.
+  The run-time behavior does not change. Code that assigns the result to
+  `BrokerResult[str]` still type-checks. In a `match` on the error, an arm
+  for `BrokerOperationFailed`, `BrokerNotAttached`,
+  `BrokerNoTypeAvailable`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` is dead; remove it. Strict pyright reports such
+  an arm (`reportUnnecessaryComparison`) when it stands alone or in an OR
+  pattern without parentheses, not inside a parenthesized OR pattern. A
+  send or schedule whose broker returns one of these five variants (only a
+  mock can) fails an assertion that names the variant. Before, it returned
+  `TaskSendEnqueueFailed`.
 - **New broker codes `INVALID_INPUT` and `LISTENER_DISABLED`.** An
   exhaustive `match` on `BrokerErrorCode` needs a case for each. These
   failures move to them:
@@ -231,9 +251,37 @@ and there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: `ContractCode.PYDANTIC_HYDRATION_ERROR` is removed.** The
+  library has not returned it since 0.1.2. Code that names it raises
+  `AttributeError`; match on `RESULT_DESERIALIZATION_ERROR`,
+  `BrokerErrorCode.INVALID_JSON_PAYLOAD` or `RETURN_TYPE_MISMATCH`. A stored
+  error code `{"__builtin_task_code__": "PYDANTIC_HYDRATION_ERROR"}` does not
+  decode: `TaskHandle.get()` returns `RESULT_DESERIALIZATION_ERROR` and
+  `app.get_result()` returns `INVALID_JSON_PAYLOAD`, each with `Unknown
+  built-in task code` in the message. A result stored before 0.1.2 already
+  fails to decode, because it has no `__h_task_result__` marker.
+- **The string `PYDANTIC_HYDRATION_ERROR` is no longer reserved.**
+  `TaskError(error_code='PYDANTIC_HYDRATION_ERROR')` makes a user code. An
+  `exception_mapper` or `default_unhandled_error_code` value
+  `PYDANTIC_HYDRATION_ERROR` no longer fails `horsies check` with `HRS-212`.
+  The monitoring API and the web UI put a stored code
+  `PYDANTIC_HYDRATION_ERROR` in the `DOMAIN` category, not `CONTRACT`.
+- **Breaking: the alias `ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS` is
+  removed.** Use `ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; the value
+  `HRS-026` does not change. Code that names the alias raises
+  `AttributeError`.
+- **Breaking: the environment variable `TASKLIB_SUPPRESS_SENDS` is renamed
+  to `HORSIES_SUPPRESS_SENDS`.** The old name has no effect. Set
+  `HORSIES_SUPPRESS_SENDS=1` where the old variable was set. Without it,
+  a send or schedule is no longer a no-op, and it connects to the broker
+  database. The send error messages and the `TaskSendErrorCode`
+  documentation use the new name.
 
 ### Changed
 
+- Three operations guides are new: Atomic Enqueue and Topology, Deploying
+  Code Changes and Testing. The Testing guide documents
+  `HORSIES_SUPPRESS_SENDS`.
 - **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
   whose idempotency key is reserved by another task with a different
   command returns `TaskSendIdempotencyKeyConflict` instead of
@@ -383,6 +431,10 @@ and there is no migration contract between pre-1.0 versions.
   code raised it. The number is retired and is not used again. The skill
   rule that `build_with()` must accept `*_args` and `**_kwargs` is removed;
   no such check exists.
+- **Unused history codecs.** `core/history/archive/rerun_input.py`,
+  `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
+  library. SQL functions write the stored bytes, and `decode_input_envelope`
+  reads a stored rerun input.
 
 ### Fixed
 
@@ -407,9 +459,8 @@ and there is no migration contract between pre-1.0 versions.
   site, the skills files and `llms.txt` now list `OutcomeCode.TASK_EXPIRED`,
   `TASK_TIMEOUT` and `WORKFLOW_EXPIRED`, `ContractCode.NO_TYPE_AVAILABLE`,
   all 21 `BrokerErrorCode` members, and `SchemaState.CUTOVER_REQUIRED` where
-  they were missing. `ContractCode.PYDANTIC_HYDRATION_ERROR` is listed as a
-  legacy reserved code that the library does not return. The errors page
-  adds HRS-105 and HRS-213 to HRS-215, and tables for
+  they were missing. The errors page adds HRS-105 and HRS-213 to HRS-215,
+  and tables for
   `WorkflowStartErrorCode` and `HandleErrorCode`. `llms.txt` adds HRS-016,
   HRS-017, HRS-031, HRS-032, HRS-104, HRS-105 and HRS-213 to HRS-216.
   HRS-104 means a pre-decorated task function (it has a `__wrapped__`
@@ -444,6 +495,16 @@ and there is no migration contract between pre-1.0 versions.
   underflows, such as `1e-9999`, still parses to `0.0`.
 - **`decode_input_envelope` returns `InputEnvelopeCorrupt` for an integer
   over the parse limit of 4300 digits.** Before, it raised `ValueError`.
+- **Every JSON parse in the library goes through `codec/json_io.py`.** A
+  history read refuses a stored result or attempt snapshot that is not strict
+  JSON: `NaN`, `Infinity`, a number outside the finite binary64 range, an
+  integer over 4300 digits, an empty payload, or bytes that are not UTF-8.
+  A result read returns `INVALID_JSON_PAYLOAD`, as a read of a live task does,
+  and a task detail read raises `HistoryContractError`. Before, the archive
+  reader accepted `NaN` and `Infinity`, and an oversized integer raised a raw
+  `ValueError`. `CorruptArchiveValue.detail` for these failures is now
+  `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
+  `HistoryContractError` for the same text.
 
 ## [0.5.5] - 2026-10-28
 

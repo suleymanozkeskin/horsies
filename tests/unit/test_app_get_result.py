@@ -145,6 +145,39 @@ class TestHorsiesGetResultEnvelopeGuards:
         assert result.unwrap_err().code == BrokerErrorCode.INVALID_JSON_PAYLOAD
 
     @pytest.mark.asyncio
+    async def test_removed_builtin_code_in_err_slot_returns_invalid_json_payload(
+        self,
+    ) -> None:
+        """A stored err slot tagged with the removed code
+        ``PYDANTIC_HYDRATION_ERROR`` fails closed with
+        ``INVALID_JSON_PAYLOAD``."""
+        app = _make_app()
+        stored = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'PYDANTIC_HYDRATION_ERROR'},
+                'message': 'stored',
+                'data': None,
+                'exception': None,
+            },
+        }
+        record = RawResultRecord(
+            task_id='task-x',
+            task_name='unknown',
+            status=TaskStatus.FAILED,
+            raw_result=cast(Any, stored),
+        )
+        _patch_broker(app, Ok(record))
+
+        result = await app.get_result_async('task-x')
+
+        assert is_err(result)
+        err = result.unwrap_err()
+        assert err.code == BrokerErrorCode.INVALID_JSON_PAYLOAD
+        assert "Unknown built-in task code: 'PYDANTIC_HYDRATION_ERROR'" in err.message
+
+    @pytest.mark.asyncio
     async def test_terminal_status_with_none_payload_is_result_not_available(
         self,
     ) -> None:
