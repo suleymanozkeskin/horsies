@@ -34,6 +34,7 @@ def _test_window() -> HistoryWindow:
     return HistoryWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
 from pydantic import SecretStr
 from sqlalchemy import event, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -47,9 +48,11 @@ from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
+from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import (
     ErrorCategory,
-    MonitoringQueryErrorCode,
+    MonitoringQueryDbOperationFailed,
+    MonitoringQueryHistoryContractViolation,
     get_task_detail,
     get_workflow_node,
     get_workflow_run,
@@ -63,7 +66,7 @@ from horsies.monitoring import (
     task_stats,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows
+from tests.integration.history_seeding import route_rows, stored_history_status
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -1574,6 +1577,21 @@ class TestGetTaskDetail:
         assert detail.attempts[0].will_retry is True
         assert detail.error_category == ErrorCategory.OPERATIONAL.value
 
+    async def test_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await insert_rows(session, task)
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            result = await get_task_detail(broker, task.id)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert "'NOT_A_STATUS'" in error.message
+
     async def test_standalone_task_has_no_workflow_linkage(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -2192,6 +2210,33 @@ class TestGetWorkflowNode:
         assert node.leaf.task_id == task.id
         assert [a.attempt for a in node.attempts] == [1, 2]
 
+    async def test_backing_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
+        await insert_rows(
+            session,
+            run,
+            task,
+            make_node(
+                workflow_id=run.id,
+                task_index=0,
+                node_id='step-one',
+                status='FAILED',
+                task_id=task.id,
+            ),
+        )
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert "'NOT_A_STATUS'" in error.message
+
     async def test_subworkflow_node_has_no_leaf_or_attempts(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -2334,10 +2379,10 @@ class TestDatabaseFailure:
 
         assert is_err(result)
         error = result.err_value
-        assert error.code is MonitoringQueryErrorCode.DB_OPERATION_FAILED
+        assert isinstance(error, MonitoringQueryDbOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
-        assert error.exception is not None
+        assert isinstance(error.exception, SQLAlchemyError)
 
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
@@ -2345,7 +2390,7 @@ class TestDatabaseFailure:
         result = await get_task_detail(unreachable_broker, str(uuid.uuid4()))
 
         assert is_err(result)
-        assert result.err_value.code is MonitoringQueryErrorCode.DB_OPERATION_FAILED
+        assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)
 
     async def test_aggregate_failure_is_reported(
         self, unreachable_broker: PostgresBroker
@@ -2537,7 +2582,6 @@ class TestUnfilteredHistoryTotalContract:
         what the boundary owes is the same either way: a typed,
         non-retryable monitoring error and no silent exact fallback.
         """
-        from horsies.core.history.errors import HistoryContractError
         from horsies.monitoring import queries as queries_module
 
         await insert_rows(
@@ -2554,9 +2598,8 @@ class TestUnfilteredHistoryTotalContract:
         result = await _unfiltered_list(broker)
 
         assert is_err(result)
-        assert (
-            result.err_value.code
-            is MonitoringQueryErrorCode.DB_OPERATION_FAILED
-        )
-        assert result.err_value.retryable is False
-        assert 'estimate decode failed' in result.err_value.message
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.retryable is False
+        assert 'estimate decode failed' in error.message
