@@ -51,6 +51,10 @@ def enqueue_fingerprint(
     Computed once from Python values before INSERT. Stored in the row.
     On conflict, the stored hash is compared directly — no recomputation
     from DB values, no datetime round-trip risk.
+
+    The text keeps the default ``ensure_ascii=True``, so this call does not
+    use ``dumps_canonical_json``: unescaped text gives a different hash for
+    non-ASCII input, and a resend of a stored row would then mismatch.
     """
     canonical = json.dumps(
         [
@@ -66,6 +70,7 @@ def enqueue_fingerprint(
         ],
         sort_keys=False,
         separators=(',', ':'),
+        allow_nan=False,
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 

@@ -4,13 +4,20 @@ dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
 emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity)
 and numeric literals outside the finite binary64 range.
+loads_json_bytes is the stored-payload form: strict UTF-8, and empty is an
+error. dumps_canonical_json is the one canonical form for hashed or stored text.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from horsies.core.codec.json_io import dumps_json, loads_json
+from horsies.core.codec.json_io import (
+    dumps_canonical_json,
+    dumps_json,
+    loads_json,
+    loads_json_bytes,
+)
 from horsies.core.types.result import is_err
 
 
@@ -187,3 +194,84 @@ class TestLoadsJson:
         result = loads_json(f'[{digits}]')
         assert not is_err(result)
         assert result.ok_value == [int(digits)]
+
+
+@pytest.mark.unit
+class TestLoadsJsonBytes:
+    """A stored payload parses as declared, or it is an error."""
+
+    def test_valid_payload(self) -> None:
+        result = loads_json_bytes('{"city":"Köln"}'.encode())
+        assert not is_err(result)
+        assert result.ok_value == {'city': 'Köln'}
+
+    def test_json_null_is_the_value_none(self) -> None:
+        result = loads_json_bytes(b'null')
+        assert not is_err(result)
+        assert result.ok_value is None
+
+    def test_empty_payload_is_an_error_not_null(self) -> None:
+        result = loads_json_bytes(b'')
+        assert is_err(result)
+        assert 'empty' in str(result.err_value)
+
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'\xff',
+            '[]'.encode('utf-16'),
+            '[]'.encode('utf-32'),
+        ],
+    )
+    def test_non_utf8_payload_is_an_error(self, payload: bytes) -> None:
+        result = loads_json_bytes(payload)
+        assert is_err(result)
+        assert 'not UTF-8' in str(result.err_value)
+
+    def test_utf8_byte_order_mark_is_an_error(self) -> None:
+        assert is_err(loads_json_bytes(b'\xef\xbb\xbf[]'))
+
+    def test_non_utf8_error_text_holds_no_payload_byte(self) -> None:
+        result = loads_json_bytes(b'[\xfe]')
+        assert is_err(result)
+        assert 'byte 1' in str(result.err_value)
+        assert '0xfe' not in str(result.err_value)
+
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'{bad',
+            b'[NaN]',
+            b'[Infinity]',
+            b'[1e9999]',
+            b'[' + b'1' * 5000 + b']',
+        ],
+    )
+    def test_strict_parse_failure_is_an_error(self, payload: bytes) -> None:
+        assert is_err(loads_json_bytes(payload))
+
+
+@pytest.mark.unit
+class TestDumpsCanonicalJson:
+    """Equal content gives equal text, because callers store or hash it."""
+
+    def test_compact_sorted_and_unescaped(self) -> None:
+        assert dumps_canonical_json({'b': 1, 'a': ['ü']}) == '{"a":["ü"],"b":1}'
+
+    def test_nested_keys_are_sorted(self) -> None:
+        assert dumps_canonical_json({'z': {'y': 1, 'x': 2}}) == (
+            '{"z":{"x":2,"y":1}}'
+        )
+
+    def test_list_order_is_kept(self) -> None:
+        assert dumps_canonical_json(['b', 'a']) == '["b","a"]'
+
+    def test_largest_finite_float_is_kept(self) -> None:
+        assert dumps_canonical_json([1.7976931348623157e308]) == (
+            '[1.7976931348623157e+308]'
+        )
+
+    @pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
+    def test_non_finite_float_crashes_loud(self, value: float) -> None:
+        with pytest.raises(ValueError, match='not JSON compliant'):
+            dumps_canonical_json({'x': value})

@@ -1735,7 +1735,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
         # Only an explicit key is validated here. A key the mapping
         # derives is generated from configuration that was already
@@ -1778,7 +1778,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
         # Only an explicit key is validated here. A key the mapping
         # derives is generated from configuration that was already
@@ -1947,7 +1947,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
 
         delay_check = _validate_delay(delay)
@@ -1997,7 +1997,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
 
         delay_check = _validate_delay(delay)

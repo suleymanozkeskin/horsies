@@ -1132,14 +1132,14 @@ async def test_task_handle_info_async() -> None:
 @pytest.mark.e2e
 def test_send_suppressed() -> None:
     """L1.10.1: Task send during suppression returns SEND_SUPPRESSED."""
-    os.environ['TASKLIB_SUPPRESS_SENDS'] = '1'
+    os.environ['HORSIES_SUPPRESS_SENDS'] = '1'
     try:
         send_result = basic_tasks.simple_task.send(x=5)
         assert is_err(send_result)
         err = send_result.err_value
         assert isinstance(err, TaskSendSuppressed)
     finally:
-        os.environ.pop('TASKLIB_SUPPRESS_SENDS', None)
+        os.environ.pop('HORSIES_SUPPRESS_SENDS', None)
 
 
 # =============================================================================

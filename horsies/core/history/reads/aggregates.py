@@ -9,8 +9,10 @@ the listing surfaces: grouping keys and counts only, never envelopes.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
+
+from horsies.core.codec.json_io import loads_json
+from horsies.core.types.result import is_err
 
 from .pages import (
     HistoryScope,
@@ -162,13 +164,12 @@ def plan_rows_from_explain(payload: object) -> int:
     """
     match payload:
         case str() as rendered:
-            try:
-                parsed: object = json.loads(rendered)
-            except json.JSONDecodeError as error:
+            loaded = loads_json(rendered)
+            if is_err(loaded):
                 raise HistoryContractError(
                     'EXPLAIN payload is not valid JSON'
-                ) from error
-            return plan_rows_from_explain(parsed)
+                ) from loaded.err_value
+            return plan_rows_from_explain(loaded.ok_value)
         case [{'Plan': {'Plan Rows': bool()}}, *_]:
             raise HistoryContractError(
                 'EXPLAIN plan row estimate decoded as boolean'

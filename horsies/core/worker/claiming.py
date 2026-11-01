@@ -160,12 +160,14 @@ class ClaimMixin:
         ]
         params: dict[str, Any] = {
             'p_worker_id': self.worker_instance_id,
-            'p_queues': json.dumps(ordered_queues),
+            'p_queues': json.dumps(ordered_queues, allow_nan=False),
             'p_queue_priority': json.dumps(
-                {q: self.cfg.queue_priorities.get(q, 100) for q in ordered_queues}
+                {q: self.cfg.queue_priorities.get(q, 100) for q in ordered_queues},
+                allow_nan=False,
             ),
             'p_queue_max_concurrency': json.dumps(
-                {q: int(self.cfg.queue_max_concurrency[q]) for q in capped_queues}
+                {q: int(self.cfg.queue_max_concurrency[q]) for q in capped_queues},
+                allow_nan=False,
             ),
             'p_hard_cap_mode': self.cfg.prefetch_buffer == 0,
             'p_processes': int(self.cfg.processes),
@@ -178,7 +180,7 @@ class ClaimMixin:
                 else None
             ),
             'p_lease_ms': int(self._claim_lease_ms()),
-            'p_lock_keys': json.dumps(lock_keys),
+            'p_lock_keys': json.dumps(lock_keys, allow_nan=False),
         }
 
         async with self.sf() as s:
