@@ -1,10 +1,11 @@
-"""``get()`` of a workflow whose terminal status reads as an error.
+"""``get()`` of a workflow whose status reads as terminal.
 
-``get_async`` reads the status, and for ``FAILED``, ``CANCELLED`` or
-``EXPIRED`` it reads the stored error in a second statement. The second read
-uses the status of the first read: a terminal status does not change.
-Retention can delete the row between the two reads; that is
-``WORKFLOW_NOT_FOUND``, not a guessed status.
+``get_async`` reads the status, and for a terminal status it reads the
+stored result (``COMPLETED``) or the stored error (``FAILED``,
+``CANCELLED``, ``EXPIRED``) in a second statement. The second read uses the
+status of the first read: a terminal status does not change. Retention can
+delete the row between the two reads; that is ``WORKFLOW_NOT_FOUND``, not a
+guessed status and not a success.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from horsies.core.models.tasks import OutcomeCode, RetrievalCode
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import (
     GET_WORKFLOW_ERROR_SQL,
+    GET_WORKFLOW_RESULT_SQL,
     GET_WORKFLOW_STATUS_SQL,
     WorkflowHandle,
 )
@@ -36,20 +38,28 @@ TERMINAL_ERROR_STATUSES = [
     WorkflowStatus.EXPIRED,
 ]
 
+TERMINAL_STATUSES = [WorkflowStatus.COMPLETED, *TERMINAL_ERROR_STATUSES]
+
 
 def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
-    """A handle whose status read gives ``status`` and whose error read gives
+    """A handle whose status read gives ``status`` and whose second read
+    (the result read for ``COMPLETED``, else the error read) gives
     ``error_row`` (``None`` is a missing row)."""
     status_result = MagicMock()
     status_result.fetchone.return_value = SimpleNamespace(status=status.value)
-    error_result = MagicMock()
-    error_result.fetchone.return_value = error_row
+    second_result = MagicMock()
+    second_result.fetchone.return_value = error_row
+    second_statement = (
+        GET_WORKFLOW_RESULT_SQL
+        if status is WorkflowStatus.COMPLETED
+        else GET_WORKFLOW_ERROR_SQL
+    )
 
     def execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
         if statement is GET_WORKFLOW_STATUS_SQL:
             return status_result
-        if statement is GET_WORKFLOW_ERROR_SQL:
-            return error_result
+        if statement is second_statement:
+            return second_result
         raise AssertionError(f'unexpected statement: {statement}')
 
     session = AsyncMock()
@@ -70,7 +80,7 @@ def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
 
 class TestRowRemovedAfterTheStatusRead:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('status', TERMINAL_ERROR_STATUSES, ids=str)
+    @pytest.mark.parametrize('status', TERMINAL_STATUSES, ids=str)
     async def test_it_is_workflow_not_found(self, status: WorkflowStatus) -> None:
         handle = _handle(status, error_row=None)
 

@@ -366,6 +366,12 @@ there is no migration contract between pre-1.0 versions.
   `Ok({})` and `Ok([])`, the same values as an existing workflow without
   results or nodes. An existing workflow before its first stored result
   still gives `Ok({})`.
+- **Breaking: `WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND`
+  when the row of a completed workflow is removed after its status was
+  read.** Retention can delete a terminal workflow between the status read
+  and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
+  success, for that case. A `COMPLETED` row without a stored result still
+  gives `TaskResult(ok=None)`.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
