@@ -931,6 +931,21 @@ class TestRunTaskEntryErrorPaths:
         assert ok is True
         assert reason is not None and 'SerializationError' in reason
 
+    def test_kwargs_json_number_outside_finite_binary64(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """A literal such as 1e9999 → WORKER_SERIALIZATION_ERROR."""
+        patches = _make_run_task_patches()
+        _run_entry_defaults['kwargs_json'] = '{"x":1e9999}'
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is not None and 'finite binary64' in reason
+        assert 'WORKER_SERIALIZATION_ERROR' in payload
+
     def test_kwargs_json_not_a_dict(
         self,
         _run_entry_defaults: dict[str, Any],
