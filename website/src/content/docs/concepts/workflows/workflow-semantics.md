@@ -296,6 +296,13 @@ resumed = await handle.resume_async()  # Returns HandleResult[bool] — unwrap w
 2. **Transition**: Sets workflow status from `PAUSED` → `RUNNING`
 3. **Re-evaluate PENDING tasks**: Checks if dependencies are terminal, marks READY if so
 4. **Enqueue READY tasks**: All READY tasks are enqueued with their dependency results
+5. **Commit, then recovery pass**: Steps 2–4 commit in one transaction. A recovery pass for the workflow tree then runs in a second transaction. It completes the propagation for a task that finished while the resume transaction ran.
+
+**Resume failures:**
+
+- A database error before the commit returns `Err(HandleDbOperationFailed)`: the transaction rolled back, or its commit outcome is unknown.
+- A database error in the recovery pass returns `Err(HandleResumeRecoveryFailed)`: the workflow is `RUNNING`, and the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)`.
+- Any other exception propagates.
 
 **What resume does NOT do:**
 

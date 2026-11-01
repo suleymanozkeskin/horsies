@@ -25,7 +25,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(HRS-301)`. |
+| `task_name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
 | `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |

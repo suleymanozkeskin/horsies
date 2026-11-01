@@ -1,24 +1,39 @@
 """Unit tests for lifecycle pause/resume Result typing.
 
-Tests that pause_workflow / resume_workflow return typed
-HandleResult[bool] instead of the previous bool | None sentinel,
-and that sync wrappers catch LoopRunnerError / unexpected exceptions.
+pause_workflow / resume_workflow return ``HandleResult[bool]``. A database
+error is a ``HandleOperationError`` variant; any other exception propagates.
+Resume runs its recovery pass in a second transaction after the commit, so a
+database error there is ``HandleResumeRecoveryFailed``. The sync wrappers
+return a ``LoopRunnerError`` as ``HandleLoopRunnerFailed`` and let other
+exceptions propagate.
 """
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from tests.broker_resources_support import attach_resources, fake_resources
 
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.models.workflow.handle_types import (
-    HandleErrorCode,
-    HandleOperationError,
+    HandleDbOperationFailed,
+    HandleLoopRunnerFailed,
+    HandleResumeRecoveryFailed,
+    HandleWorkflowNotFound,
 )
+from horsies.core.workflows.recovery import GET_WORKFLOW_TREE_IDS_SQL
+
+WORKFLOW_ID = 'wf-1'
+
+
+def _db_error() -> OperationalError:
+    return OperationalError('SELECT 1', {}, Exception('connection refused'))
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +110,13 @@ def _mock_broker(
     return broker
 
 
+def _session_of(broker: MagicMock) -> AsyncMock:
+    """The session that ``_mock_broker`` hands out."""
+    resources = broker.select_resources.return_value.ok_value
+    session: AsyncMock = resources.session_factory.return_value.__aenter__.return_value
+    return session
+
+
 # ===========================================================================
 # pause_workflow async
 # ===========================================================================
@@ -147,43 +169,50 @@ class TestPauseWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert isinstance(err, HandleWorkflowNotFound)
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_pause_db_failure_returns_db_operation_failed(self) -> None:
-        """SQLAlchemy error -> Err(DB_OPERATION_FAILED)."""
-        from sqlalchemy.exc import OperationalError
-
+        """SQLAlchemy error -> Err(HandleDbOperationFailed) with the cause."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        db_exc = OperationalError('SELECT 1', {}, Exception('connection refused'))
+        db_exc = _db_error()
         broker = _mock_broker(side_effect=db_exc)
         result = await pause_workflow(broker, 'wf-1')
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(err, HandleDbOperationFailed)
         assert err.workflow_id == 'wf-1'
-        assert err.exception is not None
+        assert err.exception is db_exc
+        assert err.retryable is True
 
     @pytest.mark.asyncio(loop_scope='function')
-    async def test_pause_non_db_failure_returns_internal_failed(self) -> None:
-        """Non-DB exception -> Err(INTERNAL_FAILED), not DB_OPERATION_FAILED."""
+    @pytest.mark.parametrize(
+        'defect', [RuntimeError('logic bug'), AssertionError('invariant')],
+        ids=type,
+    )
+    async def test_pause_defect_in_the_body_propagates(
+        self, defect: Exception,
+    ) -> None:
+        """An exception that is not a database error propagates; nothing commits."""
         from horsies.core.workflows.lifecycle import pause_workflow
 
-        broker = _mock_broker(side_effect=RuntimeError('logic bug'))
-        result = await pause_workflow(broker, 'wf-1')
+        broker = _mock_broker(transition_row=('some-id',))
+        session = _session_of(broker)
+        with (
+            patch(
+                'horsies.core.workflows.lifecycle.cascade_pause_to_children',
+                new=AsyncMock(side_effect=defect),
+            ),
+            pytest.raises(type(defect)) as exc_info,
+        ):
+            await pause_workflow(broker, 'wf-1')
 
-        assert is_err(result)
-        err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.INTERNAL_FAILED
-        assert err.retryable is False
-        assert err.exception is not None
+        assert exc_info.value is defect
+        session.commit.assert_not_awaited()
 
 
 # ===========================================================================
@@ -216,43 +245,205 @@ class TestResumeWorkflowResult:
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.WORKFLOW_NOT_FOUND
+        assert isinstance(err, HandleWorkflowNotFound)
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
 
     @pytest.mark.asyncio(loop_scope='function')
     async def test_resume_db_failure_returns_db_operation_failed(self) -> None:
-        """SQLAlchemy error -> Err(DB_OPERATION_FAILED)."""
-        from sqlalchemy.exc import OperationalError
-
+        """SQLAlchemy error -> Err(HandleDbOperationFailed) with the cause."""
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        db_exc = OperationalError('SELECT 1', {}, Exception('connection refused'))
+        db_exc = _db_error()
         broker = _mock_broker(side_effect=db_exc)
         result = await resume_workflow(broker, 'wf-1')
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(err, HandleDbOperationFailed)
         assert err.workflow_id == 'wf-1'
-        assert err.exception is not None
+        assert err.exception is db_exc
+        assert err.retryable is True
+
+
+# ===========================================================================
+# resume_workflow: the commit splits the failure states
+# ===========================================================================
+
+
+def _resume_sessions(
+    *, recovery_error: BaseException | None = None,
+) -> tuple[MagicMock, AsyncMock, AsyncMock]:
+    """A broker whose resume transaction moves one PAUSED workflow to RUNNING.
+
+    The first session is the resume transaction, the second the recovery
+    pass. ``recovery_error`` is raised by the recovery pass's tree query.
+    """
+    resume_row = MagicMock()
+    resume_row.depth = 0
+    resume_row.root_workflow_id = WORKFLOW_ID
+    resume_result = MagicMock()
+    resume_result.fetchone.return_value = resume_row
+    resume_calls: list[Any] = [resume_result]
+
+    def resume_execute(*_args: Any, **_kwargs: Any) -> MagicMock:
+        return resume_calls.pop(0) if resume_calls else _empty_result()
+
+    resume_session = AsyncMock()
+    resume_session.info = {}
+    resume_session.execute = AsyncMock(side_effect=resume_execute)
+    resume_session.commit = AsyncMock()
+
+    tree_row = MagicMock()
+    tree_row.id = WORKFLOW_ID
+    tree_result = MagicMock()
+    tree_result.fetchall.return_value = [tree_row]
+
+    def recovery_execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
+        assert statement is GET_WORKFLOW_TREE_IDS_SQL
+        if recovery_error is not None:
+            raise recovery_error
+        return tree_result
+
+    recovery_session = AsyncMock()
+    recovery_session.info = {}
+    recovery_session.execute = AsyncMock(side_effect=recovery_execute)
+    recovery_session.commit = AsyncMock()
+
+    contexts: list[AsyncMock] = []
+    for session in (resume_session, recovery_session):
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=session)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        contexts.append(cm)
+    broker = MagicMock()
+    attach_resources(
+        broker,
+        fake_resources(session_factory=MagicMock(side_effect=contexts)),
+    )
+    return broker, resume_session, recovery_session
+
+
+@contextmanager
+def _engine_completion_stubbed(recover: AsyncMock) -> Generator[None, None, None]:
+    """Stub the completion checks of the resume transaction and the tree pass."""
+    with (
+        patch(
+            'horsies.core.workflows.engine.check_workflow_completion',
+            new=AsyncMock(),
+        ),
+        patch(
+            'horsies.core.workflows.engine.drain_parent_propagations_in_session',
+            new=AsyncMock(),
+        ),
+        patch(
+            'horsies.core.workflows.recovery.recover_stuck_workflow_tree',
+            new=recover,
+        ),
+    ):
+        yield
+
+
+@pytest.mark.unit
+class TestResumeCommitSplit:
+    """A database error before the resume commit and one after it are two states."""
 
     @pytest.mark.asyncio(loop_scope='function')
-    async def test_resume_non_db_failure_returns_internal_failed(self) -> None:
-        """Non-DB exception -> Err(INTERNAL_FAILED), not DB_OPERATION_FAILED."""
+    async def test_resume_runs_the_recovery_pass_after_the_commit(self) -> None:
         from horsies.core.workflows.lifecycle import resume_workflow
 
-        broker = _mock_broker(side_effect=RuntimeError('logic bug'))
-        result = await resume_workflow(broker, 'wf-1')
+        broker, resume_session, recovery_session = _resume_sessions()
+        recover = AsyncMock(return_value=0)
+        with _engine_completion_stubbed(recover):
+            result = await resume_workflow(broker, WORKFLOW_ID)
+
+        assert is_ok(result)
+        assert result.ok_value is True
+        resume_session.commit.assert_awaited_once()
+        recover.assert_awaited_once_with(recovery_session, broker, [WORKFLOW_ID])
+        recovery_session.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_recovery_db_error_returns_resume_recovery_failed(self) -> None:
+        """The resume committed; only the second transaction failed."""
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        db_exc = _db_error()
+        broker, resume_session, recovery_session = _resume_sessions(
+            recovery_error=db_exc,
+        )
+        with _engine_completion_stubbed(AsyncMock(return_value=0)):
+            result = await resume_workflow(broker, WORKFLOW_ID)
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.INTERNAL_FAILED
+        assert isinstance(err, HandleResumeRecoveryFailed)
+        assert err.workflow_id == WORKFLOW_ID
+        assert err.exception is db_exc
         assert err.retryable is False
-        assert err.exception is not None
+        resume_session.commit.assert_awaited_once()
+        recovery_session.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_commit_db_error_returns_db_operation_failed(self) -> None:
+        """A failed resume commit is not a recovery failure; no recovery pass runs."""
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        db_exc = _db_error()
+        broker, resume_session, recovery_session = _resume_sessions()
+        resume_session.commit = AsyncMock(side_effect=db_exc)
+        recover = AsyncMock(return_value=0)
+        with _engine_completion_stubbed(recover):
+            result = await resume_workflow(broker, WORKFLOW_ID)
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleDbOperationFailed)
+        assert err.exception is db_exc
+        assert err.retryable is True
+        recover.assert_not_awaited()
+        recovery_session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    @pytest.mark.parametrize(
+        'defect', [RuntimeError('logic bug'), AssertionError('invariant')],
+        ids=type,
+    )
+    async def test_defect_in_the_resume_body_propagates(
+        self, defect: Exception,
+    ) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        broker, resume_session, recovery_session = _resume_sessions()
+        with (
+            _engine_completion_stubbed(AsyncMock(return_value=0)),
+            patch(
+                'horsies.core.workflows.lifecycle.cascade_resume_to_children',
+                new=AsyncMock(side_effect=defect),
+            ),
+            pytest.raises(type(defect)) as exc_info,
+        ):
+            await resume_workflow(broker, WORKFLOW_ID)
+
+        assert exc_info.value is defect
+        resume_session.commit.assert_not_awaited()
+        recovery_session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_defect_in_the_recovery_pass_propagates(self) -> None:
+        from horsies.core.workflows.lifecycle import resume_workflow
+
+        defect = RuntimeError('logic bug')
+        broker, resume_session, recovery_session = _resume_sessions()
+        with (
+            _engine_completion_stubbed(AsyncMock(side_effect=defect)),
+            pytest.raises(RuntimeError) as exc_info,
+        ):
+            await resume_workflow(broker, WORKFLOW_ID)
+
+        assert exc_info.value is defect
+        resume_session.commit.assert_awaited_once()
+        recovery_session.commit.assert_not_awaited()
 
 
 # ===========================================================================
@@ -265,7 +456,7 @@ class TestPauseSyncWrapper:
     """pause_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
 
     def test_loop_runner_error_returns_err(self) -> None:
-        """LoopRunnerError -> Err(LOOP_RUNNER_FAILED)."""
+        """LoopRunnerError -> Err(HandleLoopRunnerFailed)."""
         from horsies.core.workflows.lifecycle import pause_workflow_sync
         from horsies.core.utils.loop_runner import LoopRunnerError
 
@@ -273,15 +464,16 @@ class TestPauseSyncWrapper:
         with patch.object(
             broker, 'run_sync',
         ) as mock_call:
-            mock_call.side_effect = LoopRunnerError('dead')
+            runner_error = LoopRunnerError('dead')
+            mock_call.side_effect = runner_error
             result = pause_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.LOOP_RUNNER_FAILED
+        assert isinstance(err, HandleLoopRunnerFailed)
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
+        assert err.exception is runner_error
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a LoopRunnerError propagates unchanged."""
@@ -303,7 +495,7 @@ class TestResumeSyncWrapper:
     """resume_workflow_sync returns LoopRunnerError as an Err and lets other exceptions propagate."""
 
     def test_loop_runner_error_returns_err(self) -> None:
-        """LoopRunnerError -> Err(LOOP_RUNNER_FAILED)."""
+        """LoopRunnerError -> Err(HandleLoopRunnerFailed)."""
         from horsies.core.workflows.lifecycle import resume_workflow_sync
         from horsies.core.utils.loop_runner import LoopRunnerError
 
@@ -311,15 +503,16 @@ class TestResumeSyncWrapper:
         with patch.object(
             broker, 'run_sync',
         ) as mock_call:
-            mock_call.side_effect = LoopRunnerError('dead')
+            runner_error = LoopRunnerError('dead')
+            mock_call.side_effect = runner_error
             result = resume_workflow_sync(broker, 'wf-1')
 
         assert is_err(result)
         err = result.err_value
-        assert isinstance(err, HandleOperationError)
-        assert err.code == HandleErrorCode.LOOP_RUNNER_FAILED
+        assert isinstance(err, HandleLoopRunnerFailed)
         assert err.workflow_id == 'wf-1'
         assert err.retryable is False
+        assert err.exception is runner_error
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a LoopRunnerError propagates unchanged."""

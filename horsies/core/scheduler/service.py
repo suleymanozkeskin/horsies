@@ -20,8 +20,8 @@ from horsies.core.scheduler.validation import collect_schedule_errors
 from horsies.core.scheduler.calculator import calculate_next_run, should_run_now
 from horsies.core.logging import get_logger
 from horsies.core.brokers.result_types import (
+    BrokerEnqueueError,
     BrokerInvalidInput,
-    BrokerResult,
     broker_error_cause,
 )
 from horsies.core.types.error_detail import NoCause
@@ -37,7 +37,7 @@ from horsies.core.codec.payload_guard import (
 )
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.utils.fingerprint import enqueue_fingerprint, schedule_slot_task_id
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.worker.worker import import_by_path
 
 logger = get_logger('scheduler')
@@ -889,7 +889,7 @@ class Scheduler:
         schedule: TaskSchedule,
         *,
         slot_time: datetime,
-    ) -> BrokerResult[str]:
+    ) -> Result[str, BrokerEnqueueError]:
         """Enqueue a scheduled task via the broker.
 
         Uses a deterministic task_id derived from the schedule name and slot_time.
@@ -897,7 +897,7 @@ class Scheduler:
         This ensures crash-and-retry produces the same task_id + same SHA,
         making the INSERT idempotent via ON CONFLICT DO NOTHING.
 
-        Returns Ok(task_id) on success, Err(BrokerOperationError) on broker failure.
+        Returns Ok(task_id) on success, Err(BrokerEnqueueError) on broker failure.
         Raises ValueError/RuntimeError for programming errors (missing task, bad queue).
         """
         if not self.broker:

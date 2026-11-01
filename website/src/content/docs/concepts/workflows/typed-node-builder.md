@@ -192,10 +192,10 @@ process_node = process_user.node(
 | `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
 | `node_id` | `str` | `None` | Stable identifier |
 | `queue` | `str` | `None` | Queue override |
-| `priority` | `int` | `None` | Priority override |
+| `priority` | `int` | `None` | Priority override, from 1 (highest) to 100 (lowest). A value outside 1–100 raises `HRS-034` when the spec is built |
 | `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
-| `good_until` | `datetime` | `None` | Task expiry deadline |
+| `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |
 
 **Returns:** `NodeFactory[P, T]` — callable with the task's original signature, returns `TaskNode[T]`.

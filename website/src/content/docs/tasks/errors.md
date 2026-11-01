@@ -109,6 +109,16 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 
 `app.get_result_async()` and broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
 
+Three broker methods return a subset of `BrokerOperationError`, their only failures:
+
+| Method | Returns |
+| ------ | ------- |
+| `enqueue_async()` | `Result[str, BrokerEnqueueError]` |
+| `enqueue()` | `Result[str, BrokerEnqueueError \| BrokerSyncCallError]` |
+| `ensure_schema_initialized()` | `Result[None, BrokerOperationFailed \| BrokerEventLoopLimit]` |
+
+`BrokerEnqueueError` is `BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`. `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`: the failures that the sync form adds, where nothing ran. Both are exported from `horsies`.
+
 <!-- members: BrokerErrorCode -->
 | Code | Description | Retryable |
 | ---- | ----------- | --------- |
@@ -283,7 +293,7 @@ Workflow-specific error codes are distributed across the four families above:
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -294,19 +304,24 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 ### Workflow Handle Errors (HandleResult)
 
-`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()` and `result_for()` return a `TaskResult` and use `RetrievalCode` instead.
+`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()` and `result_for()` return a `TaskResult` and use `RetrievalCode` instead.
+
+`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
 #### HandleErrorCode
 
 <!-- members: HandleErrorCode -->
-| Code | Retryable | When |
-|---|---|---|
-| `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
-| `DB_OPERATION_FAILED` | Maybe | DB query/commit failure |
-| `LOOP_RUNNER_FAILED` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `INTERNAL_FAILED` | No | `pause_workflow()` / `resume_workflow()` raised an exception that is not a database error |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+| Code | Variant | Other fields | Retryable | When |
+|---|---|---|---|---|
+| `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
+| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | Driver classification of the cause | A database or driver error. A read changed nothing; `cancel()`, `pause()` and `resume()` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status that is not a `WorkflowStatus` (`status()`, `cancel()`), or a subworkflow summary that is not valid (`tasks()`); nothing changed, and a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume()` committed, and the recovery pass for the workflow tree, which runs after the commit, failed with a database error. The workflow is `RUNNING`; the worker reaper runs the same pass over all workflows. A repeated `resume()` returns `Ok(False)` |
+| `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` (the `LoopRunnerError`) | No | A sync method could not run the call on the broker's sync runner; nothing ran |
+| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran. Call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+
+`get()` folds a status read failure into its `TaskResult`: `WORKFLOW_NOT_FOUND` becomes `RetrievalCode.WORKFLOW_NOT_FOUND`, and `DB_OPERATION_FAILED` and `STORED_DATA_INVALID` become `BROKER_ERROR`.
 
 ### User-Defined Error Codes
 
@@ -480,6 +495,8 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails JSON serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | A `WorkflowDefinition` class defines `Meta`, or sets `config` to a value that is not a `WorkflowDefinitionConfig`; raised when the class is created |
+| HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` sets a `priority` outside 1–100; raised when the spec is built |
+| HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` sets a naive `good_until` (no `tzinfo`); raised when the spec is built |
 
 ### Task Definition (HRS-100-HRS-199)
 
