@@ -23,6 +23,7 @@ from collections.abc import Iterable, Iterator
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Literal,
     NamedTuple,
     Optional,
@@ -35,12 +36,15 @@ import pytest
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
 from pydantic_core import PydanticCustomError
 
-from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.json_value import (
+    MAX_JSON_DEPTH,
     JsonValue,
     StrictJsonError,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.models.tasks import TaskResult
+from horsies.core.types.result import is_ok
 from horsies.core.codec.typed import (
     Json,
     _get_adapter,  # pyright: ignore[reportPrivateUsage]
@@ -1186,6 +1190,68 @@ class _DecodeInComputedField(BaseModel):
     @property
     def decoded(self) -> str:
         return NOT_UTF8.decode('utf-8')
+
+
+class TestDepthBoundAndTheLimitOfTheDump:
+    """`MAX_JSON_DEPTH` must stay above the deepest value that `encode_value`
+    accepts. If not, the engine refuses a value that the encode accepted."""
+
+    deepest_accepted_value: ClassVar[int] = 254
+    levels_of_the_envelopes: ClassVar[int] = 16
+
+    def test_the_deepest_result_passes_the_boundary_in_its_envelope(self) -> None:
+        value = _nested_list(self.deepest_accepted_value)
+        envelope = encode_task_result(TaskResult(ok=value), Any)
+
+        text = dumps_json(envelope)
+        assert is_ok(text)
+        parsed = loads_json(text.ok_value)
+        assert is_ok(parsed)
+        assert decode_task_result(parsed.ok_value, Any).ok_value == value
+
+    def test_the_bound_leaves_room_for_the_envelopes(self) -> None:
+        wrapped = encode_value(_nested_list(self.deepest_accepted_value), Any)
+        for _ in range(self.levels_of_the_envelopes):
+            wrapped = {'envelope': wrapped}
+
+        assert is_ok(dumps_json(wrapped))
+
+    def test_a_text_past_the_limit_of_the_dump_is_a_catalog_refusal(self) -> None:
+        """Stored text inside the bound can still be too deep for a model."""
+        parsed = loads_json('[' * MAX_JSON_DEPTH + ']' * MAX_JSON_DEPTH)
+
+        assert is_ok(parsed)
+        with pytest.raises(ValueValidationError):
+            decode_value(parsed.ok_value, JsonValue)
+
+
+class TestValueOutsideTheDepthBound:
+    @pytest.mark.parametrize(
+        'expected_type',
+        [JsonValue, Optional[JsonValue]],
+        ids=['json-value', 'optional-json-value'],
+    )
+    def test_a_list_that_holds_itself_is_a_strict_refusal(
+        self,
+        expected_type: Any,
+    ) -> None:
+        """Before, the fence raised `RecursionError`."""
+        value: list[object] = []
+        value.append(value)
+
+        with pytest.raises(StrictJsonError, match='or it holds itself'):
+            encode_value(value, expected_type)
+
+    def test_a_finite_value_past_the_bound_is_a_strict_refusal(self) -> None:
+        with pytest.raises(StrictJsonError, match='nested deeper than 300 levels'):
+            encode_value(_nested_list(MAX_JSON_DEPTH + 1), JsonValue)
+
+    def test_a_value_between_the_limit_and_the_bound_is_a_catalog_refusal(
+        self,
+    ) -> None:
+        """The fence accepts it, and the validation of `JsonValue` refuses it."""
+        with pytest.raises(ValueValidationError):
+            encode_value(_nested_list(MAX_JSON_DEPTH), JsonValue)
 
 
 class TestBytesThatAreNotUtf8:

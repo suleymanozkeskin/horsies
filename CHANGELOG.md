@@ -527,6 +527,24 @@ and there is no migration contract between pre-1.0 versions.
   `TASK_EXCEPTION`. Registration refuses `bytes` in a task signature, so
   `.send()` and a schedule do not reach this. A `UnicodeDecodeError` from a
   decode in a computed field propagates.
+- **Breaking: the JSON boundary refuses nesting deeper than 300 levels.**
+  `MAX_JSON_DEPTH` in `horsies.core.codec.json_value` is the bound. It counts
+  nested lists and dicts.
+  - `dumps_json` returns `Err`, and `encode_value` raises `StrictJsonError` at a
+    `JsonValue` position, for a deeper value and for a value that holds itself.
+    Before, `RecursionError` left `dumps_json`, which returns a `SerdeResult`,
+    and `.send()`, `prepare_schedules` and `app.workflow()`. These now give
+    `TaskSendValidationFailed`, `CONFIG_INVALID_SCHEDULE` and
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`).
+  - `loads_json` and `loads_json_bytes` return `Err` for a deeper text. Before,
+    a text of 1,000 or more levels raised `RecursionError` out of the parse or
+    out of the next walk. A stored task or workflow result is now
+    `RESULT_DESERIALIZATION_ERROR`, kwargs in a worker are
+    `WORKER_SERIALIZATION_ERROR`, and `enqueue_async` returns
+    `BrokerInvalidInput`.
+  - Each value that `encode_value` accepts stays inside the bound, because
+    pydantic refuses a dump at 255 levels. A text of 301 or more levels that a
+    `dumps_json` caller stored before this release no longer parses.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

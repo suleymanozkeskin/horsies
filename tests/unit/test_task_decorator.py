@@ -15,7 +15,7 @@ from pydantic import BaseModel, field_validator
 from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
-from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -346,6 +346,25 @@ class TestBindTaskNode:
 # =============================================================================
 # TaskHandle._error_result
 # =============================================================================
+
+
+def _list_that_holds_itself() -> list[object]:
+    value: list[object] = []
+    value.append(value)
+    return value
+
+
+def _dict_that_holds_itself() -> dict[str, object]:
+    value: dict[str, object] = {}
+    value['self'] = value
+    return value
+
+
+def _nested_list(depth: int) -> JsonValue:
+    value: JsonValue = 1
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 @pytest.mark.unit
@@ -749,6 +768,38 @@ class TestTaskHandleRecordToTaskResult:
             status=status,
             raw_result=raw_result,
         )
+
+    def test_stored_result_past_the_depth_bound_is_a_deserialization_error(
+        self,
+    ) -> None:
+        """Before, `RecursionError` left the read. The broker refuses the text,
+        and the handle folds the refusal."""
+        from horsies.core.brokers.postgres import PostgresBroker
+        from horsies.core.types.status import TaskStatus
+
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = PostgresBroker._build_raw_result_record(  # pyright: ignore[reportPrivateUsage]
+            MagicMock(),
+            task_id='task-x',
+            task_name='my_task',
+            status=TaskStatus.COMPLETED,
+            result_json=(
+                '{"__h_task_result__":true,"ok":'
+                + '[' * 1_100 + ']' * 1_100
+                + ',"err":null}'
+            ),
+        )
+
+        result = handle._record_to_task_result(broker_result, timeout_ms=None)  # pyright: ignore[reportPrivateUsage]
+
+        assert result.is_err()
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert result.err.message is not None
+        assert 'nested deeper than' in result.err.message
 
     def test_malformed_envelope_err_fast_rejected(self) -> None:
         """Envelope missing the ``ok`` key fails closed on err-fast-path.
@@ -1561,6 +1612,30 @@ class TestCreateTaskWrapperSend:
             f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
             'lone surrogate, which UTF-8 cannot encode'
         )
+        app.get_broker.assert_not_called()
+
+    @pytest.mark.parametrize(
+        'value',
+        [_list_that_holds_itself(), _dict_that_holds_itself(), _nested_list(1_100)],
+        ids=['list-cycle', 'dict-cycle', 'finite'],
+    )
+    def test_send_value_past_the_depth_bound_returns_validation_error(
+        self,
+        value: JsonValue,
+    ) -> None:
+        """Before, `RecursionError` left `.send()`."""
+        def good_fn(*, x: JsonValue) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=value)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert 'nested deeper than 300 levels' in result.err_value.message
         app.get_broker.assert_not_called()
 
     def test_send_validator_echoing_a_lone_surrogate_returns_validation_error(
