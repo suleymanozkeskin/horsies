@@ -42,6 +42,7 @@ from tests.e2e.helpers.assertions import (
 )
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import get_workflow_status, wait_for_workflow_completion
+from tests.e2e.tasks import dynamic_fanout as fanout_tasks
 from tests.e2e.tasks import workflows as wf_tasks
 from tests.e2e.tasks.basic import healthcheck
 from tests.e2e.tasks.instance import app
@@ -689,6 +690,76 @@ async def test_subworkflow_build_with_args_from_receives_typed_task_result(
         )
         assert status == 'COMPLETED'
         assert_ok(await asyncio.to_thread(handle.get, timeout_ms=2000), expected_value=37)
+
+
+FANOUT_INSTANCE = 'tests.e2e.tasks.instance_dynamic_fanout:app'
+
+
+def _fanout_ready_check() -> Callable[[], bool]:
+    """Send the fan-out app's own probe, so the check waits for that worker."""
+    from horsies.core.task_decorator import TaskHandle
+
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            handle = unwrap_send(fanout_tasks.ready_task.send())
+        return handle.get(timeout_ms=2000).is_ok()
+
+    return _check
+
+
+async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
+    broker: PostgresBroker,
+) -> None:
+    """The fan-out example of the subworkflows docs runs end to end.
+
+    ``build_with`` builds one count node per shard from the upstream list, and
+    the child's fan-in node reads each count node by ``NodeKey`` through
+    ``workflow_ctx``. Three shards of ten characters give a total of 30.
+    """
+    spec = fanout_tasks.TenantReport.build(fanout_tasks.app)
+    with run_worker(FANOUT_INSTANCE, ready_check=_fanout_ready_check()):
+        handle = await start_ok_in_thread(spec)
+
+        status = await wait_for_workflow_completion(
+            current_resources(broker).session_factory,
+            handle.workflow_id,
+            timeout_s=20.0,
+        )
+        assert status == 'COMPLETED'
+        assert_ok(await asyncio.to_thread(handle.get, timeout_ms=2000), expected_value=30)
+
+        async with current_resources(broker).session_factory() as session:
+            parent_row = (
+                await session.execute(
+                    text("""
+                        SELECT sub_workflow_id
+                        FROM horsies_workflow_tasks
+                        WHERE workflow_id = :wf_id AND node_id = 'report'
+                    """),
+                    {'wf_id': handle.workflow_id},
+                )
+            ).fetchone()
+            assert parent_row is not None and isinstance(parent_row.sub_workflow_id, str)
+            child_rows = (
+                await session.execute(
+                    text("""
+                        SELECT node_id, status
+                        FROM horsies_workflow_tasks
+                        WHERE workflow_id = :wf_id
+                        ORDER BY task_index
+                    """),
+                    {'wf_id': parent_row.sub_workflow_id},
+                )
+            ).fetchall()
+        assert [(row.node_id, row.status) for row in child_rows] == [
+            ('shard_0', 'COMPLETED'),
+            ('shard_1', 'COMPLETED'),
+            ('shard_2', 'COMPLETED'),
+            ('total', 'COMPLETED'),
+        ]
 
 
 async def test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with(

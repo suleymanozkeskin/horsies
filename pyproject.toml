@@ -63,7 +63,7 @@ include = ["horsies*"]
 license-files = ["LICENSE"]
 
 [tool.setuptools.package-data]
-horsies = [".agents/skills/*.md", "web/static/**"]
+horsies = [".agents/skills/horsies/*.md", "web/static/**"]
 
 [dependency-groups]
 dev = [

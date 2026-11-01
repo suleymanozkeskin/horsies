@@ -39,10 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
-    HistoryTaskDetail,
+    HistoryTaskState,
     LiveTaskLocation,
-    TaskDetailAbsent,
-    read_task_detail,
+    TaskStateAbsent,
+    read_task_state,
     staged_detail_published,
 )
 from horsies.core.lifecycle.commands import CancelLockedTask
@@ -173,10 +173,9 @@ class TaskActionEventLoopLimit:
 class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the transaction did not commit.
 
-    ``exception`` is the ``HistoryContractError`` of the history read (for
-    example a history status that is not a ``TaskStatus`` member, or an
-    attempt snapshot that does not decode), or the ``OutcomeDecodeError``
-    of the cancel outcome row. A repeat gives the same result until the
+    ``exception`` is the ``HistoryContractError`` of the history read (a
+    history status that is not a ``TaskStatus`` member, or an unknown
+    location), or the ``OutcomeDecodeError`` of the cancel outcome row. A repeat gives the same result until the
     stored row changes.
     """
 
@@ -208,11 +207,9 @@ class TaskCancelled:
 
 # Locks the row for the rest of the transaction. The diagnosis reads
 # ``is_workflow_task`` here; the status it reports comes from the cancel
-# outcome, which decodes it. ``expiry_passed`` is evaluated against NOW(),
-# the transaction timestamp.
+# outcome, which decodes it.
 _LOCK_TASK_SQL = text("""
-    SELECT is_workflow_task,
-           (good_until IS NOT NULL AND good_until <= NOW()) AS expiry_passed
+    SELECT is_workflow_task
     FROM horsies_tasks
     WHERE id = CAST(:id AS uuid)
     FOR UPDATE
@@ -306,17 +303,18 @@ async def _diagnose_live_miss(
     after the lock read. A repeated cancel finds the row.
 
     Raises:
-        HistoryContractError: the history row does not decode.
+        HistoryContractError: the history row's status is not a task status,
+            or the staged function reports an unknown location.
     """
     if not await staged_detail_published(connection):
         return _not_found(task_id)
-    detail = await read_task_detail(connection, task_id=task_id)
-    match detail:
-        case HistoryTaskDetail(is_workflow_task=True, status=status):
+    state = await read_task_state(connection, task_id=task_id)
+    match state:
+        case HistoryTaskState(is_workflow_task=True, status=status):
             return _workflow_bound(task_id, status)
-        case HistoryTaskDetail(status=status):
+        case HistoryTaskState(status=status):
             return _not_cancellable(task_id, status)
-        case TaskDetailAbsent():
+        case TaskStateAbsent():
             return _not_found(task_id)
         case LiveTaskLocation():
             return _not_found(task_id)
@@ -352,11 +350,14 @@ async def cancel_task(
         permitted_statuses += (TaskStatus.RUNNING,)
 
     # Identity columns are uuid; text that does not parse as one cannot
-    # name any task, and must not reach a CAST that would error instead.
+    # name any task. Python also accepts forms that the Postgres uuid cast
+    # refuses (for example a ``urn:uuid:`` prefix), so every statement gets
+    # the canonical text.
     try:
-        uuid.UUID(task_id)
+        canonical_id = str(uuid.UUID(task_id))
     except ValueError:
         return _not_found(task_id)
+    task_id = canonical_id
 
     match await broker.select_resources():
         case Err(loop_limit):
@@ -377,7 +378,7 @@ async def cancel_task(
                 return await _diagnose_live_miss(
                     await session.connection(), task_id
                 )
-            is_workflow_task, _expiry_passed = locked
+            (is_workflow_task,) = locked
 
             outcome = await apply_async(
                 await session.connection(),

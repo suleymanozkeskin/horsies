@@ -1220,9 +1220,7 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            child_task_options_json: str | None = getattr(
-                child_task.fn, 'task_options_json', None
-            )
+            child_task_options_json: str | None = child_task.fn.task_options_json
             if child_task.good_until is not None:
                 child_base_options: dict[str, Any] = {}
                 if child_task_options_json:

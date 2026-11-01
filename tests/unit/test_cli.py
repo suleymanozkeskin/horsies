@@ -27,6 +27,7 @@ from horsies.core.cli import (
     setup_logging,
     worker_command,
 )
+from horsies.core.docs_fetcher import MainBranch, ReleaseTag
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -1112,31 +1113,75 @@ class TestCheckCommand:
 
 @pytest.mark.unit
 class TestGetDocsCommand:
-    """Tests for get_docs_command — docs fetcher."""
+    """Tests for get_docs_command — docs fetcher and ref selection."""
 
     @patch('horsies.core.docs_fetcher.fetch_docs', autospec=True)
-    def test_success_calls_fetch_docs(
+    def test_release_version_fetches_its_tag(
         self,
         mock_fetch: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         # Arrange
-        args = argparse.Namespace(output='/tmp/docs')
+        monkeypatch.setattr('horsies.__version__', '0.5.5')
+        args = argparse.Namespace(output='/tmp/docs', ref=None)
 
         # Act
         get_docs_command(args)
 
         # Assert
-        mock_fetch.assert_called_once_with(output_dir='/tmp/docs')
+        mock_fetch.assert_called_once_with(
+            ref=ReleaseTag(name='v0.5.5'),
+            output_dir='/tmp/docs',
+        )
+
+    @patch('horsies.core.docs_fetcher.fetch_docs', autospec=True)
+    def test_dev_version_without_ref_exits_1_and_fetches_nothing(
+        self,
+        mock_fetch: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr('horsies.__version__', '0.5.6.dev0')
+        args = argparse.Namespace(output='/tmp/docs', ref=None)
+
+        # Act / Assert
+        with pytest.raises(SystemExit) as exc_info:
+            get_docs_command(args)
+        assert exc_info.value.code == 1
+
+        mock_fetch.assert_not_called()
+        captured = capsys.readouterr()
+        assert '0.5.6.dev0' in captured.err
+        assert '--ref main' in captured.err
+
+    @patch('horsies.core.docs_fetcher.fetch_docs', autospec=True)
+    def test_ref_main_fetches_main_for_a_dev_version(
+        self,
+        mock_fetch: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr('horsies.__version__', '0.5.6.dev0')
+        args = argparse.Namespace(output='/tmp/docs', ref='main')
+
+        # Act
+        get_docs_command(args)
+
+        # Assert
+        mock_fetch.assert_called_once_with(ref=MainBranch(), output_dir='/tmp/docs')
 
     @patch('horsies.core.docs_fetcher.fetch_docs', autospec=True)
     def test_exception_prints_error_exits_1(
         self,
         mock_fetch: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
         # Arrange
+        monkeypatch.setattr('horsies.__version__', '0.5.5')
         mock_fetch.side_effect = RuntimeError('download failed')
-        args = argparse.Namespace(output='/tmp/docs')
+        args = argparse.Namespace(output='/tmp/docs', ref=None)
 
         # Act / Assert
         with pytest.raises(SystemExit) as exc_info:

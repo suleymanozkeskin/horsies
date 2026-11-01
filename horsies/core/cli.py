@@ -17,7 +17,8 @@ import os
 import random
 import signal
 import sys
-from typing import Any, NoReturn
+from pathlib import Path
+from typing import Any, NoReturn, assert_never
 
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
@@ -820,16 +821,61 @@ def check_command(args: argparse.Namespace) -> None:
 def get_docs_command(args: argparse.Namespace) -> None:
     """Handle get-docs command.
 
-    Exit contract: any failure (import, filesystem) prints and exits 1.
+    Downloads the docs of the release tag that matches the installed version.
+    ``--ref main`` downloads the ``main`` branch docs instead.
+
+    Exit contract: a version with no release tag, or any other failure
+    (import, filesystem, download), prints and exits 1.
     """
     output_dir: str = args.output
+    use_main_branch: bool = args.ref == 'main'
     try:
-        from horsies.core.docs_fetcher import fetch_docs
+        from horsies import __version__
+        from horsies.core.docs_fetcher import fetch_docs, resolve_docs_ref
 
-        fetch_docs(output_dir=output_dir)
+        match resolve_docs_ref(
+            installed_version=__version__,
+            use_main_branch=use_main_branch,
+        ):
+            case Err(ref_error):
+                print(f'error: {ref_error.message()}', file=sys.stderr)
+                sys.exit(1)
+            case Ok(ref):
+                fetch_docs(ref=ref, output_dir=output_dir)
     except Exception as e:
         print(f'error: {e}', file=sys.stderr)
         sys.exit(1)
+
+
+def skills_command(args: argparse.Namespace) -> None:
+    """Handle ``skills install``.
+
+    Copies the packaged skill folder to ``<target>/horsies/``. Exit contract:
+    exit 0 when the folder is written or already current; exit 1 on any
+    ``SkillInstallError``, with the message on stderr.
+    """
+    from horsies.core.skills_installer import (
+        SkillAlreadyCurrent,
+        SkillInstalled,
+        describe_install_error,
+        install_skill,
+    )
+
+    match install_skill(
+        target=Path(args.target),
+        overwrite_changed=args.force,
+    ):
+        case Err(error):
+            print(f'error: {describe_install_error(error)}', file=sys.stderr)
+            sys.exit(1)
+        case Ok(outcome):
+            match outcome:
+                case SkillInstalled(destination=destination, file_count=count):
+                    print(f'installed {count} files to {destination}')
+                case SkillAlreadyCurrent(destination=destination):
+                    print(f'{destination} is already current')
+                case _:
+                    assert_never(outcome)
 
 
 _TRUSTED_HEADER_WARNING = (
@@ -1233,6 +1279,42 @@ Examples:
             default='.horsies-docs',
             help='Output directory (default: .horsies-docs)',
         )
+        get_docs_parser.add_argument(
+            '--ref',
+            choices=['main'],
+            default=None,
+            help=(
+                'Download the main branch docs instead of the release tag that '
+                'matches the installed version (required for a development version)'
+            ),
+        )
+
+        # Skills command
+        skills_parser = subparsers.add_parser(
+            'skills',
+            help='Manage the horsies agent skill folder',
+        )
+        skills_subparsers = skills_parser.add_subparsers(
+            dest='skills_command',
+            required=True,
+        )
+        skills_install_parser = skills_subparsers.add_parser(
+            'install',
+            help='Copy the packaged skill folder to <target>/horsies/',
+        )
+        skills_install_parser.add_argument(
+            '--target',
+            required=True,
+            help=(
+                'Skills directory of your agent tool, for example .claude/skills. '
+                'The skill is written to <target>/horsies/'
+            ),
+        )
+        skills_install_parser.add_argument(
+            '--force',
+            action='store_true',
+            help='Replace an existing copy that differs from the packaged skill',
+        )
 
         args = parser.parse_args()
 
@@ -1247,6 +1329,8 @@ Examples:
                 web_command(args)
             case 'get-docs':
                 get_docs_command(args)
+            case 'skills':
+                skills_command(args)
             case _:
                 parser.print_help()
                 sys.exit(1)

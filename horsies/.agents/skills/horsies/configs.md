@@ -1,8 +1,3 @@
----
-name: horsies-configs
-description: Configuration and operations guidance for horsies, including AppConfig, PostgresConfig, queue modes, recovery and resilience tuning, scheduling, CLI checks, and environment variables. Use when setting up, tuning, or troubleshooting runtime configuration.
----
-
 # horsies — Configuration
 
 Detailed reference for all configuration types, validation rules, CLI commands,
@@ -768,10 +763,18 @@ reference including the registry-less capability boundary.
 ### `horsies get-docs`
 
 ```bash
-horsies get-docs [--output DIR]
+horsies get-docs [--output DIR] [--ref main]
 ```
 
-Downloads docs as local markdown to `DIR` (default `.horsies-docs/`). For AI agents to read without web requests.
+Downloads the docs of the release tag `v{installed version}` as local markdown to `DIR` (default `.horsies-docs/`). For AI agents to read without web requests. A development version has no tag: the command exits 1 unless `--ref main` is given, which downloads the `main` branch docs.
+
+### `horsies skills install`
+
+```bash
+horsies skills install --target DIR [--force]
+```
+
+Copies the skill folder from the installed package to `DIR/horsies/`. `--target` is required: each agent tool reads a different skills directory (for example `.claude/skills`). The command refuses to replace a copy that differs from the packaged files unless `--force` is given. An identical copy is left as it is. Exit code 1 on any failure.
 
 ### Exit codes
 

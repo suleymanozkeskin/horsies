@@ -9,7 +9,7 @@ is never captured as a task id.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, assert_never
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -23,11 +23,16 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_err
 from horsies.monitoring import (
     Breakdown,
+    BreakdownLimit,
     Facets,
+    MAX_BREAKDOWN_LIMIT,
+    MAX_TASK_PAGE_LIMIT,
     StatusCount,
+    TaskAbsenceReason,
     TaskDetail,
+    TaskDetailNotFound,
     TaskListPage,
-    MAX_TASK_PAGE_REACH,
+    TaskPage,
     get_task_detail,
     list_tasks,
     task_breakdown,
@@ -56,6 +61,20 @@ def _window_or_400(
             detail=resolved.reason,
         )
     return resolved
+
+
+def task_not_found_text(reason: TaskAbsenceReason) -> str:
+    """The 404 detail text for a task id that no table holds."""
+    match reason:
+        case TaskAbsenceReason.PREDATES_RETAINED_HISTORY:
+            return 'Task not found. Its id is older than the retained task history.'
+        case (
+            TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+            | TaskAbsenceReason.NOT_CLASSIFIED
+        ):
+            return 'Task not found.'
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def build_router(
@@ -144,7 +163,7 @@ def build_router(
         error_code: list[str] = Query(default=[]),
         error_category: list[str] = Query(default=[]),
         retried_only: bool = Query(default=False),
-        limit: int = Query(default=50, ge=1, le=500),
+        limit: int = Query(default=50, ge=1, le=MAX_BREAKDOWN_LIMIT),
     ) -> Breakdown:
         """Per-group status pivot with a rollup TOTAL row."""
         result = await task_breakdown(
@@ -158,7 +177,7 @@ def build_router(
             error_codes=error_code,
             error_categories=parse_error_categories(error_category),
             retried_only=retried_only,
-            limit=limit,
+            limit=BreakdownLimit(value=limit),
         )
         if is_err(result):
             raise query_failed('Task breakdown', result.err_value)
@@ -178,16 +197,14 @@ def build_router(
         sort_by: str = Query(default='enqueued_at'),
         sort_dir: Literal['asc', 'desc'] = Query(default='desc'),
         offset: int = Query(default=0, ge=0),
-        limit: int = Query(default=50, ge=1, le=200),
+        limit: int = Query(default=50, ge=1, le=MAX_TASK_PAGE_LIMIT),
     ) -> TaskListPage:
         """A paginated, server-sorted, server-filtered slice of tasks."""
-        if offset + limit > MAX_TASK_PAGE_REACH:
+        page = TaskPage.parse(offset, limit)
+        if is_err(page):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f'offset + limit must be <= {MAX_TASK_PAGE_REACH}; '
-                    f'got {offset + limit}'
-                ),
+                detail=page.err_value.reason,
             )
         result = await list_tasks(
             broker,
@@ -201,8 +218,7 @@ def build_router(
             retried_only=retried_only,
             sort_by=parse_sort_by(sort_by),
             sort_dir=sort_dir,
-            offset=offset,
-            limit=limit,
+            page=page.ok_value,
         )
         if is_err(result):
             raise query_failed('Task list', result.err_value)
@@ -214,12 +230,13 @@ def build_router(
         result = await get_task_detail(broker, task_id)
         if is_err(result):
             raise query_failed('Task detail', result.err_value)
-        detail = result.ok_value
-        if detail is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail='Task not found.',
-            )
-        return detail
+        match result.ok_value:
+            case TaskDetail() as detail:
+                return detail
+            case TaskDetailNotFound(reason=reason):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=task_not_found_text(reason),
+                )
 
     return router
