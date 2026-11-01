@@ -239,6 +239,39 @@ A child differs from a `multiprocessing` process: `parent_process()` returns
 locator is refused at start. In `ps`, a forked child shows the preload parent's
 command line.
 
+Choosing a mode: keep `library` unless memory is the limit. It shares Horsies and
+its dependencies, so an app with heavy imports gains little: an app that imports
+boto3, openai, google-genai, firebase-admin, and lxml, with 4 children, uses
+651 MiB on 0.4.6, 575 MiB with `library`, and 298 MiB with `app`. Before `app`
+goes to production, run it on staging with real calls to every client library
+inside tasks. Passing the guard does not prove that a library works after a fork.
+
+Traps with preload. Check each one before you change `--child-preload`:
+
+- **Import-time settings in `.env`:** `library` and `app` import psycopg,
+  SQLAlchemy, and pydantic before the app runs, so `load_dotenv()` in the app is
+  too late for `PSYCOPG_IMPL`. Put such a value in the process environment.
+- **Monkeypatching:** a patch that must run before those imports, such as
+  gevent, is too late. Use `--child-preload=none`.
+- **Clients built at import (`app` only):** module code runs once, in the preload
+  parent. Build a client in an `on_child_process_start` hook, which runs in every
+  child after the fork.
+- **Native threads (`app` only):** the guard sees Python threads and sockets. It
+  does not see a BLAS pool or a gRPC client built at import, and those may hang
+  or fail in a child.
+- **Code reload (`app` only):** a recycled child is a new fork of the same preload
+  parent, so it keeps the old code. New code needs a worker restart. With
+  `library`, a recycled child still loads the app from disk, but it keeps the
+  library code, so an in-place package upgrade needs a restart.
+- **Counting children:** process-name greps such as `multiprocessing-fork` find
+  nothing. A forked child shows `preload_main`, and there is one more process than
+  `--processes`.
+- **`children_memory_mb`:** it sums RSS, so with preload it counts each shared page
+  once per child and reads above real use. Use it to see one child grow, and read
+  the container or cgroup total for the footprint.
+- **Stop window:** set `--drain-timeout` below the supervisor's stop window. The
+  default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
+
 ### Child process recycling
 
 Two knobs recycle worker children to bound memory. Recycling is per-child and

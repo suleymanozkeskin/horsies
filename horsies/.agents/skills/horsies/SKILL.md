@@ -360,7 +360,9 @@ optional live DB check). Worker and scheduler also run check at startup.
 
 A worker owns one child and one socket per slot, so a crash or a timeout affects
 only that task. On Linux a preload parent forks each child: a new child takes
-milliseconds, and children share memory. See `--child-preload` in `configs.md`.
+milliseconds, and children share memory. Before you change `--child-preload`,
+read the traps under "Child process model" in `configs.md`: `app` mode changes
+what runs at import, and a recycle no longer reloads your code.
 
 Two knobs recycle worker children to bound memory, with **OR** semantics (a
 child exits when either limit is reached). `--max-tasks-per-child` (default
