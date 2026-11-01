@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -3711,6 +3712,137 @@ class TestNodeIdLengthValidation:
             WorkflowSpec(name='long_id', tasks=[node_a])
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_NODE_ID
+
+
+# =============================================================================
+# Task node priority and good_until validation (HRS-034, HRS-035)
+# =============================================================================
+
+
+def _minimal_app() -> Any:
+    from pydantic import SecretStr
+
+    from horsies.core.app import Horsies
+    from horsies.core.models.app import AppConfig
+    from horsies.core.models.broker import PostgresConfig
+
+    return Horsies(
+        config=AppConfig(
+            broker=PostgresConfig(
+                database_url=SecretStr('postgresql+psycopg://test:test@localhost/test'),
+            ),
+        )
+    )
+
+
+@pytest.mark.unit
+class TestTaskNodeOptionValidation:
+    """Spec construction refuses a priority outside 1..100 and a naive good_until."""
+
+    @pytest.mark.parametrize('priority', [0, 101, -1])
+    def test_priority_outside_the_range_is_refused(self, priority: int) -> None:
+        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            WorkflowSpec(name='bad_priority', tasks=[node])
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert f"node 'rank' sets priority={priority}" in exc_info.value.notes
+
+    @pytest.mark.parametrize('priority', [1, 100, None])
+    def test_priority_inside_the_range_or_unset_is_accepted(
+        self, priority: int | None,
+    ) -> None:
+        node = TaskNode(fn=MockTaskWrapper(task_name='rank'), priority=priority)
+
+        spec: WorkflowSpec[Any] = WorkflowSpec(name='good_priority', tasks=[node])
+
+        built = spec.tasks[0]
+        assert isinstance(built, TaskNode)
+        assert built.priority == priority
+
+    def test_naive_good_until_is_refused(self) -> None:
+        naive = datetime(2030, 1, 1, 12, 0)
+        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=naive)
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            WorkflowSpec(name='naive_deadline', tasks=[node])
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
+        assert "node 'expire'" in exc_info.value.notes[0]
+
+    @pytest.mark.parametrize(
+        'good_until',
+        [
+            datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc),
+            datetime(2030, 1, 1, 12, 0, tzinfo=timezone(timedelta(hours=-5))),
+            None,
+        ],
+        ids=['utc', 'offset', 'unset'],
+    )
+    def test_aware_or_unset_good_until_is_accepted(
+        self, good_until: datetime | None,
+    ) -> None:
+        node = TaskNode(fn=MockTaskWrapper(task_name='expire'), good_until=good_until)
+
+        spec: WorkflowSpec[Any] = WorkflowSpec(name='aware_deadline', tasks=[node])
+
+        built = spec.tasks[0]
+        assert isinstance(built, TaskNode)
+        assert built.good_until == good_until
+
+    def test_a_node_that_is_not_a_root_is_checked(self) -> None:
+        root = TaskNode(fn=MockTaskWrapper(task_name='root'))
+        child = TaskNode(
+            fn=MockTaskWrapper(task_name='child'), waits_for=[root], priority=0,
+        )
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            WorkflowSpec(name='child_priority', tasks=[root, child])
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+        assert "node 'child' sets priority=0" in exc_info.value.notes
+
+    def test_both_rules_on_one_node_are_reported_together(self) -> None:
+        node = TaskNode(
+            fn=MockTaskWrapper(task_name='both'),
+            priority=101,
+            good_until=datetime(2030, 1, 1),
+        )
+
+        with pytest.raises(MultipleValidationErrors) as exc_info:
+            WorkflowSpec(name='both_rules', tasks=[node])
+
+        codes = [error.code for error in exc_info.value.report.errors]
+        assert codes == [
+            ErrorCode.WORKFLOW_INVALID_PRIORITY,
+            ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
+        ]
+
+    def test_app_workflow_refuses_a_node_priority_outside_the_range(self) -> None:
+        fn = MockTaskWrapper(task_name='rank')
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            _minimal_app().workflow(
+                name='app_bad_priority',
+                tasks=[fn.node(priority=0)()],
+                definition_key=_definition_key('app_bad_priority'),
+            )
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_PRIORITY
+
+    def test_definition_build_refuses_a_naive_good_until(self) -> None:
+        fn = MockTaskWrapper(task_name='expire')
+
+        class NaiveDeadlineWorkflow(WorkflowDefinition[None]):
+            name = 'definition_naive_deadline'
+            definition_key = _definition_key('definition_naive_deadline')
+            expire = TaskNode(fn=fn, good_until=datetime(2030, 1, 1))
+
+        with pytest.raises(WorkflowValidationError) as exc_info:
+            NaiveDeadlineWorkflow.build(_minimal_app())
+
+        assert exc_info.value.code == ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL
 
 
 # =============================================================================
