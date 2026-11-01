@@ -311,6 +311,18 @@ class FinalizeMixin:
                         self.worker_instance_id,
                         cause.value,
                     )
+                    return Err(
+                        self._make_finalize_error(
+                            task_id=task_id,
+                            stage=_FINALIZE_STAGE_FUTURE,
+                            message=f'Requeue failed: {cause.value}',
+                            retryable=True,
+                            data={
+                                'requeue_outcome': requeued.value,
+                                'claimed_at': claimed_at,
+                            },
+                        )
+                    )
                 return Ok(None)
             case ChildLost():
                 reason = f'Worker child lost: {outcome.describe()}'

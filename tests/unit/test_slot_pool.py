@@ -35,6 +35,7 @@ from horsies.core.worker.child_protocol import (
 )
 from horsies.core.worker import slots
 from horsies.core.worker.slots import (
+    SLOT_DEFECT_LIMIT,
     Assigned,
     BootAttemptsExhausted,
     Busy,
@@ -52,6 +53,7 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NothingToKill,
     NotRunCause,
+    PoolStopped,
     SlotHandle,
     SlotPool,
     SlotPoolConfig,
@@ -816,6 +818,125 @@ class TestRecycle:
                         raise AssertionError(other)
             case other:
                 raise AssertionError(other)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestChildFaults:
+    async def test_zero_length_header_kills_the_child(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('zero_header'))):
+            case ChildLost(cause=LossCause.PROTOCOL_VIOLATION):
+                pass
+            case other:
+                raise AssertionError(other)
+
+    async def test_long_failure_reason_keeps_the_result(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        pool = await pool_factory()
+        match await _outcome(pool.submit(_frame('long_reason'))):
+            case TaskFinished(result_json='kept', failed_reason=str() as reason):
+                assert len(reason) < 70_000
+                assert 'cut from' in reason
+            case other:
+                raise AssertionError(other)
+
+    async def test_escaped_exception_ends_a_child_with_a_live_thread(
+        self,
+        pool_factory: PoolFactory,
+    ) -> None:
+        """A normal exit would wait for that thread, with no bound."""
+        pool = await pool_factory()
+        handle = pool.submit(_frame('raise_with_thread'))
+        match await asyncio.wait_for(asyncio.shield(handle.outcome), 5):
+            case ChildLost(child_exit=ExitedWith(1)):
+                pass
+            case other:
+                raise AssertionError(other)
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestSlotDefects:
+    """A frame that cannot be encoded is a defect in the slot's path."""
+
+    @staticmethod
+    def _unsendable() -> RunFrame:
+        return _frame('echo', 'bad \ud800 text')
+
+    async def test_a_defect_costs_only_its_task(self, pool_factory: PoolFactory) -> None:
+        pool = await pool_factory()
+        first = pool._slots[0].child
+        assert first is not None
+        match await _outcome(pool.submit(self._unsendable())):
+            case ChildLost(cause=LossCause.SLOT_DEFECT):
+                pass
+            case other:
+                raise AssertionError(other)
+        assert not _alive(first.pid)
+        assert await _result_json(pool.submit(_frame('echo', 'next'))) == 'next'
+
+    async def test_repeated_defects_fail_the_pool(self, pool_factory: PoolFactory) -> None:
+        pool = await pool_factory()
+        for _ in range(SLOT_DEFECT_LIMIT):
+            await _outcome(pool.submit(self._unsendable()))
+        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        assert isinstance(failure, BootAttemptsExhausted)
+
+    async def test_a_finished_task_clears_the_count(self, pool_factory: PoolFactory) -> None:
+        pool = await pool_factory()
+        for _ in range(3):
+            for _ in range(SLOT_DEFECT_LIMIT - 1):
+                await _outcome(pool.submit(self._unsendable()))
+            assert await _result_json(pool.submit(_frame('echo', 'ok'))) == 'ok'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestStopDuringBoot:
+    @staticmethod
+    async def _booting_child(pool: SlotPool) -> int:
+        for _ in range(1000):
+            child = pool._slots[0].child
+            if child is not None:
+                return child.pid
+            await asyncio.sleep(0.01)
+        raise AssertionError('no child started')
+
+    async def test_stop_ends_the_child_and_the_start(self) -> None:
+        pool = SlotPool(_config(init=_init('hangs')), pending_limit=10)
+        starting = asyncio.ensure_future(pool.start())
+        pid = await self._booting_child(pool)
+
+        await pool.stop(0)
+
+        assert await asyncio.wait_for(starting, 5) == Err(PoolStopped())
+        assert not _alive(pid)
+        assert pool._slots[0].child is None
+
+    async def test_stop_starts_no_further_child(self) -> None:
+        """Each new child would otherwise leak on a start retry."""
+        pool = SlotPool(_config(init=_init('hangs')), pending_limit=10)
+        starting = asyncio.ensure_future(pool.start())
+        first = await self._booting_child(pool)
+
+        await pool.stop(30)
+
+        await asyncio.wait_for(starting, 5)
+        assert not _alive(first)
+        assert all(task.done() for task in pool._tasks)
+        assert pool._slots[0].child is None
+
+    async def test_a_replaced_child_does_not_count_as_another_slot(self) -> None:
+        pool = SlotPool(_config(2), pending_limit=10)
+        baseline = ChildBaseline(pid=1, rss=RssUnreadable())
+        pool._note_ready(pool._slots[0], baseline)
+        pool._note_ready(pool._slots[0], baseline)
+        assert not pool._first_generation.done()
+        pool._note_ready(pool._slots[1], baseline)
+        assert pool._first_generation.done()
 
 
 @pytest.mark.asyncio(loop_scope='function')

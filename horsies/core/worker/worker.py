@@ -86,6 +86,30 @@ from horsies.core.worker.sql import (  # noqa: F401
 
 logger = get_logger('worker')
 
+
+def _frame_text(text: str) -> str:
+    """Return ``text`` as a frame can carry it. Bytes that are not UTF-8 are escaped."""
+    return text.encode('utf-8', 'backslashreplace').decode('utf-8')
+
+
+def _frame_sys_path() -> tuple[str, ...]:
+    """Return ``sys.path`` for a child. ``''`` means the current directory.
+
+    ``sys.path`` may hold any object, and Python skips what it cannot use. A
+    ``Path`` is converted. Anything else that a frame cannot carry is left out
+    with a warning, as it could not be restored.
+    """
+    entries: list[str] = []
+    for entry in sys.path:
+        try:
+            text = os.fsdecode(entry) or os.getcwd()
+            text.encode('utf-8')
+        except (TypeError, UnicodeError):
+            logger.warning('Leaving sys.path entry %r out of worker children', entry)
+            continue
+        entries.append(text)
+    return tuple(entries)
+
 _HOOK_FAILURE_MESSAGE = (
     'on_child_process_start hook failed in a worker child (see the child log '
     'line above for the hook name); fix the hook, the worker will not '
@@ -272,15 +296,15 @@ class Worker(
         return task
 
     def _slot_pool_config(self) -> SlotPoolConfig:
-        """Build the pool settings. ``''`` in ``sys.path`` means the current dir."""
+        """Build the pool settings for a child to restore the parent's imports."""
         return SlotPoolConfig(
             slots=self.cfg.processes,
             init=InitFrame(
                 app_locator=self.cfg.app_locator,
                 imports=tuple(self.cfg.imports),
                 sys_path_roots=tuple(self.cfg.sys_path_roots),
-                parent_sys_path=tuple(path or os.getcwd() for path in sys.path),
-                parent_argv=tuple(sys.argv),
+                parent_sys_path=_frame_sys_path(),
+                parent_argv=tuple(_frame_text(str(arg)) for arg in sys.argv),
                 loglevel=self.cfg.loglevel,
                 database_url=to_psycopg_url(self.cfg.dsn),
                 connect_kwargs=self.cfg.child_connect_kwargs,
@@ -604,7 +628,6 @@ class Worker(
                     err.message,
                 )
                 raise err.exception
-            self._parent_db_sockets_open = True
             # Surface concurrency configuration clearly for operators
             max_claimed_effective = (
                 self.cfg.max_claim_per_worker
@@ -846,6 +869,8 @@ class Worker(
         """
         await self._start_with_resilience_config()
         if self._stop.is_set():
+            # The start may have finished before the stop: children must not outlive it.
+            await self.stop()
             self._raise_captured_fatal_error()
             return
         logger.info('Worker started')
