@@ -94,13 +94,13 @@ runner heartbeats.
 
 ### Child Process Crash
 
-Each task runs in its own child process. When a child exits abnormally (a segfault in a C extension, a kill by the operating system such as an out-of-memory kill, `os._exit()` in task code, or the kill after `timeout_ms`), the worker detects this at once, without waiting for heartbeats. It recovers the task of that child and starts a new child in that slot:
+All child processes of a worker share one process pool. When a child process exits abnormally (a segfault in a C extension, a kill by the operating system such as an out-of-memory kill, `os._exit()` in task code, or the kill after `timeout_ms`), Python marks the whole pool as broken and stops every other child of that worker. The worker detects this at once, without waiting for heartbeats, recovers each task that was in the pool, and starts a new pool:
 
 <!-- members: TaskStatus subset -->
 - CLAIMED task (user code not started): returned to PENDING
 - RUNNING task (user code started): if the task has a retry policy with `WORKER_CRASHED` in `auto_retry_for` and retries remaining, scheduled for retry; otherwise marked as FAILED with `WORKER_CRASHED` error
 
-Other children and their tasks continue. The worker also kills the subprocesses that the lost child leaves in its session. A task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead.
+This applies to every task the worker was running, not only to the task whose child exited. The task that exceeded `timeout_ms` fails with `TASK_TIMEOUT` instead. A child that exits because it reached `max_memory_per_child_mb` is replaced alone and does not affect other tasks.
 
 ### Workflow Task Recovery
 
@@ -188,7 +188,7 @@ RecoveryConfig(
 
 ### Recovery Time After a Worker Stops
 
-A child process crash is detected at once (see [Child Process Crash](#child-process-crash)). When the whole worker process or its machine stops, its children stop too, and its RUNNING tasks are recovered by the reaper, which runs inside workers. The reaper treats a task as stale `running_stale_threshold_ms` after its last runner heartbeat and acts on it at its next pass (`check_interval_ms`). With the defaults (heartbeat every 30 s, threshold 300 s, reaper pass every 30 s), recovery happens 4.5 to 5.5 minutes after the worker stops. A `WORKER_CRASHED` retry then waits its retry policy delay, counted from recovery. If no worker is running, recovery waits until a worker starts.
+A child process crash is detected at once (see [Child Process Crash](#child-process-crash)). When the whole worker process or its machine stops, its RUNNING tasks are recovered by the reaper, which runs inside workers. The reaper treats a task as stale `running_stale_threshold_ms` after its last runner heartbeat and acts on it at its next pass (`check_interval_ms`). With the defaults (heartbeat every 30 s, threshold 300 s, reaper pass every 30 s), recovery happens 4.5 to 5.5 minutes after the worker stops. A `WORKER_CRASHED` retry then waits its retry policy delay, counted from recovery. If no worker is running, recovery waits until a worker starts.
 
 To recover faster, lower `runner_heartbeat_interval_ms` and `running_stale_threshold_ms` together. A lower threshold also raises the risk of [false positives](#false-positives-tasks-marked-stale-but-running).
 

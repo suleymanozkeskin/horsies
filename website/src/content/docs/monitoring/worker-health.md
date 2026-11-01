@@ -145,7 +145,7 @@ Snapshot timeseries for one worker, newest first.
 | `snapshot_at` | `datetime` | When the snapshot was taken |
 | `hostname` | `str` | Worker host |
 | `pid` | `int` | Worker process id |
-| `processes` | `int` | Child process count |
+| `processes` | `int` | Process pool size |
 | `max_claim_batch` | `int` | Claim batch size |
 | `max_claim_per_worker` | `int` | Per-worker claim cap |
 | `cluster_wide_cap` | `int \| None` | Cluster-wide concurrency cap, if set |
@@ -158,7 +158,7 @@ Snapshot timeseries for one worker, newest first.
 | `memory_usage_mb` | `float \| None` | Parent worker process resident memory (psutil) |
 | `memory_percent` | `float \| None` | Memory percent (psutil) |
 | `cpu_percent` | `float \| None` | CPU percent (psutil) |
-| `children_memory_mb` | `float \| None` | Summed resident memory of the worker's child processes |
+| `children_memory_mb` | `float \| None` | Summed resident memory of the executor child processes |
 | `worker_started_at` | `datetime` | Worker process start time |
 
 ### Embedded health payloads
@@ -180,7 +180,7 @@ configuration snapshot, refreshed with each snapshot:
   (considered / applied / retained / failed counts, quarantined rows,
   and the quarantine function's refusals verbatim).
 
-`memory_usage_mb` is the **parent** process only. Task code runs in the worker's
+`memory_usage_mb` is the **parent** process only. Task code runs in the executor
 children, so per-child memory growth is invisible there; `children_memory_mb`
 captures it. The platform memory quota (e.g. Heroku R14) is measured against the
 whole process tree, so use `memory_usage_mb + children_memory_mb` to track the

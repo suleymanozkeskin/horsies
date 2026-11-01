@@ -10,27 +10,6 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
-- **Workers run tasks in children that they own, one process and one socket
-  per slot.** `ProcessPoolExecutor`, `multiprocessing`, and pickle are gone
-  from the task path. Each child is a new interpreter started with `exec`:
-  - `fork` is gone. With `max_tasks_per_child=0` on Linux, children no longer
-    share imported modules with the worker, so baseline memory and child start
-    time rise to the values of the default setting.
-  - `multiprocessing.parent_process()` returns `None` in a child, and
-    `multiprocessing.current_process().name` is `horsies-child-<slot>`.
-  - An app locator of `__main__:app` is refused at worker start. A child does
-    not run your script as `__main__`.
-  - A child no longer imports `__main__` again as `__mp_main__`.
-- **`timeout_ms` starts when a child takes the task.** Before, the clock started
-  at dispatch, so time spent waiting for a free child counted.
-- **A row waiting for a child returns to `PENDING` at worker stop.** Before, it
-  waited for its claim lease to end.
-- **`max_tasks_per_child` accepts `1`.** The floor was 2.
-- **`max_memory_per_child_mb` no longer depends on the CPython version.** The
-  CPython 3.13 gate is gone with `horsies.core.worker.mem_pool`.
-- **`ExecutorRestartFailedError` is renamed `ChildStartFailedError`.** There is
-  no alias.
-
 - **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
   whitespace at the start or the end, or is longer than 100 characters (the
   length of the database `queue_name` column).** The config raises
@@ -610,25 +589,6 @@ and there is no migration contract between pre-1.0 versions.
   stays: the transcode decoder set reads it.
 
 ### Fixed
-
-- **A timeout or a crash in one child no longer touches other tasks on the
-  worker.** Before, one lost child broke the shared pool, and every started
-  task on that worker failed with `WORKER_CRASHED`. Now only the task of that
-  child is recovered, and only that slot starts a new child. (#375)
-- **A child stops when its worker dies.** Before, the child ran its task to the
-  end, sent heartbeats, and wrote to the row with no parent to read the result.
-  (#410)
-- **SIGTERM to every process no longer fails running tasks.** Heroku and systemd
-  `KillMode=control-group` signal the whole tree. Children now ignore SIGTERM
-  and SIGINT, and the worker drains them. (#411)
-- **`timeout_ms` no longer counts the wait for a free child.** (#412)
-- **A timeout kill cannot reach the next task.** The kill is bound to the task,
-  so it does nothing once the result is read. (#413)
-- **A timeout kill reaches the subprocesses of the task.** The kill goes to the
-  session of the child. A subprocess that calls `setsid` leaves that session.
-  (#414)
-- **A forked helper cannot hide a dead child.** The worker takes a child's death
-  from the process exit, not from the socket. (#415)
 
 - **A task cancel accepts every form of a task id that Python reads as a
   UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
