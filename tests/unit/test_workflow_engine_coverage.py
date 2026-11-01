@@ -1644,6 +1644,7 @@ class TestGetWorkflowFinalResult:
                     SimpleNamespace(
                         node_id='node-0', task_index=0,
                         task_name='task_a',
+                        status='COMPLETED',
                         result='{"valid": "but_not_taskresult"}',
                         sub_definition_key=None,
                     ),

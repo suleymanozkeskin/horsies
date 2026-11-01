@@ -7,8 +7,9 @@ own error. A parent workflow copies the child's result text into its
 ``SubWorkflowNode``, so both cases make a COMPLETED node with an err, and every
 reader of the result column decodes that envelope.
 
-The outputless envelope is not part of this: its branch, its shape and its
-per-entry ``None`` stay as they are.
+An outputless workflow has no output node, so its terminal nodes are its output.
+A SKIPPED terminal gets the same code in its entry. The shape of that envelope
+and the ``None`` entry of a row that does not parse stay as they are.
 """
 
 from __future__ import annotations
@@ -44,6 +45,7 @@ from horsies.core.models.workflow import (
     WorkflowTaskStatus,
 )
 from horsies.core.models.workflow.handle import (
+    _OUTPUTLESS_TERMINALS,
     _decode_per_task_envelope,
     _decode_workflow_envelope,
 )
@@ -357,19 +359,22 @@ class TestCompletionCheck:
         assert not recorder.executed(MARK_WORKFLOW_COMPLETED_SQL)
 
 
-class TestOutputlessBranchDoesNotChange:
-    @pytest.mark.asyncio
-    async def test_skipped_terminal_keeps_its_none_entry(self) -> None:
+class TestOutputlessBranch:
+    """A SKIPPED terminal is the one row that gets a named entry."""
+
+    @staticmethod
+    async def _stored(status: str, result: str | None) -> dict[str, Any]:
         recorder = _Session({
             GET_WORKFLOW_DAG_EDGES_SQL: [
-                SimpleNamespace(task_index=0, dependencies=[]),
+                SimpleNamespace(task_index=3, dependencies=[]),
             ],
             GET_TASK_RESULTS_BY_INDEXES_SQL: [
                 SimpleNamespace(
                     node_id='terminal',
-                    task_index=0,
+                    task_index=3,
                     task_name='terminal_task',
-                    result=None,
+                    status=status,
+                    result=result,
                     sub_definition_key=None,
                 ),
             ],
@@ -379,17 +384,103 @@ class TestOutputlessBranchDoesNotChange:
             recorder.session, WORKFLOW_ID, None,
         )
 
-        assert json.loads(stored) == {
+        assert not recorder.executed(GET_OUTPUT_TASK_RESULT_SQL)
+        return json.loads(stored)
+
+    @pytest.mark.asyncio
+    async def test_skipped_terminal_holds_the_named_outcome(self) -> None:
+        stored = await self._stored('SKIPPED', None)
+
+        entry = stored['ok']['results_by_id']['terminal']
+        err = decode_task_result(entry, int).err_value
+        assert err.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+        assert err.data == {
+            'workflow_id': WORKFLOW_ID,
+            'output_node_id': 'terminal',
+            'output_task_index': 3,
+            'output_task_name': 'terminal_task',
+        }
+        assert 'terminal' in (err.message or '')
+
+    @pytest.mark.asyncio
+    async def test_outer_shape_and_markers_do_not_change(self) -> None:
+        stored = await self._stored('SKIPPED', None)
+
+        del stored['ok']['results_by_id']['terminal']
+        assert stored == {
             '__h_task_result__': True,
             '__h_outputless_terminals__': True,
             'ok': {
-                'results_by_id': {'terminal': None},
+                'results_by_id': {},
                 'task_name_by_id': {'terminal': 'terminal_task'},
                 'definition_key_by_id': {'terminal': None},
             },
             'err': None,
         }
-        assert not recorder.executed(GET_OUTPUT_TASK_RESULT_SQL)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    @pytest.mark.parametrize(
+        'result',
+        [None, '', 'not{json', '{"valid": "but_not_taskresult"}'],
+        ids=['null', 'empty', 'not-json', 'not-an-envelope'],
+    )
+    async def test_row_that_does_not_parse_keeps_its_none_entry(
+        self, status: str, result: str | None,
+    ) -> None:
+        stored = await self._stored(status, result)
+
+        assert stored['ok']['results_by_id'] == {'terminal': None}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('status', 'result'),
+        [('COMPLETED', OK_RESULT_TEXT), ('FAILED', ERR_RESULT_TEXT)],
+        ids=['completed', 'failed'],
+    )
+    async def test_stored_envelope_is_the_entry(
+        self, status: str, result: str,
+    ) -> None:
+        stored = await self._stored(status, result)
+
+        assert stored['ok']['results_by_id'] == {'terminal': json.loads(result)}
+
+    @pytest.mark.asyncio
+    async def test_failed_serialization_keeps_the_fallback_text(self) -> None:
+        recorder = _Session({
+            GET_WORKFLOW_DAG_EDGES_SQL: [
+                SimpleNamespace(task_index=0, dependencies=[]),
+            ],
+        })
+
+        with patch(DUMPS_JSON, return_value=Err(SerializationError('forced'))):
+            stored = await get_workflow_final_result(
+                recorder.session, WORKFLOW_ID, None,
+            )
+
+        assert stored == 'null'
+
+    @pytest.mark.asyncio
+    async def test_get_decodes_the_entry(self, app: Horsies) -> None:
+        @app.task(task_name='terminal_task')
+        def terminal_task() -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        _ = terminal_task
+        stored = await self._stored('SKIPPED', None)
+
+        decoded = _decode_workflow_envelope(
+            stored, _OUTPUTLESS_TERMINALS, app=app, workflow_id=WORKFLOW_ID,
+        )
+
+        entry = decoded.ok_value['terminal']
+        assert entry.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    def test_statement_reads_the_status(self) -> None:
+        """Only this pin sees the statement: the fakes supply every column."""
+        statement = str(GET_TASK_RESULTS_BY_INDEXES_SQL)
+
+        assert 'SELECT node_id, task_index, task_name, status, result' in statement
 
 
 class TestReaders:

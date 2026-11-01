@@ -3231,38 +3231,40 @@ def _output_error_envelope(
     workflow_id: str,
     output_task_index: int,
     output_row: Any,
-) -> str:
-    """The result text of a COMPLETED workflow whose output node has no result.
+) -> dict[str, Json]:
+    """The error envelope of a COMPLETED workflow output that has no result.
 
-    ``data`` names the workflow and the output node. A parent workflow
-    copies this text, so at every nesting level ``data`` names the workflow
-    that holds the node.
+    The output is the explicit output node, or a terminal node of an
+    outputless workflow. ``data`` names the workflow and that node.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    return encode_task_result(
+        TaskResult(
+            err=TaskError(
+                error_code=error_code,
+                message=message,
+                data={
+                    'workflow_id': workflow_id,
+                    'output_node_id': output_row.node_id,
+                    'output_task_index': output_task_index,
+                    'output_task_name': output_row.task_name,
+                },
+            ),
+        ),
+        Any,
+    )
+
+
+def _output_result_text(envelope: dict[str, Json], workflow_id: str) -> str:
+    """The stored text of an envelope from ``_output_error_envelope``.
 
     Raises:
         SerializationError: the envelope does not serialize. The engine
             built it from a stored row, so this is a defect.
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
-
     return _ser_or_raise(
-        dumps_json(
-            encode_task_result(
-                TaskResult(
-                    err=TaskError(
-                        error_code=error_code,
-                        message=message,
-                        data={
-                            'workflow_id': workflow_id,
-                            'output_node_id': output_row.node_id,
-                            'output_task_index': output_task_index,
-                            'output_task_name': output_row.task_name,
-                        },
-                    ),
-                ),
-                Any,
-            ),
-        ),
-        f'output result of workflow {workflow_id}',
+        dumps_json(envelope), f'output result of workflow {workflow_id}',
     )
 
 
@@ -3282,16 +3284,19 @@ def _stored_output_result(
     """
     match output_row.result:
         case None | '':
-            return _output_error_envelope(
-                OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                (
-                    f'Workflow {workflow_id} is COMPLETED and its output node '
-                    f'{output_row.node_id!r} is {output_row.status} with no '
-                    'stored result'
+            return _output_result_text(
+                _output_error_envelope(
+                    OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    (
+                        f'Workflow {workflow_id} is COMPLETED and its output '
+                        f'node {output_row.node_id!r} is {output_row.status} '
+                        'with no stored result'
+                    ),
+                    workflow_id=workflow_id,
+                    output_task_index=output_task_index,
+                    output_row=output_row,
                 ),
-                workflow_id=workflow_id,
-                output_task_index=output_task_index,
-                output_row=output_row,
+                workflow_id,
             )
         case stored_result:
             return stored_result
@@ -3329,15 +3334,18 @@ def _explicit_output_result(
     )
     match status:
         case WorkflowTaskStatus.SKIPPED:
-            return _output_error_envelope(
-                OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
-                (
-                    f'Workflow {workflow_id} is COMPLETED and has no output: '
-                    f'its output node {node_id!r} is SKIPPED'
+            return _output_result_text(
+                _output_error_envelope(
+                    OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
+                    (
+                        f'Workflow {workflow_id} is COMPLETED and has no '
+                        f'output: its output node {node_id!r} is SKIPPED'
+                    ),
+                    workflow_id=workflow_id,
+                    output_task_index=output_task_index,
+                    output_row=output_row,
                 ),
-                workflow_id=workflow_id,
-                output_task_index=output_task_index,
-                output_row=output_row,
+                workflow_id,
             )
         case WorkflowTaskStatus.COMPLETED | WorkflowTaskStatus.FAILED:
             return _stored_output_result(
@@ -3356,6 +3364,45 @@ def _explicit_output_result(
             )
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _terminal_entry(workflow_id: str, node_id: str, row: Any) -> Json:
+    """The ``results_by_id`` entry of one terminal node of an outputless workflow.
+
+    Outcomes:
+        - SKIPPED: an error envelope with ``WORKFLOW_OUTPUT_SKIPPED``. Nothing
+          is corrupt: the workflow succeeded and this node has no result.
+        - Any other status with a stored ``__h_task_result__`` envelope: that
+          envelope.
+        - Any other row: ``None``. The handle surfaces a
+          ``RESULT_DESERIALIZATION_ERROR`` for the entry.
+    """
+    if row.status == WorkflowTaskStatus.SKIPPED.value:
+        return cast(
+            'Json',
+            _output_error_envelope(
+                OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
+                (
+                    f'Workflow {workflow_id} is COMPLETED and its terminal '
+                    f'node {node_id!r} is SKIPPED'
+                ),
+                workflow_id=workflow_id,
+                output_task_index=row.task_index,
+                output_row=row,
+            ),
+        )
+    if not row.result:
+        return None
+    deser = _deser_json(row.result, 'terminal task result json')
+    if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
+        return cast('Json', deser)
+    # Corrupt / pre-strict row — store null; handle layer
+    # surfaces a RESULT_DESERIALIZATION_ERROR per-entry.
+    logger.warning(
+        f'Terminal task {node_id!r} result is not a '
+        f'strict-serde envelope; storing null'
+    )
+    return None
 
 
 async def get_workflow_final_result(
@@ -3413,20 +3460,7 @@ async def get_workflow_final_result(
             continue
         task_name_by_id[node_id] = row.task_name
         definition_key_by_id[node_id] = row.sub_definition_key
-        if row.result:
-            deser = _deser_json(row.result, 'terminal task result json')
-            if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
-                results_dict[node_id] = cast('Json', deser)
-            else:
-                # Corrupt / pre-strict row — store null; handle layer
-                # surfaces a RESULT_DESERIALIZATION_ERROR per-entry.
-                logger.warning(
-                    f'Terminal task {node_id!r} result is not a '
-                    f'strict-serde envelope; storing null'
-                )
-                results_dict[node_id] = None
-        else:
-            results_dict[node_id] = None
+        results_dict[node_id] = _terminal_entry(workflow_id, node_id, row)
 
     # Outputless workflow envelope. Outer marker is the standard
     # ``__h_outputless_terminals__`` so the handle's decode path can

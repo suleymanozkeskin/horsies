@@ -443,6 +443,14 @@ there is no migration contract between pre-1.0 versions.
   on the new code. A workflow that already stored the text `null` keeps it, and
   `get()` returns `RESULT_DESERIALIZATION_ERROR` for it. A `FAILED` output
   node does not change: the workflow stores that node's error.
+- **Breaking: the `WorkflowHandle.get()` map of an outputless workflow holds
+  `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` for a `SKIPPED` terminal node.** A
+  success case that does not require the node lets this state occur. `data`
+  names the workflow and the node. Before, the entry held
+  `RESULT_DESERIALIZATION_ERROR`, although nothing is corrupt. An entry of a
+  `COMPLETED` or `FAILED` node that does not parse keeps
+  `RESULT_DESERIALIZATION_ERROR`, and so does a stored entry of a workflow that
+  already completed.
 - **Breaking: `encode_value` refuses a lone surrogate in a string or in a
   dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
   `dumps_json`. The text names the kwarg and holds no input value. A dict

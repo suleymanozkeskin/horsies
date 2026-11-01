@@ -92,7 +92,7 @@ Terminal outcome codes for tasks and workflows.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
-| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node; `data` names the workflow and the output node | No |
+| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node; `data` names the workflow and the node | No |
 
 ### Validation Failure Text
 

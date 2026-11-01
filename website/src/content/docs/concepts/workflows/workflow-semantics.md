@@ -691,7 +691,7 @@ A `SubWorkflowNode` of such a child workflow is COMPLETED and holds the child's 
 - In the `get()` map of an outputless parent, the entry of the node holds the err.
 - `SubWorkflowSummary.output` is `None`.
 
-An outputless workflow has no output node. In its `get()` map, the entry of a SKIPPED terminal node holds `RESULT_DESERIALIZATION_ERROR`.
+An outputless workflow has no output node, so its terminal nodes are its output. In its `get()` map, the entry of a SKIPPED terminal node holds `WORKFLOW_OUTPUT_SKIPPED`, and `data` names that node.
 
 ## Best Practices
 

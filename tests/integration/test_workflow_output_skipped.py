@@ -475,7 +475,7 @@ class TestOutputNodeUnderSuccessPolicy:
             OutcomeCode.WORKFLOW_OUTPUT_SKIPPED.value
         )
 
-    async def test_outputless_skipped_terminal_keeps_its_none_entry(
+    async def test_outputless_skipped_terminal_holds_the_named_outcome(
         self, setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
         session, broker, app = setup
@@ -493,8 +493,7 @@ class TestOutputNodeUnderSuccessPolicy:
 
         await self._run_skipped_child(session, broker, handle.workflow_id)
 
-        row = await self._workflow_row(session, handle.workflow_id)
-        stored = json.loads(row.result)
-        assert stored['ok']['results_by_id'][f'{spec.name}:1'] is None
         got = await handle.get_async(timeout_ms=2000)
+        entry = got.ok_value[f'{spec.name}:1']
+        assert entry.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
         assert got.ok_value[f'{spec.name}:2'].ok == 7
