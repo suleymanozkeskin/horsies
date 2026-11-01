@@ -55,7 +55,6 @@ from ..reads.detail import (
     LiveTaskLocation,
     TaskAbsenceReason,
     TaskDetailAbsent,
-    absence_reason,
     read_task_detail,
 )
 from .input_envelope import (
@@ -235,10 +234,10 @@ async def rerun_task(
     match detail:
         case LiveTaskLocation():
             return RerunSourceLive(task_id=command.source_task_id)
-        case TaskDetailAbsent(predates_retained_floor=predates):
+        case TaskDetailAbsent(reason=reason):
             return RerunSourceAbsent(
                 task_id=command.source_task_id,
-                reason=absence_reason(predates),
+                reason=reason,
             )
         case HistoryTaskDetail():
             pass

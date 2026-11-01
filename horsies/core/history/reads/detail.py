@@ -123,25 +123,15 @@ class TaskAbsenceReason(str, enum.Enum):
     NOT_CLASSIFIED = 'NOT_CLASSIFIED'
 
 
-def absence_reason(predates_retained_floor: bool | None) -> TaskAbsenceReason:
-    """Name the absence classification of a ``TaskDetailAbsent``."""
-    match predates_retained_floor:
-        case True:
-            return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
-        case False:
-            return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
-        case None:
-            return TaskAbsenceReason.NOT_CLASSIFIED
-
-
 @dataclass(frozen=True, slots=True)
 class TaskDetailAbsent:
-    """No row anywhere. `predates_retained_floor` is True when the v7
+    """No row anywhere. `reason` is PREDATES_RETAINED_HISTORY when the v7
     birth lies before the attached-catalog floor (the typed expired
-    presentation), False when it lies within retained range, and None
-    when the identifier is not v7 or no attached leaf carries a birth.
+    presentation), WITHIN_RETAINED_HISTORY when it lies within retained
+    range, and NOT_CLASSIFIED when the identifier is not v7 or no
+    attached leaf carries a birth.
 
-    False is the answer for a task whose leaf was destroyed out of band:
+    WITHIN_RETAINED_HISTORY is the answer for a task whose leaf was destroyed out of band:
     its history was retained and then removed, so it does not predate
     retained history. The row is gone either way, but the reason
     published here stays true — an operator asking why a rerun is
@@ -149,7 +139,7 @@ class TaskDetailAbsent:
     aged out."""
 
     task_id: str
-    predates_retained_floor: bool | None
+    reason: TaskAbsenceReason
 
 
 type TaskDetailResult = LiveTaskLocation | HistoryTaskDetail | TaskDetailAbsent
@@ -242,7 +232,7 @@ async def read_task_detail(
     if row is None:
         return TaskDetailAbsent(
             task_id=task_id,
-            predates_retained_floor=await _classify_absence(
+            reason=await _classify_absence(
                 connection, task_id
             ),
         )
@@ -363,7 +353,7 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
 async def _classify_absence(
     connection: AsyncConnection,
     task_id: str,
-) -> bool | None:
+) -> TaskAbsenceReason:
     """Whether a v7 birth predates all retained history.
 
     The floor is read live from the attached leaf catalog rather than
@@ -373,19 +363,21 @@ async def _classify_absence(
 
     A catalog carrying attached leaves before any reader is published
     now yields a real answer where the manifest-sourced floor yielded
-    None. That is intended: the leaves say where history begins whether
+    NOT_CLASSIFIED. That is intended: the leaves say where history begins whether
     or not a function has been generated over them, and answering from
     what is known beats declaring the question unclassifiable.
     """
     birth = uuid7_birth_at(task_id)
     if birth is None:
-        return None
+        return TaskAbsenceReason.NOT_CLASSIFIED
     floor = await read_attached_birth_floor(
         connection, excluded_class_key=HEARTBEAT_CLASS_KEY
     )
     if floor is None:
-        return None
-    return birth < floor
+        return TaskAbsenceReason.NOT_CLASSIFIED
+    if birth < floor:
+        return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
+    return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
 
 
 async def staged_detail_published(connection: AsyncConnection) -> bool:

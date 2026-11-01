@@ -83,7 +83,6 @@ from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
     TaskDetailAbsent,
-    absence_reason,
     read_task_detail,
     staged_detail_published,
 )
@@ -1572,8 +1571,8 @@ async def _history_detail(
     match detail:
         case HistoryTaskDetail():
             return detail
-        case TaskDetailAbsent(predates_retained_floor=predates):
-            return absence_reason(predates)
+        case TaskDetailAbsent(reason=reason):
+            return reason
         case LiveTaskLocation():
             raise HistoryContractError(
                 f'staged detail reports task {task_id} live in the snapshot '

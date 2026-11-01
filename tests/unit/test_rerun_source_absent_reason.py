@@ -36,17 +36,12 @@ def _connection() -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ('predates', 'reason'),
-    [
-        (True, TaskAbsenceReason.PREDATES_RETAINED_HISTORY),
-        (False, TaskAbsenceReason.WITHIN_RETAINED_HISTORY),
-        (None, TaskAbsenceReason.NOT_CLASSIFIED),
-    ],
-    ids=['predates', 'within', 'unclassified'],
+    'reason',
+    list(TaskAbsenceReason),
+    ids=lambda reason: reason.value,
 )
 async def test_the_reason_is_the_staged_classification(
     monkeypatch: pytest.MonkeyPatch,
-    predates: bool | None,
     reason: TaskAbsenceReason,
 ) -> None:
     monkeypatch.setattr(
@@ -54,7 +49,7 @@ async def test_the_reason_is_the_staged_classification(
         'read_task_detail',
         AsyncMock(
             return_value=TaskDetailAbsent(
-                task_id=SOURCE_ID, predates_retained_floor=predates,
+                task_id=SOURCE_ID, reason=reason,
             ),
         ),
     )
