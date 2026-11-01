@@ -46,6 +46,7 @@ __all__ = [
     'encode_task_error',
     'encode_task_result',
     'encode_value',
+    'lone_surrogate_text',
     'validate_task_result_envelope',
 ]
 
@@ -315,7 +316,7 @@ def _validate(
             failure = ValueValidationError(validation_summary(error, location))
     except UnicodeEncodeError:
         failure = StrictJsonError(
-            _lone_surrogate_text('a validation error', location),
+            lone_surrogate_text('a validation error', location),
         )
     raise failure
 
@@ -348,7 +349,7 @@ def _dump(
     except PydanticSerializationError as error:
         failure = ValueValidationError(f'serialization failed: {error}')
     except UnicodeEncodeError:
-        failure = StrictJsonError(_lone_surrogate_text('a dict key', location))
+        failure = StrictJsonError(lone_surrogate_text('a dict key', location))
     except TypeError as error:
         if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
             raise
@@ -871,7 +872,7 @@ def _with_location(text: str, location: tuple[str, ...]) -> str:
             return f'{".".join(location)}: {text}'
 
 
-def _lone_surrogate_text(
+def lone_surrogate_text(
     subject: Literal['a string', 'a dict key', 'a validation error'],
     location: tuple[str, ...],
 ) -> str:
@@ -898,7 +899,7 @@ def _scan_text(
     try:
         text.encode('utf-8')
     except UnicodeEncodeError:
-        failure = StrictJsonError(_lone_surrogate_text(subject, location))
+        failure = StrictJsonError(lone_surrogate_text(subject, location))
     else:
         return
     raise failure

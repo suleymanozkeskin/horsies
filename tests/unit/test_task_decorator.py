@@ -12,7 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import BaseModel, field_validator
+from pydantic_core import PydanticCustomError
 
+from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -74,6 +76,47 @@ class _EchoingModel(BaseModel):
     @classmethod
     def refuse(cls, value: str) -> str:
         raise ValueError(f'bad name {value}')
+
+
+class _AssertingModel(BaseModel):
+    """A validator that writes the refused value in an assertion."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise AssertionError(f'bad name {value}')
+
+
+class _CustomErrorModel(BaseModel):
+    """A validator that writes the refused value in the error context."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
+_LONE_SURROGATE_NAME: Any = {'name': f'keep-out{chr(0xd800)}'}
+
+
+def _returns_echoing_model() -> TaskResult[_EchoingModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _returns_asserting_model() -> TaskResult[_AssertingModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _returns_custom_error_model() -> TaskResult[_CustomErrorModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _raises_unicode_encode_error_in_the_body() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=len(chr(0xd800).encode('utf-8')))
 
 
 def _make_app(
@@ -1373,6 +1416,78 @@ class TestCreateTaskWrapperIntrospection:
 # =============================================================================
 # create_task_wrapper — send() paths
 # =============================================================================
+
+
+@pytest.mark.unit
+class TestReturnedValueWithALoneSurrogateInTheValidatorText:
+    """The direct call validates the returned value in the wrapper.
+
+    Pydantic cannot build the error text, so it raises `UnicodeEncodeError`
+    in place of a `ValidationError`. It is the same refusal as any other
+    value that does not validate, not an unhandled exception.
+    """
+
+    @pytest.mark.parametrize(
+        'fn',
+        [
+            _returns_echoing_model,
+            _returns_asserting_model,
+            _returns_custom_error_model,
+        ],
+        ids=['value-error', 'assertion-error', 'custom-error-context'],
+    )
+    def test_it_is_a_return_type_mismatch(self, fn: Any) -> None:
+        wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
+
+        result = wrapper()
+
+        error = result.unwrap_err()
+        text = 'a validation error holds a lone surrogate, which UTF-8 cannot encode'
+        assert error.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert (error.message or '').endswith(text)
+        assert 'TaskResult(ok=<dict>)' in (error.message or '')
+        assert error.exception is None
+        data: Any = error.data
+        assert sorted(data) == [
+            'actual_type',
+            'expected_type',
+            'validation_error_count',
+            'validation_errors',
+            'variant',
+        ]
+        assert data['variant'] == 'ok'
+        assert data['actual_type'] == 'dict'
+        assert 'Model' in data['expected_type']
+        assert data['validation_errors'] == [
+            {'loc': [], 'msg': text, 'type': 'lone_surrogate'},
+        ]
+        assert data['validation_error_count'] == 1
+
+    @pytest.mark.parametrize(
+        'fn',
+        [
+            _returns_echoing_model,
+            _returns_asserting_model,
+            _returns_custom_error_model,
+        ],
+        ids=['value-error', 'assertion-error', 'custom-error-context'],
+    )
+    def test_the_returned_value_is_not_stored(self, fn: Any) -> None:
+        wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
+
+        stored = serialize_error_payload(wrapper())
+
+        assert stored != FALLBACK_ERROR_JSON
+        assert 'keep-out' not in stored
+
+    def test_a_unicode_encode_error_from_the_task_body_stays_unhandled(self) -> None:
+        wrapper = create_task_wrapper(
+            _raises_unicode_encode_error_in_the_body, _make_app(), 'test.body',
+        )
+
+        result = wrapper()
+
+        assert result.unwrap_err().error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
 @pytest.mark.unit

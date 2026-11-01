@@ -23,10 +23,14 @@ from typing import Any, Generator
 from unittest.mock import MagicMock, patch, call
 
 import pytest
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, SecretStr, field_validator
+from pydantic_core import PydanticCustomError
 
+from horsies.core.app import Horsies
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
 from horsies.core.codec.json_io import SerializationError
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
@@ -863,8 +867,41 @@ class _ConstantSurrogateModel(BaseModel):
         raise ValueError(f'bad name {value}{chr(0xd800)}')
 
 
+class _CustomErrorModel(BaseModel):
+    """A validator that writes the refused value in the error context."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
 def _constant_surrogate_task(*, x: _ConstantSurrogateModel) -> None:
     pass
+
+
+_LONE_SURROGATE_NAME: Any = {'name': f'text{chr(0xd800)}'}
+
+
+def _registered_tasks() -> dict[str, Any]:
+    """Registered tasks: the worker calls their wrapper, not a mock."""
+    app = Horsies(AppConfig(
+        broker=PostgresConfig(
+            database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+        ),
+    ))
+
+    @app.task('surrogate.echoing')
+    def returns_echoing() -> TaskResult[_EchoingModel, TaskError]:
+        return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+    @app.task('surrogate.custom_error')
+    def returns_custom_error() -> TaskResult[_CustomErrorModel, TaskError]:
+        return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+    return {'value-error': returns_echoing, 'custom-error-context': returns_custom_error}
 
 
 _LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
@@ -1174,7 +1211,8 @@ class TestRunTaskEntryErrorPaths:
     ) -> None:
         """Pydantic cannot build the error text. The encode refuses the value
         through its catalog, so the code is WORKER_SERIALIZATION_ERROR and
-        not TASK_EXCEPTION for a raw exception."""
+        not TASK_EXCEPTION for a raw exception. The mock task skips the
+        wrapper: a registered task stops earlier, in the return check."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
@@ -1191,6 +1229,31 @@ class TestRunTaskEntryErrorPaths:
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
         }
         assert 'a validation error holds a lone surrogate' in parsed['err']['message']
+
+    @pytest.mark.parametrize('form', ['value-error', 'custom-error-context'])
+    def test_a_registered_task_stops_in_the_return_check(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        form: str,
+    ) -> None:
+        """The wrapper refuses the value before the worker encodes it."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()[form],
+        )
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is None
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'RETURN_TYPE_MISMATCH',
+        }
+        assert 'a validation error holds a lone surrogate' in parsed['err']['message']
+        assert parsed['err']['exception'] is None
 
     def test_a_validator_text_with_a_lone_surrogate_fails_the_kwargs_decode(
         self,

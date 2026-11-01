@@ -39,9 +39,11 @@ from horsies.core.codec.payload_guard import (
 )
 from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.codec.typed import (
+    Json,
     TypeAnnotation,
     decode_task_error,
     decode_task_result,
+    lone_surrogate_text,
     validate_task_result_envelope,
 )
 from horsies.core.codec.signature_check import (
@@ -1232,6 +1234,36 @@ def create_task_wrapper(
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
     err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
 
+    def return_type_mismatch(
+        result: TaskResult[T, TaskError],
+        summary: str,
+        entries: list[Json],
+        entry_count: int,
+    ) -> TaskResult[T, TaskError]:
+        """The refusal of a returned value that does not validate.
+
+        The text and the data name types and failing fields, never the value.
+        """
+        variant = 'ok' if result.is_ok() else 'err'
+        expected_type = ok_type if result.is_ok() else err_type
+        actual_type = type(result.ok if result.is_ok() else result.err).__name__
+        return TaskResult(
+            err=TaskError(
+                error_code=ContractCode.RETURN_TYPE_MISMATCH,
+                message=(
+                    f'Task {fn.__name__} returned TaskResult({variant}=<{actual_type}>) '
+                    f'but expected type {expected_type}: {summary}'
+                ),
+                data={
+                    'variant': variant,
+                    'expected_type': str(expected_type),
+                    'actual_type': actual_type,
+                    'validation_errors': entries,
+                    'validation_error_count': entry_count,
+                },
+            )
+        )
+
     # Create a wrapper function that preserves the exact signature
     def wrapped_function(
         *args: P.args,
@@ -1251,39 +1283,40 @@ def create_task_wrapper(
 
             # Runtime type validation: validate result against declared types
             try:
-                if result.is_ok():
-                    # Validate ok value against T. Lax validation coerces
-                    # (e.g. '5' → 5 for a declared int); return the coerced
-                    # value so an in-process caller sees the same value a
-                    # wire consumer decodes — otherwise local and remote
-                    # observations of the same task diverge.
-                    validated_ok = ok_type_adapter.validate_python(result.ok)
-                    if validated_ok is not result.ok:
-                        result = TaskResult(ok=validated_ok)
-                else:
-                    # Validate err value against E
-                    err_type_adapter.validate_python(result.err)
-            except ValidationError as ve:
-                # Type validation failed - return error result. The text and
-                # the data name types and failing fields, never the value.
-                variant = 'ok' if result.is_ok() else 'err'
-                expected_type = ok_type if result.is_ok() else err_type
-                actual_type = type(result.ok if result.is_ok() else result.err).__name__
-                return TaskResult(
-                    err=TaskError(
-                        error_code=ContractCode.RETURN_TYPE_MISMATCH,
-                        message=(
-                            f'Task {fn.__name__} returned TaskResult({variant}=<{actual_type}>) '
-                            f'but expected type {expected_type}: {validation_summary(ve)}'
-                        ),
-                        data={
-                            'variant': variant,
-                            'expected_type': str(expected_type),
-                            'actual_type': actual_type,
-                            'validation_errors': validation_error_entries(ve),
-                            'validation_error_count': ve.error_count(),
-                        },
+                try:
+                    if result.is_ok():
+                        # Validate ok value against T. Lax validation coerces
+                        # (e.g. '5' → 5 for a declared int); return the coerced
+                        # value so an in-process caller sees the same value a
+                        # wire consumer decodes — otherwise local and remote
+                        # observations of the same task diverge.
+                        validated_ok = ok_type_adapter.validate_python(result.ok)
+                        if validated_ok is not result.ok:
+                            result = TaskResult(ok=validated_ok)
+                    else:
+                        # Validate err value against E
+                        err_type_adapter.validate_python(result.err)
+                except ValidationError as ve:
+                    # Type validation failed - return error result.
+                    return return_type_mismatch(
+                        result,
+                        validation_summary(ve),
+                        validation_error_entries(ve),
+                        ve.error_count(),
                     )
+            except UnicodeEncodeError:
+                # A validator wrote a lone surrogate in its error text, so
+                # pydantic cannot build that text: validate_python raises
+                # this for a ValueError, and ValidationError.errors() for the
+                # context of a PydanticCustomError. It is the same refusal.
+                # The task body is outside this try, so its own
+                # UnicodeEncodeError is an unhandled exception.
+                text = lone_surrogate_text('a validation error', ())
+                return return_type_mismatch(
+                    result,
+                    text,
+                    [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
+                    1,
                 )
 
             return result

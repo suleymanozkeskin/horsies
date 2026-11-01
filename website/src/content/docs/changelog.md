@@ -477,8 +477,13 @@ there is no migration contract between pre-1.0 versions.
   - A workflow node kwarg fails spec construction with
     `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
     raised.
-  - A task result ends with `WORKER_SERIALIZATION_ERROR`, not
-    `TASK_EXCEPTION`, and so does a decode of the kwargs of a task.
+  - A task whose return value hits this ends with `RETURN_TYPE_MISMATCH`, in
+    a direct call and in a worker. The task wrapper refuses the value, as it
+    refuses any other value that does not validate, and the value is not
+    stored. Before, the task ended with `UNHANDLED_EXCEPTION`, or in a worker
+    with `TASK_EXCEPTION` for the context of a `PydanticCustomError`.
+  - A decode of the kwargs of a task ends with `WORKER_SERIALIZATION_ERROR`,
+    not `TASK_EXCEPTION`.
   - A decode of a stored result gives `RESULT_DESERIALIZATION_ERROR`. Before,
     the raw error left the read.
 - **Breaking: `encode_value` raises `ValueValidationError` for a dict key
