@@ -27,6 +27,8 @@ from horsies.core.skills_installer import (
     SkillAlreadyCurrent,
     SkillInstalled,
     SkillIoFailed,
+    StagingLeftAt,
+    StagingRemoved,
     TargetNotDirectory,
     describe_install_error,
     differing_paths,
@@ -291,6 +293,38 @@ class TestSwapFailures:
         assert (tmp_path / 'horsies' / 'tasks.md').read_bytes() == _packaged()['tasks.md']
         assert (calls[0][1] / 'tasks.md').read_text() == 'old copy'
 
+    def test_failed_staging_removal_names_the_staging_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        edited = _populate_changed_copy(tmp_path)
+        calls = _fail_nth_rename(monkeypatch, {2})
+
+        def remove(path: Path) -> None:
+            raise OSError(16, 'injected removal failure', str(path))
+
+        monkeypatch.setattr(skills_installer, '_remove_tree', remove)
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        staging = calls[1][0]
+        assert error.destination_state == DestinationUnchanged()
+        assert error.staging_state == StagingLeftAt(path=staging)
+        assert staging.is_dir()
+        assert edited.read_text() == 'old copy'
+
+    def test_restored_old_copy_leaves_no_staging_folder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _populate_changed_copy(tmp_path)
+        _fail_nth_rename(monkeypatch, {2})
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.staging_state == StagingRemoved()
+        assert _leftovers(tmp_path) == []
+
     def test_first_install_rename_failure_leaves_no_copy_and_no_staging(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -378,6 +412,7 @@ class TestDescribeInstallError:
                     operation='install',
                     cause='boom',
                     destination_state=OldCopyAtBackup(backup=tmp_path / 'old'),
+                    staging_state=StagingLeftAt(path=tmp_path / 'stage'),
                 )
             ),
         ]
@@ -387,6 +422,7 @@ class TestDescribeInstallError:
         assert 'tasks.md' in messages[2] and '--force' in messages[2]
         assert 'boom' in messages[3] and str(tmp_path) in messages[3]
         assert str(tmp_path / 'old') in messages[3]
+        assert str(tmp_path / 'stage') in messages[3]
 
 
 # ---------------------------------------------------------------------------

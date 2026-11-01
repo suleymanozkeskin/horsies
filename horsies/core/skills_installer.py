@@ -12,7 +12,7 @@ from __future__ import annotations
 import shutil
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib import resources
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -112,13 +112,33 @@ DestinationState = DestinationUnchanged | NewCopyInPlaceBackupLeft | OldCopyAtBa
 
 
 @dataclass(frozen=True, slots=True)
+class StagingRemoved:
+    """No staging folder is left beside the destination."""
+
+
+@dataclass(frozen=True, slots=True)
+class StagingLeftAt:
+    """The staging folder could not be removed. Remove ``path`` by hand."""
+
+    path: Path
+
+
+StagingState = StagingRemoved | StagingLeftAt
+
+
+@dataclass(frozen=True, slots=True)
 class SkillIoFailed:
-    """A filesystem call failed. ``destination_state`` says what is true now."""
+    """A filesystem call failed.
+
+    ``destination_state`` says what is true at the destination.
+    ``staging_state`` says whether the staging folder is gone.
+    """
 
     path: Path
     operation: str
     cause: str
     destination_state: DestinationState
+    staging_state: StagingState
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,9 +171,16 @@ def describe_install_error(error: SkillInstallError) -> str:
                 'Nothing was changed. Run again with --force to replace it.'
             )
         case SkillIoFailed(
-            path=path, operation=operation, cause=cause, destination_state=state
+            path=path,
+            operation=operation,
+            cause=cause,
+            destination_state=state,
+            staging_state=staging,
         ):
-            return f'{operation} failed for {path}: {cause}. {_describe_state(state)}'
+            return (
+                f'{operation} failed for {path}: {cause}. {_describe_state(state)}'
+                f'{_describe_staging(staging)}'
+            )
         case _:
             assert_never(error)
 
@@ -166,6 +193,16 @@ def _describe_state(state: DestinationState) -> str:
             return f'The new copy is in place. The old copy is left at {backup}. Remove it by hand.'
         case OldCopyAtBackup(backup=backup):
             return f'The destination has no copy. The old copy is at {backup}. Move it back by hand.'
+        case _:
+            assert_never(state)
+
+
+def _describe_staging(state: StagingState) -> str:
+    match state:
+        case StagingRemoved():
+            return ''
+        case StagingLeftAt(path=path):
+            return f' A staging folder is left at {path}. Remove it by hand.'
         case _:
             assert_never(state)
 
@@ -288,6 +325,7 @@ def _failed(
             operation=operation,
             cause=str(exc),
             destination_state=state,
+            staging_state=StagingRemoved(),
         ),
     )
 
@@ -340,12 +378,23 @@ def _write_swapped(destination: Path, packaged: SkillFiles) -> Result[None, Skil
     try:
         _write_staging(staging, packaged)
     except OSError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        return _failed(exc, staging, 'write the new copy', DestinationUnchanged())
-    swapped = _swap_in(staging, destination)
-    if swapped.is_err():
-        shutil.rmtree(staging, ignore_errors=True)
-    return swapped
+        return _remove_staging(
+            staging, _failed(exc, staging, 'write the new copy', DestinationUnchanged())
+        )
+    match _swap_in(staging, destination):
+        case Err(failure):
+            return _remove_staging(staging, Err(failure))
+        case Ok():
+            return Ok(None)
+
+
+def _remove_staging(staging: Path, failed: Err[SkillIoFailed]) -> Err[SkillIoFailed]:
+    """Remove ``staging`` after a failure. A failed removal is named in the error."""
+    try:
+        _remove_tree(staging)
+    except OSError:
+        return Err(replace(failed.err_value, staging_state=StagingLeftAt(path=staging)))
+    return failed
 
 
 def install_skill(
@@ -384,6 +433,7 @@ def install_skill(
                 operation='install',
                 cause=str(exc),
                 destination_state=DestinationUnchanged(),
+                staging_state=StagingRemoved(),
             ),
         )
 
