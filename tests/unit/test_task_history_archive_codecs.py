@@ -348,6 +348,8 @@ class TestAttemptSnapshotReadEntry:
     @pytest.mark.parametrize('payload', [b'[NaN]', b'[' + b'1' * 5000 + b']'])
     def test_detail_read_refuses_the_snapshot(self, payload: bytes) -> None:
         row = SimpleNamespace(
+            task_id='4a5b6c7d-8e9f-4a0b-9c1d-2e3f4a5b6c7d',
+            status='COMPLETED',
             attempt_archive_version=1,
             attempt_snapshot_codec='json-utf8',
             attempt_snapshot_content_type='application/json',

@@ -34,8 +34,8 @@ from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleEve
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.monitoring.task_actions import (
-    TaskActionError,
     TaskActionErrorCode,
+    TaskActionEventLoopLimit,
     cancel_task,
 )
 from horsies.core.workflows.lifecycle import (
@@ -92,12 +92,14 @@ def test_send_maps_broker_loop_limit_to_send_loop_limit() -> None:
 
 @pytest.mark.unit
 def test_web_task_action_maps_loop_limit_to_503() -> None:
-    error = TaskActionError(
-        code=TaskActionErrorCode.EVENT_LOOP_LIMIT,
+    error = TaskActionEventLoopLimit(
         message=LIMIT_MESSAGE,
-        retryable=False,
         task_id='t-1',
-        current_status=None,
+        loop_limit=EventLoopLimit(
+            limit=MAX_CALLER_EVENT_LOOPS,
+            held_thread_names=('MainThread',),
+            current_thread_name='worker-1',
+        ),
     )
 
     outcome = _task_action_failed(error)
