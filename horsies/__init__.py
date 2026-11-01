@@ -162,6 +162,7 @@ from .core.models.health import (
     WorkerPong,
     WorkerStateSnapshot,
 )
+from .core.history.reads.detail import TaskAbsenceReason
 from .core.history.rerun.operations import (
     NotEligibleReason,
     RerunEnqueued,
@@ -347,6 +348,7 @@ __all__ = [
     'RerunEnqueued',
     'RerunSourceLive',
     'RerunSourceAbsent',
+    'TaskAbsenceReason',
     'RerunSourceCorrupt',
     'RerunNotEligible',
     'RerunInputUnavailable',

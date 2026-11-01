@@ -317,6 +317,8 @@ match outcome:
 checking one variant. Eligibility is decided **at enqueue** by
 `retain_rerun_input_default` (per-task override available): a task whose input
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
+`RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
+retention can explain that no record has the id (see `monitoring.md`).
 
 ## Result Types
 
