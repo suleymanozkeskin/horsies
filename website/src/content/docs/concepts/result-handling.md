@@ -86,6 +86,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed during enqueue/build |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in too many reaper passes |
 
 ### ContractCode
 

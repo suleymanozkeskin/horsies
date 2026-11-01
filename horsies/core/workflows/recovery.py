@@ -27,6 +27,21 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession as _RuntimeAsyncSession
 
 from horsies.core.logging import get_logger
+from horsies.core.models.recovery import DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT
+from horsies.core.workflows.recovery_limit import (
+    MAX_RAISE_TEXT_LENGTH,
+    CountFailures,
+    LogFailuresOnly,
+    RaiseRecord,
+    RecoveryCandidateOutcome,
+    RecoveryCase,
+    RecoveryFailurePolicy,
+    RecoveryRaise,
+    RecoveryRaiseClass,
+    classify_recovery_raise,
+    count_over_failure_limit,
+    record_recovery_raise,
+)
 
 if TYPE_CHECKING:
     from sqlalchemy import TextClause
@@ -39,14 +54,15 @@ logger = get_logger('workflow.recovery')
 async def _run_recovery_candidate(
     session: 'AsyncSession',
     *,
-    case: str,
+    case: RecoveryCase,
     workflow_id: str | None = None,
     task_index: int | None = None,
     child_id: str | None = None,
     task_id: str | None = None,
     action: Callable[[], Awaitable[bool]],
     metrics: 'RecoveryCaseMetrics | None' = None,
-) -> bool:
+    failure_policy: RecoveryFailurePolicy,
+) -> RecoveryCandidateOutcome:
     """Run one recovery candidate without letting it poison the full pass.
 
     The candidate's DB writes run in a SAVEPOINT so a failure rolls back its
@@ -55,6 +71,13 @@ async def _run_recovery_candidate(
     lockstep, since a SAVEPOINT rollback does not touch Python state. A
     SAVEPOINT requires a real ``AsyncSession``; mock-driven unit tests fall
     back to running the action directly under the same try/except guard.
+
+    The catch is the isolation seam of the pass, so a programmer defect stops
+    here too. Such a raise repeats on every pass, so ``failure_policy`` bounds
+    it: see ``recovery_limit``. A caller that gets COUNTED or LIMIT_REACHED
+    must commit to keep the write.
+
+    ``failure_policy`` is ``CountFailures`` only with a ``workflow_id``.
     """
     from horsies.core.workflows.engine import (
         restore_pending_parent_propagations,
@@ -68,8 +91,9 @@ async def _run_recovery_candidate(
             _RuntimeAsyncSession,
         ):
             async with session.begin_nested():
-                return await action()
-        return await action()
+                applied = await action()
+        else:
+            applied = await action()
     except Exception as exc:
         restore_pending_parent_propagations(session, pending_snapshot)
         if metrics is not None:
@@ -78,15 +102,104 @@ async def _run_recovery_candidate(
             'Workflow recovery candidate failed: case=%s workflow_id=%s '
             'task_index=%s child_id=%s task_id=%s exception_type=%s '
             'exception=%s',
-            case,
+            case.value,
             workflow_id,
             task_index,
             child_id,
             task_id,
             type(exc).__name__,
-            str(exc)[:500],
+            str(exc)[:MAX_RAISE_TEXT_LENGTH],
         )
-        return False
+        record = await _record_candidate_raise(
+            session,
+            exc,
+            case=case,
+            workflow_id=workflow_id,
+            task_index=task_index,
+            failure_policy=failure_policy,
+        )
+        _note_raise_record(metrics, record)
+        return record
+    if applied:
+        return RecoveryCandidateOutcome.APPLIED
+    if metrics is not None:
+        metrics.refusals += 1
+    return RecoveryCandidateOutcome.REFUSED
+
+
+async def _record_candidate_raise(
+    session: 'AsyncSession',
+    exc: Exception,
+    *,
+    case: RecoveryCase,
+    workflow_id: str | None,
+    task_index: int | None,
+    failure_policy: RecoveryFailurePolicy,
+) -> RaiseRecord:
+    """Decide whether a raise counts, and count it.
+
+    A transient raise and a ``LogFailuresOnly`` pass write nothing.
+    """
+    match failure_policy:
+        case LogFailuresOnly():
+            return RecoveryCandidateOutcome.NOT_COUNTED
+        case CountFailures() as counting:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    match classify_recovery_raise(exc):
+        case RecoveryRaiseClass.TRANSIENT:
+            return RecoveryCandidateOutcome.NOT_COUNTED
+        case RecoveryRaiseClass.PERSISTENT:
+            assert workflow_id is not None, (
+                f'recovery case {case.value} counts a raise with no workflow id'
+            )
+            return await record_recovery_raise(
+                session,
+                counting,
+                RecoveryRaise.of(
+                    exc,
+                    workflow_id=str(workflow_id),
+                    task_index=task_index,
+                    case=case,
+                ),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _note_raise_record(
+    metrics: 'RecoveryCaseMetrics | None',
+    record: RaiseRecord,
+) -> None:
+    if metrics is None:
+        return
+    match record:
+        case RecoveryCandidateOutcome.NOT_COUNTED:
+            pass
+        case RecoveryCandidateOutcome.COUNTED:
+            metrics.failures_counted += 1
+        case RecoveryCandidateOutcome.LIMIT_REACHED:
+            metrics.failures_counted += 1
+            metrics.limit_reached += 1
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _recovered_count(outcome: RecoveryCandidateOutcome) -> int:
+    """The recovered count that one candidate adds."""
+    match outcome:
+        case RecoveryCandidateOutcome.APPLIED:
+            return 1
+        case (
+            RecoveryCandidateOutcome.REFUSED
+            | RecoveryCandidateOutcome.NOT_COUNTED
+            | RecoveryCandidateOutcome.COUNTED
+            | RecoveryCandidateOutcome.LIMIT_REACHED
+        ):
+            return 0
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 GLOBAL_SCAN_ROW_CAP = 200
@@ -428,6 +541,8 @@ class RecoveryCaseMetrics:
     duration_ms: int = 0
     refusals: int = 0
     errors: int = 0
+    failures_counted: int = 0
+    limit_reached: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -477,11 +592,13 @@ class RecoveryReport:
         for name in ('case_0', 'case_1', 'case_1_5', 'case_1_6', 'case_2_3', 'case_4')
     })
     audit: AuditResult = field(default_factory=NoAuditPage)
+    over_failure_limit: int = 0
 
     def health(self) -> dict[str, object]:
         return {
             'recovered': self.recovered,
             'errors': self.errors,
+            'over_failure_limit': self.over_failure_limit,
             'completion_candidate_yield': completion_candidate_yield(self.audit),
             'cases': {
                 name: asdict(metrics)
@@ -535,6 +652,7 @@ async def recover_stuck_workflows(
     *,
     _include_workflow_end_states: bool = True,
     _metrics: dict[str, RecoveryCaseMetrics] | None = None,
+    _failure_policy: RecoveryFailurePolicy = LogFailuresOnly(),
 ) -> int:
     """
     Find and recover workflows in inconsistent states.
@@ -602,15 +720,17 @@ async def recover_stuck_workflows(
             )
             return True
 
-        if await _run_recovery_candidate(
-            session,
-            case='pending_terminal_deps',
-            workflow_id=workflow_id,
-            task_index=task_index,
-            action=_recover_pending_ready,
-            metrics=_metrics['case_0'] if _metrics is not None else None,
-        ):
-            recovered += 1
+        recovered += _recovered_count(
+            await _run_recovery_candidate(
+                session,
+                case=RecoveryCase.PENDING_TERMINAL_DEPS,
+                workflow_id=workflow_id,
+                task_index=task_index,
+                action=_recover_pending_ready,
+                metrics=_metrics['case_0'] if _metrics is not None else None,
+                failure_policy=_failure_policy,
+            ),
+        )
     if _metrics is not None:
         _metrics['case_0'].duration_ms = int(
             (time.monotonic() - started) * 1000
@@ -670,21 +790,17 @@ async def recover_stuck_workflows(
                 return True
             return False
 
-        case_1_metrics = _metrics['case_1'] if _metrics is not None else None
-        errors_before = (
-            case_1_metrics.errors if case_1_metrics is not None else 0
+        recovered += _recovered_count(
+            await _run_recovery_candidate(
+                session,
+                case=RecoveryCase.READY_NOT_ENQUEUED,
+                workflow_id=workflow_id,
+                task_index=task_index,
+                action=_recover_ready_not_enqueued,
+                metrics=_metrics['case_1'] if _metrics is not None else None,
+                failure_policy=_failure_policy,
+            ),
         )
-        if await _run_recovery_candidate(
-            session,
-            case='ready_not_enqueued',
-            workflow_id=workflow_id,
-            task_index=task_index,
-            action=_recover_ready_not_enqueued,
-            metrics=case_1_metrics,
-        ):
-            recovered += 1
-        elif case_1_metrics is not None and case_1_metrics.errors == errors_before:
-            case_1_metrics.refusals += 1
     if _metrics is not None:
         _metrics['case_1'].duration_ms = int(
             (time.monotonic() - started) * 1000
@@ -750,15 +866,17 @@ async def recover_stuck_workflows(
             )
             return True
 
-        if await _run_recovery_candidate(
-            session,
-            case='ready_subworkflow_not_started',
-            workflow_id=workflow_id,
-            task_index=task_index,
-            action=_recover_ready_subworkflow,
-            metrics=_metrics['case_1_5'] if _metrics is not None else None,
-        ):
-            recovered += 1
+        recovered += _recovered_count(
+            await _run_recovery_candidate(
+                session,
+                case=RecoveryCase.READY_SUBWORKFLOW_NOT_STARTED,
+                workflow_id=workflow_id,
+                task_index=task_index,
+                action=_recover_ready_subworkflow,
+                metrics=_metrics['case_1_5'] if _metrics is not None else None,
+                failure_policy=_failure_policy,
+            ),
+        )
     if _metrics is not None:
         _metrics['case_1_5'].duration_ms = int(
             (time.monotonic() - started) * 1000
@@ -798,16 +916,18 @@ async def recover_stuck_workflows(
             )
             return True
 
-        if await _run_recovery_candidate(
-            session,
-            case='completed_child_parent_not_updated',
-            workflow_id=parent_wf_id,
-            task_index=parent_task_idx,
-            child_id=child_id,
-            action=_recover_completed_child,
-            metrics=_metrics['case_1_6'] if _metrics is not None else None,
-        ):
-            recovered += 1
+        recovered += _recovered_count(
+            await _run_recovery_candidate(
+                session,
+                case=RecoveryCase.COMPLETED_CHILD_PARENT_NOT_UPDATED,
+                workflow_id=parent_wf_id,
+                task_index=parent_task_idx,
+                child_id=child_id,
+                action=_recover_completed_child,
+                metrics=_metrics['case_1_6'] if _metrics is not None else None,
+                failure_policy=_failure_policy,
+            ),
+        )
     if _metrics is not None:
         _metrics['case_1_6'].duration_ms = int(
             (time.monotonic() - started) * 1000
@@ -842,13 +962,15 @@ async def recover_stuck_workflows(
                 )
                 return True
 
-            if await _run_recovery_candidate(
-                session,
-                case='terminal_workflow_running',
-                workflow_id=workflow_id,
-                action=_recover_terminal_workflow,
-            ):
-                recovered += 1
+            recovered += _recovered_count(
+                await _run_recovery_candidate(
+                    session,
+                    case=RecoveryCase.TERMINAL_WORKFLOW_RUNNING,
+                    workflow_id=workflow_id,
+                    action=_recover_terminal_workflow,
+                    failure_policy=_failure_policy,
+                ),
+            )
 
         orphan_candidates = await session.execute(
             GLOBAL_GET_ORPHANED_WORKFLOW_CANDIDATES_SQL
@@ -878,28 +1000,44 @@ async def recover_stuck_workflows(
     # child cannot abort the rest of the recovery pass.
     from horsies.core.workflows.engine import (
         drain_parent_propagations_in_session,
-        on_subworkflow_complete,
     )
-
-    async def _drain_queued_propagation(child_id: str) -> None:
-        async def _propagate() -> bool:
-            await on_subworkflow_complete(session, child_id, broker)
-            return True
-
-        await _run_recovery_candidate(
-            session,
-            case='queued_parent_propagation',
-            child_id=child_id,
-            action=_propagate,
-        )
 
     await drain_parent_propagations_in_session(
         session,
         broker,
-        run_item=_drain_queued_propagation,
+        run_item=_propagation_candidate(session, broker),
     )
 
     return recovered
+
+
+def _propagation_candidate(
+    session: 'AsyncSession',
+    broker: 'PostgresBroker | None',
+) -> Callable[[str], Awaitable[None]]:
+    """Run each queued parent advancement as its own candidate.
+
+    A raise rolls back only that advancement. The child stays terminal and
+    its parent node stays RUNNING, so recovery case 1.6 selects the same pair
+    next pass and counts it on the parent workflow. So this candidate, which
+    names no workflow, does not count.
+    """
+    from horsies.core.workflows.engine import on_subworkflow_complete
+
+    async def _run(child_id: str) -> None:
+        async def _propagate() -> bool:
+            await on_subworkflow_complete(session, child_id, broker)
+            return True
+
+        _ = await _run_recovery_candidate(
+            session,
+            case=RecoveryCase.QUEUED_PARENT_PROPAGATION,
+            child_id=child_id,
+            action=_propagate,
+            failure_policy=LogFailuresOnly(),
+        )
+
+    return _run
 
 
 async def recover_stuck_workflow_tree(
@@ -960,7 +1098,17 @@ async def _recover_global_completion_candidate(
     broker: 'PostgresBroker | None',
     workflow_id: str,
     claim_token: str,
+    *,
+    failure_policy: RecoveryFailurePolicy,
+    metrics: RecoveryCaseMetrics,
 ) -> _GlobalCandidateOutcome:
+    """Finish one workflow, then advance its parent as a second candidate.
+
+    The order is binding. A raise in the completion rolls back only the
+    completion, and its count commits. A raise in the parent advancement must
+    not reach the completion: if it did, the child would return here on every
+    pass with no count, and the limit would never see the loop.
+    """
     try:
         async with session_factory() as session:
             if not await _lock_global_claim(session, claim_token):
@@ -975,32 +1123,48 @@ async def _recover_global_completion_candidate(
                 await check_workflow_completion(session, workflow_id, broker)
                 return True
 
-            applied = await _run_recovery_candidate(
+            match await _run_recovery_candidate(
                 session,
-                case='terminal_workflow_running',
+                case=RecoveryCase.TERMINAL_WORKFLOW_RUNNING,
                 workflow_id=workflow_id,
                 action=_complete,
-            )
-            if not applied:
-                await session.rollback()
-                return _GlobalCandidateOutcome.ERROR
+                metrics=metrics,
+                failure_policy=failure_policy,
+            ):
+                case RecoveryCandidateOutcome.APPLIED:
+                    pass
+                case (
+                    RecoveryCandidateOutcome.REFUSED
+                    | RecoveryCandidateOutcome.NOT_COUNTED
+                ):
+                    # Nothing to keep. After a connection loss a commit
+                    # raises here, and a rollback does not.
+                    await session.rollback()
+                    return _GlobalCandidateOutcome.ERROR
+                case (
+                    RecoveryCandidateOutcome.COUNTED
+                    | RecoveryCandidateOutcome.LIMIT_REACHED
+                ):
+                    # The SAVEPOINT undid the candidate. This commit keeps
+                    # the count, and the limit write if there is one.
+                    await session.commit()
+                    return _GlobalCandidateOutcome.ERROR
+                case _ as unreachable:
+                    assert_never(unreachable)
 
             from horsies.core.workflows.engine import (
                 drain_parent_propagations_in_session,
-                on_subworkflow_complete,
             )
-
-            async def _propagate(child_id: str) -> None:
-                await on_subworkflow_complete(session, child_id, broker)
 
             await drain_parent_propagations_in_session(
                 session,
                 broker,
-                run_item=_propagate,
+                run_item=_propagation_candidate(session, broker),
             )
             await session.commit()
             return _GlobalCandidateOutcome.APPLIED
     except Exception as error:
+        metrics.errors += 1
         logger.error(
             'Global workflow completion recovery failed: '
             f'workflow_id={workflow_id} error={error}'
@@ -1047,6 +1211,7 @@ async def _recover_stuck_workflows_global(
     session_factory: 'async_sessionmaker[AsyncSession]',
     broker: 'PostgresBroker | None',
     report: RecoveryReport,
+    failure_policy: RecoveryFailurePolicy,
 ) -> RecoveryReport:
     async with session_factory() as session:
         report.recovered += await recover_stuck_workflows(
@@ -1054,6 +1219,7 @@ async def _recover_stuck_workflows_global(
             broker,
             _include_workflow_end_states=False,
             _metrics=report.metrics,
+            _failure_policy=failure_policy,
         )
         await session.commit()
 
@@ -1132,6 +1298,8 @@ async def _recover_stuck_workflows_global(
                 broker,
                 workflow_id,
                 claim_token,
+                failure_policy=failure_policy,
+                metrics=case_2_3,
             )
             match outcome:
                 case _GlobalCandidateOutcome.APPLIED:
@@ -1143,7 +1311,6 @@ async def _recover_stuck_workflows_global(
                     owns_claim = False
                     break
                 case _GlobalCandidateOutcome.ERROR:
-                    case_2_3.errors += 1
                     report.errors += 1
                 case _ as unreachable:
                     assert_never(unreachable)
@@ -1210,15 +1377,33 @@ async def _recover_stuck_workflows_global(
 async def recover_stuck_workflows_global(
     session_factory: 'async_sessionmaker[AsyncSession]',
     broker: 'PostgresBroker | None' = None,
+    *,
+    failure_limit: int = DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
 ) -> RecoveryReport:
-    """Run one bounded global pass and preserve partial failure metrics."""
+    """Run one bounded global pass and preserve partial failure metrics.
+
+    ``failure_limit`` is how many passes with a persistent raise a workflow
+    may see before it fails closed. This function makes the one pass id of
+    the pass: every case gets the same value, so a workflow counts once per
+    pass.
+    """
     report = RecoveryReport()
+    failure_policy = CountFailures(
+        pass_id=str(uuid.uuid4()),
+        limit=failure_limit,
+    )
     try:
-        return await _recover_stuck_workflows_global(
+        await _recover_stuck_workflows_global(
             session_factory,
             broker,
             report,
+            failure_policy,
         )
+        report.over_failure_limit = await count_over_failure_limit(
+            session_factory,
+            failure_limit,
+        )
+        return report
     except Exception as error:
         report.errors += 1
         raise RecoveryPassFailure(report, error) from error
