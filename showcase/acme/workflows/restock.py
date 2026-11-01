@@ -82,8 +82,9 @@ class Restock(WorkflowDefinition[RestockPlan]):
             # change what counts as failure. Without a policy, one timed-out
             # feed fails the workflow even though the aggregate completed on
             # the other two — which is the opposite of what "two of three is
-            # enough" means. Success is the aggregate landing; the feeds are
-            # optional and excluded from failure accounting.
+            # enough" means. Success is the aggregate landing: no case requires
+            # the feeds, so a failed feed does not change the result. `optional`
+            # records that intent; it has no runtime effect.
             success_policy=SuccessPolicy(
                 cases=[SuccessCase(required=[aggregate])],
                 optional=list(feeds),

@@ -593,7 +593,7 @@ policy = SuccessPolicy(
         SuccessCase(required=[task_a]),  # Succeed if A completes
         SuccessCase(required=[task_b]),  # OR if B completes
     ],
-    optional=[cleanup_task],  # May fail without failing workflow
+    optional=[cleanup_task],  # Declarative: no runtime effect
 )
 
 workflow = app.workflow(
@@ -608,7 +608,7 @@ workflow = app.workflow(
 1. **Case evaluation**: A `SuccessCase` is **satisfied** if ALL its `required` tasks are COMPLETED.
 2. **Workflow success**: Workflow is **COMPLETED** if **any** SuccessCase is satisfied.
 3. **SKIPPED counts as not satisfied**: A SKIPPED task does not satisfy a required condition.
-4. **Optional tasks**: Tasks in `optional` can fail without affecting success evaluation.
+4. **`optional` is declarative**: It records which nodes may fail, and it has no runtime effect. A node that no case requires does not change the result, with or without `optional`. Spec validation checks that each node in `optional` is in the workflow.
 5. **Default behavior**: If `success_policy` is None, any task failure → FAILED (unchanged).
 
 ### Example: Shipping Workflow
@@ -631,7 +631,7 @@ policy = SuccessPolicy(
         SuccessCase(required=[deliver_neighbor]),
         SuccessCase(required=[deliver_locker]),
     ],
-    optional=[notify],  # Notification can fail
+    optional=[notify],  # Declarative: no case requires notify
 )
 
 spec = app.workflow(

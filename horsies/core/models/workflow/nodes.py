@@ -396,7 +396,7 @@ class SuccessPolicy:
         # "Succeed if primary path completes, even if fallback fails"
         success_policy = SuccessPolicy(
             cases=[SuccessCase(required=[primary_task])],
-            optional=[fallback_task],  # can fail without affecting success
+            optional=[fallback_task],  # declarative: no runtime effect
         )
     """
 
@@ -408,8 +408,9 @@ class SuccessPolicy:
 
     optional: Sequence[TaskNode[Any]] | None = None
     """
-    - Tasks that may fail without affecting success evaluation
-    - These failures don't block success cases from being satisfied
+    - Declarative: records which nodes may fail. It has no runtime effect.
+    - A node that no case requires does not change the result, with or without
+      this field. Spec validation checks that each node is in the workflow.
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)

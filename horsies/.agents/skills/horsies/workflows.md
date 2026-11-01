@@ -463,12 +463,12 @@ policy = SuccessPolicy(
         SuccessCase(required=[deliver_neighbor]),
         SuccessCase(required=[deliver_locker]),
     ],
-    optional=[send_notification],  # can fail without affecting success
+    optional=[send_notification],  # declarative: no runtime effect
 )
 ```
 
 - Workflow `COMPLETED` if **any** `SuccessCase` has all `required` tasks `COMPLETED`.
-- `optional` tasks excluded from failure accounting.
+- `optional` is declarative: it records which nodes may fail, and it has no runtime effect. A node that no case requires does not change the result, with or without `optional`.
 - Without policy: any task failure → `FAILED`.
 - No case satisfied: `WORKFLOW_SUCCESS_CASE_NOT_MET` error.
 - A case does not have to require the output node. The workflow is then `COMPLETED`, and its output node can end `SKIPPED` or `FAILED`.

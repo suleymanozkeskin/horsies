@@ -758,6 +758,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The docs say what `SuccessPolicy.optional` does.** The field records which
+  nodes may fail, and it has no runtime effect: the engine stores it and reads
+  only the required nodes of each case. A node that no case requires does not
+  change the result, with or without `optional`. Before, the docs said that
+  `optional` excludes a node from failure accounting.
 - **Phase-2 recovery progresses a failed node whose stored error does not
   decode as a `TaskError`.** The recovery records the error that the
   terminal status names, as it does for a stored result envelope that does
