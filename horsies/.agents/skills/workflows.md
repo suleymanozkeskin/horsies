@@ -343,8 +343,9 @@ appearing during a pause are expected, not a fault.
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
-- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`.
+- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when no error is stored.
 - `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
+- The workflow row is removed after `get()` read its terminal status (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 

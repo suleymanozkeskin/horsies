@@ -428,6 +428,14 @@ there is no migration contract between pre-1.0 versions.
   and refuses any attribute named `Meta`, also one from a base class. The
   `HRS-025` messages name `config.output`. The run-time `WorkflowMeta`
   that a task receives as `workflow_meta` does not change.
+- **`WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND` when
+  the workflow row is removed after its terminal status was read.**
+  Retention can delete a terminal workflow between the status read and the
+  error read. Before, `get()` returned `OutcomeCode.WORKFLOW_FAILED` for
+  that case, also for a cancelled or expired workflow. A terminal workflow
+  without a stored error gets the `OutcomeCode` of the status that `get()`
+  read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
+  `get()` no longer makes a free-text `WORKFLOW_<status>` code.
 
 ### Removed
 
