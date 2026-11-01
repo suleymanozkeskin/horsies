@@ -13,7 +13,6 @@ them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 from horsies.core.codec.json_io import loads_json_bytes
@@ -58,63 +57,3 @@ def decode_result_envelope(
         )
     return DecodedArchiveValue(loaded.ok_value)
 
-
-# ---------------------------------------------------------------------------
-# Result-domain column classification
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class CanonicalResultPayload:
-    """The row's result is the task's own terminal result."""
-
-    payload: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class AdministrativePriorResult:
-    """Administrative cancellation: canonical result is null, prior retained.
-
-    Exposed only through task detail, never lists or facets — the caller
-    owning that projection rule receives the distinction as a type.
-    """
-
-    payload: bytes
-
-
-@dataclass(frozen=True, slots=True)
-class NoResultPayload:
-    """The row carries no result-domain value."""
-
-
-type ResultPayloadSelection = (
-    CanonicalResultPayload
-    | AdministrativePriorResult
-    | NoResultPayload
-    | CorruptArchiveValue
-)
-
-
-def select_result_payload(
-    *,
-    canonical: bytes | None,
-    prior: bytes | None,
-) -> ResultPayloadSelection:
-    """Classify which result-domain value a row carries.
-
-    Both columns populated violates the mutual-exclusion CHECK and decodes
-    as corruption: shared envelope metadata cannot describe two payloads,
-    so no reader may pick one and continue.
-    """
-    match canonical, prior:
-        case None, None:
-            return NoResultPayload()
-        case bytes() as value, None:
-            return CanonicalResultPayload(payload=value)
-        case None, bytes() as value:
-            return AdministrativePriorResult(payload=value)
-        case _:
-            return CorruptArchiveValue(
-                domain=ArchiveDomain.RESULT,
-                detail='canonical_and_prior_both_present',
-            )
