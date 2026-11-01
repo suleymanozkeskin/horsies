@@ -14,6 +14,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: `RerunSourceAbsent.predates_retained_floor` is now
+  `RerunSourceAbsent.reason`, a `TaskAbsenceReason`.** `True` is
+  `PREDATES_RETAINED_HISTORY`, `False` is `WITHIN_RETAINED_HISTORY` and `None`
+  is `NOT_CLASSIFIED`. `TaskAbsenceReason` is the enum that
+  `TaskDetailNotFound.reason` uses; import it from `horsies.monitoring`.
+  Code that reads `predates_retained_floor` must match on `reason`.
 - **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
   whitespace at the start or the end, or is longer than 100 characters (the
   length of the database `queue_name` column).** The config raises

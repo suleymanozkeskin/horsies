@@ -83,6 +83,7 @@ from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
     TaskDetailAbsent,
+    absence_reason,
     read_task_detail,
     staged_detail_published,
 )
@@ -1572,7 +1573,7 @@ async def _history_detail(
         case HistoryTaskDetail():
             return detail
         case TaskDetailAbsent(predates_retained_floor=predates):
-            return _absence_reason(predates)
+            return absence_reason(predates)
         case LiveTaskLocation():
             raise HistoryContractError(
                 f'staged detail reports task {task_id} live in the snapshot '
@@ -1580,17 +1581,6 @@ async def _history_detail(
             )
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def _absence_reason(predates_retained_floor: bool | None) -> TaskAbsenceReason:
-    """Name the absence classification of the staged detail read."""
-    match predates_retained_floor:
-        case True:
-            return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
-        case False:
-            return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
-        case None:
-            return TaskAbsenceReason.NOT_CLASSIFIED
 
 
 # --------------------------------------------------------------------------- #

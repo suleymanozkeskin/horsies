@@ -53,7 +53,9 @@ from horsies.core.utils.fingerprint import enqueue_fingerprint
 from ..reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
+    TaskAbsenceReason,
     TaskDetailAbsent,
+    absence_reason,
     read_task_detail,
 )
 from .input_envelope import (
@@ -117,11 +119,13 @@ class RerunSourceLive:
 
 @dataclass(frozen=True, slots=True)
 class RerunSourceAbsent:
-    """No retained record. True means the identifier predates all
-    retained history; None means unclassifiable."""
+    """No live or history record has the source id.
+
+    ``reason`` says whether retention can explain the absence. Nothing is
+    written."""
 
     task_id: str
-    predates_retained_floor: bool | None
+    reason: TaskAbsenceReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,7 +238,7 @@ async def rerun_task(
         case TaskDetailAbsent(predates_retained_floor=predates):
             return RerunSourceAbsent(
                 task_id=command.source_task_id,
-                predates_retained_floor=predates,
+                reason=absence_reason(predates),
             )
         case HistoryTaskDetail():
             pass
