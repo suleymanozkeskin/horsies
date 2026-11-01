@@ -17,6 +17,8 @@ from horsies.core.types.result import is_ok
 from tests.e2e.helpers.db import cleanup_tables
 from tests.e2e.helpers.worker import kill_stale_workers
 from tests.e2e.tasks import instance as default_instance
+from tests.e2e.tasks import instance_child_isolation
+from tests.e2e.tasks import instance_child_isolation_prefetch
 from tests.e2e.tasks import instance_custom
 from tests.e2e.tasks import instance_cluster_cap
 from tests.e2e.tasks import instance_recovery
@@ -115,6 +117,26 @@ async def recovery_broker() -> AsyncGenerator[PostgresBroker, None]:
 async def softcap_broker() -> AsyncGenerator[PostgresBroker, None]:
     """Broker instance with soft cap (prefetch_buffer > 0) for lease contention tests."""
     brk = instance_softcap.broker
+    await _initialize_session_broker(brk)
+    yield brk
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def isolation_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker for child isolation e2e tests."""
+    brk = instance_child_isolation.broker
+    await _initialize_session_broker(brk)
+    yield brk
+    closed = await brk.close_async()
+    assert is_ok(closed), closed
+
+
+@pytest_asyncio.fixture(scope='session', loop_scope='session')
+async def isolation_prefetch_broker() -> AsyncGenerator[PostgresBroker, None]:
+    """Broker for child isolation e2e tests with a prefetch buffer."""
+    brk = instance_child_isolation_prefetch.broker
     await _initialize_session_broker(brk)
     yield brk
     closed = await brk.close_async()

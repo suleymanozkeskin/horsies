@@ -176,18 +176,17 @@ class TestRunChildStartHooks:
     def test_mid_run_hook_failure_stops_worker_instead_of_restart_looping(
         self,
     ) -> None:
-        """ChildHookFailedError from a warmed-executor rebuild sets the stop flag.
+        """A hook that fails only in a replacement child stops the worker.
 
-        Pins the mid-run off-ramp: the boot path is covered e2e, but a hook
-        that fails only on a respawn reaches _restart_executor, which must
-        stop the worker rather than retry a failure that re-runs in every
-        replacement child.
+        Pins the mid-run off-ramp: the failure re-runs in every replacement
+        child, so the worker stops instead of starting more children.
         """
         import asyncio
         from unittest.mock import AsyncMock, MagicMock
 
         from horsies.core.worker.config import WorkerConfig
-        from horsies.core.worker.worker import ChildHookFailedError, Worker
+        from horsies.core.worker.slots import ChildHookFailed
+        from horsies.core.worker.worker import Worker
 
         cfg = WorkerConfig(
             dsn='postgresql+psycopg://u:p@localhost/db',
@@ -197,21 +196,13 @@ class TestRunChildStartHooks:
         worker = Worker(
             session_factory=MagicMock(), listener=MagicMock(), cfg=cfg,
         )
-        broken_executor = MagicMock()
-        worker._executor = broken_executor
-        worker._create_warmed_executor = AsyncMock(  # type: ignore[method-assign]
-            side_effect=ChildHookFailedError('hook failed in replacement child'),
-        )
+        pool = MagicMock()
+        pool.wait_failed = AsyncMock(return_value=ChildHookFailed())
 
-        async def _run() -> None:
-            await worker._restart_executor(
-                'broken pool during test', failed_executor=broken_executor,
-            )
-
-        asyncio.run(_run())
+        asyncio.run(worker._slot_failure_loop(pool))
 
         assert worker._stop.is_set()
-        worker._create_warmed_executor.assert_awaited_once()
+        pool.wait_failed.assert_awaited_once()
 
     def test_fast_hook_does_not_trip_watchdog(
         self, monkeypatch: pytest.MonkeyPatch

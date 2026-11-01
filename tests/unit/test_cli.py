@@ -2276,12 +2276,16 @@ class TestCliNumericValidation:
 
         assert _non_negative_int('0') == 0
 
-    def test_max_tasks_per_child_one_and_negative_rejected(self) -> None:
+    def test_max_tasks_per_child_negative_rejected(self) -> None:
         from horsies.core.cli import _max_tasks_per_child
 
-        for bad in ('1', '-3'):
-            with pytest.raises(Exception, match='must be >= 2'):
-                _max_tasks_per_child(bad)
+        with pytest.raises(Exception, match='must be >= 1'):
+            _max_tasks_per_child('-3')
+
+    def test_max_tasks_per_child_one_accepted(self) -> None:
+        from horsies.core.cli import _max_tasks_per_child
+
+        assert _max_tasks_per_child('1') == 1
 
     def test_max_tasks_per_child_zero_disables(self) -> None:
         from horsies.core.cli import _max_tasks_per_child

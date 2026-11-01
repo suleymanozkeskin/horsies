@@ -7,13 +7,10 @@ class can share them without importing each other.
 
 from __future__ import annotations
 
-import gc
 import os
 import random
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from multiprocessing.synchronize import Barrier
 from typing import Any, Optional
 
 from horsies.core.codec.json_io import loads_json
@@ -36,15 +33,9 @@ __all__ = [
     '_FINALIZE_PARENT_MAX_RETRIES',
     '_FINALIZE_RETRY_BASE_DELAY_S',
     '_FINALIZE_RETRY_MAX_DELAY_S',
-    '_EXECUTOR_WARMUP_ATTEMPTS',
-    '_EXECUTOR_WARMUP_RETRY_DELAY_S',
-    'CHILD_WARMUP_BARRIER_TIMEOUT_S',
-    'WarmablePool',
-    '_set_child_warmup_barrier',
     '_REAPER_MAX_PERMANENT_FAILURES',
     'ChildHookFailedError',
-    'ExecutorRestartFailedError',
-    'WarmupIncompleteError',
+    'ChildStartFailedError',
     '_RetryBackoff',
     '_FinalizeError',
     '_RetryError',
@@ -53,8 +44,6 @@ __all__ = [
     '_collect_psutil_metrics',
     '_read_current_rss_mb',
     '_parse_timeout_ms',
-    '_warm_child_process',
-    '_warm_child_process_probe',
     'MemoryBaselineExceedsThresholdError',
 ]
 
@@ -68,12 +57,6 @@ _FINALIZE_PHASE2_MAX_RETRIES = 5
 _FINALIZE_PARENT_MAX_RETRIES = 5
 _FINALIZE_RETRY_BASE_DELAY_S = 0.5
 _FINALIZE_RETRY_MAX_DELAY_S = 15.0
-# Executor create+warm attempts per restart request, and the base delay
-# between them (scaled by attempt number). Bounds the tolerance for
-# kill-shaped warmup interruptions; a genuinely broken host exhausts the
-# budget and the worker still fails closed.
-_EXECUTOR_WARMUP_ATTEMPTS = 3
-_EXECUTOR_WARMUP_RETRY_DELAY_S = 0.5
 
 
 @dataclass
@@ -266,42 +249,16 @@ class ChildHookFailedError(RuntimeError):
     """A child exited because an on_child_process_start hook failed.
 
     Deliberately not a retryable error: the hook re-runs on every child
-    start, so restarting the executor would loop on the same failure.
+    start, so starting another child would loop on the same failure.
     """
 
 
-class ExecutorRestartFailedError(RuntimeError):
-    """Replacing the process pool failed at the OS level.
+class ChildStartFailedError(RuntimeError):
+    """No child could start. Process-fatal.
 
-    Process-fatal by design: the failure modes (fd/pid/memory/semaphore
-    exhaustion) are host conditions a waiting worker cannot fix, and a
-    worker without an executor only looks healthy (heartbeat loops keep
-    running) while doing no work. Propagates to the main loop and crashes
-    the worker so the supervisor restarts it with a clean slate.
-
-    Kill-shaped warmup interruptions (``WarmupIncompleteError``,
-    ``BrokenProcessPool``) are retried with a bounded budget before this is
-    raised; only the exhausted budget or a non-transient failure reaches
-    here.
-    """
-
-
-class WarmupIncompleteError(RuntimeError):
-    """Executor warmup finished with fewer live children than configured.
-
-    Transient by classification: every child must reach the warmup barrier
-    within ``CHILD_WARMUP_BARRIER_TIMEOUT_S`` of the first one, and a
-    shortfall means a child died, never came up, or finished its
-    initializer later than that bound — on the restart path this is usually
-    the worker's own timeout enforcement killing a child mid-warmup (a
-    self-inflicted, kill-shaped interruption), not a host failure. Callers
-    retry the create+warm cycle with a bounded budget; a persistent
-    shortfall escalates to ``ExecutorRestartFailedError``.
-
-    A dedicated type (not a bare ``RuntimeError``) so restart classification
-    can match on types alone — ``ChildHookFailedError`` and
-    ``MemoryBaselineExceedsThresholdError`` are also ``RuntimeError``
-    subclasses and must never enter the retry arm.
+    A worker with no way to run tasks must not keep claiming them, so this
+    ends the worker and the supervisor restarts it. Tasks already running
+    drain first.
     """
 
 
@@ -320,7 +277,7 @@ class ServiceLoopDiedError(RuntimeError):
 
 
 class MemoryBaselineExceedsThresholdError(RuntimeError):
-    """Warmed child baseline RSS is at or above max_memory_per_child_mb.
+    """Booted child baseline RSS is at or above max_memory_per_child_mb.
 
     A threshold below the settled child baseline would recycle after every
     task (the child is over the limit before running any work), so this is a
@@ -328,79 +285,3 @@ class MemoryBaselineExceedsThresholdError(RuntimeError):
     per-child budget. Raised by the startup baseline guard to fail the worker
     loudly with both measured numbers rather than thrash silently.
     """
-
-
-CHILD_WARMUP_BARRIER_TIMEOUT_S: float = 20.0
-"""How long a warmed child waits at the warmup barrier for the others.
-
-Below the 30 s bound of one start attempt, so a slow child surfaces as a
-``WarmupIncompleteError`` that names the barrier, not as a start timeout.
-"""
-
-
-@dataclass(frozen=True, slots=True)
-class WarmablePool:
-    """A child process pool and the barrier its warmup calls meet at.
-
-    The barrier has one party per configured child and comes from the
-    pool's own multiprocessing context; the children receive it through the
-    initializer arguments, since a multiprocessing barrier cannot travel
-    through the call queue.
-    """
-
-    executor: ProcessPoolExecutor
-    warmup_barrier: Barrier
-
-
-_child_warmup_barrier: Barrier | None = None
-
-
-def _set_child_warmup_barrier(barrier: Barrier | None) -> None:
-    """Keep the pool's warmup barrier in this child process (initializer)."""
-    global _child_warmup_barrier
-    _child_warmup_barrier = barrier
-
-
-def _wait_at_warmup_barrier(timeout_seconds: float) -> None:
-    """Hold this child until every child of the pool is ready.
-
-    A child waiting here cannot take another call, so one call per child
-    reaches every child exactly once.
-
-    Raises:
-        threading.BrokenBarrierError: not every child arrived within
-            ``timeout_seconds``, or the parent aborted the warmup.
-    """
-    barrier = _child_warmup_barrier
-    assert barrier is not None, (
-        'warmup call ran in a child without a warmup barrier; '
-        '_child_initializer did not receive one'
-    )
-    barrier.wait(timeout=timeout_seconds)
-
-
-def _warm_child_process(timeout_seconds: float) -> int:
-    """Child warmup call: meet every other child, then return this pid.
-
-    Forces process startup before the parent opens database sockets.
-    """
-    _wait_at_warmup_barrier(timeout_seconds)
-    return os.getpid()
-
-
-def _warm_child_process_probe(
-    timeout_seconds: float,
-) -> tuple[int, Optional[float]]:
-    """Warmup call that also returns the child's settled baseline RSS.
-
-    Used in place of ``_warm_child_process`` when ``max_memory_per_child_mb``
-    is set: after the warmup barrier it runs ``gc.collect()`` to drop
-    import-time cyclic garbage, then samples current RSS so the parent's
-    baseline guard compares a settled figure (not a transient import peak)
-    against the threshold. The memory-recycle predicate skips this call by
-    identity, exactly like ``_warm_child_process``, so it never triggers a
-    recycle of its own.
-    """
-    _wait_at_warmup_barrier(timeout_seconds)
-    gc.collect()
-    return os.getpid(), _read_current_rss_mb()

@@ -1,10 +1,9 @@
-"""Dispatch: hand claimed tasks to the process pool; contain failures.
+"""Dispatch: hand claimed tasks to child slots; contain failures.
 
-DispatchMixin submits claimed rows to the executor, arms the per-task
-timeout, and contains child failures: requeue on dispatch failure,
-BrokenProcessPool recovery, the ownership-guarded timeout handler, and
-the live-children-only SIGKILL. Worker-internal mixin: the
-``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
+DispatchMixin submits claimed rows to the slot pool and contains child
+failures: requeue of a task that never reached a child, recovery of a task
+whose child was lost, and the ownership-guarded timeout handler. Worker-internal
+mixin: the ``TYPE_CHECKING`` block declares the slice of ``Worker`` it relies on.
 """
 
 # pyright: reportPrivateUsage=false
@@ -12,11 +11,8 @@ the live-children-only SIGKILL. Worker-internal mixin: the
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
-from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Optional, assert_never, cast
+from typing import TYPE_CHECKING, Any, Optional, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.lifecycle.commands import FailLockedTask
@@ -40,9 +36,9 @@ from horsies.core.models.tasks import (
     TaskResult,
 )
 from horsies.core.types.result import Result, is_err
-from horsies.core.utils.url import to_psycopg_url
-from horsies.core.worker.child_runner import _run_task_entry
+from horsies.core.worker.child_protocol import RunFrame
 from horsies.core.worker.runtime import _FinalizeError, _RequeueOutcome, _RetryError
+from horsies.core.worker.slots import KillSent, NothingToKill, SlotHandle, SlotPool
 from horsies.core.worker.sql import (
     SELECT_WORKER_OWNED_IN_FLIGHT_FOR_UPDATE_SQL,
     UNCLAIM_CLAIMED_TASK_SQL,
@@ -51,7 +47,6 @@ from horsies.core.worker.sql import (
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
-    from concurrent.futures import ProcessPoolExecutor
     from typing import Literal
 
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -63,25 +58,24 @@ logger = get_logger('worker')
 
 
 class DispatchMixin:
-    """Executor submission, timeout containment, dispatch-failure recovery."""
+    """Slot submission, timeout containment, dispatch-failure recovery."""
 
     if TYPE_CHECKING:
         # Worker state this mixin reads.
         sf: async_sessionmaker[AsyncSession]
         cfg: WorkerConfig
         worker_instance_id: str
-        _executor: Optional[ProcessPoolExecutor]
+        _slots: SlotPool | None
 
         # Cross-concern methods provided by sibling mixins / Worker.
         async def _finalize_after(
             self,
-            fut: asyncio.Future[tuple[bool, str, Optional[str]]],
+            handle: SlotHandle,
             task_id: str,
             queue_name: str = 'default',
             is_workflow_task: bool = True,
             timeout_ms: Optional[int] = None,
             *,
-            executor: ProcessPoolExecutor,
             task_name: str,
             claimed_at: Optional[datetime] = None,
         ) -> Result[None, _FinalizeError]: ...
@@ -101,12 +95,6 @@ class DispatchMixin:
             session: AsyncSession | None = None,
         ) -> Result[_PersistedTaskOutcome, _FinalizeError]: ...
         async def _handle_finalize_error(self, err: Any) -> None: ...
-        async def _restart_executor(
-            self,
-            reason: str,
-            failed_executor: ProcessPoolExecutor,
-        ) -> None: ...
-        async def _ensure_executor(self, reason: str) -> None: ...
         async def _should_retry_task(
             self, task_id: str, error: TaskError, session: AsyncSession
         ) -> Result[bool, _RetryError]: ...
@@ -167,49 +155,13 @@ class DispatchMixin:
             )
             return _RequeueOutcome.NOT_OWNER_OR_NOT_CLAIMED
 
-    async def _handle_broken_pool(
-        self,
-        task_id: str,
-        exc: BaseException,
-        failed_executor: ProcessPoolExecutor,
-        claimed_at: Optional[datetime] = None,
-    ) -> None:
-        """Recover the task whose pool broke, then replace the executor.
-
-        Raises:
-            ExecutorRestartFailedError: from ``_restart_executor``
-                (process-fatal). On the dispatch path it propagates to the
-                main loop. On the ``_finalize_after`` path it escapes the
-                background finalizer task (a raise inside an except handler
-                bypasses the sibling arms) into ``_on_done``, which captures
-                it and stops the worker; ``run_forever`` re-raises it for a
-                non-zero exit — no executorless zombie window.
-        """
-        outcome = await self._recover_worker_future_failure(
-            task_id,
-            f'Broken process pool: {exc}',
-            claimed_at=claimed_at,
-        )
-        if outcome is _RequeueOutcome.DB_ERROR:
-            logger.critical(
-                'Requeue DB_ERROR: task %s may remain orphaned in-flight '
-                '(worker=%s, reason=broken pool: %s)',
-                task_id,
-                self.worker_instance_id,
-                exc,
-            )
-        await self._restart_executor(
-            f'Broken process pool: {exc}',
-            failed_executor=failed_executor,
-        )
-
     async def _recover_worker_future_failure(
         self,
         task_id: str,
         reason: str,
         claimed_at: Optional[datetime] = None,
     ) -> _RequeueOutcome:
-        """Recover a task whose child future failed without a task result.
+        """Recover a task whose child ended without a task result.
 
         CLAIMED means user code never started and can be unclaimed. RUNNING
         means user code may have executed, so recovery must respect retry policy.
@@ -437,38 +389,16 @@ class DispatchMixin:
     ) -> None:
         """Submit to process pool; attach completion handler.
 
-        Total for per-task failures: dispatch errors requeue or recover the
-        task and return.
+        Never raises for a task: the pool answers every submit, and the
+        finalizer handles that answer.
 
         ``claimed_at`` is the claim generation this dispatch was born from
         (the claim statement's RETURNING); it fences the child's ownership
         confirm and every parent-side finalize/recovery statement so a
         stale dispatch cannot touch a re-claimed row (C10).
-
-        Raises:
-            ExecutorRestartFailedError: from ``_ensure_executor``
-                (process-fatal; propagates through the claim loop to the
-                main loop, which lets the worker crash for a supervisor
-                restart).
         """
-        if self._executor is None:
-            await self._ensure_executor('Executor missing before dispatch')
-            if self._executor is None:
-                outcome = await self._requeue_claimed_task(
-                    task_id,
-                    'Executor unavailable after restart attempt',
-                    claimed_at=claimed_at,
-                )
-                if outcome is _RequeueOutcome.DB_ERROR:
-                    logger.critical(
-                        'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                        '(worker=%s, reason=executor unavailable)',
-                        task_id,
-                        self.worker_instance_id,
-                    )
-                return
-        executor = self._executor
-        loop = asyncio.get_running_loop()
+        slots = self._slots
+        assert slots is not None, 'dispatch before the slot pool started'
 
         # Get heartbeat interval from recovery config (milliseconds)
         runner_heartbeat_interval_ms = 30_000  # default: 30 seconds
@@ -477,53 +407,28 @@ class DispatchMixin:
                 self.cfg.recovery_config.runner_heartbeat_interval_ms
             )
 
-        # Pass task_id and database_url to task process for self-heartbeat
-        database_url = to_psycopg_url(self.cfg.dsn)
-        try:
-            fut = loop.run_in_executor(
-                executor,
-                _run_task_entry,
-                task_name,
-                args_json,
-                kwargs_json,
-                task_id,
-                database_url,
-                self.worker_instance_id,
-                runner_heartbeat_interval_ms,
-                is_workflow_task,
-                timeout_ms,
-                claimed_at,
-            )
-        except BrokenProcessPool as exc:
-            await self._handle_broken_pool(
-                task_id, exc, executor, claimed_at=claimed_at
-            )
-            return
-        except Exception as exc:
-            outcome = await self._recover_worker_future_failure(
-                task_id,
-                f'Failed to dispatch task to executor: {exc}',
+        handle = slots.submit(
+            RunFrame(
+                task_id=task_id,
+                task_name=task_name,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                worker_id=self.worker_instance_id,
+                runner_heartbeat_interval_ms=runner_heartbeat_interval_ms,
+                is_workflow_task=is_workflow_task,
+                timeout_ms=timeout_ms,
                 claimed_at=claimed_at,
-            )
-            if outcome is _RequeueOutcome.DB_ERROR:
-                logger.critical(
-                    'Requeue DB_ERROR: task %s may remain orphaned CLAIMED '
-                    '(worker=%s, reason=dispatch failed: %s)',
-                    task_id,
-                    self.worker_instance_id,
-                    exc,
-                )
-            return
+            ),
+        )
 
         # When done, record the outcome
         self._spawn_background(
             self._finalize_after(
-                fut,
+                handle,
                 task_id,
                 queue_name,
                 is_workflow_task,
                 timeout_ms=timeout_ms,
-                executor=executor,
                 task_name=task_name,
                 claimed_at=claimed_at,
             ),
@@ -535,11 +440,12 @@ class DispatchMixin:
 
     async def _handle_task_timeout(
         self,
+        handle: SlotHandle,
         task_id: str,
         timeout_ms: int,
         claimed_at: Optional[datetime] = None,
     ) -> None:
-        """Persist TASK_TIMEOUT for an over-deadline task and SIGKILL its child.
+        """Persist TASK_TIMEOUT for an over-deadline task and kill its child.
 
         Ownership-guarded like every finalize path: a row already resolved by
         another actor (reaper reclaim, cancel) is left alone. A CLAIMED row
@@ -552,8 +458,10 @@ class DispatchMixin:
         The kill happens on both the retry-scheduled and terminal-failure
         branches: the hung child keeps executing user code either way, and a
         zombie attempt racing a re-claimed retry would be a double execution.
+        The kill is bound to this task's slot, so it cannot reach the next
+        task, and it goes to the child's session, so task subprocesses go too.
         """
-        kill_pid: int | None = None
+        kill_child = False
         try:
             task_error = TaskError(
                 error_code=OutcomeCode.TASK_TIMEOUT,
@@ -627,7 +535,7 @@ class DispatchMixin:
                     )
                     return
 
-                kill_pid = ctx_row.worker_pid
+                kill_child = True
                 attempt_num = (ctx_row.retry_count or 0) + 1
                 db_now = ctx_row.db_now or datetime.now(timezone.utc)
                 attempt_started_at = ctx_row.started_at or db_now
@@ -721,43 +629,29 @@ class DispatchMixin:
                 exc,
             )
         finally:
-            if kill_pid:
-                self._kill_owned_child(kill_pid, task_id, timeout_ms)
+            if kill_child:
+                self._kill_timed_out_child(handle, task_id, timeout_ms)
 
-    def _kill_owned_child(self, kill_pid: int, task_id: str, timeout_ms: int) -> None:
-        """SIGKILL a timed-out child only if it is a live child of ours.
-
-        The pid comes from the task row and can be stale: a concurrent
-        timeout or broken pool may already have restarted the executor and
-        reaped the child, after which the OS is free to reuse the pid for
-        an unrelated process. Membership in the live executor's process map
-        confines the kill to processes this worker owns; a missing pid
-        means the pool teardown already terminated the child.
-        """
-        from multiprocessing.process import BaseProcess
-
-        live_children = cast(
-            'dict[int, BaseProcess]',
-            getattr(self._executor, '_processes', None) or {},
-        )
-        if kill_pid not in live_children:
-            logger.warning(
-                'Skipping kill for timed-out task %s: pid=%s is not a live '
-                'child of the current executor (already reaped or pool '
-                'restarted)',
-                task_id,
-                kill_pid,
-            )
-            return
-        try:
-            os.kill(kill_pid, signal.SIGKILL)
-            logger.warning(
-                'Killed child pid=%s for timed-out task %s '
-                '(timeout_ms=%s); the process pool restarts and '
-                'sibling tasks recover via crash recovery',
-                kill_pid,
-                task_id,
-                timeout_ms,
-            )
-        except ProcessLookupError:
-            pass
+    def _kill_timed_out_child(
+        self,
+        handle: SlotHandle,
+        task_id: str,
+        timeout_ms: int,
+    ) -> None:
+        """Kill the child that holds this task, if it still holds it."""
+        match handle.kill():
+            case KillSent():
+                logger.warning(
+                    'Killed the child of timed-out task %s (timeout_ms=%s); the '
+                    'slot restarts and other tasks are not affected',
+                    task_id,
+                    timeout_ms,
+                )
+            case NothingToKill():
+                logger.warning(
+                    'Skipping kill for timed-out task %s: its child no longer '
+                    'holds it',
+                    task_id,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
