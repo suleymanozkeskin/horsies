@@ -17,8 +17,10 @@ import json
 from typing import Dict, List, Optional, Union
 
 from horsies.core.codec.json_value import (
+    JSON_TEXT_TOO_DEEP,
     StrictJsonError,
     _parse_finite_float,
+    _reject_deep_nesting,
     _reject_lone_surrogate,
     _reject_nonstandard_json_constant,
     _validate_json_native,
@@ -42,6 +44,8 @@ def dumps_json(value: object) -> SerdeResult[str]:
 
     Fails closed (Err) on any non-JSON-native value — tuple, set, bytes,
     Decimal, non-finite float, non-string dict key — rather than coercing it.
+    A value nested deeper than ``MAX_JSON_DEPTH``, or a value that holds
+    itself, is also an Err.
     Emits no class tags; encode typed values via ``codec/typed.py`` first.
     """
     try:
@@ -103,6 +107,11 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     such as ``1e9999`` never reaches ``parse_constant``, and ``float()`` would
     turn it into ``inf``. ``_reject_lone_surrogate`` then refuses a string that
     UTF-8 cannot encode, which ``dumps_json`` also refuses.
+
+    A document nested deeper than ``MAX_JSON_DEPTH`` is an Err, so each walker
+    that gets the parsed value stays inside the recursion limit. A text that
+    is too deep for ``json.loads`` itself gets the same Err from the
+    ``RecursionError`` arm.
     """
     if not s:
         return Ok(None)
@@ -113,8 +122,11 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
             parse_float=_parse_finite_float,
         )
         _reject_lone_surrogate(s, parsed)
+        _reject_deep_nesting(s, parsed)
     except StrictJsonError as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
+    except RecursionError:
+        return Err(SerializationError(f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'))
     except (json.JSONDecodeError, ValueError) as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
     return Ok(parsed)

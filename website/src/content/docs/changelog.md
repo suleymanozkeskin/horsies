@@ -14,6 +14,28 @@ there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: a workflow whose recovery raises on every pass now fails.** After
+  `workflow_recovery_failure_limit` reaper passes (default 25) with a persistent
+  raise, the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A persistent
+  raise is a defect, stored data that the engine cannot use, or a SQL error
+  outside `OperationalError`. Before, the reaper logged the raise on each pass,
+  and the workflow stayed `RUNNING`. A workflow in that state when you upgrade
+  reaches the limit and fails: at the default check interval, that is 750
+  seconds after the first pass. Set a higher limit to get more time for a fix.
+  A connection, lock or timeout error does not count, so a database outage
+  cannot fail a workflow.
+- **Breaking: a phase-2 row whose progression raises a persistent error now
+  counts toward `phase2_quarantine_after_attempts`.** At that bound the row moves
+  to quarantine, and the workflow fails with
+  `WORKFLOW_RECOVERY_LIMIT_REACHED`. Before, the raise did not count, and the
+  row was retried on every pass.
+- **An exhaustive `match` on `OperationalErrorCode` needs a
+  `WORKFLOW_RECOVERY_LIMIT_REACHED` case.** The code string is now reserved: an
+  `exception_mapper` or `default_unhandled_error_code` with that value fails
+  `horsies check` with `HRS-212`.
+- **Schema v52 adds the table `horsies_workflow_recovery_failures`.** The table
+  is new and empty, so the migration takes no lock on an existing table. A
+  worker applies it at start.
 - **Breaking: a schedule whose kwargs exceed `payload.reject_bytes` fails at
   scheduler start.** `Scheduler.start()` raises `ConfigurationError`
   (`HRS-205`, `CONFIG_INVALID_SCHEDULE`), and `horsies check` reports the
@@ -434,15 +456,41 @@ there is no migration contract between pre-1.0 versions.
   output node is `SKIPPED`.** A success case that does not require the output
   node lets this state occur. The workflow stores an error envelope with the
   new code, and `data` names the workflow and the output node. A
-  `SubWorkflowNode` of such a child stays `COMPLETED` and holds that error, so
-  a downstream node, `result_for()` and the `get()` of a parent see the same
-  code. Before, the workflow stored the text `null`, `get()` returned
+  `SubWorkflowNode` of such a child holds that error, so `result_for()`, a
+  dependent with `allow_failed_deps=True` and the `get()` of a parent see the
+  same code. Before, the workflow stored the text `null`, `get()` returned
   `RESULT_DESERIALIZATION_ERROR`, and a downstream node received
   `RESULT_DESERIALIZATION_ERROR` with `Stored TaskResult JSON corrupt`. Code
   that reads this state through `RESULT_DESERIALIZATION_ERROR` must match
   on the new code. A workflow that already stored the text `null` keeps it, and
   `get()` returns `RESULT_DESERIALIZATION_ERROR` for it. A `FAILED` output
   node does not change: the workflow stores that node's error.
+- **Breaking: the `WorkflowHandle.get()` map of an outputless workflow holds
+  `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` for a `SKIPPED` terminal node.** A
+  success case that does not require the node lets this state occur. `data`
+  names the workflow and the node. Before, the entry held
+  `RESULT_DESERIALIZATION_ERROR`, although nothing is corrupt. An entry of a
+  `COMPLETED` or `FAILED` node that does not parse keeps
+  `RESULT_DESERIALIZATION_ERROR`, and so does a stored entry of a workflow that
+  already completed.
+- **Breaking: a `SubWorkflowNode` is `FAILED` when its child is `COMPLETED`
+  with an err output.** A node is `COMPLETED` only when its result is ok, as for
+  a task node. A success case that does not require the child's output node
+  lets that node end `SKIPPED` or `FAILED`. The parent node holds that err, so
+  `on_error` runs, a dependent with `allow_failed_deps=False` is `SKIPPED`,
+  `join="any"` and `join="quorum"` do not count the node, a `SuccessCase` that
+  requires the node is not met, and a parent without a success policy is
+  `FAILED`. `SubWorkflowSummary.status` stays `COMPLETED`. Before, the node was
+  `COMPLETED`, and a dependent with the default options ran and received the
+  err. To let a parent complete, keep the node out of its success cases. To run
+  a dependent, set `allow_failed_deps=True`. A child with no output node is not
+  affected.
+- **Breaking: a `SubWorkflowNode` is `FAILED` with
+  `RESULT_DESERIALIZATION_ERROR` when the stored result of its `COMPLETED` child
+  is not a well-formed result envelope, or is NULL or empty.** The node holds an
+  error envelope that names the child and the cause, so each reader and the
+  `get()` of the parent report that code. The stored text stays on the child
+  workflow row. Before, the node was `COMPLETED` and held that text.
 - **Breaking: `encode_value` refuses a lone surrogate in a string or in a
   dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
   `dumps_json`. The text names the kwarg and holds no input value. A dict
@@ -512,8 +560,43 @@ there is no migration contract between pre-1.0 versions.
   - A task that returns such a value, or whose `TaskError.data` holds one,
     ends with `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`.
 
-  Any other `ValueError` from the dump propagates, also the `Circular
-  reference detected (depth exceeded)` of a value that is only deep.
+  Any other `ValueError` from the dump propagates.
+- **Breaking: `encode_value` raises `ValueValidationError` for a value that
+  is nested too deep.** Pydantic refuses a dump at 255 levels of nesting, and
+  it says `Circular reference detected (depth exceeded)` also for a finite
+  value. The text names the kwarg. Before, a raw `ValueError` left
+  `encode_value`. Each caller gets the same outcome as for a value that holds
+  itself: `TaskSendValidationFailed` from `.send()`,
+  `CONFIG_INVALID_SCHEDULE` from `prepare_schedules`,
+  `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`) from `app.workflow()`, and
+  `WORKER_SERIALIZATION_ERROR` for a task, not `TASK_EXCEPTION`.
+- **Breaking: `encode_value` raises `ValueValidationError` for `bytes` that
+  are not UTF-8.** This holds at a declared `bytes` position and at `Any`,
+  also for a dict key. The text is fixed and holds no byte value. Before, a
+  raw `UnicodeDecodeError` left `encode_value`. A `build_with()` kwarg fails
+  spec construction with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A
+  `TaskError.data` ends the task with `WORKER_SERIALIZATION_ERROR`, not
+  `TASK_EXCEPTION`. Registration refuses `bytes` in a task signature, so
+  `.send()` and a schedule do not reach this. A `UnicodeDecodeError` from a
+  decode in a computed field propagates.
+- **Breaking: the JSON boundary refuses nesting deeper than 300 levels.**
+  `MAX_JSON_DEPTH` in `horsies.core.codec.json_value` is the bound. It counts
+  nested lists and dicts.
+  - `dumps_json` returns `Err`, and `encode_value` raises `StrictJsonError` at a
+    `JsonValue` position, for a deeper value and for a value that holds itself.
+    Before, `RecursionError` left `dumps_json`, which returns a `SerdeResult`,
+    and `.send()`, `prepare_schedules` and `app.workflow()`. These now give
+    `TaskSendValidationFailed`, `CONFIG_INVALID_SCHEDULE` and
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`).
+  - `loads_json` and `loads_json_bytes` return `Err` for a deeper text. Before,
+    a text of 1,000 or more levels raised `RecursionError` out of the parse or
+    out of the next walk. A stored task or workflow result is now
+    `RESULT_DESERIALIZATION_ERROR`, kwargs in a worker are
+    `WORKER_SERIALIZATION_ERROR`, and `enqueue_async` returns
+    `BrokerInvalidInput`.
+  - Each value that `encode_value` accepts stays inside the bound, because
+    pydantic refuses a dump at 255 levels. A text of 301 or more levels that a
+    `dumps_json` caller stored before this release no longer parses.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -575,9 +658,46 @@ there is no migration contract between pre-1.0 versions.
   negative `limit` gave a different result in each read, and a direct
   `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
   answers do not change.
+- **Breaking: `TaskError` refuses a key that it does not declare.** The rule
+  applies at construction and at decode, and `SubWorkflowError` inherits it. A
+  stored error with an unknown key is stored data that does not parse: the
+  refusal names the key, and each reader folds it as for any other stored
+  error that does not decode. Before, the key was dropped, so `{"nope": 1}`
+  read as an error with no code and no message. A task that returns a
+  `TaskError` subclass with its own fields fails with
+  `WORKER_SERIALIZATION_ERROR`. Before, those fields were dropped.
+- **Breaking: `TaskError.error_code` is required and must not be null, on the
+  wire and in the type.** `message`, `data` and `exception` stay optional, and
+  `error_code` stays `BuiltInTaskCode | str`. Before, `TaskError(message='m')`
+  built an error with no code, and `TaskError()` built an empty one. Now each
+  raises `ValidationError` (a `ValueError`). In a task body, that exception ends
+  the task with `UNHANDLED_EXCEPTION`. Pyright reports these calls.
+- **Breaking: a stored error without a code does not decode.** This includes
+  rows that an earlier version wrote with a null `error_code`. No migration
+  rewrites them. `TaskHandle.get()`, `WorkflowHandle.get()` and `result_for()`
+  return `RESULT_DESERIALIZATION_ERROR` with the cause. `app.get_result()` and
+  `app.get_task_info(include_result=True)` return
+  `Err(BrokerInvalidJsonPayload)`. `app.get_raw_result()` still returns the
+  stored value.
 
 ### Changed
 
+- Workflow recovery has a limit. A workflow whose recovery raises a persistent
+  error in `workflow_recovery_failure_limit` reaper passes fails closed. The
+  node that raised goes `FAILED`, other `PENDING` and `READY` nodes go
+  `SKIPPED`, a stored first error stays, and live nodes finish. The new setting
+  `RecoveryConfig.workflow_recovery_failure_limit` has the default 25 and the
+  range 3–1000. The count is stored in the new table
+  `horsies_workflow_recovery_failures`, so a worker restart keeps it, and all
+  workers share it. The count has no reset, so a later unrelated raise after a
+  repair reaches the limit sooner. The worker health surface gets
+  `failures_counted` and `limit_reached` per case, `over_failure_limit` for each
+  workflow recovery pass, and `raised_counted` for each phase-2 pass.
+- The top-level `errors` of the `workflow_recovery` health counts every recovery
+  case. Before, it left out `case_0`, `case_1`, `case_1_5` and `case_1_6`.
+- The parent advancement after a global workflow completion runs in its own
+  SAVEPOINT. A raise there no longer rolls back the completion of the child, so
+  the child ends, and recovery counts the raise on the parent workflow.
 - **`SuccessCase.required` and `SuccessPolicy.optional` accept any node.**
   The element type is `AnyNode` (`TaskNode[Any] | SubWorkflowNode[Any]`).
   Before, it was `TaskNode[Any]`, but spec validation already accepted a
@@ -793,12 +913,25 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The docs say what `SuccessPolicy.optional` does.** The field records which
+  nodes may fail, and it has no runtime effect: the engine stores it and reads
+  only the required nodes of each case. A node that no case requires does not
+  change the result, with or without `optional`. Before, the docs said that
+  `optional` excludes a node from failure accounting.
 - **Phase-2 recovery progresses a failed node whose stored error does not
-  decode as a `TaskError`.** The recovery records the error that the
-  terminal status names, as it does for a stored result envelope that does
-  not validate. The log names the refusal. Before, the
+  decode as a `TaskError`, and it records the cause.** The recovery records
+  `RESULT_DESERIALIZATION_ERROR` with the cause in the message. A stored
+  result envelope that does not validate and stored text that is not JSON get
+  the same error. The log names the refusal. Before, the
   `ValueValidationError` of the decode rolled back the recovery of that row
-  on each pass, and the node did not progress.
+  on each pass, and the node did not progress. Text that is not JSON recorded
+  the error that the terminal status names.
+- **A workflow keeps the cause when the stored result of its first failed task
+  does not parse.** This applies to text that is not JSON, a result envelope
+  that does not validate, and an error that does not decode. The workflow
+  error is `RESULT_DESERIALIZATION_ERROR` with the cause in the message.
+  Before, the cause was lost, and the workflow took a NULL error or
+  `WORKFLOW_SUCCESS_CASE_NOT_MET`.
 - **A lone surrogate in the text of a node failure no longer loses the
   text.** The text of an exception from `build_with()` can hold one, for
   example a file name. The node now fails with the text, with the surrogate

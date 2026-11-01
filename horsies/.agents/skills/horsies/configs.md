@@ -430,7 +430,8 @@ to `AppConfig.retention` — see RetentionConfig below.
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat from running task process |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–5min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states` |
-| `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it |
+| `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
+| `workflow_recovery_failure_limit` | `int` | `25` | 3–1000 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A connection, lock or timeout error does not count. The count is stored. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner |
 
 **Removed in 0.5.0 — setting either fails config construction naming the
 successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions

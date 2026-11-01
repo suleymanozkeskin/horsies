@@ -17,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, assert_never, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -261,6 +261,22 @@ def _resolve_source_ok_type(
     )
 
 
+def _unreadable_task_result(cause: str) -> 'TaskResult[Any, TaskError]':
+    """``RESULT_DESERIALIZATION_ERROR`` for a stored task result that does not parse.
+
+    ``cause`` can hold text from a stored row, so a lone surrogate in it is
+    escaped: the caller encodes this error.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=escape_lone_surrogates(cause),
+        ),
+    )
+
+
 def _decode_err_only(
     stored_result: str,
 ) -> 'TaskResult[Any, TaskError] | None':
@@ -269,15 +285,21 @@ def _decode_err_only(
     Mirrors the app-layer err-without-ok-type fast path (design §6):
     ``TaskError`` is a fixed-schema internal type, so an err-only
     payload can be reconstructed even when the source task isn't
-    registered locally. Returns ``None`` if the envelope is missing,
-    malformed, or carries an ok payload (caller must supply ok_type for
-    those).
+    registered locally.
+
+    Outcomes:
+        - An envelope whose err slot decodes: that error.
+        - An envelope with no err slot: ``None``. An ok payload needs an
+          ok_type, and this function has none.
+        - Stored data that does not parse: ``RESULT_DESERIALIZATION_ERROR``
+          with the cause in the message. That is text that is not JSON, JSON
+          that ``validate_task_result_envelope`` refuses, or an err slot that
+          ``decode_task_error`` refuses.
 
     Envelope shape is checked via ``validate_task_result_envelope`` —
     same strict criteria as ``decode_task_result``: exactly the keys
     ``{__h_task_result__, ok, err}``, marker is True, at most one slot
-    populated. Malformed envelopes return ``None`` so the caller falls
-    through to legacy handling rather than crashing.
+    populated.
 
     Routes through ``decode_task_error`` (polymorphic) so subclass
     types like ``SubWorkflowError`` survive the decode. The base
@@ -286,20 +308,26 @@ def _decode_err_only(
     """
     from horsies.core.models.tasks import TaskError, TaskResult
 
-    deser = _deser_json(stored_result, 'err-only result json')
-    if deser is None:
-        return None
+    parsed = loads_json(stored_result)
+    if is_err(parsed):
+        return _unreadable_task_result(
+            f'Stored task result is not JSON: {parsed.err_value}',
+        )
     try:
-        envelope = validate_task_result_envelope(deser)
-    except StrictJsonError:
-        return None
+        envelope = validate_task_result_envelope(parsed.ok_value)
+    except StrictJsonError as exc:
+        return _unreadable_task_result(
+            f'Stored task result does not decode: {exc}',
+        )
     err_slot = envelope.get('err')
     if err_slot is None:
         return None
     try:
         decoded_err = decode_task_error(err_slot)
-    except (StrictJsonError, ValueValidationError):
-        return None
+    except (StrictJsonError, ValueValidationError) as exc:
+        return _unreadable_task_result(
+            f'Stored task error does not decode: {exc}',
+        )
     if not isinstance(decoded_err, TaskError):
         return None
     return TaskResult(err=decoded_err)
@@ -2719,6 +2747,207 @@ async def check_workflow_completion(
 
 
 
+@dataclass(frozen=True, slots=True)
+class _ChildOutputValue:
+    """A well-formed result envelope with an empty err slot."""
+
+    value: Any
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildOutputError:
+    """A well-formed result envelope whose err slot decodes."""
+
+    error: 'TaskError'
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildOutputUnreadable:
+    """Stored data that is not a well-formed result envelope, or no text."""
+
+    cause: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ChildOutputless:
+    """The outputless workflow envelope. A parent node reads no output from it."""
+
+
+type _ChildOutput = (
+    _ChildOutputValue
+    | _ChildOutputError
+    | _ChildOutputUnreadable
+    | _ChildOutputless
+)
+
+
+def _parse_child_output(stored_result: str | None) -> _ChildOutput:
+    """Parse the stored result column of a child workflow.
+
+    Every outcome is a variant. ``ok_slot`` is not decoded: typed decode is
+    the concern of the node that reads the output.
+    """
+    if not stored_result:
+        return _ChildOutputUnreadable(cause='the result is NULL or empty')
+    loaded = loads_json(stored_result)
+    if is_err(loaded):
+        return _ChildOutputUnreadable(cause=f'not JSON: {loaded.err_value}')
+    if _is_outputless_workflow_envelope(loaded.ok_value):
+        return _ChildOutputless()
+    try:
+        envelope = validate_task_result_envelope(loaded.ok_value)
+    except StrictJsonError as exc:
+        return _ChildOutputUnreadable(cause=str(exc))
+    err_slot = envelope.get('err')
+    if err_slot is None:
+        return _ChildOutputValue(value=envelope.get('ok'), text=stored_result)
+    try:
+        return _ChildOutputError(
+            error=decode_task_error(err_slot), text=stored_result,
+        )
+    except (StrictJsonError, ValueValidationError) as exc:
+        return _ChildOutputUnreadable(cause=str(exc))
+
+
+@dataclass(frozen=True, slots=True)
+class _ParentNodeCompleted:
+    """The node holds an ok."""
+
+    result: str
+    status: ClassVar[str] = WorkflowTaskStatus.COMPLETED.value
+
+
+@dataclass(frozen=True, slots=True)
+class _ParentNodeFailed:
+    """The node holds an err. ``error`` goes to the failure handler."""
+
+    result: str
+    error: 'TaskError'
+    status: ClassVar[str] = WorkflowTaskStatus.FAILED.value
+
+
+type _ParentNodeOutcome = _ParentNodeCompleted | _ParentNodeFailed
+
+
+def _unreadable_child_error(child_workflow_id: str, cause: str) -> 'TaskError':
+    """The error of a COMPLETED child whose stored result does not parse.
+
+    ``cause`` can hold text from a stored row, so a lone surrogate in it is
+    escaped: the failure handler encodes this error.
+    """
+    from horsies.core.models.tasks import TaskError
+
+    return TaskError(
+        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        message=escape_lone_surrogates(
+            f'Child workflow {child_workflow_id} is COMPLETED and its stored '
+            f'result does not parse: {cause}',
+        ),
+        data={'workflow_id': child_workflow_id},
+    )
+
+
+def _completed_child_node(
+    child_workflow_id: str, child_output: _ChildOutput,
+) -> _ParentNodeOutcome:
+    """The parent node of a COMPLETED child.
+
+    A node is COMPLETED only when its stored result is ok, as for a task node.
+    The child is COMPLETED under its own success policy, which can leave its
+    output node FAILED or SKIPPED, so the output decides.
+
+    Outcomes:
+        - An ok output: COMPLETED with the child's text.
+        - An outputless child: COMPLETED with ``ok=None``. Its envelope is for
+          ``WorkflowHandle.get()`` only: stored in a node, later typed encode
+          and decode paths read its nested ``__h_*`` markers as user data.
+        - An err output: FAILED with the child's text and that error.
+        - Stored data that does not parse, or no text: FAILED with an envelope
+          of ``RESULT_DESERIALIZATION_ERROR`` that names the child and the
+          cause. Each reader of the node, and a parent that reads this node
+          as its failure, then names the cause. A node without a result gives
+          its readers no entry, and a node with the raw text gives the failure
+          selection nothing to decode. The raw text stays on the child row.
+
+    Raises:
+        SerializationError: an envelope that this function built does not
+            serialize. It holds values from the child row, so this is a
+            defect; the caller's transaction rolls back.
+    """
+    from horsies.core.models.tasks import TaskResult
+
+    match child_output:
+        case _ChildOutputValue(text=text):
+            return _ParentNodeCompleted(result=text)
+        case _ChildOutputless():
+            return _ParentNodeCompleted(
+                result=_ser_or_raise(
+                    dumps_json(encode_task_result(TaskResult(ok=None), Any)),
+                    f'outputless result of child workflow {child_workflow_id}',
+                ),
+            )
+        case _ChildOutputError(error=error, text=text):
+            return _ParentNodeFailed(result=text, error=error)
+        case _ChildOutputUnreadable(cause=cause):
+            error = _unreadable_child_error(child_workflow_id, cause)
+            return _ParentNodeFailed(
+                result=_ser_or_raise(
+                    dumps_json(encode_task_result(TaskResult(err=error), Any)),
+                    f'parent node error for child workflow {child_workflow_id}',
+                ),
+                error=error,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _failed_child_node(
+    child_workflow_id: str,
+    child_status: str,
+    child_summary: SubWorkflowSummary[Any],
+) -> _ParentNodeFailed:
+    """The parent node of a child that is FAILED, CANCELLED or EXPIRED.
+
+    Raises:
+        SerializationError: the node error does not serialize. It holds values
+            from the child row, so this is a defect; the caller's transaction
+            rolls back.
+    """
+    from horsies.core.models.tasks import SubWorkflowError
+
+    error = SubWorkflowError(
+        error_code=OutcomeCode.SUBWORKFLOW_FAILED,
+        message=f'Subworkflow {child_workflow_id} failed with status {child_status}',
+        sub_workflow_id=child_workflow_id,
+        sub_workflow_summary=child_summary,
+    )
+    # Strict-serde §5: build the `__h_task_result__` envelope
+    # directly. ``serialize_error_payload`` runs the err slot
+    # through ``encode_value(err, TaskError)`` which drops the
+    # SubWorkflowError-specific fields (``sub_workflow_id`` /
+    # ``sub_workflow_summary``); ``model_dump`` on the concrete
+    # class preserves them. The reserved-key scan isn't applied
+    # here because this is an engine-internal emit, not user data.
+    return _ParentNodeFailed(
+        result=_ser_or_raise(
+            dumps_json({
+                '__h_task_result__': True,
+                'ok': None,
+                'err': error.model_dump(mode='json'),
+            }),
+            f'parent node error for child workflow {child_workflow_id}',
+        ),
+        error=SubWorkflowError(
+            error_code=OutcomeCode.SUBWORKFLOW_FAILED,
+            message=f'Subworkflow {child_workflow_id} failed',
+            sub_workflow_id=child_workflow_id,
+            sub_workflow_summary=child_summary,
+        ),
+    )
+
+
 async def on_subworkflow_complete(
     session: AsyncSession,
     child_workflow_id: str,
@@ -2739,7 +2968,7 @@ async def on_subworkflow_complete(
             into a HandleOperationError variant, and the reaper contains
             each recovery pass as one unit.
     """
-    from horsies.core.models.tasks import TaskResult, SubWorkflowError
+    from horsies.core.models.tasks import TaskResult
 
     # 1. Get child workflow info and task counts
     child_result = await session.execute(
@@ -2790,28 +3019,7 @@ async def on_subworkflow_complete(
     # with the workflow's declared OutT). Here we extract the raw ok
     # payload from the envelope without typed decode; the parent
     # decodes properly when it consumes the summary downstream.
-    child_output: Any = None
-    child_result_payload: Any = None
-    child_result_is_outputless = False
-    if child_result_json:
-        child_result_payload = _deser_json(child_result_json, 'child result json')
-        child_result_is_outputless = _is_outputless_workflow_envelope(
-            child_result_payload,
-        )
-        if isinstance(child_result_payload, dict):
-            envelope = cast('dict[str, Any]', child_result_payload)
-        else:
-            envelope = None
-        if (
-            envelope is not None
-            and envelope.get('__h_task_result__') is True
-            and not child_result_is_outputless
-        ):
-            ok_slot = envelope.get('ok')
-            err_slot = envelope.get('err')
-            if err_slot is None:
-                # Success path — ok slot is the raw encoded value.
-                child_output = ok_slot
+    child_output = _parse_child_output(child_result_json)
 
     error_summary: str | None = None
     if child_error:
@@ -2825,7 +3033,11 @@ async def on_subworkflow_complete(
 
     child_summary = SubWorkflowSummary(
         status=WorkflowStatus(child_status),
-        output=child_output,
+        output=(
+            child_output.value
+            if isinstance(child_output, _ChildOutputValue)
+            else None
+        ),
         total_tasks=total_tasks,
         completed_tasks=completed_tasks,
         failed_tasks=failed_tasks,
@@ -2834,51 +3046,11 @@ async def on_subworkflow_complete(
     )
 
     # 3. Determine parent node status and result
-    if child_status == 'COMPLETED':
-        parent_node_status = 'COMPLETED'
-        if child_result_is_outputless:
-            # An outputless workflow's final result is a workflow-level
-            # envelope whose ok slot contains nested per-node TaskResult
-            # envelopes. That shape is for WorkflowHandle.get() only; if
-            # stored as a SubWorkflowNode result or summary output, later
-            # typed encode/decode paths treat the nested __h_* markers as
-            # user data and reject them. A SubWorkflowNode for a workflow
-            # with no explicit output therefore completes with ok=None.
-            parent_node_result = _ser_or_raise(
-                dumps_json(encode_task_result(TaskResult(ok=None), Any)),
-                f'outputless result of child workflow {child_workflow_id}',
-            )
-        else:
-            # Pass through child's explicit output as TaskResult. The child
-            # is COMPLETED, so the node is COMPLETED, also for an err: a
-            # success case that does not require the child's output node
-            # lets that node end FAILED (its error) or SKIPPED
-            # (WORKFLOW_OUTPUT_SKIPPED).
-            parent_node_result = child_result_json
-    else:
-        parent_node_status = 'FAILED'
-        # Create SubWorkflowError
-        error = SubWorkflowError(
-            error_code=OutcomeCode.SUBWORKFLOW_FAILED,
-            message=f'Subworkflow {child_workflow_id} failed with status {child_status}',
-            sub_workflow_id=child_workflow_id,
-            sub_workflow_summary=child_summary,
-        )
-        # Strict-serde §5: build the `__h_task_result__` envelope
-        # directly. ``serialize_error_payload`` runs the err slot
-        # through ``encode_value(err, TaskError)`` which drops the
-        # SubWorkflowError-specific fields (``sub_workflow_id`` /
-        # ``sub_workflow_summary``); ``model_dump`` on the concrete
-        # class preserves them. The reserved-key scan isn't applied
-        # here because this is an engine-internal emit, not user data.
-        parent_node_result = _ser_or_raise(
-            dumps_json({
-                '__h_task_result__': True,
-                'ok': None,
-                'err': error.model_dump(mode='json'),
-            }),
-            f'parent node error for child workflow {child_workflow_id}',
-        )
+    parent_node = (
+        _completed_child_node(child_workflow_id, child_output)
+        if child_status == 'COMPLETED'
+        else _failed_child_node(child_workflow_id, child_status, child_summary)
+    )
 
     # 4. Serialize parent-side promotion with other completions of the same
     # parent: on_workflow_task_complete takes this lock for exactly that
@@ -2902,8 +3074,8 @@ async def on_subworkflow_complete(
     update_result = await session.execute(
         UPDATE_PARENT_NODE_RESULT_SQL,
         {
-            'status': parent_node_status,
-            'result': parent_node_result,
+            'status': parent_node.status,
+            'result': parent_node.result,
             'summary': _ser_or_raise(
                 dumps_json(child_summary.to_json()),
                 f'summary of child workflow {child_workflow_id}',
@@ -2920,27 +3092,24 @@ async def on_subworkflow_complete(
         logger.debug(
             'Parent workflow task already terminal, skipping subworkflow progression: '
             'parent_workflow=%s task_index=%s child_workflow=%s attempted_status=%s',
-            parent_wf_id, parent_task_idx, child_workflow_id, parent_node_status,
+            parent_wf_id, parent_task_idx, child_workflow_id, parent_node.status,
         )
         return
 
     # 6. Handle failure (same as task failure)
-    if parent_node_status == 'FAILED':
-        # Create a TaskResult for the failure handler
-        failure_result: TaskResult[Any, TaskError] = TaskResult(
-            err=SubWorkflowError(
-                error_code=OutcomeCode.SUBWORKFLOW_FAILED,
-                message=f'Subworkflow {child_workflow_id} failed',
-                sub_workflow_id=child_workflow_id,
-                sub_workflow_summary=child_summary,
+    match parent_node:
+        case _ParentNodeFailed(error=error):
+            failure_result: TaskResult[Any, TaskError] = TaskResult(err=error)
+            should_continue = await _handle_workflow_task_failure(
+                session, parent_wf_id, failure_result
             )
-        )
-        should_continue = await _handle_workflow_task_failure(
-            session, parent_wf_id, failure_result
-        )
-        if not should_continue:
-            # PAUSE mode - stop processing
-            return
+            if not should_continue:
+                # PAUSE mode - stop processing
+                return
+        case _ParentNodeCompleted():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
 
     # 7. Check if parent workflow is PAUSED
     parent_status_check = await session.execute(
@@ -3231,38 +3400,40 @@ def _output_error_envelope(
     workflow_id: str,
     output_task_index: int,
     output_row: Any,
-) -> str:
-    """The result text of a COMPLETED workflow whose output node has no result.
+) -> dict[str, Json]:
+    """The error envelope of a COMPLETED workflow output that has no result.
 
-    ``data`` names the workflow and the output node. A parent workflow
-    copies this text, so at every nesting level ``data`` names the workflow
-    that holds the node.
+    The output is the explicit output node, or a terminal node of an
+    outputless workflow. ``data`` names the workflow and that node.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    return encode_task_result(
+        TaskResult(
+            err=TaskError(
+                error_code=error_code,
+                message=message,
+                data={
+                    'workflow_id': workflow_id,
+                    'output_node_id': output_row.node_id,
+                    'output_task_index': output_task_index,
+                    'output_task_name': output_row.task_name,
+                },
+            ),
+        ),
+        Any,
+    )
+
+
+def _output_result_text(envelope: dict[str, Json], workflow_id: str) -> str:
+    """The stored text of an envelope from ``_output_error_envelope``.
 
     Raises:
         SerializationError: the envelope does not serialize. The engine
             built it from a stored row, so this is a defect.
     """
-    from horsies.core.models.tasks import TaskError, TaskResult
-
     return _ser_or_raise(
-        dumps_json(
-            encode_task_result(
-                TaskResult(
-                    err=TaskError(
-                        error_code=error_code,
-                        message=message,
-                        data={
-                            'workflow_id': workflow_id,
-                            'output_node_id': output_row.node_id,
-                            'output_task_index': output_task_index,
-                            'output_task_name': output_row.task_name,
-                        },
-                    ),
-                ),
-                Any,
-            ),
-        ),
-        f'output result of workflow {workflow_id}',
+        dumps_json(envelope), f'output result of workflow {workflow_id}',
     )
 
 
@@ -3282,16 +3453,19 @@ def _stored_output_result(
     """
     match output_row.result:
         case None | '':
-            return _output_error_envelope(
-                OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                (
-                    f'Workflow {workflow_id} is COMPLETED and its output node '
-                    f'{output_row.node_id!r} is {output_row.status} with no '
-                    'stored result'
+            return _output_result_text(
+                _output_error_envelope(
+                    OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                    (
+                        f'Workflow {workflow_id} is COMPLETED and its output '
+                        f'node {output_row.node_id!r} is {output_row.status} '
+                        'with no stored result'
+                    ),
+                    workflow_id=workflow_id,
+                    output_task_index=output_task_index,
+                    output_row=output_row,
                 ),
-                workflow_id=workflow_id,
-                output_task_index=output_task_index,
-                output_row=output_row,
+                workflow_id,
             )
         case stored_result:
             return stored_result
@@ -3329,15 +3503,18 @@ def _explicit_output_result(
     )
     match status:
         case WorkflowTaskStatus.SKIPPED:
-            return _output_error_envelope(
-                OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
-                (
-                    f'Workflow {workflow_id} is COMPLETED and has no output: '
-                    f'its output node {node_id!r} is SKIPPED'
+            return _output_result_text(
+                _output_error_envelope(
+                    OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
+                    (
+                        f'Workflow {workflow_id} is COMPLETED and has no '
+                        f'output: its output node {node_id!r} is SKIPPED'
+                    ),
+                    workflow_id=workflow_id,
+                    output_task_index=output_task_index,
+                    output_row=output_row,
                 ),
-                workflow_id=workflow_id,
-                output_task_index=output_task_index,
-                output_row=output_row,
+                workflow_id,
             )
         case WorkflowTaskStatus.COMPLETED | WorkflowTaskStatus.FAILED:
             return _stored_output_result(
@@ -3356,6 +3533,45 @@ def _explicit_output_result(
             )
         case _ as unreachable:
             assert_never(unreachable)
+
+
+def _terminal_entry(workflow_id: str, node_id: str, row: Any) -> Json:
+    """The ``results_by_id`` entry of one terminal node of an outputless workflow.
+
+    Outcomes:
+        - SKIPPED: an error envelope with ``WORKFLOW_OUTPUT_SKIPPED``. Nothing
+          is corrupt: the workflow succeeded and this node has no result.
+        - Any other status with a stored ``__h_task_result__`` envelope: that
+          envelope.
+        - Any other row: ``None``. The handle surfaces a
+          ``RESULT_DESERIALIZATION_ERROR`` for the entry.
+    """
+    if row.status == WorkflowTaskStatus.SKIPPED.value:
+        return cast(
+            'Json',
+            _output_error_envelope(
+                OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
+                (
+                    f'Workflow {workflow_id} is COMPLETED and its terminal '
+                    f'node {node_id!r} is SKIPPED'
+                ),
+                workflow_id=workflow_id,
+                output_task_index=row.task_index,
+                output_row=row,
+            ),
+        )
+    if not row.result:
+        return None
+    deser = _deser_json(row.result, 'terminal task result json')
+    if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
+        return cast('Json', deser)
+    # Corrupt / pre-strict row — store null; handle layer
+    # surfaces a RESULT_DESERIALIZATION_ERROR per-entry.
+    logger.warning(
+        f'Terminal task {node_id!r} result is not a '
+        f'strict-serde envelope; storing null'
+    )
+    return None
 
 
 async def get_workflow_final_result(
@@ -3413,20 +3629,7 @@ async def get_workflow_final_result(
             continue
         task_name_by_id[node_id] = row.task_name
         definition_key_by_id[node_id] = row.sub_definition_key
-        if row.result:
-            deser = _deser_json(row.result, 'terminal task result json')
-            if isinstance(deser, dict) and deser.get('__h_task_result__') is True:
-                results_dict[node_id] = cast('Json', deser)
-            else:
-                # Corrupt / pre-strict row — store null; handle layer
-                # surfaces a RESULT_DESERIALIZATION_ERROR per-entry.
-                logger.warning(
-                    f'Terminal task {node_id!r} result is not a '
-                    f'strict-serde envelope; storing null'
-                )
-                results_dict[node_id] = None
-        else:
-            results_dict[node_id] = None
+        results_dict[node_id] = _terminal_entry(workflow_id, node_id, row)
 
     # Outputless workflow envelope. Outer marker is the standard
     # ``__h_outputless_terminals__`` so the handle's decode path can

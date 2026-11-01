@@ -87,7 +87,7 @@ envelope = encode_task_result(
 The consumer holds the declared `ok_type` (from the task registry) and calls `decode_task_result(envelope, ok_type)`:
 
 1. `validate_task_result_envelope` checks the marker and structural shape.
-2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally.
+2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally. It refuses a key that the error type does not declare, and an error without `error_code`. The refusal names the cause.
 3. Otherwise `TypeAdapter[ok_type].validate_python(envelope["ok"])` materializes the typed value.
 
 Distinct decode-error surfaces:
@@ -236,7 +236,9 @@ Cheap shape check before per-slot decode. Returns the envelope as `dict[str, Jso
 
 Primitive entry points for non-`TaskResult` values (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
 
-**Raises:** `encode_value` raises `ValueValidationError` for a dict key without a JSON form (a `frozenset`, or an Enum member whose value is a list, a dict or a set) and for a value that holds itself. Any other `TypeError` or `ValueError` from the dump propagates, for example from a computed field, or for a value that is too deep.
+**Raises:** `encode_value` raises `ValueValidationError` for a dict key without a JSON form (a `frozenset`, or an Enum member whose value is a list, a dict or a set), for a value that holds itself, for a value that is nested too deep, and for `bytes` that are not UTF-8. Any other `TypeError` or `ValueError` from the dump propagates, for example from a computed field.
+
+**Validators:** a validator refuses a value with `ValueError` or `AssertionError`. Any other exception from a validator is a bug: it propagates, and `encode_value` and `decode_value` do not catch it.
 
 ### `JsonValue`
 
@@ -254,6 +256,8 @@ PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 ### `StrictJsonError`
 
 Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair in JSON text is one valid character and stays accepted. `encode_value` refuses each string that `dumps_json` refuses: a lone surrogate in a string or in a dict key raises `StrictJsonError` at any depth. In a Python `str`, a surrogate pair is two code points, so it is refused too. `encode_value` and `decode_value` also raise `StrictJsonError` when the error text of a validator holds a lone surrogate, because pydantic cannot build that text. The text names the kwarg and holds no input value. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
+
+`MAX_JSON_DEPTH` (300) is the deepest nesting of lists and dicts at the JSON boundary. `dumps_json` and the fence of `encode_value` at a `JsonValue` position refuse a deeper value and a value that holds itself. `loads_json` refuses a deeper text, so each walker that gets a parsed value stays inside the recursion limit of Python. The bound is above the limit of a pydantic dump, which refuses at 255 levels: a value that `encode_value` accepts also passes the bound inside its envelope.
 
 ## Things to Avoid
 

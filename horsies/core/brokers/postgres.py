@@ -513,6 +513,7 @@ from horsies.core.schemas.migrations import (
 )
 from horsies.core.schemas.recovery import (
     CREATE_RECOVERY_SCAN_CURSORS_SQL,
+    CREATE_WORKFLOW_RECOVERY_FAILURES_SQL,
     SEED_RECOVERY_SCAN_CURSORS_SQL,
     VALIDATE_RECOVERY_INDEXES_SQL,
     install_recovery_indexes,
@@ -1592,6 +1593,8 @@ class PostgresBroker:
             await conn.execute(text(DROP_SINGLE_COLUMN_CHECKS_DDL))
             # v51: the task retention statistics have no reader.
             await conn.execute(DROP_TASKS_RETENTION_STATISTICS_SQL)
+            # v52: the stored count of the workflow recovery limit.
+            await conn.execute(CREATE_WORKFLOW_RECOVERY_FAILURES_SQL)
             await conn.execute(
                 INSERT_SCHEMA_VERSION_SQL,
                 {'version': SCHEMA_VERSION},

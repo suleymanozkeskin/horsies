@@ -1,7 +1,7 @@
 # horsies/core/models/recovery.py
 from __future__ import annotations
 from dataclasses import asdict, dataclass
-from typing import Annotated, Self, cast
+from typing import Annotated, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from horsies.core.errors import (
     ConfigurationError,
@@ -9,6 +9,10 @@ from horsies.core.errors import (
     ValidationReport,
     raise_collected,
 )
+
+
+DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT: Final = 25
+"""Reaper passes with a persistent recovery raise before a workflow fails."""
 
 
 MOVED_TO_RETENTION: frozenset[str] = frozenset({
@@ -67,6 +71,7 @@ class RecoveryConfig(BaseModel):
     - finalizing_stale_threshold_ms: Milliseconds a task may remain finalizing before recovery
     - crashed_worker_recovery_grace_ms: Grace before recovering a terminal task whose workflow progression was not applied
     - phase2_quarantine_after_attempts: Recovery passes an unresolvable phase-2 pending row may retain before it is quarantined
+    - workflow_recovery_failure_limit: Reaper passes with a persistent recovery raise before a workflow fails closed
     - check_interval_ms: How often the reaper checks for stale tasks
     - orphan_task_audit_interval_ms: How often the orphan cursor scans one page
     - runner_heartbeat_interval_ms: How often RUNNING tasks send heartbeats from inside the task process
@@ -144,7 +149,24 @@ class RecoveryConfig(BaseModel):
             'to the quarantine table and discovery stops retrying it. Floor '
             '3 keeps a burst of transient failures from quarantining healthy '
             'recovery; both directions stay recoverable because quarantine '
-            'preserves the evidence (3-1000).'
+            'preserves the evidence. A progression that raises a persistent '
+            'error counts too, and at the bound its workflow fails closed '
+            '(3-1000).'
+        ),
+    )
+
+    workflow_recovery_failure_limit: Annotated[
+        int, Field(ge=3, le=1_000),
+    ] = Field(
+        default=DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
+        description=(
+            'Reaper passes in which the recovery of a workflow may raise a '
+            'persistent error before the workflow fails with '
+            'WORKFLOW_RECOVERY_LIMIT_REACHED. A connection, lock or timeout '
+            'error does not count, so a database outage cannot fail a '
+            'workflow. At the default check interval, 25 passes give 750 '
+            'seconds to deploy a fix. The count is stored, so a worker '
+            'restart keeps it, and it has no reset (3-1000).'
         ),
     )
 

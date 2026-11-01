@@ -413,7 +413,7 @@ def _make_app() -> Any:
     app.config.resend_on_transient_err = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
-    app.config.default_unhandled_error_code = None
+    app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
     app.are_sends_suppressed.return_value = False
     app.validate_queue_name.return_value = 'default'
     return app

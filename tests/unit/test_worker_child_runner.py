@@ -904,11 +904,36 @@ def _registered_tasks() -> dict[str, Any]:
             err=TaskError(error_code='MY_ERROR', message='m', data=value),
         )
 
+    @app.task('deep.returned')
+    def returns_a_long_chain() -> TaskResult[_Linked, TaskError]:
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+        return TaskResult(ok=node)
+
+    @app.task('deep.error_data')
+    def error_data_is_too_deep() -> TaskResult[int, TaskError]:
+        value: list[Any] = []
+        for _ in range(299):
+            value = [value]
+        return TaskResult(
+            err=TaskError(error_code='MY_ERROR', message='m', data=value),
+        )
+
+    @app.task('bytes.error_data')
+    def error_data_is_not_utf8() -> TaskResult[int, TaskError]:
+        return TaskResult(
+            err=TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
+        )
+
     return {
+        'error-data-not-utf8': error_data_is_not_utf8,
         'value-error': returns_echoing,
         'custom-error-context': returns_custom_error,
         'returned-model': returns_itself,
         'error-data': error_data_holds_itself,
+        'deep-returned-model': returns_a_long_chain,
+        'deep-error-data': error_data_is_too_deep,
     }
 
 
@@ -1044,6 +1069,23 @@ class TestRunTaskEntryErrorPaths:
 
         assert ok is True
         assert reason is not None and 'lone surrogate' in reason
+        assert 'WORKER_SERIALIZATION_ERROR' in payload
+
+    def test_kwargs_json_past_the_depth_bound(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """A text past the bound → WORKER_SERIALIZATION_ERROR."""
+        patches = _make_run_task_patches()
+        _run_entry_defaults['kwargs_json'] = (
+            '{"x":' + '[' * 1_100 + ']' * 1_100 + '}'
+        )
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is not None and 'nested deeper than' in reason
         assert 'WORKER_SERIALIZATION_ERROR' in payload
 
     def test_kwargs_json_number_outside_finite_binary64(
@@ -1286,6 +1328,54 @@ class TestRunTaskEntryErrorPaths:
             '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
         }
         assert 'Circular reference detected (id repeated)' in parsed['err']['message']
+
+    @pytest.mark.parametrize('form', ['deep-returned-model', 'deep-error-data'])
+    def test_a_value_that_is_too_deep_ends_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        form: str,
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()[form],
+        )
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert (
+            'Circular reference detected (depth exceeded)'
+            in parsed['err']['message']
+        )
+
+    def test_bytes_that_are_not_utf8_in_error_data_end_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """`TaskError.data` is the one task value that registration does not
+        type. The refusal holds no byte value."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()['error-data-not-utf8'],
+        )
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert 'bytes that are not UTF-8' in parsed['err']['message']
+        assert '0xff' not in parsed['err']['message']
 
     def test_a_validator_text_with_a_lone_surrogate_fails_the_kwargs_decode(
         self,
@@ -2307,6 +2397,92 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
 
         assert ok is True
         self._assert_no_marker(payload, reason, caplog)
+
+
+@pytest.mark.unit
+class TestRunTaskEntryStoredErrorRefusal:
+    """An injected err slot that does not parse gives its cause, not a raise."""
+
+    def test_args_from_err_slot_gives_a_serialization_error(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        source_task = MagicMock()
+        source_task.task_ok_type = str
+        mock_task = MagicMock()
+        mock_task.task_ok_type = str
+
+        def _task_lookup(name: str) -> Any:
+            return source_task if name == 'upstream_task' else mock_task
+
+        mock_app.tasks.__getitem__ = MagicMock(side_effect=_task_lookup)
+        mock_app.tasks.get = MagicMock(side_effect=_task_lookup)
+        _run_entry_defaults['kwargs_json'] = json.dumps({
+            'upstream': {
+                '__h_taskresult_envelope__': True,
+                'source_task_name': 'upstream_task',
+                'inner': {
+                    '__h_task_result__': True,
+                    'ok': None,
+                    'err': {'nope': 1},
+                },
+            },
+        })
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.WORKER_SERIALIZATION_ERROR.value,
+        }
+        assert 'nope' in err['message']
+        mock_task.assert_not_called()
+
+    def test_workflow_ctx_err_slot_gives_a_stored_data_entry(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
+            return TaskResult(ok='done')
+
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = str
+        mock_task.return_value = TaskResult(ok='done')
+        mock_task._original_fn = _task_with_ctx
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+        mock_app.tasks.get = MagicMock(return_value=mock_task)
+        _run_entry_defaults['kwargs_json'] = json.dumps({
+            '__h_workflow_ctx__': {
+                'workflow_id': 'wf-1',
+                'task_index': 0,
+                'task_name': 'my_task',
+                'results_by_id': {
+                    'node_a': {
+                        '__h_task_result__': True,
+                        'ok': None,
+                        'err': {'nope': 1},
+                    },
+                },
+                'task_name_by_id': {'node_a': 'upstream_task'},
+                'summaries_by_id': {},
+            },
+        })
+
+        with _apply_patches(patches):
+            ok, _, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is None
+        injected = mock_task.call_args.kwargs['workflow_ctx']
+        entry = injected._results_by_id['node_a'].unwrap_err()
+        assert entry.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'nope' in entry.message
 
 
 # ===================================================================

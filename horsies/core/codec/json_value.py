@@ -7,6 +7,7 @@ Defines:
 
 - `JsonValue` — PEP 695 alias; the sanctioned "untyped boundary" type.
 - `StrictJsonError` — raised on any strict-JSON violation.
+- `MAX_JSON_DEPTH` — the deepest nesting that the boundary accepts.
 - `_validate_json_native(value)` — producer-side walker that rejects
   non-JSON-native Python values (bytes, Decimal, tuple, set, non-finite
   floats, non-string dict keys, ...) before they reach
@@ -16,6 +17,8 @@ Defines:
   `NaN`, `Infinity`, `-Infinity` (Python lenient extensions, not RFC 8259).
 - `_parse_finite_float(literal)` — `parse_float` hook for the same sites;
   rejects a numeric literal outside the finite binary64 range.
+- `_reject_deep_nesting(text, parsed)` — post-parse check for the same sites;
+  rejects a document nested deeper than `MAX_JSON_DEPTH`.
 - `_reject_lone_surrogate(text, parsed)` — post-parse check for the same
   sites; rejects a string that UTF-8 cannot encode.
 - `escape_lone_surrogates(text)` — makes text that the library did not write
@@ -25,15 +28,19 @@ Defines:
 from __future__ import annotations
 
 import math
-from typing import NoReturn, cast
+from itertools import chain
+from typing import Final, NoReturn, cast
 
 
 __all__ = [
+    'JSON_TEXT_TOO_DEEP',
     'JsonValue',
+    'MAX_JSON_DEPTH',
     'StrictJsonError',
     '_validate_json_native',
     '_reject_nonstandard_json_constant',
     '_parse_finite_float',
+    '_reject_deep_nesting',
     '_reject_lone_surrogate',
     'escape_lone_surrogates',
 ]
@@ -50,16 +57,36 @@ type JsonValue = (
 )
 
 
+type _JsonContainer = list[JsonValue] | dict[str, JsonValue]
+
+
+MAX_JSON_DEPTH: Final = 300
+"""The deepest nesting of lists and dicts in a JSON value or a JSON text.
+
+The recursive walkers of the codec run on these values, and `json.loads` has no
+depth parameter, so this bound fails closed before Python's recursion limit.
+
+- It is above the limit of a pydantic dump, which refuses at 255 levels. The
+  engine puts a dumped value inside envelopes, and these add less than 16
+  levels. So each value that `encode_value` accepts stays inside the bound.
+- It is far below the recursion limit of 1000, which also counts the frames of
+  the caller.
+"""
+
+JSON_TEXT_TOO_DEEP: Final = f'JSON text is nested deeper than {MAX_JSON_DEPTH} levels'
+"""The refusal for a parsed text. It holds no input value."""
+
+
 class StrictJsonError(Exception):
     """Raised when a value fails strict JSON-native validation.
 
     Producer-side via `_validate_json_native`; decode-side via
-    `_reject_nonstandard_json_constant`, `_parse_finite_float` and
-    `_reject_lone_surrogate`.
+    `_reject_nonstandard_json_constant`, `_parse_finite_float`,
+    `_reject_deep_nesting` and `_reject_lone_surrogate`.
     """
 
 
-def _validate_json_native(value: object) -> None:
+def _validate_json_native(value: object, depth: int = 0) -> None:
     """Reject anything that isn't a JSON-native Python value, recursively.
 
     Producer-side fence. Required because `TypeAdapter(JsonValue)` silently
@@ -67,13 +94,16 @@ def _validate_json_native(value: object) -> None:
     Decode-side hardening lives separately in
     `_reject_nonstandard_json_constant`.
 
+    A value that holds itself reaches the depth bound, so the walk always ends.
+
     Args:
         value: Any Python value; walked recursively for list / dict.
+        depth: The number of lists and dicts around `value`.
 
     Raises:
         StrictJsonError: on bytes, Decimal, tuple, set, non-finite float,
             non-string dict key, or any other non-JSON-native value at any
-            depth.
+            depth, and on a value nested deeper than `MAX_JSON_DEPTH`.
     """
     # bool BEFORE int — `True isinstance int` is True; check the narrower type first.
     if isinstance(value, bool) or value is None or isinstance(value, (int, str)):
@@ -83,11 +113,17 @@ def _validate_json_native(value: object) -> None:
         if math.isnan(value) or math.isinf(value):
             raise StrictJsonError(f'non-RFC-8259 float: {value!r}')
         return
+    if depth >= MAX_JSON_DEPTH and isinstance(value, (list, dict)):
+        raise StrictJsonError(
+            f'JSON value is nested deeper than {MAX_JSON_DEPTH} levels, '
+            'or it holds itself',
+        )
+    item_depth = depth + 1
     if isinstance(value, list):
         # Tuples are NOT `list` and fall through to the final raise — JSON has
         # no tuple shape; TypeAdapter would coerce silently.
         for item in cast(list[object], value):
-            _validate_json_native(item)
+            _validate_json_native(item, item_depth)
         return
     if isinstance(value, dict):
         for key, item in cast(dict[object, object], value).items():
@@ -95,7 +131,7 @@ def _validate_json_native(value: object) -> None:
                 raise StrictJsonError(
                     f'dict key must be str, got {type(key).__name__}',
                 )
-            _validate_json_native(item)
+            _validate_json_native(item, item_depth)
         return
     raise StrictJsonError(f'non-JSON-native value: {type(value).__name__}')
 
@@ -151,6 +187,52 @@ def _encodes_as_utf8(text: str) -> bool:
     except UnicodeEncodeError:
         return False
     return True
+
+
+def _next_level(level: list[_JsonContainer]) -> list[_JsonContainer]:
+    """Return the lists and dicts directly inside the containers of `level`."""
+    children = chain.from_iterable(
+        [
+            container if isinstance(container, list) else container.values()
+            for container in level
+        ],
+    )
+    return [child for child in children if isinstance(child, (list, dict))]
+
+
+def _reject_deep_nesting(text: str, parsed: JsonValue) -> None:
+    """Reject a parsed document nested deeper than `MAX_JSON_DEPTH`.
+
+    `json.loads` has no depth parameter, and it parses deeper than the
+    recursive walkers of the codec can go. A caller that has `parsed` must be
+    able to walk it, so the bound is checked here and not in each walker.
+
+    Nesting cannot exceed the count of opening brackets. A bracket in a string
+    adds to the count, which can only send the document to the walk. So a text
+    with few brackets skips the walk.
+
+    The walk is iterative, so it does not need the stack that a deep document
+    would use.
+
+    Args:
+        text: The JSON text that `parsed` came from.
+        parsed: The parsed document. It is finite, so the walk ends.
+
+    Raises:
+        StrictJsonError: when the document is nested too deep. The text names
+            no input value.
+    """
+    if text.count('[') + text.count('{') <= MAX_JSON_DEPTH:
+        return
+    level: list[_JsonContainer] = (
+        [parsed] if isinstance(parsed, (list, dict)) else []
+    )
+    for _ in range(MAX_JSON_DEPTH):
+        if not level:
+            return
+        level = _next_level(level)
+    if level:
+        raise StrictJsonError(JSON_TEXT_TOO_DEEP)
 
 
 def _reject_lone_surrogate(text: str, parsed: JsonValue) -> None:
