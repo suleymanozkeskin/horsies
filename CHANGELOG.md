@@ -692,6 +692,11 @@ and there is no migration contract between pre-1.0 versions.
   not validate. The log names the refusal. Before, the
   `ValueValidationError` of the decode rolled back the recovery of that row
   on each pass, and the node did not progress.
+- **The `VALIDATION_FAILED` row of the workflow start codes on the errors
+  page states that a `SerializationError` in the start transaction
+  propagates.** The row said that a serialization error refused the start,
+  which is not true since #421. It now has the same text as the Workflow API
+  page and the skill.
 - **The web UI no longer shows a Retry action that the server cannot run.**
   The server removed the manual task retry route, so the Retry button on a
   task detail panel could only fail. The button, its confirm text, the
