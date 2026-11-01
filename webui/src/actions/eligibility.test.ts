@@ -1,20 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  EXPIRY_PASSED_REASON,
   taskCancelAvailability,
-  taskRetryAvailability,
   workflowActionAvailability,
 } from '@/actions/eligibility';
 
-const NOW = Date.parse('2026-07-26T12:00:00Z');
-const PAST = '2026-07-26T11:59:59Z';
-const FUTURE = '2026-07-26T12:00:01Z';
-
-const task = (status: string, overrides: Partial<{ isWorkflowTask: boolean; goodUntil: string | null }> = {}) => ({
+const task = (status: string, overrides: Partial<{ isWorkflowTask: boolean }> = {}) => ({
   isWorkflowTask: overrides.isWorkflowTask ?? false,
   status,
-  goodUntil: overrides.goodUntil ?? null,
 });
 
 const TASK_STATUSES = [
@@ -63,74 +56,6 @@ describe('task cancel', () => {
   });
 });
 
-describe('task retry', () => {
-  const RETRYABLE = new Set(['FAILED', 'EXPIRED', 'CANCELLED']);
-
-  it.each(TASK_STATUSES)(
-    'is shown only for a settled-without-success status %s',
-    status => {
-      const availability = taskRetryAvailability(task(status), NOW);
-      expect(availability.shown).toBe(RETRYABLE.has(status));
-    }
-  );
-
-  it.each(['FAILED', 'EXPIRED', 'CANCELLED'])(
-    'is enabled when good_until is null (%s)',
-    status => {
-      expect(taskRetryAvailability(task(status), NOW)).toEqual({
-        shown: true,
-        enabled: true,
-      });
-    }
-  );
-
-  it.each(['FAILED', 'EXPIRED', 'CANCELLED'])(
-    'is enabled when good_until is in the future (%s)',
-    status => {
-      expect(
-        taskRetryAvailability(task(status, { goodUntil: FUTURE }), NOW)
-      ).toEqual({ shown: true, enabled: true });
-    }
-  );
-
-  it.each(['FAILED', 'EXPIRED', 'CANCELLED'])(
-    'is shown but disabled once good_until has passed (%s)',
-    status => {
-      expect(
-        taskRetryAvailability(task(status, { goodUntil: PAST }), NOW)
-      ).toEqual({
-        shown: true,
-        enabled: false,
-        disabledReason: EXPIRY_PASSED_REASON,
-      });
-    }
-  );
-
-  it('treats good_until exactly at now as passed, matching the server CAS', () => {
-    const availability = taskRetryAvailability(
-      task('FAILED', { goodUntil: new Date(NOW).toISOString() }),
-      NOW
-    );
-    expect(availability).toEqual({
-      shown: true,
-      enabled: false,
-      disabledReason: EXPIRY_PASSED_REASON,
-    });
-  });
-
-  it('stays enabled on an unparseable good_until so the server decides', () => {
-    expect(
-      taskRetryAvailability(task('FAILED', { goodUntil: 'not-a-date' }), NOW)
-    ).toEqual({ shown: true, enabled: true });
-  });
-
-  it.each(TASK_STATUSES)('is hidden for a workflow-bound row (%s)', status => {
-    expect(
-      taskRetryAvailability(task(status, { isWorkflowTask: true }), NOW)
-    ).toEqual({ shown: false });
-  });
-});
-
 describe('workflow actions', () => {
   it.each(RUN_STATUSES)('pause is shown only while RUNNING (%s)', status => {
     const availability = workflowActionAvailability('workflow-pause', status);
@@ -173,9 +98,15 @@ describe('workflow actions', () => {
       expect(workflowActionAvailability('task-cancel', status)).toEqual({
         shown: false,
       });
-      expect(workflowActionAvailability('task-retry', status)).toEqual({
-        shown: false,
-      });
     }
   );
+});
+
+describe('retired task retry', () => {
+  it('is not an action kind', () => {
+    const call = () =>
+      // @ts-expect-error task-retry was removed from ActionKind
+      workflowActionAvailability('task-retry', 'RUNNING');
+    expect(call).toBeTypeOf('function');
+  });
 });

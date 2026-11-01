@@ -552,6 +552,12 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The web UI no longer shows a Retry action that the server cannot run.**
+  The server removed the manual task retry route, so the Retry button on a
+  task detail panel could only fail. The button, its confirm text, the
+  `TASK_NOT_RETRYABLE` and `TASK_EXPIRY_PASSED` conflict codes in the UI
+  types, and the `--enable-actions` help text for retry are removed. To run
+  a terminal task again, use the rerun API.
 - **A task cancel accepts every form of a task id that Python reads as a
   UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
   cancel now uses the canonical id text, and the result carries it.
