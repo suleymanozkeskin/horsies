@@ -425,6 +425,26 @@ and there is no migration contract between pre-1.0 versions.
   `TaskResult(ok=None)`, a success, and an empty error returned the
   `OutcomeCode` of the status. A NULL error still gives the `OutcomeCode` of
   the status: a cancel does not write the error.
+- **Breaking: `encode_value` refuses a lone surrogate in a string or in a
+  dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
+  `dumps_json`. The text names the kwarg and holds no input value. A dict
+  key is the larger change. Before, `dump_python(mode='json')` wrote U+FFFD
+  in place of the surrogate of a key with a declared type: the send and the
+  task succeeded with a changed key, and two keys could become one. For a
+  key without a declared type, a raw `UnicodeEncodeError` left `encode_value`.
+  What each caller gets now:
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A child node in
+    `build_with()` fails the `SubWorkflowNode` with
+    `WORKFLOW_ENQUEUE_FAILED`. Before, for a string, `spec.start()` returned
+    `VALIDATION_FAILED`, and a child start failed the `SubWorkflowNode` with
+    `WORKER_SERIALIZATION_ERROR`.
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `StrictJsonError` as `exception`.
+  - `prepare_schedules` refuses the schedule at boot with
+    `CONFIG_INVALID_SCHEDULE`.
+  - A task that returns such a value ends with
+    `WORKER_SERIALIZATION_ERROR`.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -705,6 +725,11 @@ and there is no migration contract between pre-1.0 versions.
   not validate. The log names the refusal. Before, the
   `ValueValidationError` of the decode rolled back the recovery of that row
   on each pass, and the node did not progress.
+- **A lone surrogate in the text of a node failure no longer loses the
+  text.** The text of an exception from `build_with()` can hold one, for
+  example a file name. The node now fails with the text, with the surrogate
+  written as a `\udXXX` escape. Before, the node stored the fixed text
+  `secondary serialization failure`.
 - **The `VALIDATION_FAILED` row of the workflow start codes on the errors
   page states that a `SerializationError` in the start transaction
   propagates.** The row said that a serialization error refused the start,

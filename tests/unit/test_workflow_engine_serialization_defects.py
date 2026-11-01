@@ -16,18 +16,35 @@ from __future__ import annotations
 
 # pyright: reportPrivateUsage=false
 
+import json
+import uuid
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import SecretStr
 
+from horsies.core.app import Horsies
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.codec.json_value import StrictJsonError
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.models.workflow import SubWorkflowNode
+from horsies.core.errors import ErrorCode, WorkflowValidationError
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.models.workflow import (
+    SubWorkflowNode,
+    TaskNode,
+    WorkflowDefinition,
+    WorkflowSpec,
+)
+from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.engine import (
     _handle_workflow_task_failure,
@@ -42,10 +59,12 @@ from horsies.core.workflows.sql import (
     GET_CHILD_WORKFLOW_INFO_SQL,
     GET_FIRST_FAILED_REQUIRED_TASK_SQL,
     GET_FIRST_FAILED_TASK_RESULT_SQL,
+    GET_WORKFLOW_ON_ERROR_SQL,
     INSERT_CHILD_WORKFLOW_SQL,
     INSERT_WORKFLOW_TASKS_BULK_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     PAUSE_WORKFLOW_ON_ERROR_SQL,
+    SET_WORKFLOW_ERROR_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
 )
 
@@ -62,6 +81,8 @@ CHILD_OUTPUT_RESULT = '{"__h_task_result__":true,"ok":7,"err":null}'
 STORED_TASK_ERROR = serialize_error_payload(
     TaskResult(err=TaskError(error_code='FIRST_ERROR', message='first')),
 )
+LONE_SURROGATE_TEXT = f'name{chr(0xdc80)}'
+DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
 
 
 class _RecordingSession:
@@ -408,3 +429,197 @@ class TestChildStartKwargsEncode:
         assert INSERT_CHILD_WORKFLOW_SQL in recorder.executed
         assert INSERT_WORKFLOW_TASKS_BULK_SQL in recorder.executed
         fail_mock.assert_not_awaited()
+
+
+def _real_app() -> Horsies:
+    return Horsies(AppConfig(
+        broker=PostgresConfig(database_url=SecretStr(DATABASE_URL)),
+    ))
+
+
+def _register_note_task(app: Horsies) -> TaskFunction[..., int]:
+    @app.task('surrogate.note')
+    def note(*, text: str, labels: dict[str, int]) -> TaskResult[int, TaskError]:
+        return TaskResult(ok=len(text) + len(labels))
+    return note
+
+
+def _key(label: str) -> str:
+    return f'tests.unit.surrogate.{label}.{uuid.uuid4().hex}'
+
+
+class TestSpecConstructionRefusesALoneSurrogate:
+    """Spec construction encodes every kwarg, so it refuses a lone surrogate.
+
+    The value does not reach the workflow start transaction or a child start,
+    where a failure to serialize is a defect.
+    """
+
+    @pytest.mark.parametrize(
+        ('kwargs', 'subject'),
+        [
+            ({'text': LONE_SURROGATE_TEXT, 'labels': {}}, 'a string'),
+            ({'text': 'ok', 'labels': {LONE_SURROGATE_TEXT: 1}}, 'a dict key'),
+        ],
+        ids=['string', 'key'],
+    )
+    def test_a_task_node_kwarg_is_hrs_031(
+        self,
+        kwargs: dict[str, Any],
+        subject: str,
+    ) -> None:
+        app = _real_app()
+        note = _register_note_task(app)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='surrogate-task-node',
+                tasks=[TaskNode(fn=note, kwargs=kwargs)],
+                definition_key=_key('task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert raised.value.code.value == 'HRS-031'
+        assert (
+            f'{subject} holds a lone surrogate' in ' '.join(raised.value.notes)
+        )
+
+    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'surrogate-child'
+            definition_key = _key('child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, text: str = '', **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='surrogate-sub-node',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow,
+                    kwargs={'text': LONE_SURROGATE_TEXT},
+                )],
+                definition_key=_key('sub_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+
+
+def _surrogate_child_workflow(
+    note: TaskFunction[..., int],
+    kwargs: dict[str, Any],
+) -> type[WorkflowDefinition[int]]:
+    class ChildWorkflow(WorkflowDefinition[int]):
+        name = 'surrogate-child-build'
+        definition_key = _key('child_build')
+
+        @classmethod
+        def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+            _ = app, args, params
+            node = TaskNode(fn=note, kwargs=kwargs)
+            return WorkflowSpec(name=cls.name, tasks=[node], output=node)
+
+    return ChildWorkflow
+
+
+class TestChildStartOfALoneSurrogate:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'kwargs',
+        [
+            {'text': LONE_SURROGATE_TEXT, 'labels': {}},
+            {'text': 'ok', 'labels': {LONE_SURROGATE_TEXT: 1}},
+        ],
+        ids=['string', 'key'],
+    )
+    async def test_a_child_kwarg_fails_the_node_through_the_build_with_catch(
+        self,
+        kwargs: dict[str, Any],
+    ) -> None:
+        """Spec construction runs in `build_with()`, so the refusal is a node
+        failure with WORKFLOW_ENQUEUE_FAILED, not a defect that raises."""
+        app = _real_app()
+        note = _register_note_task(app)
+        child_workflow = _surrogate_child_workflow(note, kwargs)
+        recorder = _RecordingSession(
+            {ENQUEUE_SUBWORKFLOW_TASK_SQL: _parent_node_row()},
+        )
+        broker = MagicMock()
+        broker.app = app
+        fail_mock = AsyncMock()
+
+        with patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
+            return_value=child_workflow,
+        ), patch(
+            'horsies.core.workflows.engine._fail_enqueued_task', new=fail_mock,
+        ):
+            child_workflow_id = await enqueue_subworkflow_task(
+                recorder.session, broker, 'parent-wf', 0, {},
+                parent_depth=0, root_workflow_id='parent-wf',
+            )
+
+        assert child_workflow_id is None
+        fail_mock.assert_awaited_once()
+        call = fail_mock.await_args
+        assert call is not None
+        assert call.args[3].startswith('Subworkflow build failed: ')
+        assert (
+            call.kwargs['error_code']
+            is OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED
+        )
+        assert INSERT_CHILD_WORKFLOW_SQL not in recorder.executed
+
+    @pytest.mark.asyncio
+    async def test_an_exception_text_from_build_with_fails_the_node(self) -> None:
+        """The text comes from user code, so it can hold a lone surrogate, for
+        example a file name. The failure handler encodes the error and raises
+        for a value that does not encode, so the text is escaped first:
+        without that, each recovery pass raises and the node never fails."""
+        recorder = _RecordingSession({
+            ENQUEUE_SUBWORKFLOW_TASK_SQL: _parent_node_row(),
+            GET_WORKFLOW_ON_ERROR_SQL: SimpleNamespace(on_error='fail'),
+            GET_FIRST_FAILED_TASK_RESULT_SQL: None,
+        })
+        workflow_def = MagicMock()
+        workflow_def.name = 'ChildWorkflow'
+        workflow_def.build_with.side_effect = ValueError(
+            f'cannot open {LONE_SURROGATE_TEXT}',
+        )
+        broker = MagicMock()
+        mark_failed = AsyncMock(return_value=True)
+
+        with patch(
+            'horsies.core.workflows.engine._load_workflow_def_from_key',
+            return_value=workflow_def,
+        ), patch(
+            'horsies.core.workflows.engine._mark_workflow_task_failed_if_nonterminal',
+            new=mark_failed,
+        ), patch(
+            'horsies.core.workflows.engine._process_dependents', new=AsyncMock(),
+        ), patch(
+            'horsies.core.workflows.engine.check_workflow_completion',
+            new=AsyncMock(),
+        ):
+            child_workflow_id = await enqueue_subworkflow_task(
+                recorder.session, broker, 'parent-wf', 0, {},
+                parent_depth=0, root_workflow_id='parent-wf',
+            )
+
+        assert child_workflow_id is None
+        mark_call = mark_failed.await_args
+        assert mark_call is not None
+        node_error = json.loads(mark_call.args[3])['err']
+        assert 'cannot open name\\udc80' in node_error['message']
+        workflow_errors = [
+            call.args[1]['error']
+            for call in recorder.session.execute.await_args_list
+            if call.args[0] is SET_WORKFLOW_ERROR_SQL
+        ]
+        assert len(workflow_errors) == 1
+        assert 'cannot open name\\udc80' in json.loads(workflow_errors[0])['message']

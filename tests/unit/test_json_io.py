@@ -18,7 +18,32 @@ from horsies.core.codec.json_io import (
     loads_json,
     loads_json_bytes,
 )
+from horsies.core.codec.json_value import escape_lone_surrogates
 from horsies.core.types.result import is_err
+
+
+@pytest.mark.unit
+class TestEscapeLoneSurrogates:
+    """Free text in a library-built error must encode."""
+
+    def test_a_lone_surrogate_becomes_an_escape_that_encodes(self) -> None:
+        escaped = escape_lone_surrogates(f'/data/a{chr(0xdc80)}b')
+
+        assert escaped == '/data/a\\udc80b'
+        assert not is_err(dumps_json(escaped))
+
+    def test_a_python_surrogate_pair_becomes_two_escapes(self) -> None:
+        pair = chr(0xd83d) + chr(0xde00)
+
+        assert escape_lone_surrogates(pair) == '\\ud83d\\ude00'
+
+    @pytest.mark.parametrize(
+        'text',
+        ['', 'plain', 'caf\u00e9', 'a\ufffdb', chr(0x1f600)],
+        ids=['empty', 'ascii', 'non-ascii', 'replacement-char', 'astral'],
+    )
+    def test_text_that_encodes_does_not_change(self, text: str) -> None:
+        assert escape_lone_surrogates(text) == text
 
 
 @pytest.mark.unit

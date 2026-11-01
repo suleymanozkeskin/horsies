@@ -583,6 +583,7 @@ Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above 
 - Objects defined in `__main__` or inside functions (`<locals>` in qualname)
 - `dict` keys that collide after `str()` coercion
 - Non-finite floats (`nan`, `inf`)
+- A lone surrogate in a string or a dict key, for example a file name that `os.listdir()` decoded with `surrogateescape`
 
 ### Return type serialization
 

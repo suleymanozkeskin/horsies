@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any, TypeVar, assert_never, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     encode_kwargs,
@@ -446,6 +446,11 @@ async def _fail_enqueued_task(
 ) -> bool:
     """Mark an ENQUEUED workflow task as FAILED when pre-enqueue parsing fails.
 
+    ``message`` can hold the text of an exception from user code, for
+    example from ``build_with()``. A lone surrogate in it is escaped, so the
+    failure stays a node failure: the failure handler encodes this error and
+    raises for a value that does not encode.
+
     Raises:
         Exception: errors propagate to the public engine entry points,
             whose callers own the typed recovery seams.
@@ -467,7 +472,7 @@ async def _fail_enqueued_task(
     tr: TaskResult[None, TaskError] = TaskResult(
         err=TaskError(
             error_code=error_code,
-            message=message,
+            message=escape_lone_surrogates(message),
             data={'workflow_id': workflow_id, 'task_index': task_index},
         ),
     )

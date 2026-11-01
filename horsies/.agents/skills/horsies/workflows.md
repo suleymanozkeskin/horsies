@@ -639,7 +639,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
 | HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
-| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
+| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization, also a lone surrogate in a string or a dict key |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
 | HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |
