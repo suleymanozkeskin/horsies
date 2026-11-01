@@ -47,6 +47,7 @@ from horsies.core.models.workflow import (
 from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.engine import (
+    _decode_stored_task_result,
     _handle_workflow_task_failure,
     _ser_or_raise,
     enqueue_subworkflow_task,
@@ -99,6 +100,31 @@ class _RefusedOk(BaseModel):
     @classmethod
     def refuse(cls, value: int) -> int:
         raise RuntimeError(f'cannot check {LONE_SURROGATE_TEXT}: {value}')
+
+
+class _EchoingModel(BaseModel):
+    """A validator that writes the refused value in its error text."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}')
+
+
+class _ConstantSurrogateModel(BaseModel):
+    """A validator whose own text holds a lone surrogate.
+
+    Stored JSON cannot hold one, so a decode reaches the case only this way.
+    """
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}{LONE_SURROGATE_TEXT}')
 
 
 class _RecordingSession:
@@ -578,6 +604,49 @@ def _surrogate_child_workflow(
             return WorkflowSpec(name=cls.name, tasks=[node], output=node)
 
     return ChildWorkflow
+
+
+class TestValidatorTextWithALoneSurrogate:
+    def test_a_node_kwarg_is_hrs_031_at_spec_construction(self) -> None:
+        """Before, the raw `UnicodeEncodeError` left `app.workflow()`."""
+        app = _real_app()
+
+        @app.task('surrogate.echoing')
+        def echoing(*, x: _EchoingModel) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x.name))
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='surrogate-validator',
+                tasks=[TaskNode(fn=echoing, kwargs={'x': {'name': LONE_SURROGATE_TEXT}})],
+                definition_key=_key('validator'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'a validation error holds a lone surrogate' in ' '.join(
+            raised.value.notes,
+        )
+
+    def test_a_stored_result_decode_folds_into_a_deserialization_error(self) -> None:
+        """Before, the raw `UnicodeEncodeError` left the engine's decode, so
+        the promotion raised on each finalize retry and recovery pass."""
+        app = _real_app()
+
+        @app.task('surrogate.constant')
+        def constant() -> TaskResult[_ConstantSurrogateModel, TaskError]:
+            return TaskResult(ok=_ConstantSurrogateModel.model_construct(name='n'))
+
+        _ = constant
+        stored = '{"__h_task_result__":true,"ok":{"name":"plain"},"err":null}'
+
+        decoded = _decode_stored_task_result(
+            stored, app=app, task_name='surrogate.constant', context={},
+        )
+
+        error = decoded.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'a validation error holds a lone surrogate' in (error.message or '')
+        assert error.data == {'stage': 'decode'}
 
 
 class TestChildStartOfALoneSurrogate:

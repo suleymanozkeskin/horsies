@@ -215,8 +215,8 @@ def encode_value(
 
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
-            a lone surrogate in a string or a dict key, or reserved-key
-            smuggling.
+            a lone surrogate in a string, a dict key or the text of a
+            validator, or reserved-key smuggling.
         ValueValidationError: when `value` doesn't satisfy `expected_type`,
             or pydantic cannot serialize the validated value. The text holds
             no input value.
@@ -268,7 +268,8 @@ def decode_value(
         The decoded Python value.
 
     Raises:
-        StrictJsonError: on reserved-key collision in user-positioned data.
+        StrictJsonError: on reserved-key collision in user-positioned data,
+            or a lone surrogate in the text of a validator.
         ValueValidationError: when `json_value` doesn't satisfy
             `expected_type`. The text holds no input value.
     """
@@ -287,13 +288,27 @@ def _validate(
 ) -> object:
     """`adapter.validate_python(value)`; a refusal raises `ValueValidationError`.
 
-    The error is raised outside the `except` block, so it has no
+    A validator can write a lone surrogate in its error text, for example
+    when it echoes the value. Pydantic then cannot build the error text and
+    raises `UnicodeEncodeError`: `validate_python` does for the text of a
+    `ValueError` or an `AssertionError`, and `ValidationError.errors()` does
+    for the context of a `PydanticCustomError`. A validator cannot raise that
+    error itself, because pydantic reads each `ValueError` as a refusal. So
+    the arm catches only this case, and it raises `StrictJsonError`.
+
+    The error is raised outside the `except` blocks, so it has no
     `__context__` that holds the pydantic error and its input.
     """
+    failure: StrictJsonError | ValueValidationError
     try:
-        return adapter.validate_python(value)
-    except ValidationError as error:
-        failure = ValueValidationError(validation_summary(error, location))
+        try:
+            return adapter.validate_python(value)
+        except ValidationError as error:
+            failure = ValueValidationError(validation_summary(error, location))
+    except UnicodeEncodeError:
+        failure = StrictJsonError(
+            _lone_surrogate_text('a validation error', location),
+        )
     raise failure
 
 
@@ -827,7 +842,7 @@ def _dataclass_hints(dc: type) -> dict[str, object]:
 
 
 def _lone_surrogate_text(
-    subject: Literal['a string', 'a dict key'],
+    subject: Literal['a string', 'a dict key', 'a validation error'],
     location: tuple[str, ...],
 ) -> str:
     """The refusal text for a lone surrogate. It holds no input value."""

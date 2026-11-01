@@ -11,6 +11,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import BaseModel, field_validator
 
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.brokers.result_types import (
@@ -62,6 +63,17 @@ from horsies.core.utils.loop_runner import LoopRunnerError
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+class _EchoingModel(BaseModel):
+    """A validator that writes the refused value in its error text."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}')
 
 
 def _make_app(
@@ -1426,6 +1438,30 @@ class TestCreateTaskWrapperSend:
         assert result.err_value.message == (
             f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
             'lone surrogate, which UTF-8 cannot encode'
+        )
+        app.get_broker.assert_not_called()
+
+    def test_send_validator_echoing_a_lone_surrogate_returns_validation_error(
+        self,
+    ) -> None:
+        """Pydantic cannot build the error text; the send stays in its catalog."""
+        def good_fn(*, x: _EchoingModel) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x.name))
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        # The validator refuses the value, so no `_EchoingModel` can hold it.
+        refused_value: Any = {'name': f'text{chr(0xd800)}'}
+
+        result = wrapper.send(x=refused_value)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert result.err_value.message == (
+            'Failed to encode kwargs for test.good_fn: x: a validation error '
+            'holds a lone surrogate, which UTF-8 cannot encode'
         )
         app.get_broker.assert_not_called()
 

@@ -449,6 +449,24 @@ there is no migration contract between pre-1.0 versions.
     `CONFIG_INVALID_SCHEDULE`.
   - A task that returns such a value ends with
     `WORKER_SERIALIZATION_ERROR`.
+- **Breaking: a lone surrogate in the error text of a validator raises
+  `StrictJsonError` from `encode_value` and `decode_value`.** A validator
+  that writes the refused value in its text, such as `raise
+  ValueError(f'bad name {value}')`, is the usual cause. Pydantic cannot
+  build such a text. The new text names the kwarg and holds no input value.
+  Before, a raw `UnicodeEncodeError` left both functions. What each caller
+  gets now:
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `StrictJsonError` as `exception`. Before, it raised.
+  - `prepare_schedules` refuses the schedule with `CONFIG_INVALID_SCHEDULE`.
+    Before, it raised.
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+    raised.
+  - A task result ends with `WORKER_SERIALIZATION_ERROR`, not
+    `TASK_EXCEPTION`, and so does a decode of the kwargs of a task.
+  - A decode of a stored result gives `RESULT_DESERIALIZATION_ERROR`. Before,
+    the raw error left the read.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

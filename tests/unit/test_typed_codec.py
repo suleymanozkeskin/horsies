@@ -31,7 +31,8 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import (
@@ -798,6 +799,81 @@ class TestEncodeValueRefusesALoneSurrogate:
         assert 'keep-out' not in str(raised.value)
         assert raised.value.__context__ is None
         assert raised.value.__cause__ is None
+
+
+def _echo_in_value_error(value: str) -> str:
+    raise ValueError(f'bad name {value}')
+
+
+def _echo_in_assertion_error(value: str) -> str:
+    raise AssertionError(f'bad name {value}')
+
+
+def _echo_in_custom_error_context(value: str) -> str:
+    raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
+def _refuse_with_constant_lone_surrogate(value: str) -> str:
+    raise ValueError(f'bad name {value}{chr(0xd800)}')
+
+
+_VALIDATORS_THAT_ECHO = [
+    _echo_in_value_error,
+    _echo_in_assertion_error,
+    _echo_in_custom_error_context,
+]
+_VALIDATOR_IDS = ['value-error', 'assertion-error', 'custom-error-context']
+
+
+class TestValidatorTextWithALoneSurrogate:
+    """Pydantic cannot build the error text, and raises `UnicodeEncodeError`."""
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_encode_value_refuses_it(self, validator: Any) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT,
+                Annotated[str, AfterValidator(validator)],
+                location=('note',),
+            )
+
+        assert str(raised.value) == (
+            'note: a validation error holds a lone surrogate, which UTF-8 '
+            'cannot encode'
+        )
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_the_refusal_holds_no_input_value(self, validator: Any) -> None:
+        """The `UnicodeEncodeError` holds the text, so it is not chained."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT, Annotated[str, AfterValidator(validator)],
+            )
+
+        assert 'keep-out' not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+    def test_decode_value_refuses_a_lone_surrogate_in_the_validator_text(self) -> None:
+        """A stored value cannot hold a lone surrogate: `loads_json` refuses
+        it. The validator text can, because the validator writes that text."""
+        with pytest.raises(StrictJsonError) as raised:
+            decode_value(
+                'plain',
+                Annotated[str, AfterValidator(_refuse_with_constant_lone_surrogate)],
+            )
+
+        assert str(raised.value) == (
+            'a validation error holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        assert raised.value.__context__ is None
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_a_validator_refusal_without_a_surrogate_is_unchanged(
+        self, validator: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError, match='bad name plain'):
+            encode_value('plain', Annotated[str, AfterValidator(validator)])
 
 
 class TestEncodeValueKeepsValidText:
