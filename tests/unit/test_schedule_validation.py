@@ -14,6 +14,7 @@ from pydantic import BaseModel, field_validator
 
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -208,6 +209,52 @@ class TestPrepareSchedules:
                 assert 'not encodable' in errors[0].message
                 assert (
                     'x: serialization failed: Circular reference detected'
+                    in ' '.join(errors[0].notes)
+                )
+            case Ok(encoded_kwargs):
+                raise AssertionError(f'expected a refusal, got {encoded_kwargs!r}')
+
+    def test_a_value_past_the_depth_bound_is_refused_at_boot(self) -> None:
+        """Before, `RecursionError` left `prepare_schedules`."""
+        def fn(x: JsonValue) -> str:
+            return str(x)
+
+        value: list[object] = []
+        value.append(value)
+        config = ScheduleConfig(schedules=[_schedule(kwargs={'x': value})])
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        match result:
+            case Err(errors):
+                assert len(errors) == 1
+                assert isinstance(errors[0], ConfigurationError)
+                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert 'not encodable' in errors[0].message
+                assert 'nested deeper than' in ' '.join(errors[0].notes)
+            case Ok(encoded_kwargs):
+                raise AssertionError(f'expected a refusal, got {encoded_kwargs!r}')
+
+    def test_a_value_that_is_too_deep_is_refused_at_boot(self) -> None:
+        def fn(x: _Linked) -> str:
+            return str(x)
+
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+        config = ScheduleConfig(schedules=[_schedule(kwargs={'x': node})])
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        match result:
+            case Err(errors):
+                assert len(errors) == 1
+                assert isinstance(errors[0], ConfigurationError)
+                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert (
+                    'Circular reference detected (depth exceeded)'
                     in ' '.join(errors[0].notes)
                 )
             case Ok(encoded_kwargs):

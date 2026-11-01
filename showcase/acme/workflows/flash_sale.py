@@ -4,15 +4,16 @@
     publish_cdn     ---\\
                         >-- warm_cache_edge      (join='any')
     publish_origin  ---/
-    prewarm_search  (optional, excluded from failure accounting)
+    prewarm_search  (in no success case)
 
 Two mechanisms are on show.
 
 `SuccessPolicy` decides what "succeeded" means. Two `SuccessCase`s, one per
 publish target: the sale is COMPLETED when either lands, even though the other
-failed. `prewarm_search` is listed as `optional`, so its failure never counts —
-it fails about half the time and nothing happens. When *both* publishes fail,
-no case is satisfied and the workflow fails with
+failed. No case requires `prewarm_search`, so its failure changes nothing — it
+fails about half the time and the result stays the same. It is listed as
+`optional` to record that intent; the field has no runtime effect. When *both*
+publishes fail, no case is satisfied and the workflow fails with
 `WORKFLOW_SUCCESS_CASE_NOT_MET`, which is a different and more informative
 outcome than "a task failed".
 

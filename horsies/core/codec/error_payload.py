@@ -58,9 +58,8 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     err slot is encoded against the fixed ``TaskError`` schema.
 
     Live ``BaseException`` on ``TaskError.exception`` is flattened to
-    ``FlattenedException`` by ``encode_task_result`` itself, so callers can
-    hand us ``TaskResult(err=TaskError(exception=<live exc>))`` without
-    pre-flattening.
+    ``FlattenedException`` by ``encode_task_result`` itself, so a caller can
+    hand us a ``TaskError`` that holds a live exception without pre-flattening.
 
     Returns the JSON string on success, or a hardcoded fallback if
     serialization fails (should never happen for library-constructed

@@ -30,7 +30,7 @@ from pydantic import BaseModel, SecretStr, field_validator
 from horsies.core.app import Horsies
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.json_value import JsonValue, StrictJsonError
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
@@ -761,6 +761,86 @@ class TestValueThatHoldsItself:
         assert 'Circular reference detected (id repeated)' in ' '.join(
             raised.value.notes,
         )
+
+
+class TestValueThatIsTooDeep:
+    def test_a_task_node_kwarg_is_hrs_031(self) -> None:
+        """Before, the raw `ValueError` left `app.workflow()`."""
+        app = _real_app()
+
+        @app.task('deep.linked')
+        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='deep-task-node',
+                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                definition_key=_key('deep_task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (depth exceeded)' in ' '.join(
+            raised.value.notes,
+        )
+
+
+class TestValuePastTheDepthBound:
+    def test_a_task_node_kwarg_is_hrs_031(self) -> None:
+        """Before, `RecursionError` left `app.workflow()`."""
+        app = _real_app()
+
+        @app.task('cycle.json_value')
+        def holds_json(*, x: JsonValue) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        value: list[object] = []
+        value.append(value)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='cycle-task-node',
+                tasks=[TaskNode(fn=holds_json, kwargs={'x': value})],
+                definition_key=_key('cycle_task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'nested deeper than' in ' '.join(raised.value.notes)
+
+
+class TestBytesThatAreNotUtf8:
+    """Registration refuses `bytes` in a task signature, so `.send()` and a
+    schedule cannot reach this. It does not check a `build_with()` parameter."""
+
+    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+        """Before, the raw `UnicodeDecodeError` left `app.workflow()`."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'not-utf8-child'
+            definition_key = _key('not_utf8_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, payload: bytes = b'', **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='not-utf8-sub-node',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'payload': b'\xff'},
+                )],
+                definition_key=_key('not_utf8_sub_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'bytes that are not UTF-8' in ' '.join(raised.value.notes)
 
 
 class TestChildStartOfALoneSurrogate:
