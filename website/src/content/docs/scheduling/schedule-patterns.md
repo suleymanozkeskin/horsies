@@ -377,7 +377,7 @@ run matters.
 
 ## Examples in Context
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from datetime import time
 from horsies.core.models.schedule import (

@@ -42,7 +42,7 @@ The scheduler:
 
 Add a `ScheduleConfig` to your `AppConfig`:
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time

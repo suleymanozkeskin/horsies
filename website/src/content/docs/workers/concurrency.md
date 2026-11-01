@@ -222,7 +222,7 @@ horsies worker myapp.instance:app --processes=6 \
 
 In CUSTOM mode, limit concurrent tasks per queue:
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.queues import CustomQueueConfig
 
@@ -447,7 +447,7 @@ fleet is on one version.
 
 ### Single Worker, Simple
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -461,7 +461,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### Multi-Worker with Global Cap
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
@@ -482,7 +482,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### Priority Queues with Rate Limiting
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

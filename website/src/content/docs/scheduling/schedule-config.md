@@ -9,7 +9,7 @@ tags: [scheduling, configuration, TaskSchedule]
 
 Top-level scheduler configuration added to `AppConfig`.
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 
@@ -113,7 +113,7 @@ TaskSchedule(
 
 In CUSTOM mode, override the task's default queue:
 
-<!-- check: skip defect -- does not type-check: reportArgumentType -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 @app.task("background_job", queue_name="normal")
 def background_job() -> TaskResult[None, TaskError]:
@@ -184,7 +184,7 @@ future slot.
 
 Disable individual schedules:
 
-<!-- check: skip defect -- does not type-check: reportArgumentType -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 TaskSchedule(
     name="deprecated-job",
@@ -196,7 +196,7 @@ TaskSchedule(
 
 Disable entire scheduler:
 
-<!-- check: skip defect -- does not type-check: reportArgumentType -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 ScheduleConfig(
     enabled=False,  # No schedules run
@@ -226,7 +226,7 @@ At scheduler startup, validates:
 2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
 3. **Arguments complete**: Required task parameters must be provided
 
-<!-- check: skip defect -- does not type-check: reportArgumentType -->
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 # Will fail at startup:
 TaskSchedule(

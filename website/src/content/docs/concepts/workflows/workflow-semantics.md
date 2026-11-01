@@ -116,7 +116,7 @@ When a task is terminal but its result is missing, recovery synthesizes errors:
 
 ### When is a workflow marked FAILED?
 
-A workflow is marked **FAILED** if **any task fails** (when `on_error="fail"`, the default).
+A workflow is marked **FAILED** if **any task fails** (when `on_error=OnError.FAIL`, the default).
 
 The failure flow:
 1. Task fails → workflow stores error, but status remains `RUNNING`
@@ -136,7 +136,7 @@ This design allows recovery handlers (`allow_failed_deps=True`) to execute befor
 
 Horsies does **not** stop the entire workflow on first failure. It resolves the DAG to terminal state and applies failure rules **per dependency**. Short-circuiting happens **along the failed path**, not globally.
 
-**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error="fail"`):**
+**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error=OnError.FAIL`):**
 
 - When a dependency fails or is skipped, any downstream task that requires all dependencies is **SKIPPED**.
 - That skip propagates to its dependents.
@@ -183,7 +183,7 @@ When an upstream task fails and the downstream task uses `join="all"` (the defau
 - **`allow_failed_deps=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
 - **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream `TaskResult` with `is_err() == True`.
 
-`on_error="fail"` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
+`on_error=OnError.FAIL` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
 
 With `join="any"`, a downstream task runs when **any** dependency succeeds, so a single upstream failure does not cause a skip unless **all** dependencies fail. With `join="quorum"`, the task runs when `min_success` dependencies succeed, so failures only matter if they make the threshold unreachable.
 
@@ -714,22 +714,30 @@ Results from `WorkflowHandle.results()` and `WorkflowHandle.get()` (when no outp
 
 This ensures no result collisions when the same task function is used multiple times in a workflow.
 
-<!-- check: skip defect -- does not type-check: reportAttributeAccessIssue -->
 ```python
 # Same task used twice
 fetch_a = TaskNode(fn=fetch_data, kwargs={'url': "url_a"})  # index 0
 fetch_b = TaskNode(fn=fetch_data, kwargs={'url': "url_b"})  # index 1
 
 spec = WorkflowSpec(name="parallel_fetch", tasks=[fetch_a, fetch_b], broker=broker)
-start_result = await spec.start_async()
-handle = start_result.ok_value
+
+# start_async() returns Ok(handle) or Err(WorkflowStartError)
+match await spec.start_async():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # Wait for workflow completion first
 await handle.get_async(timeout_ms=30000)
 
 # Now safe to access individual results (node_id keys)
-results_handle = handle.results()
-results = results_handle.ok_value  # HandleResult[dict[...]] → unwrap
+# results() returns Ok(dict) or Err(HandleOperationError)
+match handle.results():
+    case Err(results_error):
+        raise RuntimeError(results_error.message)
+    case Ok(results):
+        pass
 result_a = results["parallel_fetch:0"]  # First fetch
 result_b = results["parallel_fetch:1"]  # Second fetch
 
@@ -959,14 +967,14 @@ node_b: TaskNode[str] = TaskNode(
 
 **Don't do this:**
 
-<!-- check: skip defect -- does not type-check: reportAttributeAccessIssue -->
 ```python
 # Fire-and-forget: start workflow without waiting
-start_result = spec.start()
-handle = start_result.ok_value
-
-# Immediately call result_for() - task likely hasn't completed yet
-result = handle.result_for(node)  # Returns RESULT_NOT_READY error
+match spec.start():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        # Immediately call result_for() - task likely hasn't completed yet
+        result = handle.result_for(node)  # Returns RESULT_NOT_READY error
 ```
 
 **Do this instead:**

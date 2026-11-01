@@ -382,7 +382,7 @@ worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, work
 
 ## `TaskSendResult` / `TaskSendError`
 
-<!-- check: skip defect -- does not type-check: reportGeneralTypeIssues -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendResult[T] = Result[T, TaskSendError]
 ```
@@ -391,7 +391,7 @@ type TaskSendResult[T] = Result[T, TaskSendError]
 
 One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `exception` are not in the repr.
 
-<!-- check: skip defect -- does not type-check: reportGeneralTypeIssues -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendError = (
     TaskSendSuppressed               # message
@@ -791,7 +791,7 @@ node = my_task.node(good_until=deadline)(arg=value)
 
 ## All Public Imports
 
-<!-- check: skip defect -- does not type-check: reportAssignmentType -->
+<!-- check: alone -->
 ```python
 from horsies import (
     # App and config

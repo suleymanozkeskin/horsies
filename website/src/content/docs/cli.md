@@ -275,16 +275,19 @@ If the module contains exactly one `Horsies` instance, the `:name` suffix can be
 
 ## Module Discovery
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
 ```python
 # instance.py
-from horsies import Horsies, AppConfig, PostgresConfig
+from pydantic import SecretStr
 
-app = Horsies(AppConfig(...))  # Auto-discovered
+from horsies import Horsies, AppConfig, PostgresConfig, TaskError, TaskResult
+
+app = Horsies(AppConfig(
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb")),
+))  # Auto-discovered
 
 @app.task("my_task")
-def my_task():
-    ...
+def my_task() -> TaskResult[None, TaskError]:
+    return TaskResult(ok=None)
 
 app.discover_tasks(["myapp.tasks"])
 ```

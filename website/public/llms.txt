@@ -615,7 +615,7 @@ Registry (HRS-300-HRS-399):
 - allow_failed_deps=True: downstream runs, receives failed TaskResult
 - join="any"/"quorum": downstream can still run if success threshold met
 - SKIPPED cascades for join="all" with allow_failed_deps=False
-- on_error="fail" (default): store error, continue DAG, mark FAILED when all terminal
+- OnError.FAIL (default): store error, continue DAG, mark FAILED when all terminal
 - OnError.PAUSE: immediately pause, block new enqueues, await resume
 
 ### Utilities

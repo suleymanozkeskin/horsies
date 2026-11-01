@@ -2,9 +2,11 @@
 
 from typing import Any
 
+from horsies import NodeKey
+
 from prelude import app as app
 
 double: Any
 describe: Any
 summarize: Any
-FIRST_KEY: str
+FIRST_KEY: NodeKey[int]

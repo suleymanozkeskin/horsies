@@ -161,7 +161,7 @@ See [Errors Reference](../../tasks/errors#workflow-handle-errors-handleresult) f
 
 **Usage:**
 
-<!-- check: skip defect -- does not type-check: reportPossiblyUnboundVariable -->
+<!-- check: skip partial -- handle comes from a block that is not checked -->
 ```python
 from horsies import Err, HandleResumeRecoveryFailed, Ok
 

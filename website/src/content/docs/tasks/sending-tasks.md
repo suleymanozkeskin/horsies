@@ -276,7 +276,7 @@ The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSend
 
 Set `resend_on_transient_err=True` in `AppConfig` to have the library automatically retry transient enqueue failures before returning the error:
 
-<!-- check: skip defect -- does not type-check: reportCallIssue -->
+<!-- check: skip elided -- # ... stands for the other settings, including the broker -->
 ```python
 config = AppConfig(
     resend_on_transient_err=True,

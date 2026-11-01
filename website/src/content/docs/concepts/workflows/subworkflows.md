@@ -996,7 +996,6 @@ horsies worker myapp.instance:app
 
 Putting it all together:
 
-<!-- check: skip defect -- does not type-check: reportAttributeAccessIssue -->
 ```python
 from typing import Any
 
@@ -1016,6 +1015,8 @@ from horsies import (
     WorkflowSpec,
     SuccessPolicy,
     SuccessCase,
+    Err,
+    Ok,
 )
 
 app = Horsies(AppConfig(
@@ -1164,8 +1165,12 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
 
 async def run_pipeline():
     spec = MultiSourcePipeline.build(app)
-    start_result = await spec.start_async()
-    handle = start_result.ok_value
+    match await spec.start_async():
+        case Err(start_error):
+            print(f"Start failed: {start_error.code} - {start_error.message}")
+            return
+        case Ok(handle):
+            pass
 
     result = await handle.get_async()
 

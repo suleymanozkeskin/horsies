@@ -59,7 +59,7 @@ match divide.send(a=10, b=2):
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
-<!-- check: skip defect -- does not type-check: reportReturnType -->
+<!-- check: skip elided -- a return statement shown without its function -->
 ```python
 return TaskResult(err=TaskError(
     error_code="VALIDATION_FAILED",
@@ -158,7 +158,7 @@ Both cases result in `TaskResult(err=...)`, but the error codes differ.
 
 Horsies validates that your returned value matches the declared type:
 
-<!-- check: skip defect -- does not type-check: reportReturnType -->
+<!-- check: skip elided -- returns a wrong type on purpose, to show the runtime check -->
 ```python
 @app.task("typed_task")
 def typed_task() -> TaskResult[int, TaskError]:

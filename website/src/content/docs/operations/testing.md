@@ -93,7 +93,6 @@ To test the failure path, pass `TaskResult(err=TaskError(...))`.
 
 `WorkflowContext.from_serialized(...)` builds the context that a worker gives to a task with a `workflow_ctx` parameter.
 
-<!-- check: skip defect -- does not type-check: reportAssignmentType -->
 ```python
 from horsies import TaskResult, WorkflowContext
 

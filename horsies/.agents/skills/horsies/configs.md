@@ -324,12 +324,13 @@ enqueues (including `args_from` injection) warn only; task results warn
 only — results are never rejected. Subworkflow child-start kwargs are not
 yet checked.
 
-<!-- check: skip defect -- does not type-check: reportArgumentType -->
 ```python
-from horsies import PayloadPolicy
+from pydantic import SecretStr
+
+from horsies import AppConfig, PayloadPolicy, PostgresConfig
 
 AppConfig(
-    broker=broker,
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
     payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
 )
 ```

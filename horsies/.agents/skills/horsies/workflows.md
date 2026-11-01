@@ -153,7 +153,6 @@ fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
 
 `result_for()` accepts a `NodeKey` and looks up the result by `node_id`. Build the key from the explicit id string. The task module then does not import the workflow module.
 
-<!-- check: skip defect -- does not type-check: reportAssignmentType -->
 ```python
 from horsies import NodeKey, TaskError, TaskResult, WorkflowContext
 
@@ -653,7 +652,6 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 
 ## All Public Imports
 
-<!-- check: skip defect -- does not type-check: reportAssignmentType -->
 ```python
 from horsies import (
     # Spec construction
