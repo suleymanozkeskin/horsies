@@ -467,9 +467,13 @@ class TestTypedRefusals:
                 b'{"args":[],"kwargs":{"x":1e9999},"options":null}',
                 'finite binary64',
             ),
+            (
+                rb'{"args":[],"kwargs":{"x":"\ud800"},"options":null}',
+                'lone surrogate',
+            ),
         ],
     )
-    async def test_non_finite_number_in_a_stored_envelope_fails_closed(
+    async def test_refused_value_in_a_stored_envelope_fails_closed(
         self,
         terminalization_schema: HistorySchema,
         payload: bytes,

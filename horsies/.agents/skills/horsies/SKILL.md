@@ -1,6 +1,6 @@
 ---
-name: horsies-quick-reference
-description: Quick orientation for the horsies Python task queue and workflow engine. Use when users need a concise overview and routing to detailed guidance for tasks, workflows, configuration, and monitoring.
+name: horsies
+description: Guidance for the horsies Python task queue and workflow engine (PostgreSQL broker). Use when code has `import horsies`, `from horsies import ...`, `@app.task`, `TaskResult`, `TaskError`, `WorkflowSpec` or `WorkflowDefinition`, or when the user works on horsies tasks, workflows, configuration, scheduling, or monitoring.
 ---
 
 # horsies — Quick Reference
@@ -9,7 +9,7 @@ PostgreSQL-backed background task queue and workflow engine for Python.
 
 This is an **introductory quick reference** — it covers core concepts and
 patterns at a glance. For production-level guidance, see the dedicated
-skill files in this directory:
+reference files in this skill folder (open one only when the task needs it):
 
 | File | When to open |
 |---|---|
@@ -20,7 +20,7 @@ skill files in this directory:
 
 All public symbols: `from horsies import <name>`
 
-For the full API reference, run `horsies get-docs` to download docs locally,
+For the full API reference, run `horsies get-docs` to download the docs of the installed version,
 or read `llms.txt` on the docs site:
 `https://suleymanozkeskin.github.io/horsies/llms.txt`.
 
@@ -343,7 +343,9 @@ horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
-horsies get-docs                         # download docs locally
+horsies get-docs                         # download the docs of the installed version
+horsies get-docs --ref main              # download the main branch docs (needed for a development version)
+horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)
 
 # Recycle each child after N tasks to bound memory (default 100, per-child,
 # staggered; forces spawn). Tune per deployment; 0 disables (keeps fork).

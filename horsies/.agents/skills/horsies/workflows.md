@@ -1,8 +1,3 @@
----
-name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-035. Use when building, validating, or troubleshooting workflows.
----
-
 # horsies — Workflows
 
 Detailed reference for building, starting, and managing workflow DAGs.

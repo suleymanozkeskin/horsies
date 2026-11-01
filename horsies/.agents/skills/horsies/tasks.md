@@ -1,8 +1,3 @@
----
-name: horsies-tasks
-description: Task authoring and execution guidance for horsies, including @app.task, TaskResult, send and schedule APIs, retry behavior, exception mapping, and serialization pitfalls. Use when implementing, debugging, or reviewing task-related code.
----
-
 # horsies — Tasks
 
 Detailed reference for defining, sending, and handling tasks.
