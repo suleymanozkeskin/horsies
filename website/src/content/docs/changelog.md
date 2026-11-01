@@ -335,6 +335,17 @@ there is no migration contract between pre-1.0 versions.
   `Ok({})` and `Ok([])`, the same values as an existing workflow without
   results or nodes. An existing workflow before its first stored result
   still gives `Ok({})`.
+- **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
+  does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
+  `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
+  `WITHIN_RETAINED_HISTORY` (retained history covers the id and has no row)
+  or `NOT_CLASSIFIED`. Both are exported from `horsies.monitoring`. Code
+  that checks `detail is None` must match on `TaskDetailNotFound`. The web
+  route still answers 404; for `PREDATES_RETAINED_HISTORY` the detail text
+  says that the id is older than the retained task history.
+  `get_task_detail` and `get_workflow_node` now read in one REPEATABLE READ
+  snapshot. Before, a task row that was committed between the live read and
+  the history read gave `Ok(None)`.
 
 ### Changed
 

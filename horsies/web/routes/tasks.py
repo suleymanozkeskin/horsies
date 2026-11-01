@@ -9,7 +9,7 @@ is never captured as a task id.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Literal, assert_never
 
 from fastapi import APIRouter, HTTPException, Query, status
 
@@ -25,7 +25,9 @@ from horsies.monitoring import (
     Breakdown,
     Facets,
     StatusCount,
+    TaskAbsenceReason,
     TaskDetail,
+    TaskDetailNotFound,
     TaskListPage,
     MAX_TASK_PAGE_REACH,
     get_task_detail,
@@ -56,6 +58,20 @@ def _window_or_400(
             detail=resolved.reason,
         )
     return resolved
+
+
+def task_not_found_text(reason: TaskAbsenceReason) -> str:
+    """The 404 detail text for a task id that no table holds."""
+    match reason:
+        case TaskAbsenceReason.PREDATES_RETAINED_HISTORY:
+            return 'Task not found. Its id is older than the retained task history.'
+        case (
+            TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+            | TaskAbsenceReason.NOT_CLASSIFIED
+        ):
+            return 'Task not found.'
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def build_router(
@@ -214,12 +230,13 @@ def build_router(
         result = await get_task_detail(broker, task_id)
         if is_err(result):
             raise query_failed('Task detail', result.err_value)
-        detail = result.ok_value
-        if detail is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail='Task not found.',
-            )
-        return detail
+        match result.ok_value:
+            case TaskDetail() as detail:
+                return detail
+            case TaskDetailNotFound(reason=reason):
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=task_not_found_text(reason),
+                )
 
     return router

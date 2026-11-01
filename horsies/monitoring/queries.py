@@ -14,7 +14,10 @@ states:
   ``get_workflow_node``: stored history data that does not decode.
 
 Nothing else is caught. A row that does not exist is ``Ok(None)``, not an
-error.
+error. ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the
+reason the reads know. ``get_task_detail`` and ``get_workflow_node`` read in
+one REPEATABLE READ snapshot, so the live read and the history read see the
+same rows.
 
 Sort and group columns are resolved through allowlist mappings keyed by
 ``Literal`` types, so no caller-supplied string reaches SQL.
@@ -32,7 +35,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, assert_never
 
 from sqlalchemy import (
     ColumnElement,
@@ -78,6 +81,7 @@ from horsies.core.history.reads.aggregates import (
 )
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
+    LiveTaskLocation,
     TaskDetailAbsent,
     read_task_detail,
     staged_detail_published,
@@ -109,8 +113,10 @@ from horsies.monitoring.models import (
     LeafTaskInfo,
     ScheduleStateInfo,
     StatusCount,
+    TaskAbsenceReason,
     TaskAttemptInfo,
     TaskDetail,
+    TaskDetailNotFound,
     TaskListPage,
     TaskSummary,
     WorkflowEdge,
@@ -1440,16 +1446,27 @@ async def list_tasks(
 async def get_task_detail(
     broker: PostgresBroker,
     task_id: str,
-) -> MonitoringResult[TaskDetail | None]:
-    """A single task with its attempt history, or None when it does not exist.
+) -> MonitoringResult[TaskDetail | TaskDetailNotFound]:
+    """A single task with its attempt history.
 
     The attempt history is where a task's cause lives: ``error_message``
-    carries the unhandled exception per try, including retries. A history
-    row that does not decode returns
-    ``MonitoringQueryHistoryContractViolation``.
+    carries the unhandled exception per try, including retries.
+
+    Outcomes:
+        - ``Ok(TaskDetail)``: the live row, or the history row when the live
+          table has no row.
+        - ``Ok(TaskDetailNotFound)``: no table holds the id. ``reason`` says
+          whether retention can explain it.
+        - ``Err(MonitoringQueryHistoryContractViolation)``: the history row
+          does not decode, or the staged read reports the task live in the
+          snapshot where the live read found no row.
+
+    Every read runs in one REPEATABLE READ snapshot.
     """
     if not _is_uuid_text(task_id):
-        return Ok(None)
+        return Ok(TaskDetailNotFound(
+            task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
+        ))
     task_stmt = select(TaskModel).where(TaskModel.id == task_id)
     attempts_stmt = (
         select(TaskAttemptModel)
@@ -1471,11 +1488,16 @@ async def get_task_detail(
 
     try:
         async with resources.session_factory() as session:
+            await _begin_one_snapshot(session)
             task = (await session.execute(task_stmt)).scalar_one_or_none()
             if task is None:
-                history = await _history_detail_or_none(session, task_id)
-                if history is None:
-                    return Ok(None)
+                match await _history_detail(session, task_id):
+                    case TaskAbsenceReason() as reason:
+                        return Ok(TaskDetailNotFound(
+                            task_id=task_id, reason=reason,
+                        ))
+                    case HistoryTaskDetail() as history:
+                        pass
                 node = (await session.execute(node_stmt)).tuples().first()
                 workflow_id, workflow_task_index = (
                     node if node is not None else (None, None)
@@ -1519,27 +1541,63 @@ async def get_task_detail(
     )
 
 
-async def _history_detail_or_none(
+async def _begin_one_snapshot(session: AsyncSession) -> None:
+    """Begin the session's transaction in REPEATABLE READ.
+
+    Call it before the first statement. Every later statement of the
+    session sees the snapshot of the first one, so the live read and the
+    staged history read agree on where a task row is. A read-only
+    REPEATABLE READ transaction gets no serialization failure. The
+    isolation level resets when the connection goes back to the pool.
+    """
+    _ = await session.connection(
+        execution_options={'isolation_level': 'REPEATABLE READ'},
+    )
+
+
+async def _history_detail(
     session: AsyncSession, task_id: str
-) -> HistoryTaskDetail | None:
-    """The history side of a detail read, or None when nothing is there.
+) -> HistoryTaskDetail | TaskAbsenceReason:
+    """The history side of a detail read, after the live read found no row.
 
     Terminalization moves finished rows out of the live table, so an
-    absent live row is the normal terminal case, not an error. A
-    pre-coverage database (no published staged function) has no
-    history to consult; a row the staged read reports live vanished
-    mid-read and is treated as absent — the caller's next poll sees
-    whichever side it landed on.
+    absent live row is the normal terminal case, not an error. A database
+    without the staged detail function has no history to read:
+    ``NOT_CLASSIFIED``. The session reads in one snapshot
+    (``_begin_one_snapshot``), so the staged read cannot find the task live.
+
+    Raises:
+        HistoryContractError: the history row does not decode, or the
+            staged read reports the task live in the snapshot where the
+            live read found no row.
     """
     connection = await session.connection()
     if not await staged_detail_published(connection):
-        return None
+        return TaskAbsenceReason.NOT_CLASSIFIED
     detail = await read_task_detail(connection, task_id=task_id)
     match detail:
         case HistoryTaskDetail():
             return detail
-        case TaskDetailAbsent() | _:
-            return None
+        case TaskDetailAbsent(predates_retained_floor=predates):
+            return _absence_reason(predates)
+        case LiveTaskLocation():
+            raise HistoryContractError(
+                f'staged detail reports task {task_id} live in the snapshot '
+                'where the live read found no row'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _absence_reason(predates_retained_floor: bool | None) -> TaskAbsenceReason:
+    """Name the absence classification of the staged detail read."""
+    match predates_retained_floor:
+        case True:
+            return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
+        case False:
+            return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
+        case None:
+            return TaskAbsenceReason.NOT_CLASSIFIED
 
 
 # --------------------------------------------------------------------------- #
@@ -1725,7 +1783,8 @@ async def get_workflow_node(
     None when the backing task row has been removed by retention, while its
     attempt rows are still reported if present. A history row of the
     backing task that does not decode returns
-    ``MonitoringQueryHistoryContractViolation``.
+    ``MonitoringQueryHistoryContractViolation``. Every read runs in one
+    REPEATABLE READ snapshot.
     """
     if not _is_uuid_text(workflow_id):
         return Ok(None)
@@ -1742,6 +1801,7 @@ async def get_workflow_node(
 
     try:
         async with resources.session_factory() as session:
+            await _begin_one_snapshot(session)
             node = (await session.execute(node_stmt)).scalar_one_or_none()
             if node is None:
                 return Ok(None)
@@ -1756,9 +1816,11 @@ async def get_workflow_node(
                     )
                 ).scalar_one_or_none()
                 if task is None:
-                    history = await _history_detail_or_none(
-                        session, str(node.task_id)
-                    )
+                    match await _history_detail(session, str(node.task_id)):
+                        case HistoryTaskDetail() as found:
+                            history = found
+                        case TaskAbsenceReason():
+                            history = None
                 attempt_rows = list(
                     (
                         await session.execute(

@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.types.result import is_err
+from horsies.monitoring import TaskDetail, TaskDetailNotFound
 from horsies.monitoring.queries import get_task_detail, get_workflow_node
 from tests.integration.test_task_result_history_fallback import (
     _populated_history,
@@ -56,7 +57,7 @@ class TestTaskDetailFromHistory:
             outcome = await get_task_detail(broker, completed)
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
-            assert detail is not None
+            assert isinstance(detail, TaskDetail)
             assert detail.task_name == 'legacy.task'
             assert detail.leaf.status == 'COMPLETED'
             assert detail.leaf.completed_at is not None
@@ -65,13 +66,13 @@ class TestTaskDetailFromHistory:
             outcome = await get_task_detail(broker, cancelled)
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
-            assert detail is not None
+            assert isinstance(detail, TaskDetail)
             assert detail.leaf.status == 'CANCELLED'
             assert detail.leaf.failed_at is not None
 
             missing = await get_task_detail(broker, str(uuid.uuid4()))
             assert not is_err(missing), missing
-            assert missing.ok_value is None
+            assert isinstance(missing.ok_value, TaskDetailNotFound)
         finally:
             await broker.close_async()
 

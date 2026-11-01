@@ -13,6 +13,7 @@ These models are unstable pre-1.0.
 from __future__ import annotations
 
 import enum
+from dataclasses import dataclass
 from datetime import datetime
 
 from pydantic import BaseModel
@@ -200,6 +201,32 @@ class TaskDetail(BaseModel):
     attempts: list[TaskAttemptInfo]
     workflow_id: str | None
     workflow_task_index: int | None
+
+
+class TaskAbsenceReason(str, enum.Enum):
+    """What the detail read knows about a task id that no table holds.
+
+    The live table and the task history have no row for the id. The reason
+    says whether retention can explain that.
+    """
+
+    # The id's UUIDv7 birth is before the oldest retained history, so
+    # retention can have removed the task.
+    PREDATES_RETAINED_HISTORY = 'PREDATES_RETAINED_HISTORY'
+    # Retained history covers the id's birth and has no row: the task did
+    # not exist, or its history partition was removed out of band.
+    WITHIN_RETAINED_HISTORY = 'WITHIN_RETAINED_HISTORY'
+    # The id is not a UUIDv7, no attached history partition has a birth, or
+    # the database has no staged history read.
+    NOT_CLASSIFIED = 'NOT_CLASSIFIED'
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDetailNotFound:
+    """No live row and no history row has this task id."""
+
+    task_id: str
+    reason: TaskAbsenceReason
 
 
 # --------------------------------------------------------------------------- #
