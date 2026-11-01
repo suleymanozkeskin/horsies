@@ -663,6 +663,15 @@ there is no migration contract between pre-1.0 versions.
   message names the child node. Before, the child start failed the
   `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. Stored kwargs of the
   parent node that do not decode still fail only that node.
+- **The workflow start transaction raises `SerializationError` for task
+  options that are JSON but not an object when it merges the `good_until`
+  of a node.** The options are the task decorator's serialization of a
+  validated `TaskOptions`, so such a value is a defect, for example
+  `task_options_json` that was changed after registration. The message names
+  the node and the type of the value. The transaction rolls back, and
+  nothing is written. Before, the start replaced the options with `{}` and
+  stored only `good_until`. The child workflow start already raises for the
+  same value.
 
 ### Removed
 
