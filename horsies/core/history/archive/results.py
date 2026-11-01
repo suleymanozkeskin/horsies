@@ -7,64 +7,26 @@ and digest columns, so the decoder is one function regardless of which
 column held the bytes; which column it was is the caller's fact, not the
 payload's.
 
-Encoding validates that the payload is well-formed JSON before it can
-become immutable history: a writer holding a corrupt result must fail at
-the insert, not hand the corruption to every future reader.
+The SQL terminalization functions write these bytes, and this module decodes
+them.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from typing import Any
 
+from horsies.core.codec.json_io import loads_json_bytes
+from horsies.core.types.result import is_err
+
 from .versions import (
-    ARCHIVE_VERSION_1,
     ArchiveDecodeResult,
     ArchiveDomain,
     CorruptArchiveValue,
     DecodedArchiveValue,
-    JSON_CONTENT_TYPE,
-    JSON_UTF8_CODEC,
-    archive_digest,
     validate_envelope_contract,
     verify_payload_digest,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class StoredResultEnvelope:
-    """An encoded result with the envelope facts the writer stores."""
-
-    version: int
-    codec: str
-    content_type: str
-    payload: bytes
-    digest: bytes
-
-
-def encode_result_envelope(result_json: str) -> StoredResultEnvelope:
-    """Encode canonical result JSON as a version-1 stored envelope.
-
-    The bytes stored are exactly the caller's serialized form — encoding
-    never reserializes, because the digest must cover the bytes the rest of
-    the system already knows. Malformed JSON is rejected here, before any
-    immutable row can carry it.
-    """
-    payload = result_json.encode()
-    try:
-        json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ValueError(
-            f'result payload is not well-formed JSON: {type(exc).__name__}'
-        ) from exc
-    return StoredResultEnvelope(
-        version=ARCHIVE_VERSION_1,
-        codec=JSON_UTF8_CODEC,
-        content_type=JSON_CONTENT_TYPE,
-        payload=payload,
-        digest=archive_digest(payload),
-    )
 
 
 def decode_result_envelope(
@@ -89,12 +51,12 @@ def decode_result_envelope(
     )
     if digest_failure is not None:
         return digest_failure
-    try:
-        return DecodedArchiveValue(json.loads(payload))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    loaded = loads_json_bytes(payload)
+    if is_err(loaded):
         return CorruptArchiveValue(
-            domain=ArchiveDomain.RESULT, detail=type(exc).__name__
+            domain=ArchiveDomain.RESULT, detail='invalid_json'
         )
+    return DecodedArchiveValue(loaded.ok_value)
 
 
 # ---------------------------------------------------------------------------

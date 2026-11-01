@@ -379,6 +379,10 @@ there is no migration contract between pre-1.0 versions.
   code raised it. The number is retired and is not used again. The skill
   rule that `build_with()` must accept `*_args` and `**_kwargs` is removed;
   no such check exists.
+- **Unused history codecs.** `core/history/archive/rerun_input.py`,
+  `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
+  library. SQL functions write the stored bytes, and `decode_input_envelope`
+  reads a stored rerun input.
 
 ### Fixed
 
@@ -439,6 +443,16 @@ there is no migration contract between pre-1.0 versions.
   underflows, such as `1e-9999`, still parses to `0.0`.
 - **`decode_input_envelope` returns `InputEnvelopeCorrupt` for an integer
   over the parse limit of 4300 digits.** Before, it raised `ValueError`.
+- **Every JSON parse in the library goes through `codec/json_io.py`.** A
+  history read refuses a stored result or attempt snapshot that is not strict
+  JSON: `NaN`, `Infinity`, a number outside the finite binary64 range, an
+  integer over 4300 digits, an empty payload, or bytes that are not UTF-8.
+  A result read returns `INVALID_JSON_PAYLOAD`, as a read of a live task does,
+  and a task detail read raises `HistoryContractError`. Before, the archive
+  reader accepted `NaN` and `Infinity`, and an oversized integer raised a raw
+  `ValueError`. `CorruptArchiveValue.detail` for these failures is now
+  `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
+  `HistoryContractError` for the same text.
 - **`loads_json` refuses a lone UTF-16 surrogate.** An escape such as
   `\ud800` decoded to a string that UTF-8 cannot encode, so the failure came
   later: one such row aborted a cutover preparation batch, and a rerun of a
@@ -446,7 +460,7 @@ there is no migration contract between pre-1.0 versions.
   value: `enqueue_async` returns `INVALID_INPUT` and writes nothing, the worker
   returns `WORKER_SERIALIZATION_ERROR`, cutover preparation counts the row as a
   decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
-  refused such a string. A surrogate pair such as `\ud83d\ude00` is one valid
+  refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
   character and stays accepted.
 
 ## 0.5.5 — 2026-10-28

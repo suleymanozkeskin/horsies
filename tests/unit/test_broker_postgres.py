@@ -23,10 +23,13 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerInvalidInput,
+    BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
 )
 from horsies.core.codec.json_io import SerializationError
+from horsies.core.history.archive.versions import archive_digest
+from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -3719,3 +3722,55 @@ class TestEnqueueInsertStatement:
             'prepared_rerun_input_inline',
         ):
             assert params[field] is None
+
+
+@pytest.mark.unit
+class TestHistoryTaskInfoResultDecode:
+    """A stored result outside strict JSON is refused, as a live read refuses it."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'{"x":NaN}',
+            b'{"x":1e9999}',
+            b'{"x":' + b'1' * 5000 + b'}',
+            b'',
+        ],
+    )
+    async def test_stored_result_is_refused_as_invalid_json_payload(
+        self, payload: bytes,
+    ) -> None:
+        detail = MagicMock(spec=HistoryTaskDetail)
+        detail.status = 'FAILED'
+        detail.terminal_at = datetime(2026, 8, 7, tzinfo=timezone.utc)
+        detail.result_payload = payload
+        detail.result_digest = archive_digest(payload)
+        detail.result_envelope_version = 1
+        detail.result_codec = 'json-utf8'
+        detail.result_content_type = 'application/json'
+
+        with (
+            patch(
+                'horsies.core.history.reads.detail.staged_detail_published',
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                'horsies.core.history.reads.detail.read_task_detail',
+                AsyncMock(return_value=detail),
+            ),
+        ):
+            result = await _make_broker()._history_task_info(
+                AsyncMock(),
+                '0192b3a4-0000-7000-8000-000000000001',
+                include_result=True,
+                include_failed_reason=False,
+                include_attempts=False,
+            )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidJsonPayload(message=message):
+                assert 'invalid_json' in message
+            case other:
+                raise AssertionError(f'expected INVALID_JSON_PAYLOAD, got {other!r}')

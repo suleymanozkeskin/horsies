@@ -20,9 +20,6 @@ from horsies.core.history.rerun.input_envelope import (
     decode_input_envelope,
     encode_input_envelope_v1,
 )
-from horsies.core.history.rerun.operations import (
-    _canonical_json,  # pyright: ignore[reportPrivateUsage]
-)
 
 pytestmark = [pytest.mark.unit]
 
@@ -148,7 +145,9 @@ class TestDecode:
         assert 'payload is not JSON' in decoded.detail
 
     def test_empty_payload_with_a_matching_digest_fails_closed(self) -> None:
-        assert isinstance(roundtrip(b''), InputEnvelopeCorrupt)
+        decoded = roundtrip(b'')
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert 'payload is not JSON' in decoded.detail
 
     def test_largest_finite_float_roundtrips_byte_identical(self) -> None:
         payload = encode_input_envelope_v1(
@@ -173,8 +172,3 @@ class TestNonFiniteValueIsADefect:
     def test_encode_crashes_loud(self, value: float) -> None:
         with pytest.raises(ValueError, match='not JSON compliant'):
             encode_input_envelope_v1(args=[], kwargs={'x': value}, options=None)
-
-    @pytest.mark.parametrize('value', [float('inf'), float('-inf'), float('nan')])
-    def test_canonical_json_crashes_loud(self, value: float) -> None:
-        with pytest.raises(ValueError, match='not JSON compliant'):
-            _canonical_json({'x': value})

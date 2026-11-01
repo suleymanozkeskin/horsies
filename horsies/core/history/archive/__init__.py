@@ -7,8 +7,9 @@ unknown version, an unknown codec, a wrong content type, a digest mismatch,
 or a corrupt payload is a typed decode failure, never absence and never a
 silently skipped row.
 
-Codecs operate on values, not tables. Nothing in this package executes SQL;
-the terminalization writer stores what these codecs produce and the read
-surfaces decode through them, which is what keeps one decoder authoritative
-for both drivers and for the offline transcode inventory.
+Codecs operate on values, not tables. Nothing in this package executes SQL.
+The SQL terminalization functions write the stored bytes and the read surfaces
+decode them here, which keeps one decoder authoritative for both drivers and
+for the offline transcode inventory. The stored rerun input decodes in
+``history/rerun/input_envelope.py``.
 """

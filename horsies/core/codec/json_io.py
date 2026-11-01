@@ -69,6 +69,26 @@ def dumps_json(value: object) -> SerdeResult[str]:
     return Ok(encoded)
 
 
+def dumps_canonical_json(value: object) -> str:
+    """Serialize a JSON-native value to its one canonical text.
+
+    Compact separators, sorted keys, no ASCII escaping. Callers store or hash
+    this text, so equal content always gives equal text.
+
+    Callers pass values that ``loads_json`` parsed or that the library built,
+    so a non-finite float is a code defect: ``allow_nan=False`` raises
+    ``ValueError``, and no caller handles it. Unlike ``dumps_json`` this does
+    not walk the value first.
+    """
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
 def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     """Deserialize a JSON string.
 
@@ -98,3 +118,28 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     except (json.JSONDecodeError, ValueError) as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
     return Ok(parsed)
+
+
+def loads_json_bytes(payload: bytes) -> SerdeResult[Json]:
+    """Deserialize a stored payload whose codec declares UTF-8 JSON.
+
+    The strict rules of ``loads_json`` apply, with two differences that a
+    stored payload needs:
+
+    - Empty bytes are an Err. ``loads_json`` returns Ok(None) for empty text,
+      which here would read as the JSON value ``null``.
+    - Bytes that are not UTF-8 are an Err. ``json.loads`` on bytes detects
+      UTF-16 and UTF-32 and skips a byte order mark, so it accepts formats
+      that the codec does not declare.
+
+    The error text names a byte offset, not a byte: the payload is task input.
+    """
+    if not payload:
+        return Err(SerializationError('JSON parse failed: payload is empty'))
+    try:
+        text = payload.decode('utf-8')
+    except UnicodeDecodeError as exc:
+        return Err(SerializationError(
+            f'JSON parse failed: payload is not UTF-8 at byte {exc.start}'
+        ))
+    return loads_json(text)
