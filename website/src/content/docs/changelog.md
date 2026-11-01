@@ -14,6 +14,20 @@ there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: a schedule whose kwargs exceed `payload.reject_bytes` fails at
+  scheduler start.** `Scheduler.start()` raises `ConfigurationError`
+  (`HRS-205`, `CONFIG_INVALID_SCHEDULE`), and `horsies check` reports the
+  schedule. The notes give the size and the limit. Disabled schedules are not
+  checked. Before, the scheduler started and skipped every slot of that
+  schedule.
+- **Breaking: schedule kwargs are encoded once, at scheduler start.** Every
+  slot sends that text until the next start. A kwargs model field with a
+  `default_factory`, or a validator that reads the clock, runs once per start
+  and not once per fire, so the task receives the same value on every fire.
+  If such a validator refuses the value after the start, the scheduler still
+  enqueues the task, and the task fails at the worker with
+  `WORKER_SERIALIZATION_ERROR`. Before, the scheduler logged an error and
+  skipped the slot.
 - **Breaking: `RerunSourceAbsent.predates_retained_floor` is now
   `RerunSourceAbsent.reason`, a `TaskAbsenceReason`.** `True` is
   `PREDATES_RETAINED_HISTORY`, `False` is `WITHIN_RETAINED_HISTORY` and `None`
@@ -165,9 +179,8 @@ there is no migration contract between pre-1.0 versions.
     `WORKER_PING_FAILED`); a non-positive `limit` of
     `get_worker_state_history` (before: `MONITORING_QUERY_FAILED`); both
     `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without
-    either, or malformed args or kwargs JSON passed to `enqueue()`, and a
-    scheduled slot whose kwargs fail to encode or exceed
-    `payload.reject_bytes` (before: `ENQUEUE_FAILED`).
+    either, or malformed args or kwargs JSON passed to `enqueue()` (before:
+    `ENQUEUE_FAILED`).
   - `LISTENER_DISABLED`: `ping_workers` on a broker built with
     `assume_initialized=True` (before: `WORKER_PING_FAILED`).
 - **Malformed `task_options` JSON passed to `enqueue()` returns

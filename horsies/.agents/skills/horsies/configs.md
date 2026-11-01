@@ -315,7 +315,7 @@ against the already-serialized JSON string (no extra serialization pass).
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size; rate-limited to once per (task_name, kind) per process |
-| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written |
+| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check` |
 
 Coverage: `.send()`/`.schedule()` kwargs warn and reject
 (`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails
@@ -513,7 +513,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction) |
+| `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction). Encoded once at scheduler start: a `default_factory` or a validator that reads the clock runs once per start, not once per fire |
 | `queue_name` | `str \| None` | `None` | Target queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |

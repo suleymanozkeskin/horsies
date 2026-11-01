@@ -120,7 +120,7 @@ serialization pass.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `payload.warn_bytes` | `int \| None` | 1 MiB | Warn when a serialized payload exceeds this size; rate-limited to once per task name and payload kind per process. `None` disables |
-| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size before anything is written. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
+| `payload.reject_bytes` | `int \| None` | `None` | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check`. Results are never rejected — completed work is never destroyed over size. `None` (default) disables |
 
 Coverage by boundary:
 
