@@ -126,6 +126,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
+| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node |
 
 ## Domain Errors vs Library Errors
 
