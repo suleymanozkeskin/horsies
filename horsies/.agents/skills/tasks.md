@@ -696,6 +696,41 @@ async def report() -> None:
     result = await handle.get_async(timeout_ms=5000)
 ```
 
+### `timeout_ms` fails other started tasks on the same worker → `WORKER_CRASHED`
+
+A timeout SIGKILLs the child process. All children of a worker share one process pool, so the kill breaks the pool. The worker then recovers every task that was in the pool, not only the timed-out one.
+
+| Task state at the kill | Result |
+|---|---|
+| Timed-out task | Fails with `TASK_TIMEOUT` (retry only if `TASK_TIMEOUT` is in `auto_retry_for`) |
+| Other task, user code not started | Returns to PENDING |
+| Other task, user code started | Fails with `WORKER_CRASHED`; retried only if `WORKER_CRASHED` is in its `auto_retry_for`, otherwise FAILED |
+
+```python
+from horsies import OperationalErrorCode, OutcomeCode, RetryPolicy
+
+# A task that is safe to run again: survives a sibling's timeout.
+@app.task(
+    "resize_image",
+    retry_policy=RetryPolicy.fixed(
+        [30, 120],
+        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+    ),
+)
+def resize_image(*, image_id: str) -> TaskResult[str, TaskError]: ...
+
+# The task with the timeout. Size it as a hang backstop, not as routine control flow.
+@app.task(
+    "render_report",
+    timeout_ms=600_000,
+    retry_policy=RetryPolicy.fixed([60], auto_retry_for=[OutcomeCode.TASK_TIMEOUT]),
+)
+def render_report(*, report_id: str) -> TaskResult[str, TaskError]: ...
+```
+
+- A retry runs the task from the start. Add `WORKER_CRASHED` only to tasks that are safe to run again.
+- A child that reaches `max_memory_per_child_mb` is replaced alone and does not break the pool.
+
 ### `WAIT_TIMEOUT` is not a terminal failure
 
 ```python
