@@ -56,6 +56,19 @@ def _boot(init: InitFrame) -> None:
                 marks.seek(0)
                 if len(marks.read()) < int(init.imports[0]):
                     raise RuntimeError('scripted transient boot failure')
+        case 'killed_always':
+            os.kill(os.getpid(), signal.SIGKILL)
+        case 'killed_after_first' | 'fails_after_first':
+            # The first boots pass, then the next boots end, while marks last.
+            with open(argument, 'a+', encoding='ascii') as marks:
+                marks.write('x')
+                marks.seek(0)
+                seen = len(marks.read())
+            first_boots = int(init.imports[1])
+            if first_boots < seen <= first_boots + int(init.imports[0]):
+                if mode == 'killed_after_first':
+                    os.kill(os.getpid(), signal.SIGKILL)
+                raise RuntimeError('scripted replacement boot failure')
         case 'parent_identity':
             return
         case _:
