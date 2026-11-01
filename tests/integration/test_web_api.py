@@ -45,7 +45,7 @@ from horsies.web.routes import events as events_route_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows
+from tests.integration.history_seeding import route_rows, stored_history_status
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -638,6 +638,23 @@ class TestTaskActionMapping:
         assert refused.json()['current_status'] == 'RUNNING'
         assert allowed.status_code == 200
         assert allowed.json()['was_status'] == 'RUNNING'
+
+    async def test_stored_data_that_does_not_parse_is_a_server_error(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        """The request was valid, and a repeat gives the same answer: not 503."""
+        task = make_task(status=TaskStatus.FAILED)
+        await persist(session, task)
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            cancel = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
+            detail = await api.get(f'/api/tasks/{task.id}')
+
+        assert cancel.status_code == 500
+        assert "'NOT_A_STATUS'" in cancel.json()['detail']
+        assert detail.status_code == 500
+        assert detail.json()['detail'].startswith('Task detail query failed:')
+        assert "'NOT_A_STATUS'" in detail.json()['detail']
 
 
 @pytest.mark.usefixtures('clean_tables')

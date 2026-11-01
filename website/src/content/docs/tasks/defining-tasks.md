@@ -211,7 +211,7 @@ def task_two() -> TaskResult[str, TaskError]:
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `task_name` | `str` | Yes | Unique task identifier |
+| `task_name` | `str` | Yes | Unique task identifier. An empty name raises `TaskDefinitionError` (`HRS-102`) |
 | `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |

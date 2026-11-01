@@ -29,6 +29,7 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 | `RUNNING` | Cancelled **only when the caller opts in**. See below |
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
+| Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
 
 A committed `CANCELLED` is final. Every lifecycle transition is a CAS with an
 expected status, so claim, finalize, auto-retry, and the reaper all no-op
@@ -241,7 +242,7 @@ concurrency control.
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
 | 404 | The row no longer exists | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
-| 500 | A stored value of the run does not parse (`STORED_DATA_INVALID`), or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing changed and a repeat gets the same answer |
+| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
 
 A failed request is not proof that nothing happened. A network error in
