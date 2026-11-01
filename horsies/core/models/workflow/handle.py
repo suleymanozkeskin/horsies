@@ -918,7 +918,8 @@ class WorkflowHandle(Generic[OutT]):
             If output task specified: that task's TaskResult. A COMPLETED
             workflow whose output task is SKIPPED returns
             ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED``.
-            Otherwise: TaskResult containing dict of terminal task results
+            Otherwise: TaskResult containing dict of terminal task results. A
+            SKIPPED terminal task has an entry with that same code.
         """
         return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
 

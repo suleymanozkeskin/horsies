@@ -138,10 +138,19 @@ _NO_JSON_KEY_TEXT: Final = re.compile(r'`\w+` not valid as object key')
 key without a JSON form. Its one placeholder is a type name, so it holds no
 input value. `_dump` matches all of it: any other `TypeError` is a defect."""
 
-_CIRCULAR_REFERENCE_TEXT: Final = 'Circular reference detected (id repeated)'
-"""The text of the plain `ValueError` from `dump_python` for a value that holds
-itself. `_dump` compares all of it: any other `ValueError` propagates, also the
-`Circular reference detected (depth exceeded)` of a value that is only deep."""
+_NOT_UTF8_REASON: Final = 'invalid utf-8'
+"""The `reason` of the `UnicodeDecodeError` that `dump_python` raises for `bytes`
+that are not UTF-8. A decode in Python gives another reason, such as `invalid
+start byte`, so a bad decode in a computed field stays a defect."""
+
+_NOT_SERIALIZABLE_VALUE_TEXTS: Final = frozenset({
+    'Circular reference detected (id repeated)',
+    'Circular reference detected (depth exceeded)',
+})
+"""The texts of the plain `ValueError` from `dump_python` for a value that holds
+itself, and for a value that is nested too deep. The second text says circular,
+but the value can be finite. `_dump` compares all of each text: any other
+`ValueError` propagates."""
 
 
 # ---------------------------------------------------------------------------
@@ -201,8 +210,9 @@ def encode_value(
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
        A dict key with a lone surrogate raises at a position without a
        declared key type; `_dump` makes that a `StrictJsonError`. A dict key
-       without a JSON form, and a value that holds itself, raise too; `_dump`
-       makes those a `ValueValidationError`.
+       without a JSON form, a value that holds itself, a value that is nested
+       too deep and `bytes` that are not UTF-8 raise too; `_dump` makes those
+       a `ValueValidationError`.
     4. `_scan_wire_json` rejects non-finite floats and strings with a lone
        surrogate at any depth, so `encode_value` refuses each string that
        `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
@@ -262,8 +272,9 @@ def decode_value(
 ) -> object:
     """Decode a JSON-shaped value into a typed Python value.
 
-    Assumes `json_value` came from `loads_json`, so non-RFC-8259 constants
-    and numbers outside the finite binary64 range were rejected upstream.
+    Assumes `json_value` came from `loads_json`, so non-RFC-8259 constants,
+    numbers outside the finite binary64 range and nesting deeper than
+    `MAX_JSON_DEPTH` were rejected upstream.
 
     Reserved-key invariant is enforced symmetrically with `encode_value`:
     payloads carrying `__h_*` or `__builtin_task_code__` at user-controlled
@@ -348,11 +359,18 @@ def _dump(
     `TypeError` propagates. A pydantic that changes the text gives the raw
     `TypeError` again, not a wrong refusal.
 
-    Pydantic raises a plain `ValueError` for a value that holds itself. The
-    same rule applies: only the full text is this refusal. Any other
-    `ValueError` propagates, for example from a computed field. The arm comes
-    after the arms for `PydanticSerializationError` and `UnicodeEncodeError`,
-    because both are a `ValueError`.
+    Pydantic raises a plain `ValueError` for a value that holds itself or
+    that is nested too deep. The same rule applies: only the full text is
+    this refusal. Any other `ValueError` propagates, for example from a
+    computed field. The arm comes after the arms for
+    `PydanticSerializationError`, `UnicodeEncodeError` and
+    `UnicodeDecodeError`, because each is a `ValueError`.
+
+    Pydantic raises `UnicodeDecodeError` for `bytes` that are not UTF-8, at
+    a declared `bytes` position and at `Any`, also as a dict key. Its text
+    and its `object` hold the bytes, so the refusal has a fixed text and is
+    raised outside the `except` block. Only the `reason` of pydantic is this
+    refusal; a decode error from Python code propagates.
     """
     failure: StrictJsonError | ValueValidationError
     try:
@@ -361,6 +379,12 @@ def _dump(
         failure = ValueValidationError(f'serialization failed: {error}')
     except UnicodeEncodeError:
         failure = StrictJsonError(lone_surrogate_text('a dict key', location))
+    except UnicodeDecodeError as error:
+        if error.reason != _NOT_UTF8_REASON:
+            raise
+        failure = ValueValidationError(
+            _with_location('serialization failed: bytes that are not UTF-8', location),
+        )
     except TypeError as error:
         if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
             raise
@@ -368,7 +392,7 @@ def _dump(
             _with_location(f'serialization failed: {error}', location),
         )
     except ValueError as error:
-        if str(error) != _CIRCULAR_REFERENCE_TEXT:
+        if str(error) not in _NOT_SERIALIZABLE_VALUE_TEXTS:
             raise
         failure = ValueValidationError(
             _with_location(f'serialization failed: {error}', location),
@@ -630,7 +654,7 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
 
     TaskError's `error_code` serializer emits exactly
     `{"__builtin_task_code__": "<str>"}` for built-in codes and a
-    plain string (or None) for user codes. Anything else under
+    plain string for user codes. Anything else under
     `error_code` — additional keys, other reserved keys alongside the
     discriminator — is rejected as smuggled. `data`, `exception`, and
     `message` are user-controlled and get the full strict scan.
@@ -648,8 +672,7 @@ def _scan_task_error_user_fields(dumped_json: Json) -> None:
 def _scan_task_error_error_code(value: Json) -> None:
     """Path-aware scan for TaskError.error_code.
 
-    The TaskError serializer emits one of exactly three shapes:
-    - `None` (no error code set)
+    The TaskError serializer emits one of exactly two shapes:
     - `"some_user_code"` (plain string for user codes)
     - `{"__builtin_task_code__": "BUILTIN_NAME"}` (single-key dict for
       built-in codes)
@@ -660,15 +683,14 @@ def _scan_task_error_error_code(value: Json) -> None:
     `{"__builtin_task_code__": "X", "other": "y"}` case, but Pydantic
     silently drops unknown keys during error_code validation — so an
     extra non-reserved key would pass through unobserved. Reject any
-    deviation from the documented three shapes here.
+    deviation from the documented two shapes here. A null `error_code` is not
+    a dict, so the TypeAdapter refuses it with its own cause.
 
     When the deviation includes a reserved key (e.g.
     `{"__builtin_task_code__": "X", "__h_extra__": 1}`), prefer the
     reserved-key message: it tells operators they're looking at a
     smuggle attempt, not just a shape bug.
     """
-    if value is None:
-        return
     if isinstance(value, str):
         return
     if not isinstance(value, dict):
@@ -694,8 +716,8 @@ def _scan_task_error_error_code(value: Json) -> None:
                 f'reserved key {key!r} in user-originated data',
             )
     raise StrictJsonError(
-        f'invalid TaskError.error_code shape: expected None, a plain '
-        f'string, or {{"__builtin_task_code__": "<str>"}}; got dict '
+        f'invalid TaskError.error_code shape: expected a plain string '
+        f'or {{"__builtin_task_code__": "<str>"}}; got dict '
         f'with keys {sorted(d.keys())}',
     )
 

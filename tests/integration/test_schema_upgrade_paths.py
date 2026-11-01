@@ -1751,6 +1751,54 @@ class TestUpgradePaths:
             await broker.close_async()
             await engine.dispose()
 
+    async def test_recovery_failure_table_upgrade_from_51(
+        self, scratch_database: str,
+    ) -> None:
+        """A v51 database gets the count table at v52 with no foreign key,
+        and a second apply changes nothing."""
+        await _migrate(scratch_database)
+        engine = _engine(scratch_database)
+        columns_sql = text("""
+            SELECT attname::text FROM pg_attribute
+            WHERE attrelid = 'horsies_workflow_recovery_failures'::regclass
+              AND attnum > 0 AND NOT attisdropped
+            ORDER BY attnum
+        """)
+        foreign_keys_sql = text("""
+            SELECT count(*) FROM pg_constraint
+            WHERE conrelid = 'horsies_workflow_recovery_failures'::regclass
+              AND contype = 'f'
+        """)
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    'DROP TABLE horsies_workflow_recovery_failures'
+                ))
+                await conn.execute(text(
+                    'DELETE FROM horsies_schema_version WHERE version >= 52'
+                ))
+                await conn.execute(text(
+                    'INSERT INTO horsies_schema_version(version) VALUES (51) '
+                    'ON CONFLICT DO NOTHING'
+                ))
+            await _migrate(scratch_database)
+            await _migrate(scratch_database)
+            async with engine.connect() as conn:
+                assert await _stored_version(engine) == SCHEMA_VERSION
+                assert (await conn.execute(columns_sql)).scalars().all() == [
+                    'workflow_id',
+                    'failed_passes',
+                    'last_pass_id',
+                    'first_failed_at',
+                    'last_failed_at',
+                    'last_case',
+                    'last_task_index',
+                    'last_exception_type',
+                ]
+                assert (await conn.execute(foreign_keys_sql)).scalar_one() == 0
+        finally:
+            await engine.dispose()
+
     async def test_single_column_history_checks_upgrade_from_48(
         self, scratch_database: str,
     ) -> None:

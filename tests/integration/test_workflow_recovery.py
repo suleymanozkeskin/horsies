@@ -33,6 +33,11 @@ from horsies.core.workflows.recovery import (
     _run_recovery_candidate,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.workflows.phase2_recovery import drive_phase2_recovery
+from horsies.core.workflows.recovery_limit import (
+    LogFailuresOnly,
+    RecoveryCandidateOutcome,
+    RecoveryCase,
+)
 
 from .conftest import make_simple_task, make_failing_task, make_workflow_spec, start_ok
 from horsies.core.models.workflow import SuccessPolicy, SuccessCase
@@ -186,11 +191,12 @@ class TestWorkflowRecovery:
 
         result = await _run_recovery_candidate(
             session,
-            case='unit_probe',
+            case=RecoveryCase.PENDING_TERMINAL_DEPS,
             action=_poison,
+            failure_policy=LogFailuresOnly(),
         )
 
-        assert result is False
+        assert result is RecoveryCandidateOutcome.NOT_COUNTED
         # SAVEPOINT rollback dropped the probe row...
         assert not await self._probe_exists(session, probe_id)
         # ...and the queue is restored to the pre-candidate snapshot.
@@ -215,11 +221,12 @@ class TestWorkflowRecovery:
 
         result = await _run_recovery_candidate(
             session,
-            case='unit_probe',
+            case=RecoveryCase.PENDING_TERMINAL_DEPS,
             action=_succeed,
+            failure_policy=LogFailuresOnly(),
         )
 
-        assert result is True
+        assert result is RecoveryCandidateOutcome.APPLIED
         assert await self._probe_exists(session, probe_id)
         assert pop_pending_parent_propagations(session) == ['candidate-child']
         await session.rollback()

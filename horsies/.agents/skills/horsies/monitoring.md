@@ -129,8 +129,10 @@ list_schedules(broker)
   future partitions remain), `partition_pruning`
   (`{"finalized", "detached", "dropped", "refusals", "errors"}` — the last
   two are reason-carrying lists, not counts; a refused partition is retried
-  every pass), and `phase2_recovery` (pass summary with quarantined counts
-  and refusals).
+  every pass), `phase2_recovery` (pass summary with quarantined counts,
+  `raised_counted` and refusals), and `workflow_recovery` (`recovered`,
+  `errors`, `over_failure_limit`, and per case `failures_counted` and
+  `limit_reached`).
 
 ### Reads span live and history
 

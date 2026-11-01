@@ -179,7 +179,15 @@ configuration snapshot, refreshed with each snapshot:
   skipped, and remains a candidate on the next pass.
 - `phase2_recovery` — the crashed-worker progression pass summary
   (considered / applied / retained / failed counts, quarantined rows,
-  and the quarantine function's refusals verbatim).
+  `raised_counted` rows whose progression raised a persistent error, and
+  the quarantine function's refusals verbatim).
+- `workflow_recovery` — the last workflow recovery pass: `recovered`,
+  `errors`, and per case the rows selected, refusals and errors. The
+  top-level `errors` adds every case and the failures that no case counted.
+  `failures_counted` and `limit_reached` per case show the
+  [recovery limit](../configuration/recovery-config#workflow-recovery-limit).
+  `over_failure_limit` counts the `RUNNING` workflows at or over the limit:
+  a live node holds such a workflow, and so does a limit write that fails.
 
 `memory_usage_mb` is the **parent** process only. Task code runs in the worker's
 children, so per-child memory growth is invisible there; `children_memory_mb`

@@ -191,8 +191,8 @@ campaign id engineered to miss both, which reports
 WORKFLOW_SUCCESS_CASE_NOT_MET."""
 
 SEARCH_PREWARM_FAIL_RATE: Final[float] = 0.50
-"""`prewarm_search` is declared optional in the SuccessPolicy, so this rate
-never affects whether the sale succeeded."""
+"""No case of the SuccessPolicy requires `prewarm_search`, so this rate never
+affects whether the sale succeeded."""
 
 EXPIRING_PRICE_SENDS: Final[int] = 80
 PRICE_GOOD_UNTIL_SECONDS: Final[int] = 45

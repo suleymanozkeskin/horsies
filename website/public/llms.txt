@@ -81,13 +81,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .ok_value -> T (raises on err), .err_value -> E (raises on ok)
 
 ### TaskError
-- error_code: str | BuiltInTaskCode | None
+- error_code: str | BuiltInTaskCode (required, not null)
 - message: str | None
 - data: Any | None
 - exception: dict[str, Any] | BaseException | None
+- Unknown keys are refused, at construction and at decode
 
 ### BuiltInTaskCode (type alias = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode)
-- OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
+- OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED
 - ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CTX_MISSING_ID, NO_TYPE_AVAILABLE
 - RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
@@ -95,8 +96,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
 - User-defined error codes are plain str only (foreign str,Enum types rejected)
-- Strict construction: TaskError(error_code="BROKER_ERROR") raises ValueError (reserved string)
-- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR) — accepted
+- Strict construction: TaskError(error_code="BROKER_ERROR", message="...") raises ValueError (reserved string)
+- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
 - Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
 - Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
 
@@ -337,7 +338,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### SuccessPolicy / SuccessCase
 - SuccessPolicy(cases=[SuccessCase(required=[...])], optional=[...])
 - Workflow COMPLETED if ANY SuccessCase is fully satisfied (all required COMPLETED)
-- optional: tasks that can fail without affecting success evaluation
+- optional: declarative, no runtime effect; a node that no case requires does not change the result
 - Without success_policy: any task failure -> workflow FAILED
 
 ### AnyNode
