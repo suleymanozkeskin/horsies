@@ -946,11 +946,12 @@ class TestBootKills:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
-        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100', '1'))
-        pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
+        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100', '2'))
+        pool = await pool_factory(_config(2, init=init, max_tasks_per_child=1))
 
         await _outcome(pool.submit(_frame('echo', 'first')))
 
+        # The other child is serving, so only the kind of death decides here.
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
         assert isinstance(failure, BootAttemptsExhausted)
 
