@@ -593,6 +593,14 @@ and there is no migration contract between pre-1.0 versions.
   decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
   refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
   character and stays accepted.
+- **`prepare_legacy_batch` no longer aborts on a row that breaks an enqueue
+  rule.** An empty task or queue name, or a priority outside 1..100, raised a
+  raw `ValueError` out of the batch, so one row stopped every row around it and
+  the error did not name it. The row now stays unprepared, and
+  `PreparationBatch.refused_rows` names it with the rule. The walk ends in the
+  new `PreparationBlocked`, which counts the rows that remain, not in
+  `PreparationComplete`. Repair the rows and run preparation again; the tighten
+  refuses while any remain.
 
 ## [0.5.5] - 2026-10-28
 
