@@ -20,10 +20,10 @@ from sqlalchemy.exc import OperationalError
 from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
-    HistoryTaskDetail,
+    HistoryTaskState,
     LiveTaskLocation,
-    TaskDetailAbsent,
-    TaskDetailResult,
+    TaskStateAbsent,
+    TaskStateResult,
 )
 from horsies.core.lifecycle.operations import TerminalizationKind
 from horsies.core.lifecycle.outcomes import (
@@ -148,47 +148,9 @@ class TestVariantCatalog:
                 assert error.retryable is False
 
 
-def _history_detail(*, status: TaskStatus, is_workflow_task: bool) -> HistoryTaskDetail:
-    return HistoryTaskDetail(
-        task_id=TASK_ID,
-        task_name='report',
-        queue_name='default',
-        priority=100,
-        status=status,
-        terminalization_kind='FAIL_RUNNING',
-        terminal_at=NOW,
-        retention_class_key='default',
-        enqueued_at=NOW,
-        created_at=NOW,
-        sent_at=None,
-        claimed_at=None,
-        started_at=None,
-        good_until=None,
-        retry_count=0,
-        max_retries=0,
-        last_claimed_worker_id=None,
-        last_worker_hostname=None,
-        last_worker_pid=None,
-        result_envelope_version=1,
-        result_codec='json-utf8',
-        result_content_type='application/json',
-        result_payload=None,
-        prior_result_payload=None,
-        result_digest=None,
-        error_code=None,
-        final_failed_reason=None,
-        rerun_of_task_id=None,
-        rerun_root_task_id=None,
-        workflow_id=None,
-        is_workflow_task=is_workflow_task,
-        rerun_input_disposition='DECLINED_BY_POLICY',
-        rerun_input_version=None,
-        rerun_input_codec=None,
-        rerun_input_content_type=None,
-        rerun_input_digest=None,
-        rerun_input_inline=None,
-        rerun_input_reference=None,
-        attempts=(),
+def _history_state(*, status: TaskStatus, is_workflow_task: bool) -> HistoryTaskState:
+    return HistoryTaskState(
+        task_id=TASK_ID, status=status, is_workflow_task=is_workflow_task,
     )
 
 
@@ -227,7 +189,7 @@ def _patch_history(
     monkeypatch: pytest.MonkeyPatch,
     *,
     published: bool,
-    read: TaskDetailResult | BaseException,
+    read: TaskStateResult | BaseException,
 ) -> None:
     monkeypatch.setattr(
         task_actions_module,
@@ -239,7 +201,7 @@ def _patch_history(
             reader = AsyncMock(side_effect=read)
         case _:
             reader = AsyncMock(return_value=read)
-    monkeypatch.setattr(task_actions_module, 'read_task_detail', reader)
+    monkeypatch.setattr(task_actions_module, 'read_task_state', reader)
 
 
 def _patch_outcome(
@@ -258,7 +220,7 @@ async def _cancel_missed(
     monkeypatch: pytest.MonkeyPatch,
     *,
     published: bool,
-    read: TaskDetailResult | BaseException,
+    read: TaskStateResult | BaseException,
 ) -> Result[TaskCancelled, TaskActionError]:
     broker, _ = _broker_with_session(AsyncMock(return_value=_missed_row()))
     _patch_history(monkeypatch, published=published, read=read)
@@ -288,7 +250,7 @@ class TestCancelLiveMiss:
         result = await _cancel_missed(
             monkeypatch,
             published=True,
-            read=TaskDetailAbsent(task_id=TASK_ID, predates_retained_floor=False),
+            read=TaskStateAbsent(task_id=TASK_ID),
         )
 
         assert is_err(result)
@@ -312,7 +274,7 @@ class TestCancelLiveMiss:
         result = await _cancel_missed(
             monkeypatch,
             published=True,
-            read=_history_detail(status=TaskStatus.COMPLETED, is_workflow_task=False),
+            read=_history_state(status=TaskStatus.COMPLETED, is_workflow_task=False),
         )
 
         assert is_err(result)
@@ -329,7 +291,7 @@ class TestCancelLiveMiss:
         result = await _cancel_missed(
             monkeypatch,
             published=True,
-            read=_history_detail(status=TaskStatus.FAILED, is_workflow_task=True),
+            read=_history_state(status=TaskStatus.FAILED, is_workflow_task=True),
         )
 
         assert is_err(result)

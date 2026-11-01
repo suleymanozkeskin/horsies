@@ -39,10 +39,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
-    HistoryTaskDetail,
+    HistoryTaskState,
     LiveTaskLocation,
-    TaskDetailAbsent,
-    read_task_detail,
+    TaskStateAbsent,
+    read_task_state,
     staged_detail_published,
 )
 from horsies.core.lifecycle.commands import CancelLockedTask
@@ -173,10 +173,9 @@ class TaskActionEventLoopLimit:
 class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the transaction did not commit.
 
-    ``exception`` is the ``HistoryContractError`` of the history read (for
-    example a history status that is not a ``TaskStatus`` member, or an
-    attempt snapshot that does not decode), or the ``OutcomeDecodeError``
-    of the cancel outcome row. A repeat gives the same result until the
+    ``exception`` is the ``HistoryContractError`` of the history read (a
+    history status that is not a ``TaskStatus`` member, or an unknown
+    location), or the ``OutcomeDecodeError`` of the cancel outcome row. A repeat gives the same result until the
     stored row changes.
     """
 
@@ -304,17 +303,18 @@ async def _diagnose_live_miss(
     after the lock read. A repeated cancel finds the row.
 
     Raises:
-        HistoryContractError: the history row does not decode.
+        HistoryContractError: the history row's status is not a task status,
+            or the staged function reports an unknown location.
     """
     if not await staged_detail_published(connection):
         return _not_found(task_id)
-    detail = await read_task_detail(connection, task_id=task_id)
-    match detail:
-        case HistoryTaskDetail(is_workflow_task=True, status=status):
+    state = await read_task_state(connection, task_id=task_id)
+    match state:
+        case HistoryTaskState(is_workflow_task=True, status=status):
             return _workflow_bound(task_id, status)
-        case HistoryTaskDetail(status=status):
+        case HistoryTaskState(status=status):
             return _not_cancellable(task_id, status)
-        case TaskDetailAbsent():
+        case TaskStateAbsent():
             return _not_found(task_id)
         case LiveTaskLocation():
             return _not_found(task_id)
