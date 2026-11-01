@@ -121,5 +121,5 @@ def run() -> int:
     bullet('  EXPIRED is not FAILED — the deadline passed before execution started')
     bullet(f'{WEB_BASE_URL}/workflows  compare the two campaign runs')
     bullet('  the failing one reports WORKFLOW_SUCCESS_CASE_NOT_MET, not a task error')
-    bullet('  prewarm_search fails in both and changes nothing — it is optional')
+    bullet('  prewarm_search fails in both and changes nothing — no case requires it')
     return 0

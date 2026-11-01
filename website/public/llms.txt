@@ -337,7 +337,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### SuccessPolicy / SuccessCase
 - SuccessPolicy(cases=[SuccessCase(required=[...])], optional=[...])
 - Workflow COMPLETED if ANY SuccessCase is fully satisfied (all required COMPLETED)
-- optional: tasks that can fail without affecting success evaluation
+- optional: declarative, no runtime effect; a node that no case requires does not change the result
 - Without success_policy: any task failure -> workflow FAILED
 
 ### AnyNode

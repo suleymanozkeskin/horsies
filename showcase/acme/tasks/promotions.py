@@ -272,9 +272,9 @@ def publish_origin(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskE
 def prewarm_search(*, campaign_id: str) -> TaskResult[SearchPrewarm, TaskError]:
     """Rebuild the search index for the sale.
 
-    Declared `optional` in the workflow's SuccessPolicy, so it is excluded from
-    failure accounting entirely — it fails half the time and the sale still
-    completes.
+    No case of the workflow's SuccessPolicy requires it, so it fails half the
+    time and the sale still completes. The policy lists it as `optional` to
+    record that intent.
     """
     simulate.perform(tuning.PREWARM_SEARCH_WORK, campaign_id, 'search')
 

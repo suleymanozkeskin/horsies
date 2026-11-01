@@ -167,7 +167,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 - `UPSTREAM_SKIPPED` — upstream task was skipped
 - `SUBWORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
-- `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node
+- `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node
 
 ### Reserved Built-In Codes
 
