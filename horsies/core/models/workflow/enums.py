@@ -92,7 +92,9 @@ class WorkflowTaskStatus(str, Enum):
     """Worker is executing the task (or child workflow is running)"""
 
     COMPLETED = 'COMPLETED'
-    """Task succeeded (TaskResult.is_ok())"""
+    """Task succeeded (TaskResult.is_ok()), or the child workflow of a
+    SubWorkflowNode is COMPLETED. The result of that node is the child's
+    output result, which can be an err under a success policy."""
 
     FAILED = 'FAILED'
     """Task failed (TaskResult.is_err())"""

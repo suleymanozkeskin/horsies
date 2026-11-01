@@ -361,9 +361,10 @@ def _completed_without_stored_result(
     result column is NULL or empty.
 
     The library writes a result in the same statement that sets
-    ``COMPLETED``: the output node's stored result, the outputless envelope,
-    or the JSON text ``null``. So a NULL or empty result is stored data that
-    does not parse, not a success.
+    ``COMPLETED``: the output node's stored result, an error envelope for an
+    output node with no result, the outputless envelope, or the JSON text
+    ``null`` when that envelope does not serialize. So a NULL or empty result
+    is stored data that does not parse, not a success.
     """
     return TaskResult(
         err=TaskError(
@@ -501,7 +502,7 @@ _NODE_STATUS_BY_STORED_VALUE: dict[str, WorkflowTaskStatus] = {
 }
 
 
-def _stored_node_status(
+def stored_node_status(
     *, workflow_id: str, node_id: str, stored: str,
 ) -> WorkflowTaskStatus:
     """Return the node status that the database row stores.
@@ -938,7 +939,9 @@ class WorkflowHandle(Generic[OutT]):
         Block until workflow completes or timeout.
 
         Returns:
-            If output task specified: that task's TaskResult
+            If output task specified: that task's TaskResult. A COMPLETED
+            workflow whose output task is SKIPPED returns
+            ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED``.
             Otherwise: TaskResult containing dict of terminal task results
         """
         return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
@@ -1522,7 +1525,7 @@ class WorkflowHandle(Generic[OutT]):
                         node_id=row.node_id,
                         index=row.task_index,
                         name=row.task_name,
-                        status=_stored_node_status(
+                        status=stored_node_status(
                             workflow_id=self.workflow_id,
                             node_id=row.node_id,
                             stored=row.status,

@@ -1,0 +1,583 @@
+"""A COMPLETED workflow with an explicit output node always stores an envelope.
+
+A success case that does not require the output node lets a workflow be
+COMPLETED while that node is SKIPPED or FAILED. A SKIPPED output node stores an
+error envelope with ``WORKFLOW_OUTPUT_SKIPPED``. A FAILED output node stores its
+own error. A parent workflow copies the child's result text into its
+``SubWorkflowNode``, so both cases make a COMPLETED node with an err, and every
+reader of the result column decodes that envelope.
+
+The outputless envelope is not part of this: its branch, its shape and its
+per-entry ``None`` stay as they are.
+"""
+
+from __future__ import annotations
+
+# pyright: reportPrivateUsage=false
+
+import json
+from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+from pydantic import SecretStr
+
+from horsies.core.app import Horsies
+from horsies.core.codec.error_payload import serialize_error_payload
+from horsies.core.codec.json_io import SerializationError
+from horsies.core.codec.typed import decode_task_result
+from horsies.core.models.app import AppConfig
+from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.tasks import (
+    BUILTIN_CODE_REGISTRY,
+    OperationalErrorCode,
+    OutcomeCode,
+    TaskError,
+    TaskResult,
+)
+from horsies.core.models.workflow import (
+    SubWorkflowSummary,
+    WorkflowDefinition,
+    WorkflowStatus,
+    WorkflowTaskStatus,
+)
+from horsies.core.models.workflow.handle import (
+    _decode_per_task_envelope,
+    _decode_workflow_envelope,
+)
+from horsies.core.types.result import Err
+from horsies.core.workflows.engine import (
+    _decode_err_only,
+    _decode_stored_task_result,
+    check_workflow_completion,
+    get_dependency_results,
+    get_dependency_results_with_names,
+    get_workflow_final_result,
+    on_subworkflow_complete,
+)
+from horsies.core.workflows.registry import (
+    register_workflow_definition,
+    unregister_workflow_definition,
+)
+from horsies.core.workflows.sql import (
+    GET_CHILD_WORKFLOW_INFO_SQL,
+    GET_DEPENDENCY_RESULTS_SQL,
+    GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
+    GET_OUTPUT_TASK_RESULT_SQL,
+    GET_TASK_RESULTS_BY_INDEXES_SQL,
+    GET_TASK_STATUSES_SQL,
+    GET_WORKFLOW_COMPLETION_STATUS_SQL,
+    GET_WORKFLOW_DAG_EDGES_SQL,
+    GET_WORKFLOW_STATUS_SQL,
+    LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
+    MARK_WORKFLOW_COMPLETED_SQL,
+    MARK_WORKFLOW_FAILED_SQL,
+    SET_WORKFLOW_ERROR_SQL,
+    UPDATE_PARENT_NODE_RESULT_SQL,
+)
+from horsies.monitoring.models import ErrorCategory
+from horsies.monitoring.queries import categorize_error_code
+
+pytestmark = [pytest.mark.unit]
+
+WORKFLOW_ID = '11111111-1111-7111-8111-111111111111'
+OUTPUT_INDEX = 2
+OUTPUT_NODE_ID = 'shipping:2'
+OUTPUT_TASK_NAME = 'label_parcel'
+CHILD_KEY = 'tests.unit.workflow_output_skipped.child.v1'
+DUMPS_JSON = 'horsies.core.workflows.engine.dumps_json'
+OK_RESULT_TEXT = '{"__h_task_result__":true,"ok":7,"err":null}'
+ERR_RESULT_TEXT = serialize_error_payload(
+    TaskResult(err=TaskError(error_code='LABEL_REFUSED', message='refused')),
+)
+LIVE_STATUSES = [
+    status for status in WorkflowTaskStatus if not status.is_terminal
+]
+
+
+class _Session:
+    """An ``AsyncSession`` stand-in. ``rows`` maps a statement to its rows."""
+
+    def __init__(self, rows: dict[Any, list[Any]]) -> None:
+        self.rows = rows
+        self.calls: list[tuple[Any, dict[str, Any]]] = []
+        self.session = AsyncMock()
+        self.session.execute = AsyncMock(side_effect=self._dispatch)
+        # The engine queues parent propagations in ``session.info``.
+        self.session.info = {}
+
+    async def _dispatch(
+        self, statement: Any, params: dict[str, Any] | None = None,
+    ) -> MagicMock:
+        self.calls.append((statement, params or {}))
+        rows = self.rows.get(statement, [])
+        result = MagicMock()
+        result.fetchone.return_value = rows[0] if rows else None
+        result.fetchall.return_value = rows
+        return result
+
+    def executed(self, statement: Any) -> bool:
+        return any(called is statement for called, _ in self.calls)
+
+    def params_of(self, statement: Any) -> dict[str, Any]:
+        found = [params for called, params in self.calls if called is statement]
+        assert len(found) == 1, f'expected one execution, got {len(found)}'
+        return found[0]
+
+
+class _ChildDefinition(WorkflowDefinition[int]):
+    """The child workflow that the parent node of these tests runs."""
+
+    name = 'tests_unit_output_skipped_child'
+    definition_key = CHILD_KEY
+
+    @classmethod
+    def build_with(cls, app: Any, *args: Any, **params: Any) -> Any:
+        raise AssertionError('these tests do not start the child')
+
+
+@pytest.fixture
+def registered_child() -> Iterator[None]:
+    register_workflow_definition(_ChildDefinition)
+    yield
+    unregister_workflow_definition(CHILD_KEY)
+
+
+@pytest.fixture
+def app() -> Horsies:
+    return Horsies(
+        AppConfig(
+            broker=PostgresConfig(
+                database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+            ),
+        ),
+    )
+
+
+def _output_row(status: str, result: str | None) -> SimpleNamespace:
+    return SimpleNamespace(
+        node_id=OUTPUT_NODE_ID,
+        task_name=OUTPUT_TASK_NAME,
+        status=status,
+        result=result,
+    )
+
+
+async def _final_result(row: SimpleNamespace | None) -> str:
+    recorder = _Session({GET_OUTPUT_TASK_RESULT_SQL: [] if row is None else [row]})
+    return await get_workflow_final_result(
+        recorder.session, WORKFLOW_ID, OUTPUT_INDEX,
+    )
+
+
+async def _skipped_output_text() -> str:
+    return await _final_result(_output_row('SKIPPED', None))
+
+
+def _stored_err(text: str) -> TaskError:
+    result = decode_task_result(json.loads(text), int)
+    assert result.is_err()
+    return result.err_value
+
+
+class TestExplicitOutputResult:
+    """Each outcome of the explicit-output branch."""
+
+    @pytest.mark.asyncio
+    async def test_skipped_output_stores_the_named_outcome(self) -> None:
+        stored = await _skipped_output_text()
+
+        envelope = json.loads(stored)
+        assert set(envelope) == {'__h_task_result__', 'ok', 'err'}
+        assert envelope['__h_task_result__'] is True
+        assert envelope['ok'] is None
+        err = _stored_err(stored)
+        assert err.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+        assert err.data == {
+            'workflow_id': WORKFLOW_ID,
+            'output_node_id': OUTPUT_NODE_ID,
+            'output_task_index': OUTPUT_INDEX,
+            'output_task_name': OUTPUT_TASK_NAME,
+        }
+        assert WORKFLOW_ID in (err.message or '')
+        assert OUTPUT_NODE_ID in (err.message or '')
+
+    @pytest.mark.asyncio
+    async def test_skipped_status_decides_over_a_stored_result(self) -> None:
+        """No skip writer stores a result. The status names the state."""
+        stored = await _final_result(_output_row('SKIPPED', OK_RESULT_TEXT))
+
+        assert _stored_err(stored).error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('status', 'stored'),
+        [('COMPLETED', OK_RESULT_TEXT), ('FAILED', ERR_RESULT_TEXT)],
+        ids=['completed', 'failed-outside-the-required-set'],
+    )
+    async def test_stored_result_is_returned_unchanged(
+        self, status: str, stored: str,
+    ) -> None:
+        assert await _final_result(_output_row(status, stored)) == stored
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', ['COMPLETED', 'FAILED'])
+    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
+    async def test_node_without_a_result_is_stored_data_that_does_not_parse(
+        self, status: str, stored: str | None,
+    ) -> None:
+        text = await _final_result(_output_row(status, stored))
+
+        err = _stored_err(text)
+        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert status in (err.message or '')
+        assert OUTPUT_NODE_ID in (err.message or '')
+
+    @pytest.mark.asyncio
+    async def test_absent_row_raises_with_subject_and_cause(self) -> None:
+        with pytest.raises(AssertionError) as raised:
+            await _final_result(None)
+
+        message = str(raised.value)
+        assert WORKFLOW_ID in message
+        assert f'output_task_index {OUTPUT_INDEX}' in message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', LIVE_STATUSES, ids=lambda s: s.value)
+    async def test_live_status_raises_with_subject_and_cause(
+        self, status: WorkflowTaskStatus,
+    ) -> None:
+        with pytest.raises(AssertionError) as raised:
+            await _final_result(_output_row(status.value, None))
+
+        message = str(raised.value)
+        assert WORKFLOW_ID in message
+        assert OUTPUT_NODE_ID in message
+        assert status.value in message
+
+    @pytest.mark.asyncio
+    async def test_unknown_status_raises_with_subject_and_cause(self) -> None:
+        with pytest.raises(AssertionError) as raised:
+            await _final_result(_output_row('GARBAGE', OK_RESULT_TEXT))
+
+        assert WORKFLOW_ID in str(raised.value)
+        assert 'GARBAGE' in str(raised.value)
+
+    @pytest.mark.asyncio
+    async def test_envelope_that_does_not_serialize_raises(self) -> None:
+        refused = Err(SerializationError('forced'))
+
+        with patch(DUMPS_JSON, return_value=refused):
+            with pytest.raises(SerializationError) as raised:
+                await _skipped_output_text()
+
+        assert f'output result of workflow {WORKFLOW_ID}' in str(raised.value)
+
+    def test_statement_reads_what_the_branch_matches_on(self) -> None:
+        """Only this pin sees the statement: the fakes supply every column."""
+        statement = str(GET_OUTPUT_TASK_RESULT_SQL)
+
+        assert 'SELECT node_id, task_name, status, result' in statement
+
+
+class TestCompletionCheck:
+    """The branch runs from its real caller, under a real policy evaluation."""
+
+    @staticmethod
+    def _session(
+        *, statuses: dict[int, str], output: SimpleNamespace | None,
+    ) -> _Session:
+        return _Session({
+            GET_WORKFLOW_COMPLETION_STATUS_SQL: [
+                SimpleNamespace(
+                    status='RUNNING',
+                    completed_at=None,
+                    error='{"message": "first failure"}',
+                    success_policy={'cases': [{'required_indices': [0]}]},
+                    name='shipping',
+                    output_task_index=OUTPUT_INDEX,
+                    parent_workflow_id=None,
+                    incomplete=0,
+                    failed=1,
+                    completed=1,
+                    total=len(statuses),
+                ),
+            ],
+            GET_TASK_STATUSES_SQL: [
+                SimpleNamespace(task_index=index, status=status)
+                for index, status in statuses.items()
+            ],
+            GET_OUTPUT_TASK_RESULT_SQL: [] if output is None else [output],
+        })
+
+    @pytest.mark.asyncio
+    async def test_success_case_without_the_output_stores_the_named_outcome(
+        self,
+    ) -> None:
+        recorder = self._session(
+            statuses={0: 'COMPLETED', 1: 'FAILED', 2: 'SKIPPED'},
+            output=_output_row('SKIPPED', None),
+        )
+
+        await check_workflow_completion(
+            recorder.session, WORKFLOW_ID, lock_held=True,
+        )
+
+        stored = recorder.params_of(MARK_WORKFLOW_COMPLETED_SQL)['result']
+        assert _stored_err(stored).error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+        assert not recorder.executed(MARK_WORKFLOW_FAILED_SQL)
+
+    @pytest.mark.asyncio
+    async def test_failed_output_outside_the_required_set_stores_its_error(
+        self,
+    ) -> None:
+        recorder = self._session(
+            statuses={0: 'COMPLETED', 1: 'SKIPPED', 2: 'FAILED'},
+            output=_output_row('FAILED', ERR_RESULT_TEXT),
+        )
+
+        await check_workflow_completion(
+            recorder.session, WORKFLOW_ID, lock_held=True,
+        )
+
+        params = recorder.params_of(MARK_WORKFLOW_COMPLETED_SQL)
+        assert params['result'] == ERR_RESULT_TEXT
+
+    @pytest.mark.asyncio
+    async def test_absent_output_row_writes_no_completion(self) -> None:
+        recorder = self._session(statuses={0: 'COMPLETED'}, output=None)
+
+        with pytest.raises(AssertionError):
+            await check_workflow_completion(
+                recorder.session, WORKFLOW_ID, lock_held=True,
+            )
+
+        assert not recorder.executed(MARK_WORKFLOW_COMPLETED_SQL)
+
+
+class TestOutputlessBranchDoesNotChange:
+    @pytest.mark.asyncio
+    async def test_skipped_terminal_keeps_its_none_entry(self) -> None:
+        recorder = _Session({
+            GET_WORKFLOW_DAG_EDGES_SQL: [
+                SimpleNamespace(task_index=0, dependencies=[]),
+            ],
+            GET_TASK_RESULTS_BY_INDEXES_SQL: [
+                SimpleNamespace(
+                    node_id='terminal',
+                    task_index=0,
+                    task_name='terminal_task',
+                    result=None,
+                    sub_definition_key=None,
+                ),
+            ],
+        })
+
+        stored = await get_workflow_final_result(
+            recorder.session, WORKFLOW_ID, None,
+        )
+
+        assert json.loads(stored) == {
+            '__h_task_result__': True,
+            '__h_outputless_terminals__': True,
+            'ok': {
+                'results_by_id': {'terminal': None},
+                'task_name_by_id': {'terminal': 'terminal_task'},
+                'definition_key_by_id': {'terminal': None},
+            },
+            'err': None,
+        }
+        assert not recorder.executed(GET_OUTPUT_TASK_RESULT_SQL)
+
+
+class TestReaders:
+    """Each decoder of a stored result gives the named outcome."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('out_type', [int, None], ids=['typed', 'no-out-type'])
+    async def test_get_decodes_the_workflow_result(self, out_type: Any) -> None:
+        stored = await _skipped_output_text()
+
+        decoded = _decode_workflow_envelope(
+            json.loads(stored), out_type, app=None, workflow_id=WORKFLOW_ID,
+        )
+
+        assert decoded.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_result_for_decodes_the_node_result(
+        self, app: Horsies, registered_child: None,
+    ) -> None:
+        stored = await _skipped_output_text()
+
+        decoded = _decode_per_task_envelope(
+            json.loads(stored),
+            app=app,
+            task_name=_ChildDefinition.name,
+            node_id='parent:0',
+            sub_definition_key=CHILD_KEY,
+        )
+
+        assert decoded.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_downstream_decode_is_not_corrupt(
+        self, app: Horsies, registered_child: None,
+    ) -> None:
+        stored = await _skipped_output_text()
+
+        decoded = _decode_stored_task_result(
+            stored,
+            app=app,
+            task_name=_ChildDefinition.name,
+            context={'workflow_id': WORKFLOW_ID},
+            sub_definition_key=CHILD_KEY,
+        )
+
+        assert decoded.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_err_only_decode(self) -> None:
+        decoded = _decode_err_only(await _skipped_output_text())
+
+        assert decoded is not None
+        assert decoded.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @staticmethod
+    async def _dependency_row(*, node_id: str | None = None) -> SimpleNamespace:
+        return SimpleNamespace(
+            task_index=0,
+            task_name=_ChildDefinition.name,
+            node_id=node_id,
+            status='COMPLETED',
+            result=await _skipped_output_text(),
+            sub_definition_key=CHILD_KEY,
+        )
+
+    @pytest.mark.asyncio
+    async def test_dependency_results_of_a_completed_node(
+        self, app: Horsies, registered_child: None,
+    ) -> None:
+        recorder = _Session({
+            GET_DEPENDENCY_RESULTS_SQL: [await self._dependency_row()],
+        })
+
+        results, _, _ = await get_dependency_results(
+            recorder.session, WORKFLOW_ID, [0], app=app,
+        )
+
+        assert results[0].err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+    @pytest.mark.asyncio
+    async def test_dependency_results_with_names_of_a_completed_node(
+        self, app: Horsies, registered_child: None,
+    ) -> None:
+        recorder = _Session({
+            GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL: [
+                await self._dependency_row(node_id='parent:0'),
+            ],
+        })
+
+        results = await get_dependency_results_with_names(
+            recorder.session, WORKFLOW_ID, ['parent:0'], app=app,
+        )
+
+        by_id = results.by_id['parent:0']
+        assert by_id.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+
+
+class TestParentNode:
+    """A child COMPLETED with an err result makes a COMPLETED parent node."""
+
+    @staticmethod
+    def _session(child_result: str) -> _Session:
+        return _Session({
+            GET_CHILD_WORKFLOW_INFO_SQL: [
+                SimpleNamespace(
+                    status='COMPLETED',
+                    result=child_result,
+                    error=None,
+                    parent_workflow_id='wf-parent',
+                    parent_task_index=0,
+                    total=3, completed=1, failed=1, skipped=1,
+                ),
+            ],
+            LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL: [
+                SimpleNamespace(id='wf-parent'),
+            ],
+            UPDATE_PARENT_NODE_RESULT_SQL: [SimpleNamespace(task_index=0)],
+            GET_WORKFLOW_STATUS_SQL: [SimpleNamespace(status='RUNNING')],
+        })
+
+    @staticmethod
+    async def _complete_child(recorder: _Session) -> tuple[AsyncMock, AsyncMock]:
+        with patch(
+            'horsies.core.workflows.engine._process_dependents',
+            new=AsyncMock(),
+        ) as dependents, patch(
+            'horsies.core.workflows.engine.check_workflow_completion',
+            new=AsyncMock(),
+        ) as completion:
+            await on_subworkflow_complete(recorder.session, 'child-1')
+        return dependents, completion
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('child', ['skipped-output', 'failed-output'])
+    async def test_node_is_completed_and_keeps_the_child_text(
+        self, child: str,
+    ) -> None:
+        child_result = (
+            await _skipped_output_text()
+            if child == 'skipped-output'
+            else ERR_RESULT_TEXT
+        )
+        recorder = self._session(child_result)
+
+        dependents, completion = await self._complete_child(recorder)
+
+        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'COMPLETED'
+        assert params['result'] == child_result
+        # No failure policy runs: the parent's error column stays as it is.
+        assert not recorder.executed(SET_WORKFLOW_ERROR_SQL)
+        dependents.assert_awaited_once()
+        completion.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_summary_has_no_output_and_the_child_counts(self) -> None:
+        recorder = self._session(await _skipped_output_text())
+
+        await self._complete_child(recorder)
+
+        summary = SubWorkflowSummary.from_json(
+            json.loads(recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['summary']),
+        )
+        assert summary.status is WorkflowStatus.COMPLETED
+        assert summary.output is None
+        assert summary.skipped_tasks == 1
+
+    @pytest.mark.asyncio
+    async def test_two_levels_keep_the_named_outcome(self) -> None:
+        """Each level's output node is the COMPLETED node of the level below."""
+        stored = await _skipped_output_text()
+
+        for _ in range(2):
+            recorder = self._session(stored)
+            await self._complete_child(recorder)
+            node_result = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['result']
+            stored = await _final_result(_output_row('COMPLETED', node_result))
+
+        err = _stored_err(stored)
+        assert err.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+        # The text names the workflow that holds the skipped node.
+        assert (err.data or {})['workflow_id'] == WORKFLOW_ID
+
+
+class TestOutcomeCode:
+    def test_code_is_registered_as_a_built_in_outcome(self) -> None:
+        name = 'WORKFLOW_OUTPUT_SKIPPED'
+
+        assert BUILTIN_CODE_REGISTRY[name] is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
+        assert categorize_error_code(name) is ErrorCategory.OUTCOME

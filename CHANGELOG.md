@@ -425,6 +425,20 @@ and there is no migration contract between pre-1.0 versions.
   `TaskResult(ok=None)`, a success, and an empty error returned the
   `OutcomeCode` of the status. A NULL error still gives the `OutcomeCode` of
   the status: a cancel does not write the error.
+- **Breaking: `WorkflowHandle.get()` returns
+  `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` for a `COMPLETED` workflow whose
+  output node is `SKIPPED`.** A success case that does not require the output
+  node lets this state occur. The workflow stores an error envelope with the
+  new code, and `data` names the workflow and the output node. A
+  `SubWorkflowNode` of such a child stays `COMPLETED` and holds that error, so
+  a downstream node, `result_for()` and the `get()` of a parent see the same
+  code. Before, the workflow stored the text `null`, `get()` returned
+  `RESULT_DESERIALIZATION_ERROR`, and a downstream node received
+  `RESULT_DESERIALIZATION_ERROR` with `Stored TaskResult JSON corrupt`. Code
+  that reads this state through `RESULT_DESERIALIZATION_ERROR` must match
+  on the new code. A workflow that already stored the text `null` keeps it, and
+  `get()` returns `RESULT_DESERIALIZATION_ERROR` for it. A `FAILED` output
+  node does not change: the workflow stores that node's error.
 - **Breaking: `encode_value` refuses a lone surrogate in a string or in a
   dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
   `dumps_json`. The text names the kwarg and holds no input value. A dict

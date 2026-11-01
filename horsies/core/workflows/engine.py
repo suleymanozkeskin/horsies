@@ -62,6 +62,7 @@ from horsies.core.models.workflow import (
     WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
+from horsies.core.models.workflow.handle import stored_node_status
 from horsies.core.errors import WorkflowValidationError, ErrorCode, ConfigurationError
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
@@ -2594,6 +2595,9 @@ async def check_workflow_completion(
     Handles cases where workflow may already be FAILED but DAG is still resolving.
 
     Raises:
+        AssertionError: the output node row is absent or not terminal. This
+            function counted no non-terminal node, so this is a defect; the
+            caller's transaction rolls back.
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
             with bounded retries, pause and resume fold a database error
@@ -2845,7 +2849,11 @@ async def on_subworkflow_complete(
                 f'outputless result of child workflow {child_workflow_id}',
             )
         else:
-            # Pass through child's explicit output as TaskResult.
+            # Pass through child's explicit output as TaskResult. The child
+            # is COMPLETED, so the node is COMPLETED, also for an err: a
+            # success case that does not require the child's output node
+            # lets that node end FAILED (its error) or SKIPPED
+            # (WORKFLOW_OUTPUT_SKIPPED).
             parent_node_result = child_result_json
     else:
         parent_node_status = 'FAILED'
@@ -3216,6 +3224,140 @@ def _compute_terminal_indexes(edge_rows: Sequence[Any]) -> list[int]:
     return sorted(all_indexes - referenced)
 
 
+def _output_error_envelope(
+    error_code: OutcomeCode | OperationalErrorCode,
+    message: str,
+    *,
+    workflow_id: str,
+    output_task_index: int,
+    output_row: Any,
+) -> str:
+    """The result text of a COMPLETED workflow whose output node has no result.
+
+    ``data`` names the workflow and the output node. A parent workflow
+    copies this text, so at every nesting level ``data`` names the workflow
+    that holds the node.
+
+    Raises:
+        SerializationError: the envelope does not serialize. The engine
+            built it from a stored row, so this is a defect.
+    """
+    from horsies.core.models.tasks import TaskError, TaskResult
+
+    return _ser_or_raise(
+        dumps_json(
+            encode_task_result(
+                TaskResult(
+                    err=TaskError(
+                        error_code=error_code,
+                        message=message,
+                        data={
+                            'workflow_id': workflow_id,
+                            'output_node_id': output_row.node_id,
+                            'output_task_index': output_task_index,
+                            'output_task_name': output_row.task_name,
+                        },
+                    ),
+                ),
+                Any,
+            ),
+        ),
+        f'output result of workflow {workflow_id}',
+    )
+
+
+def _stored_output_result(
+    workflow_id: str,
+    output_task_index: int,
+    output_row: Any,
+) -> str:
+    """The result text for a COMPLETED or FAILED output node.
+
+    Outcomes:
+        - A stored result: that text, unchanged. A FAILED node stores its
+          error, so the workflow stores that error.
+        - A NULL or empty result: an error envelope with
+          ``RESULT_DESERIALIZATION_ERROR``. No library writer stores this, so
+          it is stored data that does not parse.
+    """
+    match output_row.result:
+        case None | '':
+            return _output_error_envelope(
+                OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                (
+                    f'Workflow {workflow_id} is COMPLETED and its output node '
+                    f'{output_row.node_id!r} is {output_row.status} with no '
+                    'stored result'
+                ),
+                workflow_id=workflow_id,
+                output_task_index=output_task_index,
+                output_row=output_row,
+            )
+        case stored_result:
+            return stored_result
+
+
+def _explicit_output_result(
+    workflow_id: str,
+    output_task_index: int,
+    output_row: Any | None,
+) -> str:
+    """The result text of a COMPLETED workflow with an explicit output node.
+
+    ``check_workflow_completion`` calls this only after it counts no
+    non-terminal node, under the workflow lock. A success case that does not
+    require the output node lets that node end in any terminal status.
+
+    Outcomes:
+        - SKIPPED: an error envelope with ``WORKFLOW_OUTPUT_SKIPPED``. Nothing
+          is corrupt: the workflow succeeded and has no output.
+        - COMPLETED or FAILED: the outcome of ``_stored_output_result``.
+
+    Raises:
+        AssertionError: no row at ``output_task_index``, or a status that is
+            not terminal. The caller rules out both, so each is a defect.
+    """
+    if output_row is None:
+        raise AssertionError(
+            f'workflow {workflow_id} has output_task_index '
+            f'{output_task_index} and no node row at that index; the '
+            'workflow start transaction writes both'
+        )
+    node_id = output_row.node_id
+    status = stored_node_status(
+        workflow_id=workflow_id, node_id=str(node_id), stored=output_row.status,
+    )
+    match status:
+        case WorkflowTaskStatus.SKIPPED:
+            return _output_error_envelope(
+                OutcomeCode.WORKFLOW_OUTPUT_SKIPPED,
+                (
+                    f'Workflow {workflow_id} is COMPLETED and has no output: '
+                    f'its output node {node_id!r} is SKIPPED'
+                ),
+                workflow_id=workflow_id,
+                output_task_index=output_task_index,
+                output_row=output_row,
+            )
+        case WorkflowTaskStatus.COMPLETED | WorkflowTaskStatus.FAILED:
+            return _stored_output_result(
+                workflow_id, output_task_index, output_row,
+            )
+        case (
+            WorkflowTaskStatus.PENDING
+            | WorkflowTaskStatus.READY
+            | WorkflowTaskStatus.ENQUEUED
+            | WorkflowTaskStatus.RUNNING
+        ):
+            raise AssertionError(
+                f'workflow {workflow_id} output node {node_id!r} is '
+                f'{status.value} at workflow completion; the completion '
+                'check counted no non-terminal node under the workflow lock'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 async def get_workflow_final_result(
     session: AsyncSession,
     workflow_id: str,
@@ -3227,17 +3369,20 @@ async def get_workflow_final_result(
     Result-typing of this completion-path function is deferred to the
     workflow-completion redesign.
 
-    If output_task_index is set: return that task's result
+    If output_task_index is set: the outcome of ``_explicit_output_result``
     Otherwise: return dict of terminal task results (tasks with no dependents)
+
+    Raises:
+        AssertionError: from ``_explicit_output_result``.
     """
     if output_task_index is not None:
-        # Return explicit output task's result
         output_result = await session.execute(
             GET_OUTPUT_TASK_RESULT_SQL,
             {'wf_id': workflow_id, 'idx': output_task_index},
         )
-        output_row = output_result.fetchone()
-        return output_row.result if output_row and output_row.result else 'null'
+        return _explicit_output_result(
+            workflow_id, output_task_index, output_result.fetchone(),
+        )
 
     # Find terminal tasks (not in any other task's dependencies).
     # Two-step: payload-free edge read, set difference in Python, then
