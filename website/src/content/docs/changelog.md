@@ -434,15 +434,41 @@ there is no migration contract between pre-1.0 versions.
   output node is `SKIPPED`.** A success case that does not require the output
   node lets this state occur. The workflow stores an error envelope with the
   new code, and `data` names the workflow and the output node. A
-  `SubWorkflowNode` of such a child stays `COMPLETED` and holds that error, so
-  a downstream node, `result_for()` and the `get()` of a parent see the same
-  code. Before, the workflow stored the text `null`, `get()` returned
+  `SubWorkflowNode` of such a child holds that error, so `result_for()`, a
+  dependent with `allow_failed_deps=True` and the `get()` of a parent see the
+  same code. Before, the workflow stored the text `null`, `get()` returned
   `RESULT_DESERIALIZATION_ERROR`, and a downstream node received
   `RESULT_DESERIALIZATION_ERROR` with `Stored TaskResult JSON corrupt`. Code
   that reads this state through `RESULT_DESERIALIZATION_ERROR` must match
   on the new code. A workflow that already stored the text `null` keeps it, and
   `get()` returns `RESULT_DESERIALIZATION_ERROR` for it. A `FAILED` output
   node does not change: the workflow stores that node's error.
+- **Breaking: the `WorkflowHandle.get()` map of an outputless workflow holds
+  `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` for a `SKIPPED` terminal node.** A
+  success case that does not require the node lets this state occur. `data`
+  names the workflow and the node. Before, the entry held
+  `RESULT_DESERIALIZATION_ERROR`, although nothing is corrupt. An entry of a
+  `COMPLETED` or `FAILED` node that does not parse keeps
+  `RESULT_DESERIALIZATION_ERROR`, and so does a stored entry of a workflow that
+  already completed.
+- **Breaking: a `SubWorkflowNode` is `FAILED` when its child is `COMPLETED`
+  with an err output.** A node is `COMPLETED` only when its result is ok, as for
+  a task node. A success case that does not require the child's output node
+  lets that node end `SKIPPED` or `FAILED`. The parent node holds that err, so
+  `on_error` runs, a dependent with `allow_failed_deps=False` is `SKIPPED`,
+  `join="any"` and `join="quorum"` do not count the node, a `SuccessCase` that
+  requires the node is not met, and a parent without a success policy is
+  `FAILED`. `SubWorkflowSummary.status` stays `COMPLETED`. Before, the node was
+  `COMPLETED`, and a dependent with the default options ran and received the
+  err. To let a parent complete, keep the node out of its success cases. To run
+  a dependent, set `allow_failed_deps=True`. A child with no output node is not
+  affected.
+- **Breaking: a `SubWorkflowNode` is `FAILED` with
+  `RESULT_DESERIALIZATION_ERROR` when the stored result of its `COMPLETED` child
+  is not a well-formed result envelope, or is NULL or empty.** The node holds an
+  error envelope that names the child and the cause, so each reader and the
+  `get()` of the parent report that code. The stored text stays on the child
+  workflow row. Before, the node was `COMPLETED` and held that text.
 - **Breaking: `encode_value` refuses a lone surrogate in a string or in a
   dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
   `dumps_json`. The text names the kwarg and holds no input value. A dict
@@ -793,6 +819,11 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The docs say what `SuccessPolicy.optional` does.** The field records which
+  nodes may fail, and it has no runtime effect: the engine stores it and reads
+  only the required nodes of each case. A node that no case requires does not
+  change the result, with or without `optional`. Before, the docs said that
+  `optional` excludes a node from failure accounting.
 - **Phase-2 recovery progresses a failed node whose stored error does not
   decode as a `TaskError`.** The recovery records the error that the
   terminal status names, as it does for a stored result envelope that does
