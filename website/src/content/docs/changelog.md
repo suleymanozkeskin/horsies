@@ -690,6 +690,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Phase-2 recovery progresses a failed node whose stored error does not
+  decode as a `TaskError`.** The recovery records the error that the
+  terminal status names, as it does for a stored result envelope that does
+  not validate. The log names the refusal. Before, the
+  `ValueValidationError` of the decode rolled back the recovery of that row
+  on each pass, and the node did not progress.
 - **The web UI no longer shows a Retry action that the server cannot run.**
   The server removed the manual task retry route, so the Retry button on a
   task detail panel could only fail. The button, its confirm text, the
