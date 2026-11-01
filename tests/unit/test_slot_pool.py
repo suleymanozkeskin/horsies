@@ -20,7 +20,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 import pytest_asyncio
@@ -1004,6 +1004,33 @@ class TestStopDuringBoot:
         assert not _alive(first)
         assert all(task.done() for task in pool._tasks)
         assert pool._slots[0].child is None
+
+    async def test_a_child_that_starts_during_the_stop_is_ended(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``stop`` cannot see a child that is still on its way up."""
+        pool = SlotPool(_config(init=_init('hangs')), pending_limit=10)
+        real_start = Child.start
+        started: list[Child] = []
+
+        async def start_then_stop(*args: Any) -> Any:
+            result = await real_start(*args)
+            pool._stopping = True
+            match result:
+                case Ok(child):
+                    started.append(child)
+                case Err(_):
+                    pass
+            return result
+
+        monkeypatch.setattr(Child, 'start', start_then_stop)
+
+        reply = await pool._boot_child(pool._slots[0])
+
+        assert reply == Err(PoolStopped())
+        assert pool._slots[0].child is None
+        assert not _alive(started[0].pid)
 
     async def test_a_replaced_child_does_not_count_as_another_slot(self) -> None:
         pool = SlotPool(_config(2), pending_limit=10)

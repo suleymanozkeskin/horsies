@@ -72,6 +72,7 @@ from horsies.core.worker.slots import (
     NotDispatched,
     NothingToKill,
     NotRunCause,
+    PoolStopped,
     SlotHandle,
     SlotOutcome,
     SpawnFailed,
@@ -1533,6 +1534,28 @@ class TestSlotPoolSetup:
         with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
             with pytest.raises(ChildHookFailedError):
                 await worker._start_slots()
+
+    @pytest.mark.asyncio
+    async def test_a_stop_during_the_start_is_no_failure(self) -> None:
+        worker = _make_worker()
+        pool = MagicMock()
+        pool.start = AsyncMock(return_value=Err(PoolStopped()))
+
+        with patch('horsies.core.worker.worker.SlotPool', return_value=pool):
+            await worker._start_slots()
+
+    @pytest.mark.asyncio
+    async def test_a_stop_during_the_start_opens_no_database_work(self) -> None:
+        worker = _make_worker()
+        worker._preload_modules_main = MagicMock()  # type: ignore[method-assign]
+        worker._start_slots = AsyncMock(  # type: ignore[method-assign]
+            side_effect=worker._stop.set,
+        )
+        worker.listener.start = AsyncMock()
+
+        await worker.start()
+
+        worker.listener.start.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_start_failure_raises_and_keeps_the_pool_for_cleanup(self) -> None:

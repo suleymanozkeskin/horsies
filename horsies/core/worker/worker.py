@@ -33,6 +33,7 @@ from horsies.core.worker.slots import (
     BootAttemptsExhausted,
     ChildBaseline,
     ChildHookFailed,
+    PoolStopped,
     SlotPool,
     SlotPoolConfig,
     SpawnFailed,
@@ -326,7 +327,7 @@ class Worker(
         return 2 * budget
 
     async def _start_slots(self) -> None:
-        """Start every child and publish the pool.
+        """Start every child and publish the pool. A stop during this returns.
 
         Raises:
             ChildHookFailedError: an ``on_child_process_start`` hook failed.
@@ -351,6 +352,8 @@ class Worker(
                     self.cfg.processes,
                 )
                 self._check_memory_baseline(baselines)
+            case Err(PoolStopped()):
+                return
             case Err(ChildHookFailed()):
                 raise ChildHookFailedError(_HOOK_FAILURE_MESSAGE)
             case Err(failure):
@@ -566,6 +569,8 @@ class Worker(
             # Start children before any database work, so a bad app or hook
             # fails at once. Children are new programs: they inherit no socket.
             await self._start_slots()
+            if self._stop.is_set():
+                return
 
             # A worker broker proves both database paths before maintenance
             # starts.
