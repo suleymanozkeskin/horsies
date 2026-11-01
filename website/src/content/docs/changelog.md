@@ -353,6 +353,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
+  reports a version mismatch.** The stored and expected versions are equal in
+  this state. The banner now names the one version, says that the offline
+  task-history cutover is not complete, and tells the operator to run the
+  cutover stages through tighten and validation. The `MISMATCH` banner is
+  unchanged.
 - **The agent skills in the wheel and the docs state the codes and
   signatures that the code uses.** A raised exception in a task gives
   `UNHANDLED_EXCEPTION`; `TASK_EXCEPTION` means the task returned `None`.

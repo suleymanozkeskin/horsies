@@ -4,6 +4,8 @@ import { deriveCanAct } from '@/actions/capability';
 import {
   NO_SCHEMA_MESSAGE,
   SCHEMA_UNREACHABLE_MESSAGE,
+  schemaBannerMessage,
+  schemaCutoverMessage,
   schemaMismatchMessage,
   schemaState,
 } from '@/lib/schema-state';
@@ -36,6 +38,19 @@ describe('schema state', () => {
     expect(
       schemaState(meta({ schema_version: 15, schema_compatible: false }))
     ).toBe('mismatch');
+  });
+
+  it('reports cutover_required when the versions are equal but the schema is incompatible', () => {
+    expect(
+      schemaState(
+        meta({
+          schema_version: 14,
+          expected_schema_version: 14,
+          schema_compatible: false,
+          actions_disabled_reason: 'SCHEMA_INCOMPATIBLE',
+        })
+      )
+    ).toBe('cutover_required');
   });
 
   it('reports absent when a successful probe found no version row', () => {
@@ -100,6 +115,27 @@ describe('schema copy', () => {
     ).toBe(
       'Schema v13; this UI expects v14. Read-only mode: actions are disabled. ' +
         'Upgrade horsies (workers apply migrations) or use the matching UI version.'
+    );
+  });
+
+  it('does not claim a version mismatch in the cutover state', () => {
+    const cutover = meta({
+      schema_version: 35,
+      expected_schema_version: 35,
+      schema_compatible: false,
+      actions_disabled_reason: 'SCHEMA_INCOMPATIBLE',
+    });
+    const text = schemaCutoverMessage(cutover);
+    expect(text).toBe(
+      'Schema v35 is current, but the offline task-history cutover is not ' +
+        'complete. Read-only mode: actions are disabled. ' +
+        'Run the cutover stages through tighten and validation. ' +
+        'See the 0.5.0 migration guide.'
+    );
+    expect(text).not.toContain('expects');
+    expect(schemaBannerMessage(cutover, 'cutover_required')).toBe(text);
+    expect(schemaBannerMessage(cutover, 'mismatch')).toBe(
+      schemaMismatchMessage(cutover)
     );
   });
 
