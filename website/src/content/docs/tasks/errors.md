@@ -55,7 +55,6 @@ Errors from type/schema validation and structural contracts.
 | Code | Description | Auto-Retry? |
 | ---- | ----------- | ----------- |
 | `RETURN_TYPE_MISMATCH` | Task return type doesn't match declaration | No |
-| `PYDANTIC_HYDRATION_ERROR` | Legacy code. It stays in the enum as a reserved code, and the library does not return it | No |
 | `NO_TYPE_AVAILABLE` | Outputless workflow per-node decode: terminal task name not in the local registry, so no `task_ok_type` to decode with | No |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID | No |
 

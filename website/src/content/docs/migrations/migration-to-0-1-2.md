@@ -157,7 +157,7 @@ Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVA
 
 ### Removed error code
 
-`PYDANTIC_HYDRATION_ERROR` is retained as a legacy enum member on `ContractCode` but is no longer emitted by any production path. New code should not match on it. The strict-serde equivalents are `RETURN_TYPE_MISMATCH` (encode-side return type mismatch), `RESULT_DESERIALIZATION_ERROR` (handle/workflow decode failure folded into `TaskResult.err`), and `BrokerErrorCode.INVALID_JSON_PAYLOAD` (app-level result read failure).
+In 0.1.2, `PYDANTIC_HYDRATION_ERROR` stayed on `ContractCode` as a legacy enum member, and no production path emitted it. A later release removes the member from `ContractCode`; see the [changelog](../../changelog). The strict-serde equivalents are `RETURN_TYPE_MISMATCH` (encode-side return type mismatch), `RESULT_DESERIALIZATION_ERROR` (handle/workflow decode failure folded into `TaskResult.err`), and `BrokerErrorCode.INVALID_JSON_PAYLOAD` (app-level result read failure).
 
 ## Wire Envelope
 
@@ -234,4 +234,4 @@ broker = app.get_broker()
 - [ ] Replace `broker.get_result(...)` / `broker.get_result_async(...)` with `app.get_result(...)` / `app.get_result_async(...)`; update callers to unwrap the outer `BrokerResult`.
 - [ ] Drop or drain in-flight pre-strict-serde rows before upgrading workers.
 - [ ] Replace string-form built-in error codes (e.g. `"BROKER_ERROR"`, `"WORKER_RESOLUTION_ERROR"`) with the corresponding enum member.
-- [ ] If you match on `PYDANTIC_HYDRATION_ERROR`, add `RESULT_DESERIALIZATION_ERROR` and `RETURN_TYPE_MISMATCH` to the match arms.
+- [ ] If you match on `PYDANTIC_HYDRATION_ERROR`, replace that arm with arms for `RESULT_DESERIALIZATION_ERROR` and `RETURN_TYPE_MISMATCH`.

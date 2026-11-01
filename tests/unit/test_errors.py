@@ -528,7 +528,7 @@ class TestErrorCode:
             ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
             ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
             ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
-            ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS,
+            ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
             ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED,
             ErrorCode.WORKFLOW_CHECK_CASE_INVALID,
             ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
@@ -538,6 +538,15 @@ class TestErrorCode:
             # HRS-001-HRS-099 range
             num = int(code.value[4:])
             assert 1 <= num <= 99, f'{code} should be in HRS-001-HRS-099 range'
+
+    def test_hrs_026_has_one_member_name(self) -> None:
+        """HRS-026 has no alias: only one member name has the value."""
+        names = [
+            name
+            for name, member in ErrorCode.__members__.items()
+            if member.value == 'HRS-026'
+        ]
+        assert names == ['WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED']
 
     def test_task_error_codes_in_range(self) -> None:
         task_codes = [
