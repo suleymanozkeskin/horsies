@@ -35,7 +35,6 @@ from horsies.core.history.archive.versions import (
     UnknownArchiveContentType,
     UnknownArchiveVersion,
     archive_digest,
-    decode_history_row_version,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
@@ -366,9 +365,3 @@ class TestRegistry:
         assert set(RETAINED_ARCHIVE_VERSIONS) == set(ArchiveDomain)
         for domain in ArchiveDomain:
             assert RETAINED_ARCHIVE_VERSIONS[domain] == frozenset({1})
-
-    def test_history_row_version_decode_matches_registry(self) -> None:
-        assert decode_history_row_version(1) == DecodedArchiveValue(1)
-        assert decode_history_row_version(2) == UnknownArchiveVersion(
-            ArchiveDomain.HISTORY_ROW, 2
-        )

@@ -379,10 +379,10 @@ and there is no migration contract between pre-1.0 versions.
   `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
   library. SQL functions write the stored bytes, and `decode_input_envelope`
   reads a stored rerun input.
-- **Unused archive helpers.** `select_result_payload`, its result types, and
-  the registry accessors `is_retained` and `retained_versions` had no caller
-  in the library. `RETAINED_ARCHIVE_VERSIONS` stays: the transcode decoder set
-  reads it.
+- **Unused archive helpers.** `select_result_payload`, its result types,
+  `decode_history_row_version`, and the registry accessors `is_retained` and
+  `retained_versions` had no caller in the library. `RETAINED_ARCHIVE_VERSIONS`
+  stays: the transcode decoder set reads it.
 
 ### Fixed
 
