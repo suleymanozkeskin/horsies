@@ -236,6 +236,10 @@ are five states.
 | `ABSENT` | A **successful** probe observed the version table or row missing | — | Disabled | Full-screen state: the database has no horsies schema |
 | `UNKNOWN` | The probe has **never** succeeded — connection failure with no prior verdict | — | Disabled | Full-screen state: the database cannot be reached to determine its schema |
 
+`/api/meta` reports the state in the field `schema_state`, with the values in
+the first column. The SPA picks its screen and banner from this field. It does
+not derive the state from the version numbers.
+
 Two rules follow from that table:
 
 - `ABSENT` may only come from a successful observation. A failed read is not a

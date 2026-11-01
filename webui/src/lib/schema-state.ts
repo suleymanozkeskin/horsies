@@ -20,30 +20,25 @@ export type BannerSchemaState = Extract<
   'mismatch' | 'cutover_required'
 >;
 
-/**
- * The server reports `mismatch` only when the stored version differs from the
- * expected one. An incompatible schema with equal versions is therefore the
- * `CUTOVER_REQUIRED` server state.
- *
- * `absent` and `unknown` both carry a null `schema_version`, so the version
- * alone cannot tell them apart. The reason code is the discriminator, and it
- * has to be checked first: only a SUCCESSFUL probe may report `absent`, and
- * reporting an unreachable database as an empty one would tell an operator to
- * initialize a database that is merely down.
- */
+/** Maps the server's verdict to the UI state. Every server state has one
+ * UI state, and a new server state fails the typecheck here. */
 export function schemaState(meta: MonitoringMeta): SchemaState {
-  if (meta.actions_disabled_reason === 'SCHEMA_UNKNOWN') {
-    return 'unknown';
+  switch (meta.schema_state) {
+    case 'MATCH':
+      return 'match';
+    case 'MISMATCH':
+      return 'mismatch';
+    case 'CUTOVER_REQUIRED':
+      return 'cutover_required';
+    case 'ABSENT':
+      return 'absent';
+    case 'UNKNOWN':
+      return 'unknown';
+    default: {
+      const unhandled: never = meta.schema_state;
+      return unhandled;
+    }
   }
-  if (meta.schema_version === null) {
-    return 'absent';
-  }
-  if (meta.schema_compatible) {
-    return 'match';
-  }
-  return meta.schema_version === meta.expected_schema_version
-    ? 'cutover_required'
-    : 'mismatch';
 }
 
 export const NO_SCHEMA_MESSAGE =
