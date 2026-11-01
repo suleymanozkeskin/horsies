@@ -302,7 +302,7 @@ class ParentWorkflow(WorkflowDefinition[int]):
 
 **Lifecycle mapping:**
 - Child RUNNING → Parent node RUNNING
-- Child COMPLETED → Parent node COMPLETED (result = child output)
+- Child COMPLETED → Parent node COMPLETED (result = child output). The child output can be an err: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy).
 - Child FAILED → Parent node FAILED (result = SubWorkflowError)
 
 ### 6.3 Parameterized Subworkflows with `build_with()`
@@ -505,6 +505,7 @@ Rules for this pattern:
 - Import the child module in the worker (`app.discover_tasks`). See [Subworkflow Not Found in Worker](#subworkflow-not-found-in-worker).
 - With the default `allow_failed_deps=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
   With `allow_failed_deps=True`, `build_with()` receives `TaskResult(err=...)` and must handle it.
+  An upstream `SubWorkflowNode` that is COMPLETED with an err does not skip this node: `build_with()` receives that err. See [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy).
 - An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
 - The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
@@ -560,7 +561,7 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 | Field | Type | Description |
 |-------|------|-------------|
 | `status` | `WorkflowStatus` | Terminal status of child workflow |
-| `output` | `Any \| None` | Child workflow output (if COMPLETED) |
+| `output` | `Any \| None` | Child workflow output (if COMPLETED). `None` when the child's output result is an err |
 | `total_tasks` | `int` | Total tasks in child workflow |
 | `completed_tasks` | `int` | Tasks that completed successfully |
 | `failed_tasks` | `int` | Tasks that failed |
