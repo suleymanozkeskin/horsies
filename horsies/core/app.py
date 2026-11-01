@@ -176,12 +176,12 @@ class Horsies:
 
         Hooks run after task-module imports and before the child opens its
         own connection pool, in registration order. They fire on every child
-        start, including executor restarts, so bodies must be idempotent.
+        start, including replacement children, so bodies must be idempotent.
         A hook that raises or hangs terminates the child and stops the
         worker (fail-closed); catch inside the hook for best-effort work.
 
-        The canonical body disposes engines inherited from a forked parent
-        (`engine.dispose(close=False)`) and rebinds app-owned engines to a
+        The canonical body closes connections opened during import
+        (`engine.dispose()`) and rebinds app-owned engines to a
         worker-appropriate pool.
         """
         if not callable(fn):

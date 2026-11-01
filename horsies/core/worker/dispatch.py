@@ -387,7 +387,7 @@ class DispatchMixin:
         timeout_ms: Optional[int] = None,
         claimed_at: Optional[datetime] = None,
     ) -> None:
-        """Submit to process pool; attach completion handler.
+        """Submit to the slot pool and spawn the finalizer.
 
         Never raises for a task: the pool answers every submit, and the
         finalizer handles that answer.

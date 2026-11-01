@@ -162,8 +162,8 @@ def _parse_locator(locator: str) -> tuple[str, str | None]:
 def _positive_int(value: str) -> int:
     """argparse type: integer >= 1.
 
-    ProcessPoolExecutor raises a raw ValueError on max_workers=0; reject
-    at the CLI boundary with a usage error instead.
+    A worker needs at least one child; reject at the CLI boundary with a
+    usage error.
     """
     parsed = int(value)
     if parsed < 1:

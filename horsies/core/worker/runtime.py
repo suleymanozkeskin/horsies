@@ -214,7 +214,7 @@ def _collect_psutil_metrics() -> tuple[float, float, float, float]:
 
     Returns ``(rss_mb, mem_pct, cpu_pct, children_rss_mb)`` for the calling
     (parent) worker process. ``children_rss_mb`` is the summed RSS of every
-    descendant process — the executor children where task code runs. The
+    descendant process — the worker children where task code runs. The
     parent heartbeat alone hides per-child memory growth; Heroku's R14 quota
     is measured against the whole process tree's footprint, so the children
     must be sampled to see what the dyno sees.

@@ -137,7 +137,7 @@ class Worker(
     Async master that:
       - Subscribes to queue channels
       - Claims tasks (priority + enqueued_at) with SKIP LOCKED
-      - Executes in a process pool
+      - Executes in worker-owned child processes
       - On completion, writes result/failed, COMMITs, and NOTIFY task_done
     """
 
@@ -525,7 +525,7 @@ class Worker(
     # ----- lifecycle -----
 
     async def start(self) -> None:
-        """Bring up the worker: preload, warm children, listen, spawn loops.
+        """Bring up the worker: preload, start children, listen, spawn loops.
 
         Raises:
             Exception: any startup failure propagates.
@@ -836,9 +836,9 @@ class Worker(
         errors are backoff-retried per the resilience config; anything else
         (including ChildStartFailedError and an exhausted backoff)
         re-raises so the process exits non-zero for a supervisor restart.
-        An ChildStartFailedError that escaped a BACKGROUND task is
+        A ChildStartFailedError that escaped a BACKGROUND task is
         captured by ``_on_done`` (which sets stop) and re-raised here after
-        shutdown — same non-zero exit, no zombie executorless worker.
+        shutdown — same non-zero exit, no worker left without children.
         ``stop()`` always runs once the loop is entered; startup failures
         exit via ``_cleanup_after_failed_start`` instead.
 
