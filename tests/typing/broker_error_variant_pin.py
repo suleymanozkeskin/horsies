@@ -12,6 +12,9 @@ The enqueue path and ``ensure_schema_initialized`` return a subset of
 its declared type, which fails when the type widens. The public methods
 also have a ``BrokerOperationFailed`` arm that must be reported as never
 matched.
+
+The mapping from a broker error to a send error takes only the enqueue
+and sync-call errors. Passing an operation error to it must fail.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ from horsies import (
     Err,
     NoCause,
     Ok,
+    TaskSendPayload,
     broker_error_cause,
 )
 from horsies.core.brokers.postgres import (
@@ -48,6 +52,9 @@ from horsies.core.brokers.postgres import (
 from horsies.core.brokers.resources import BrokerResources
 from horsies.core.models.schedule import TaskSchedule
 from horsies.core.scheduler.service import Scheduler
+from horsies.core.task_decorator import (
+    _map_broker_err,  # pyright: ignore[reportPrivateUsage]
+)
 from horsies.core.types.result import Result
 from horsies.core.utils.loop_runner import LoopRunnerError
 
@@ -189,6 +196,7 @@ async def enqueue_helpers_return_their_subsets(
         priority=100,
         args_json=None,
         kwargs_json=None,
+        kwargs={},
         good_until=good_until,
         enqueue_delay_seconds=None,
         task_options=None,
@@ -228,3 +236,12 @@ async def scheduled_enqueue_returns_only_enqueue_errors(
         schedule, slot_time=slot_time,
     )
     _ = enqueued
+
+
+def send_mapping_refuses_the_operation_error(
+    enqueue_error: BrokerEnqueueError,
+    operation_error: BrokerOperationFailed,
+    payload: TaskSendPayload,
+) -> None:
+    _ = _map_broker_err(enqueue_error, 'task-id', payload)
+    _ = _map_broker_err(operation_error, 'task-id', payload)  # pyright: ignore[reportArgumentType]

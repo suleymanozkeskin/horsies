@@ -1,8 +1,3 @@
----
-name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-035. Use when building, validating, or troubleshooting workflows.
----
-
 # horsies — Workflows
 
 Detailed reference for building, starting, and managing workflow DAGs.
@@ -85,7 +80,11 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
 child = SubWorkflowNode(workflow_def=ChildPipeline, kwargs={"source_url": "https://..."})
 ```
 
-A `WorkflowSpec(...)` built directly has no broker and no bound queue or priority. Do not start it as a top-level workflow: `start()` returns `BROKER_NOT_CONFIGURED`. For a top-level workflow, use `app.workflow()` or `build(app)`.
+A `WorkflowSpec(...)` built directly has `broker=None` and no bound queue or priority on its `TaskNode` items.
+
+- `start()` returns `BROKER_NOT_CONFIGURED` only when `broker` is `None`.
+- With `broker=` passed, the start runs the checks. Each top-level `TaskNode` must have `queue` and `priority` set. If one is `None`, `start()` returns `VALIDATION_FAILED` with `HRS-014` (queue) or `HRS-015` (priority).
+- For a top-level workflow, use `app.workflow()` or `build(app)`. They set the broker and bind the queue and priority.
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
@@ -251,7 +250,7 @@ match spec.start():
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -310,11 +309,12 @@ async def get_async(self, timeout_ms: int | None = None) -> TaskResult[OutT, Tas
 def result_for(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 async def result_for_async(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 
-# All results keyed by node_id
+# All results keyed by node_id. Ok({}) before any node has a result;
+# Err(HandleWorkflowNotFound) when no workflow has the id.
 def results(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 async def results_async(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 
-# Task info list
+# Task info list. Err(HandleWorkflowNotFound) when no workflow has the id.
 def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]
 async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]
 
@@ -343,8 +343,9 @@ appearing during a pause are expected, not a fault.
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
-- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`.
+- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when no error is stored.
 - `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
+- The workflow row is removed after `get()` read its terminal status (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 

@@ -14,6 +14,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
+  whitespace at the start or the end, or is longer than 100 characters (the
+  length of the database `queue_name` column).** The config raises
+  `ConfigurationError` (`HRS-200`) when it is built. Only configs that were
+  already unusable change: a task could not target such a queue, or the
+  database refused the name.
 - **Breaking: a sync call inside a running event loop returns
   `ASYNC_CONTEXT`.** Code that makes a sync call from a coroutine or a
   Jupyter cell must call the `*_async` form. Before, the call blocked that
@@ -271,13 +277,11 @@ there is no migration contract between pre-1.0 versions.
   with the task as a root returned `VALIDATION_FAILED`.
 - **Breaking: a defect in the workflow start checks propagates.** The
   checks before the start transaction return only a
-  `WorkflowValidationError` as `WorkflowStartValidationFailed`, and the
-  start transaction returns only a `SerializationError` as
-  `WorkflowStartValidationFailed`. Any other exception propagates, a
-  `ValueError` included. A node that has positional args or
-  `priority=None` when it reaches the start transaction (only possible
-  through `object.__setattr__` after construction) fails an `assert` that
-  names the node. Before, the start returned a `ValueError`,
+  `WorkflowValidationError` as `WorkflowStartValidationFailed`. Any other
+  exception propagates, a `ValueError` included. A node that has
+  positional args or `priority=None` when it reaches the start transaction
+  (only possible through `object.__setattr__` after construction) fails an
+  `assert` that names the node. Before, the start returned a `ValueError`,
   `MultipleValidationErrors` or `SerializationError` from the checks, and a
   `ValueError` from the transaction, as `VALIDATION_FAILED`.
 - **An exhaustive `match` on `ErrorCode` needs cases for
@@ -355,6 +359,65 @@ there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **`enqueue_async` refuses bad input before the database, with its own code.**
+  A refused input used to fall into the `except Exception` of the write, so a
+  direct call got `ENQUEUE_FAILED`, whose contract says the write may have
+  happened, and a send got an error that the retry methods accepted. These now
+  give `INVALID_INPUT` and write nothing, and a send gets `VALIDATION_FAILED`:
+  an empty task or queue name, a priority outside 1..100, a naive `good_until`,
+  a negative `enqueue_delay_seconds`, an empty `retention_class_key`, an empty
+  idempotency key or one over 255 bytes, a naive `sent_at`, and a naive
+  `enqueued_at`. A naive `sent_at` raised a raw `TypeError` before, and a naive
+  `enqueued_at` was stored under the session time zone with no error.
+  `args_json` must be null or an empty array, because the worker refuses every
+  other row, and `kwargs_json` must be an object or null. An empty string is
+  refused for both, and a falsy value no longer turns into an empty container.
+- **Breaking: a code defect in the enqueue write crashes loud.** The write now
+  catches database, network and history-contract errors only, so any other
+  exception leaves `enqueue_async`, and so leaves `send()`. Schema init keeps its
+  catch: an incomplete cutover is still `ENQUEUE_FAILED`.
+- **Breaking: `WorkflowHandle.results()` and `tasks()` return
+  `HandleWorkflowNotFound` for an id that has no workflow.** The same is
+  true for `results_async()` and `tasks_async()`. Each method reads the
+  workflow row and its nodes in one statement. Before, an unknown id gave
+  `Ok({})` and `Ok([])`, the same values as an existing workflow without
+  results or nodes. An existing workflow before its first stored result
+  still gives `Ok({})`.
+- **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
+  does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
+  `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
+  `WITHIN_RETAINED_HISTORY` (retained history covers the id and has no row)
+  or `NOT_CLASSIFIED`. Both are exported from `horsies.monitoring`. Code
+  that checks `detail is None` must match on `TaskDetailNotFound`. The web
+  route still answers 404; for `PREDATES_RETAINED_HISTORY` the detail text
+  says that the id is older than the retained task history.
+  `get_task_detail` and `get_workflow_node` now read in one REPEATABLE READ
+  snapshot. Before, a task row that was committed between the live read and
+  the history read gave `Ok(None)`.
+- **New rerun outcome `RerunSourceCorrupt`.** `rerun_task` returns it, with
+  the `HistoryContractError` as `exception`, when the source history row
+  does not decode: for example a stored status that is not a `TaskStatus`
+  member. Nothing is written. Before, `rerun_task` raised the error into
+  the caller's transaction. It is exported from `horsies`. An exhaustive
+  `match` on `RerunOutcome` needs a case for it.
+- **Breaking: a `SerializationError` in the workflow start transaction
+  propagates.** The transaction encodes only values that the process built
+  and validated before the start: the options that the task decorator
+  serialized, and the node kwargs that spec construction encoded and
+  decoded. A failure there is a defect, for example `task_options_json`
+  that was changed after registration. Before, the start returned it as
+  `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
+  is written.
+- **Breaking: the agent skill files moved into one skill folder.** The
+  five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
+  `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
+  `horsies/.agents/skills/`. Only `SKILL.md` has frontmatter (`name:
+  horsies`); the four reference files have none. Copy or link the new
+  folder, and remove the old paths from any agent tool setup.
+- **Breaking: `horsies get-docs` downloads the docs of the release tag
+  `v{installed version}`, not the `main` branch.** A development version
+  (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
+  exits with code 1. Pass `--ref main` to download the `main` branch docs.
 - **Breaking: `list_tasks`, `task_breakdown` and `list_workflow_runs` take a
   page value.** `list_tasks` takes `page: TaskPage` in place of `offset` and
   `limit`, `task_breakdown` takes `limit: BreakdownLimit`, and
@@ -369,6 +432,14 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- New command `horsies skills install --target DIR [--force]`. It copies
+  the skill folder from the installed package to `DIR/horsies/`. `--target`
+  is required, because each agent tool reads a different skills directory.
+  The command leaves an identical copy as it is, refuses to replace a copy
+  that differs unless `--force` is given, and exits with code 1 on any
+  failure. `get-docs` has a new option `--ref main`.
+- The release workflow checks that the built wheel contains the skill
+  folder.
 - Three operations guides are new: Atomic Enqueue and Topology, Deploying
   Code Changes and Testing. The Testing guide documents
   `HORSIES_SUPPRESS_SENDS`.
@@ -514,6 +585,14 @@ there is no migration contract between pre-1.0 versions.
   and refuses any attribute named `Meta`, also one from a base class. The
   `HRS-025` messages name `config.output`. The run-time `WorkflowMeta`
   that a task receives as `workflow_meta` does not change.
+- **`WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND` when
+  the workflow row is removed after its terminal status was read.**
+  Retention can delete a terminal workflow between the status read and the
+  error read. Before, `get()` returned `OutcomeCode.WORKFLOW_FAILED` for
+  that case, also for a cancelled or expired workflow. A terminal workflow
+  without a stored error gets the `OutcomeCode` of the status that `get()`
+  read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
+  `get()` no longer makes a free-text `WORKFLOW_<status>` code.
 
 ### Removed
 
@@ -532,6 +611,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A task cancel accepts every form of a task id that Python reads as a
+  UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
+  cancel now uses the canonical id text, and the result carries it.
+- **A cancel of a task in history reads only the status and the workflow
+  flag.** A history row whose attempt snapshot does not decode no longer
+  fails the cancel.
 - **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
   reports a version mismatch.** The stored and expected versions are equal in
   this state. The banner now names the one version, says that the offline
