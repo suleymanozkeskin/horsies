@@ -171,7 +171,7 @@ The stored `result` column shape changed from the legacy `__task_result__` / `__
 }
 ```
 
-See [Serialization](../internals/serialization) for the full envelope shape (including outputless workflow terminals).
+See [Serialization](../../internals/serialization) for the full envelope shape (including outputless workflow terminals).
 
 ### Implications
 
