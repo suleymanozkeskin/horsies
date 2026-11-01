@@ -673,6 +673,10 @@ Each entry: Title -- summary -> URL
 - Typed Node Builder -- .node() API for type-safe TaskNode construction -> /horsies/concepts/workflows/typed-node-builder/
 - Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
+### Guides
+- Start a Workflow Once per Entity -- deterministic workflow_id (uuid5) from an entity key, same-id behavior, retention limit -> /horsies/guides/start-workflow-once/
+- Async Frameworks -- FastAPI lifespan, broker close, async vs sync calls, event-loop limit -> /horsies/guides/async-frameworks/
+
 ### Configuration
 - Queue Modes -- DEFAULT vs CUSTOM, priorities -> /horsies/concepts/queue-modes/
 - AppConfig -- root application config -> /horsies/configuration/app-config/
@@ -797,4 +801,7 @@ operational indexes, history queries, opt-in DDL -> /horsies/internals/operation
 performance, latency, hot path, statement cost -> /horsies/internals/performance/
 migration 0.1.2, strict serde, upgrade from 0.1.1 -> /horsies/migrations/migration-to-0-1-2/
 migration 0.5.0, live/history split, offline cutover, schema v35 -> /horsies/migrations/migration-to-0-5-0/
+start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
+FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT, EVENT_LOOP_LIMIT -> /horsies/guides/async-frameworks/
+dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 changelog, release notes, breaking changes -> /horsies/changelog/
