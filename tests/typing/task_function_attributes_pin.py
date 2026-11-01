@@ -9,6 +9,7 @@ unneeded and the check fails.
 
 from __future__ import annotations
 
+from horsies import Horsies
 from horsies.core.task_decorator import TaskFunction
 
 
@@ -24,3 +25,9 @@ def serialized_options_may_be_absent(fn: TaskFunction[[], int]) -> None:
     _ = serialized
     must_exist: str = fn.task_options_json  # pyright: ignore[reportAssignmentType]
     _ = must_exist
+
+
+def registry_holds_task_functions(app: Horsies) -> None:
+    task = app.tasks.get('report')
+    declared: str | None = task.task_queue_name if task is not None else None
+    _ = declared
