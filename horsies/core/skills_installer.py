@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -89,16 +90,46 @@ class ChangedCopyExists:
 
 
 @dataclass(frozen=True, slots=True)
-class SkillIoFailed:
-    """A filesystem call failed. The destination can hold partial effects.
+class DestinationUnchanged:
+    """The destination is as it was before the call: the old copy, or no copy."""
 
-    A failed overwrite leaves the old copy in place when the failure happens
-    before the swap, and can leave no copy when it happens during the swap.
-    """
+
+@dataclass(frozen=True, slots=True)
+class NewCopyInPlaceBackupLeft:
+    """The new copy is in place. The old copy is still at ``backup``; remove it by hand."""
+
+    backup: Path
+
+
+@dataclass(frozen=True, slots=True)
+class OldCopyAtBackup:
+    """The destination has no copy. The old copy is at ``backup``; move it back by hand."""
+
+    backup: Path
+
+
+DestinationState = DestinationUnchanged | NewCopyInPlaceBackupLeft | OldCopyAtBackup
+
+
+@dataclass(frozen=True, slots=True)
+class SkillIoFailed:
+    """A filesystem call failed. ``destination_state`` says what is true now."""
 
     path: Path
     operation: str
     cause: str
+    destination_state: DestinationState
+
+
+@dataclass(frozen=True, slots=True)
+class TreeBoundExceeded:
+    """A folder has more files or deeper nesting than the skill bounds allow.
+
+    ``path`` is the relative path where the walk stopped.
+    """
+
+    path: str
+    reason: str
 
 
 SkillInstallError = (
@@ -119,10 +150,24 @@ def describe_install_error(error: SkillInstallError) -> str:
                 f'{destination} differs from the packaged skill ({listed}). '
                 'Nothing was changed. Run again with --force to replace it.'
             )
-        case SkillIoFailed(path=path, operation=operation, cause=cause):
-            return f'{operation} failed for {path}: {cause}'
+        case SkillIoFailed(
+            path=path, operation=operation, cause=cause, destination_state=state
+        ):
+            return f'{operation} failed for {path}: {cause}. {_describe_state(state)}'
         case _:
             assert_never(error)
+
+
+def _describe_state(state: DestinationState) -> str:
+    match state:
+        case DestinationUnchanged():
+            return 'The destination is unchanged.'
+        case NewCopyInPlaceBackupLeft(backup=backup):
+            return f'The new copy is in place. The old copy is left at {backup}. Remove it by hand.'
+        case OldCopyAtBackup(backup=backup):
+            return f'The destination has no copy. The old copy is at {backup}. Move it back by hand.'
+        case _:
+            assert_never(state)
 
 
 # ---------------------------------------------------------------------------
@@ -142,21 +187,32 @@ def _collect_files(
     prefix: str,
     depth: int,
     collected: SkillFiles,
-) -> str | None:
-    """Add every file under ``directory`` to ``collected``. Return a reason on failure."""
+) -> Result[None, TreeBoundExceeded]:
+    """Add every file under ``directory`` to ``collected``, within the named bounds."""
     if depth > MAX_SKILL_DIRECTORY_DEPTH:
-        return f'directories nest deeper than {MAX_SKILL_DIRECTORY_DEPTH}'
+        return Err(
+            TreeBoundExceeded(
+                path=prefix,
+                reason=f'directories nest deeper than {MAX_SKILL_DIRECTORY_DEPTH}',
+            ),
+        )
     for entry in sorted(directory.iterdir(), key=lambda item: item.name):
         relative = f'{prefix}{entry.name}'
         if entry.is_dir():
-            reason = _collect_files(entry, f'{relative}/', depth + 1, collected)
-            if reason is not None:
-                return reason
-            continue
+            match _collect_files(entry, f'{relative}/', depth + 1, collected):
+                case Err(exceeded):
+                    return Err(exceeded)
+                case Ok():
+                    continue
         if len(collected) >= MAX_SKILL_FILE_COUNT:
-            return f'more than {MAX_SKILL_FILE_COUNT} files'
+            return Err(
+                TreeBoundExceeded(
+                    path=relative,
+                    reason=f'more than {MAX_SKILL_FILE_COUNT} files',
+                ),
+            )
         collected[relative] = entry.read_bytes()
-    return None
+    return Ok(None)
 
 
 def read_packaged_skill() -> Result[SkillFiles, PackagedSkillMissing]:
@@ -171,22 +227,27 @@ def read_packaged_skill() -> Result[SkillFiles, PackagedSkillMissing]:
         if not root.is_dir():
             return Err(PackagedSkillMissing(location=location, reason='folder not found'))
         files: SkillFiles = {}
-        reason = _collect_files(root, '', 0, files)
+        walked = _collect_files(root, '', 0, files)
     except OSError as exc:
         return Err(PackagedSkillMissing(location=location, reason=str(exc)))
-    if reason is not None:
-        return Err(PackagedSkillMissing(location=location, reason=reason))
+    match walked:
+        case Err(exceeded):
+            return Err(PackagedSkillMissing(location=location, reason=exceeded.reason))
+        case Ok():
+            pass
     if 'SKILL.md' not in files:
         return Err(PackagedSkillMissing(location=location, reason='SKILL.md not found'))
     return Ok(files)
 
 
-def _read_installed_files(destination: Path) -> SkillFiles:
+def _read_installed_files(destination: Path) -> Result[SkillFiles, TreeBoundExceeded]:
+    """Read the installed copy with the bounds that the packaged read uses."""
     installed: SkillFiles = {}
-    for path in sorted(destination.rglob('*')):
-        if path.is_file():
-            installed[path.relative_to(destination).as_posix()] = path.read_bytes()
-    return installed
+    match _collect_files(destination, '', 0, installed):
+        case Err(exceeded):
+            return Err(exceeded)
+        case Ok():
+            return Ok(installed)
 
 
 def differing_paths(packaged: SkillFiles, installed: SkillFiles) -> tuple[str, ...]:
@@ -200,24 +261,91 @@ def differing_paths(packaged: SkillFiles, installed: SkillFiles) -> tuple[str, .
 # ---------------------------------------------------------------------------
 
 
-def _write_swapped(destination: Path, packaged: SkillFiles) -> None:
+def _rename_path(source: Path, destination: Path) -> None:
+    source.rename(destination)
+
+
+def _remove_tree(path: Path) -> None:
+    shutil.rmtree(path)
+
+
+def _write_staging(staging: Path, packaged: SkillFiles) -> None:
+    for relative, content in packaged.items():
+        file_path = staging / relative
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(content)
+
+
+def _failed(
+    exc: OSError,
+    fallback: Path,
+    operation: str,
+    state: DestinationState,
+) -> Err[SkillIoFailed]:
+    return Err(
+        SkillIoFailed(
+            path=_error_path(exc, fallback),
+            operation=operation,
+            cause=str(exc),
+            destination_state=state,
+        ),
+    )
+
+
+def _swap_in(
+    staging: Path,
+    destination: Path,
+) -> Result[None, SkillIoFailed]:
+    """Move ``staging`` to ``destination``. An old copy moves to a backup first.
+
+    Order: old copy to backup, staging to destination, backup removed. Each
+    failure reports what is true: the old copy kept, the old copy at the
+    backup path, or the new copy in place with a backup left.
+    """
+    if not destination.exists():
+        try:
+            _rename_path(staging, destination)
+        except OSError as exc:
+            return _failed(exc, destination, 'install', DestinationUnchanged())
+        return Ok(None)
+    backup = destination.with_name(f'.horsies-skill-old-{uuid.uuid4().hex}')
+    try:
+        _rename_path(destination, backup)
+    except OSError as exc:
+        return _failed(exc, destination, 'back up the old copy', DestinationUnchanged())
+    try:
+        _rename_path(staging, destination)
+    except OSError as exc:
+        try:
+            _rename_path(backup, destination)
+        except OSError:
+            return _failed(exc, destination, 'install', OldCopyAtBackup(backup=backup))
+        return _failed(exc, destination, 'install', DestinationUnchanged())
+    try:
+        _remove_tree(backup)
+    except OSError as exc:
+        return _failed(
+            exc, backup, 'remove the backup', NewCopyInPlaceBackupLeft(backup=backup)
+        )
+    return Ok(None)
+
+
+def _write_swapped(destination: Path, packaged: SkillFiles) -> Result[None, SkillIoFailed]:
     """Write ``packaged`` beside ``destination``, then swap it into place.
 
     Raises:
-        OSError: a filesystem call failed.
+        OSError: the staging folder could not be created. Nothing changed.
     """
     staging = Path(tempfile.mkdtemp(prefix='.horsies-skill-', dir=destination.parent))
     try:
-        for relative, content in packaged.items():
-            file_path = staging / relative
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_bytes(content)
-        if destination.exists():
-            shutil.rmtree(destination)
-        staging.rename(destination)
-    except OSError:
+        _write_staging(staging, packaged)
+    except OSError as exc:
         shutil.rmtree(staging, ignore_errors=True)
-        raise
+        return _failed(exc, staging, 'write the new copy', DestinationUnchanged())
+    swapped = _swap_in(staging, destination)
+    if swapped.is_err():
+        shutil.rmtree(staging, ignore_errors=True)
+    return swapped
 
 
 def install_skill(
@@ -251,7 +379,12 @@ def install_skill(
         )
     except OSError as exc:
         return Err(
-            SkillIoFailed(path=_error_path(exc, destination), operation='install', cause=str(exc)),
+            SkillIoFailed(
+                path=_error_path(exc, destination),
+                operation='install',
+                cause=str(exc),
+                destination_state=DestinationUnchanged(),
+            ),
         )
 
 
@@ -272,11 +405,19 @@ def _install_checked(
     if destination.exists() and not destination.is_dir():
         return Err(TargetNotDirectory(path=destination))
     if destination.is_dir():
-        differing = differing_paths(packaged, _read_installed_files(destination))
+        match _read_installed_files(destination):
+            case Ok(installed):
+                differing = differing_paths(packaged, installed)
+            case Err(exceeded):
+                differing = (exceeded.path,)
         if not differing:
             return Ok(SkillAlreadyCurrent(destination=destination, file_count=len(packaged)))
         if not overwrite_changed:
             return Err(ChangedCopyExists(destination=destination, differing_paths=differing))
     target.mkdir(parents=True, exist_ok=True)
-    _write_swapped(destination, packaged)
+    match _write_swapped(destination, packaged):
+        case Err(failure):
+            return Err(failure)
+        case Ok():
+            pass
     return Ok(SkillInstalled(destination=destination, file_count=len(packaged)))

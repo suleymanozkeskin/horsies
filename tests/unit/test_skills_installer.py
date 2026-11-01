@@ -20,6 +20,9 @@ from horsies.core import cli, skills_installer
 from horsies.core.skills_installer import (
     MAX_SKILL_FILE_COUNT,
     ChangedCopyExists,
+    DestinationUnchanged,
+    NewCopyInPlaceBackupLeft,
+    OldCopyAtBackup,
     PackagedSkillMissing,
     SkillAlreadyCurrent,
     SkillInstalled,
@@ -204,6 +207,152 @@ class TestInstallSkill:
         assert 'Permission denied' in error.cause
 
 
+def _populate_changed_copy(tmp_path: Path) -> Path:
+    install_skill(target=tmp_path, overwrite_changed=False).unwrap()
+    edited = tmp_path / 'horsies' / 'tasks.md'
+    edited.write_text('old copy')
+    return edited
+
+
+def _fail_nth_rename(monkeypatch: pytest.MonkeyPatch, failing: set[int]) -> list[tuple[Path, Path]]:
+    real = skills_installer._rename_path
+    calls: list[tuple[Path, Path]] = []
+
+    def rename(source: Path, destination: Path) -> None:
+        calls.append((source, destination))
+        if len(calls) in failing:
+            raise OSError(5, 'injected rename failure', str(source))
+        real(source, destination)
+
+    monkeypatch.setattr(skills_installer, '_rename_path', rename)
+    return calls
+
+
+def _leftovers(tmp_path: Path) -> list[str]:
+    return sorted(p.name for p in tmp_path.iterdir() if p.name != 'horsies')
+
+
+class TestSwapFailures:
+    def test_backup_rename_failure_keeps_the_old_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        edited = _populate_changed_copy(tmp_path)
+        _fail_nth_rename(monkeypatch, {1})
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.destination_state == DestinationUnchanged()
+        assert edited.read_text() == 'old copy'
+        assert _leftovers(tmp_path) == []
+
+    def test_install_rename_failure_restores_the_old_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        edited = _populate_changed_copy(tmp_path)
+        _fail_nth_rename(monkeypatch, {2})
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.destination_state == DestinationUnchanged()
+        assert edited.read_text() == 'old copy'
+        assert _leftovers(tmp_path) == []
+
+    def test_failed_restore_reports_the_backup_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _populate_changed_copy(tmp_path)
+        calls = _fail_nth_rename(monkeypatch, {2, 3})
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        backup = calls[0][1]
+        assert error.destination_state == OldCopyAtBackup(backup=backup)
+        assert (backup / 'tasks.md').read_text() == 'old copy'
+        assert not (tmp_path / 'horsies').exists()
+
+    def test_failed_backup_removal_reports_the_backup_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _populate_changed_copy(tmp_path)
+        calls = _fail_nth_rename(monkeypatch, set())
+
+        def remove(path: Path) -> None:
+            raise OSError(16, 'injected removal failure', str(path))
+
+        monkeypatch.setattr(skills_installer, '_remove_tree', remove)
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.destination_state == NewCopyInPlaceBackupLeft(backup=calls[0][1])
+        assert (tmp_path / 'horsies' / 'tasks.md').read_bytes() == _packaged()['tasks.md']
+        assert (calls[0][1] / 'tasks.md').read_text() == 'old copy'
+
+    def test_first_install_rename_failure_leaves_no_copy_and_no_staging(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fail_nth_rename(monkeypatch, {1})
+
+        error = install_skill(target=tmp_path, overwrite_changed=False).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.destination_state == DestinationUnchanged()
+        assert list(tmp_path.iterdir()) == []
+
+    def test_staging_write_failure_keeps_the_old_copy(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        edited = _populate_changed_copy(tmp_path)
+
+        def write(staging: Path, packaged: dict[str, bytes]) -> None:
+            raise OSError(28, 'injected write failure', str(staging))
+
+        monkeypatch.setattr(skills_installer, '_write_staging', write)
+
+        error = install_skill(target=tmp_path, overwrite_changed=True).unwrap_err()
+
+        assert isinstance(error, SkillIoFailed)
+        assert error.destination_state == DestinationUnchanged()
+        assert edited.read_text() == 'old copy'
+        assert _leftovers(tmp_path) == []
+
+
+class TestInstalledCopyBounds:
+    def test_too_many_installed_files_count_as_a_changed_copy(self, tmp_path: Path) -> None:
+        install_skill(target=tmp_path, overwrite_changed=False).unwrap()
+        for index in range(MAX_SKILL_FILE_COUNT):
+            (tmp_path / 'horsies' / f'extra-{index}.md').write_text('x')
+
+        error = install_skill(target=tmp_path, overwrite_changed=False).unwrap_err()
+
+        assert isinstance(error, ChangedCopyExists)
+        assert len(error.differing_paths) == 1
+
+    def test_deep_installed_nesting_counts_as_a_changed_copy(self, tmp_path: Path) -> None:
+        install_skill(target=tmp_path, overwrite_changed=False).unwrap()
+        deep = tmp_path.joinpath(
+            'horsies', *('d',) * (skills_installer.MAX_SKILL_DIRECTORY_DEPTH + 2)
+        )
+        deep.mkdir(parents=True)
+
+        error = install_skill(target=tmp_path, overwrite_changed=False).unwrap_err()
+
+        assert isinstance(error, ChangedCopyExists)
+
+    def test_force_replaces_a_copy_that_exceeds_the_bounds(self, tmp_path: Path) -> None:
+        install_skill(target=tmp_path, overwrite_changed=False).unwrap()
+        for index in range(MAX_SKILL_FILE_COUNT):
+            (tmp_path / 'horsies' / f'extra-{index}.md').write_text('x')
+
+        outcome = install_skill(target=tmp_path, overwrite_changed=True).unwrap()
+
+        assert isinstance(outcome, SkillInstalled)
+        assert sorted(p.name for p in (tmp_path / 'horsies').iterdir()) == sorted(_packaged())
+
+
 class TestDifferingPaths:
     def test_equal_sets_have_no_difference(self) -> None:
         assert differing_paths({'a': b'1'}, {'a': b'1'}) == ()
@@ -223,13 +372,21 @@ class TestDescribeInstallError:
             describe_install_error(
                 ChangedCopyExists(destination=tmp_path, differing_paths=('tasks.md',))
             ),
-            describe_install_error(SkillIoFailed(path=tmp_path, operation='install', cause='boom')),
+            describe_install_error(
+                SkillIoFailed(
+                    path=tmp_path,
+                    operation='install',
+                    cause='boom',
+                    destination_state=OldCopyAtBackup(backup=tmp_path / 'old'),
+                )
+            ),
         ]
 
         assert 'loc' in messages[0] and 'gone' in messages[0]
         assert str(tmp_path) in messages[1]
         assert 'tasks.md' in messages[2] and '--force' in messages[2]
         assert 'boom' in messages[3] and str(tmp_path) in messages[3]
+        assert str(tmp_path / 'old') in messages[3]
 
 
 # ---------------------------------------------------------------------------
