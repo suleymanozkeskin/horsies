@@ -1,8 +1,8 @@
-"""Archive codecs: canonical encoding, exhaustive fail-closed decoding.
+"""Archive codecs: exhaustive fail-closed decoding.
 
-The attempt payload bytes are pinned exactly because two writers must
-produce them — this module and the SQL terminalization encoder — and the
-digest covers the bytes, so any divergence is a permanent integrity fault.
+The attempt payload bytes are pinned exactly because the digest covers them:
+the test mirror in `tests/attempt_snapshot_support.py` and the SQL
+terminalization encoder must agree, or the fixtures stop matching stored rows.
 Decode tests enumerate every documented corruption, and the discriminant
 tests enumerate the ratified value sets so a drive-by addition has to
 justify itself here.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -20,9 +21,7 @@ import pytest
 from horsies.core.history.archive.attempts import (
     ATTEMPT_FIELD_COUNT,
     AttemptRecord,
-    StoredAttemptSnapshot,
     decode_attempt_snapshot,
-    encode_attempt_snapshot,
 )
 from horsies.core.history.archive.registry import (
     RETAINED_ARCHIVE_VERSIONS,
@@ -34,7 +33,6 @@ from horsies.core.history.archive.results import (
     CanonicalResultPayload,
     NoResultPayload,
     decode_result_envelope,
-    encode_result_envelope,
     select_result_payload,
 )
 from horsies.core.history.archive.versions import (
@@ -48,6 +46,14 @@ from horsies.core.history.archive.versions import (
     UnknownArchiveVersion,
     archive_digest,
     decode_history_row_version,
+)
+from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.reads.detail import (
+    _decode_history_detail,  # pyright: ignore[reportPrivateUsage]
+)
+from tests.attempt_snapshot_support import (
+    StoredAttemptSnapshot,
+    encode_attempt_snapshot,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -96,6 +102,18 @@ def decode_stored(
     }
     values.update(overrides)
     return decode_attempt_snapshot(**values)  # type: ignore[arg-type]
+
+
+def decode_result(payload: bytes, **overrides: object) -> object:
+    values: dict[str, object] = {
+        'version': 1,
+        'codec': 'json-utf8',
+        'content_type': 'application/json',
+        'payload': payload,
+        'digest': archive_digest(payload),
+    }
+    values.update(overrides)
+    return decode_result_envelope(**values)  # type: ignore[arg-type]
 
 
 class TestAttemptRecordConstruction:
@@ -202,8 +220,13 @@ class TestAttemptDecodeFailures:
     @pytest.mark.parametrize(
         ('payload', 'detail'),
         [
-            (b'not json', 'JSONDecodeError'),
-            (b'\xff\xfe', 'JSONDecodeError'),
+            (b'not json', 'invalid_json'),
+            (b'\xff\xfe', 'invalid_json'),
+            (b'', 'invalid_json'),
+            (b'[NaN]', 'invalid_json'),
+            (b'[Infinity]', 'invalid_json'),
+            (b'[1e9999]', 'invalid_json'),
+            (b'[' + b'1' * 5000 + b']', 'invalid_json'),
             (b'{}', 'expected_array'),
             (b'[{}]', 'expected_positional_row'),
             (b'[[1,"OK",true]]', 'wrong_field_count'),
@@ -280,64 +303,59 @@ class TestAttemptDecodeFailures:
 
 class TestResultEnvelope:
     def test_roundtrip(self) -> None:
-        stored = encode_result_envelope('{"answer":42,"text":"später"}')
-        decoded = decode_result_envelope(
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
+        payload = '{"answer":42,"text":"später"}'.encode()
+        assert decode_result(payload) == DecodedArchiveValue(
+            {'answer': 42, 'text': 'später'}
         )
-        assert decoded == DecodedArchiveValue({'answer': 42, 'text': 'später'})
 
-    def test_encode_stores_the_exact_caller_bytes(self) -> None:
-        result_json = '{"b": 1, "a": 2}'
-        stored = encode_result_envelope(result_json)
-        assert stored.payload == result_json.encode()
-
-    def test_encode_rejects_malformed_json(self) -> None:
-        with pytest.raises(ValueError, match='not well-formed JSON'):
-            encode_result_envelope('{"unterminated": ')
+    def test_stored_json_null_is_a_decoded_none(self) -> None:
+        assert decode_result(b'null') == DecodedArchiveValue(None)
 
     def test_digest_mismatch(self) -> None:
-        stored = encode_result_envelope('{}')
-        assert decode_result_envelope(
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=bytes(32),
-        ) == ArchiveDigestMismatch(ArchiveDomain.RESULT)
-
-    def test_corrupt_payload_with_matching_digest(self) -> None:
-        payload = b'not json'
-        result = decode_result_envelope(
-            version=1,
-            codec='json-utf8',
-            content_type='application/json',
-            payload=payload,
-            digest=archive_digest(payload),
+        assert decode_result(b'{}', digest=bytes(32)) == ArchiveDigestMismatch(
+            ArchiveDomain.RESULT
         )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RESULT, 'JSONDecodeError'
+
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'not json',
+            b'\xff\xfe',
+            b'',
+            b'{"x":NaN}',
+            b'{"x":Infinity}',
+            b'{"x":1e9999}',
+            b'{"x":' + b'1' * 5000 + b'}',
+        ],
+    )
+    def test_corrupt_payload_with_matching_digest(self, payload: bytes) -> None:
+        assert decode_result(payload) == CorruptArchiveValue(
+            ArchiveDomain.RESULT, 'invalid_json'
         )
 
     def test_unknown_discriminants(self) -> None:
-        stored = encode_result_envelope('{}')
-        assert decode_result_envelope(
-            version=5,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
-        ) == UnknownArchiveVersion(ArchiveDomain.RESULT, 5)
-        assert decode_result_envelope(
-            version=1,
-            codec='pickle',
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
-        ) == UnknownArchiveCodec(ArchiveDomain.RESULT, 'pickle')
+        assert decode_result(b'{}', version=5) == UnknownArchiveVersion(
+            ArchiveDomain.RESULT, 5
+        )
+        assert decode_result(b'{}', codec='pickle') == UnknownArchiveCodec(
+            ArchiveDomain.RESULT, 'pickle'
+        )
+
+
+class TestAttemptSnapshotReadEntry:
+    """A strict-parse failure reaches the read surface as a contract error."""
+
+    @pytest.mark.parametrize('payload', [b'[NaN]', b'[' + b'1' * 5000 + b']'])
+    def test_detail_read_refuses_the_snapshot(self, payload: bytes) -> None:
+        row = SimpleNamespace(
+            attempt_archive_version=1,
+            attempt_snapshot_codec='json-utf8',
+            attempt_snapshot_content_type='application/json',
+            attempt_snapshot=payload,
+            attempt_snapshot_digest=archive_digest(payload),
+        )
+        with pytest.raises(HistoryContractError, match='invalid_json'):
+            _decode_history_detail(row)
 
 
 class TestResultPayloadSelection:

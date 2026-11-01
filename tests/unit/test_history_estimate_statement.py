@@ -78,6 +78,20 @@ class TestPlanRowsDecode:
         rendered = '[{"Plan": {"Plan Rows": 7, "Node Type": "Append"}}]'
         assert plan_rows_from_explain(rendered) == 7
 
+    @pytest.mark.parametrize(
+        'rendered',
+        [
+            '[{"Plan": {"Plan Rows": NaN}}]',
+            '[{"Plan": {"Plan Rows": 1e9999}}]',
+            '[{"Plan": {"Plan Rows": ' + '1' * 5000 + '}}]',
+        ],
+    )
+    def test_text_outside_strict_json_is_a_contract_error(
+        self, rendered: str
+    ) -> None:
+        with pytest.raises(HistoryContractError, match='not valid JSON'):
+            plan_rows_from_explain(rendered)
+
     def test_extra_plan_keys_are_ignored(self) -> None:
         payload = [
             {

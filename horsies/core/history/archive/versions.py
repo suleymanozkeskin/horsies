@@ -22,7 +22,6 @@ from enum import StrEnum
 from typing import Final
 
 
-ARCHIVE_VERSION_1: Final = 1
 JSON_UTF8_CODEC: Final = 'json-utf8'
 JSON_CONTENT_TYPE: Final = 'application/json'
 

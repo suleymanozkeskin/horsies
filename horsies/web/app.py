@@ -127,7 +127,7 @@ def _inject(index_html: str, root_path: str, custom_css_url: str | None) -> str:
     block = (
         f'<base href="{_base_href(root_path)}">'
         f'<script>window.__HORSIES_UI__ = '
-        f'{json.dumps(_ui_config(root_path))}</script>'
+        f'{json.dumps(_ui_config(root_path), allow_nan=False)}</script>'
     )
     if custom_css_url is not None:
         block += f'<link rel="stylesheet" href="{custom_css_url}">'

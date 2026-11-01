@@ -6,12 +6,10 @@ per attempt, timestamps as signed integer Unix-epoch microseconds. The
 field order is part of the version — adding, removing, or reordering a
 field requires version 2 and a retained decoder, never an in-place change.
 
-The byte encoding is canonical because two writers produce it: this module
-and the SQL terminalization function. Both must emit identical bytes for
-identical sequences, or digests would depend on which side wrote the row.
-The canonical form is compact separators, no ASCII escaping of non-ASCII
-text, and the positional layout below; the unit suite pins exact bytes so
-the SQL encoder can be tested against the same fixtures.
+The SQL terminalization function writes these bytes, and this module decodes
+them. The canonical form is compact separators, no ASCII escaping of non-ASCII
+text, and the positional layout below. The digest covers the bytes, so this
+form cannot change within version 1.
 
 Decoding validates shape exhaustively before constructing records: arity,
 per-field types (booleans are rejected where integers are required, since
@@ -23,20 +21,18 @@ wrong.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Final, cast
 
+from horsies.core.codec.json_io import loads_json_bytes
+from horsies.core.types.result import is_err
+
 from .versions import (
-    ARCHIVE_VERSION_1,
     ArchiveDecodeResult,
     ArchiveDomain,
     CorruptArchiveValue,
     DecodedArchiveValue,
-    JSON_CONTENT_TYPE,
-    JSON_UTF8_CODEC,
-    archive_digest,
     validate_envelope_contract,
     verify_payload_digest,
 )
@@ -78,44 +74,6 @@ class AttemptRecord:
             raise ValueError('attempt timestamps must be timezone-aware')
 
 
-@dataclass(frozen=True, slots=True)
-class StoredAttemptSnapshot:
-    """An encoded snapshot with the envelope facts the writer stores."""
-
-    version: int
-    codec: str
-    content_type: str
-    payload: bytes
-    digest: bytes
-
-
-def encode_attempt_snapshot(
-    attempts: tuple[AttemptRecord, ...],
-) -> StoredAttemptSnapshot:
-    """Encode a complete ordered sequence as canonical version-1 bytes.
-
-    Rejects a sequence that is not contiguous from 1: the writer assembling
-    a snapshot from a broken sequence must fail before storing, because the
-    stored snapshot is immutable and a gap would be permanent.
-    """
-    expected = tuple(range(1, len(attempts) + 1))
-    actual = tuple(record.attempt for record in attempts)
-    if actual != expected:
-        raise ValueError('attempts must be ordered and contiguous from 1')
-    payload = json.dumps(
-        [_positional_row(record) for record in attempts],
-        ensure_ascii=False,
-        separators=(',', ':'),
-    ).encode()
-    return StoredAttemptSnapshot(
-        version=ARCHIVE_VERSION_1,
-        codec=JSON_UTF8_CODEC,
-        content_type=JSON_CONTENT_TYPE,
-        payload=payload,
-        digest=archive_digest(payload),
-    )
-
-
 def decode_attempt_snapshot(
     *,
     version: int,
@@ -138,10 +96,10 @@ def decode_attempt_snapshot(
     )
     if digest_failure is not None:
         return digest_failure
-    try:
-        parsed: Any = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return _corrupt(type(exc).__name__)
+    loaded = loads_json_bytes(payload)
+    if is_err(loaded):
+        return _corrupt('invalid_json')
+    parsed: Any = loaded.ok_value
     if not isinstance(parsed, list):
         return _corrupt('expected_array')
     items = cast(list[Any], parsed)
@@ -159,23 +117,6 @@ def decode_attempt_snapshot(
     if actual != expected:
         return _corrupt('non_contiguous_attempts')
     return DecodedArchiveValue(tuple(records))
-
-
-def _positional_row(record: AttemptRecord) -> list[Any]:
-    return [
-        record.attempt,
-        record.outcome,
-        record.will_retry,
-        _datetime_to_epoch_us(record.started_at),
-        _datetime_to_epoch_us(record.finished_at),
-        record.error_code,
-        record.error_message,
-        record.failed_reason,
-        record.worker_id,
-        record.worker_hostname,
-        record.worker_pid,
-        record.worker_process_name,
-    ]
 
 
 def _decode_positional_row(item: Any) -> AttemptRecord | CorruptArchiveValue:
@@ -233,15 +174,6 @@ def _decode_positional_row(item: Any) -> AttemptRecord | CorruptArchiveValue:
 
 def _is_plain_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _datetime_to_epoch_us(value: datetime) -> int:
-    delta = value.astimezone(timezone.utc) - _UTC_EPOCH
-    return (
-        delta.days * 86_400_000_000
-        + delta.seconds * 1_000_000
-        + delta.microseconds
-    )
 
 
 def _decode_epoch_us(value: Any) -> datetime | None:

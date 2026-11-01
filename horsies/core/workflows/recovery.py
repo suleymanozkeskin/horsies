@@ -865,7 +865,7 @@ async def recover_stuck_workflows(
                     'Workflow task insertion did not complete.'
                 ),
                 'recovery': 'case_4',
-            })
+            }, allow_nan=False)
             result = await session.execute(
                 FAIL_ORPHANED_WORKFLOW_SQL,
                 {'workflow_id': workflow_id, 'error': error},
@@ -1021,7 +1021,7 @@ async def _recover_global_orphan_candidate(
             'Workflow task insertion did not complete.'
         ),
         'recovery': 'case_4',
-    })
+    }, allow_nan=False)
     try:
         async with session_factory() as session:
             if not await _lock_global_claim(session, claim_token):

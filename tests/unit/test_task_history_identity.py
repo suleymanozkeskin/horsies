@@ -194,6 +194,12 @@ class TestCommandFingerprint:
             '90c4323848b3880935ff136aa7e86dcfeb6509f25425ead6e2703843f129ac2f'
         )
 
+    def test_pinned_digest_with_non_ascii_input(self) -> None:
+        """Version 1 hashes non-ASCII text unescaped."""
+        assert make_command(kwargs_json='{"city":"Köln"}').fingerprint.hex() == (
+            'f3c9df759d775bf1da1550c9a94ad4d5f5bc5524bfd90210f9d7632d7bb4bdfb'
+        )
+
     def test_every_field_is_accounted_for(self) -> None:
         assert {field.name for field in dataclasses.fields(EnqueueCommandV1)} == {
             'task_name',

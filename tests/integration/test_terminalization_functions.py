@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.ddl.classes import DEFAULT_RETENTION_CLASS_KEY
-from horsies.core.history.archive.attempts import encode_attempt_snapshot
+from tests.attempt_snapshot_support import encode_attempt_snapshot
 from tests.integration.history_seeding import read_attempt_history
 
 from horsies.core.lifecycle.commands import (
