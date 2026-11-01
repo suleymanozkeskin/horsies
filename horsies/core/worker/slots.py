@@ -26,7 +26,7 @@ import socket
 import sys
 import time
 from collections import deque
-from collections.abc import Callable, Collection
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Final, TypeAlias, assert_never, cast
@@ -422,38 +422,43 @@ class Child:
         config: SlotPoolConfig,
         init: InitFrame,
         preload: PreloadParent | None = None,
-        known_pids: Collection[int] = (),
+        live_pids: set[int] | None = None,
     ) -> Result['Child', SpawnFailed]:
         """Start a process and send its init frame.
 
         A child comes from ``preload`` when one is given and it can serve the
-        request, otherwise from ``exec``. Must run on a long-lived thread: on
-        Linux the child's parent-death signal fires when the spawning thread
-        ends. Does not wait for the child to be ready.
+        request, otherwise from ``exec``. ``live_pids`` holds its pid until it
+        exits. Must run on a long-lived thread: on Linux the child's
+        parent-death signal fires when the spawning thread ends. Does not wait
+        for the child to be ready.
         """
+        registry = set[int]() if live_pids is None else live_pids
         parent_sock, child_sock = socket.socketpair()
         try:
             for sock in (parent_sock, child_sock):
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, SOCKET_BUFFER_BYTES)
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, SOCKET_BUFFER_BYTES)
-            process = await cls._launch(config, child_sock, preload, known_pids)
+            process = await cls._launch(config, child_sock, preload, registry)
         except OSError as exc:
             parent_sock.close()
             return Err(SpawnFailed(f'{type(exc).__name__}: {exc}'))
         finally:
             child_sock.close()
-        return Ok(await cls._attach(process, parent_sock, init))
+        registry.add(process.pid)
+        child = await cls._attach(process, parent_sock, init)
+        child.notify_on_exit(lambda: registry.discard(process.pid))
+        return Ok(child)
 
     @staticmethod
     async def _launch(
         config: SlotPoolConfig,
         child_sock: socket.socket,
         preload: PreloadParent | None,
-        known_pids: Collection[int],
+        live_pids: set[int],
     ) -> ChildProcess:
         """Return a running process on ``child_sock``. Raises ``OSError``."""
         if preload is not None:
-            match await preload.fork_child(child_sock, known_pids):
+            match await preload.fork_child(child_sock, live_pids):
                 case Ok(process):
                     return process
                 case Err(down):
@@ -747,6 +752,8 @@ class SlotPool:
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
         self._preload: PreloadParent | None = None
         self._preload_watch: asyncio.Task[None] | None = None
+        # Every child that has not exited, from any preload parent or ``exec``.
+        self._live_pids: set[int] = set()
 
     async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure]:
         """Boot every slot. Returns when all are ready, or on the first failure.
@@ -867,9 +874,6 @@ class SlotPool:
             PRELOAD_RESTART_LIMIT + 1,
         )
 
-    def _known_pids(self) -> set[int]:
-        return {slot.child.pid for slot in self._slots if slot.child is not None}
-
     async def wait_failed(self) -> PoolFailure:
         """Wait until no replacement child can start. Fatal to the worker."""
         return await asyncio.shield(self._failed)
@@ -939,7 +943,7 @@ class SlotPool:
                 self._config,
                 init,
                 self._preload,
-                self._known_pids(),
+                self._live_pids,
             ):
                 case Err(spawn_failed):
                     return Err(spawn_failed)

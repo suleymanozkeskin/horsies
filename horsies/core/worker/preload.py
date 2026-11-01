@@ -272,9 +272,12 @@ class PreloadParent:
     async def fork_child(
         self,
         child_sock: socket.socket,
-        known_pids: Collection[int],
+        live_pids: set[int],
     ) -> Result[ReparentedProcess, PreloadDown]:
         """Ask for one child on ``child_sock``. The socket stays open on failure.
+
+        ``live_pids`` is the pool's registry. A new pid enters it before any
+        await, so a sweep can never take this child's exit status.
 
         A preload parent that fails mid-request is killed: the channel may hold
         a partial frame, so it cannot serve another request.
@@ -295,7 +298,14 @@ class PreloadParent:
                 return Err(PreloadDown(f'{type(exc).__name__}: {exc}'))
             finally:
                 _set_subreaper(False)
-            reap_landed_orphans({*known_pids, self.process.pid})
+            match frame:
+                case ChildForkedFrame(pid=pid):
+                    live_pids.add(pid)
+                case ForkFailedFrame() | PreloadReadyFrame() | PreloadRefusedFrame():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+            reap_landed_orphans({*live_pids, self.process.pid})
         return self._child_from(frame)
 
     def _child_from(self, frame: PreloadFrame) -> Result[ReparentedProcess, PreloadDown]:

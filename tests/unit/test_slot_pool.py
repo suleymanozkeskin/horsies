@@ -937,7 +937,9 @@ class TestPoolFailure:
         self,
         tmp_path: Path,
     ) -> None:
-        pool = await _started_pool(_config(max_tasks_per_child=1))
+        pool = await _started_pool(
+            _config(max_tasks_per_child=1, child_entry=(SCRIPTED_CHILD,)),
+        )
         real_executable = sys.executable
         finished = pool.submit(_frame('echo', 'x'))
         queued = pool.submit(_frame('echo', 'y'))
@@ -963,11 +965,15 @@ PARENT_PROGRAM = """
 import asyncio, os, sys, time
 sys.path[:0] = {paths!r}
 from horsies.core.worker.child_protocol import InitFrame, RunFrame
+from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.slots import SlotPool, SlotPoolConfig
 
 async def main():
     init = InitFrame('ok', (), (), tuple(sys.path), ('p',), 30, 'x', {{}}, 0, 1, False, 'c')
-    pool = SlotPool(SlotPoolConfig(1, init, 0, None, ({child!r},)), 10)
+    pool = SlotPool(
+        SlotPoolConfig(1, init, 0, None, ({child!r},), ChildPreload({mode!r}), ({preload!r},)),
+        10,
+    )
     await pool.start()
     pool.submit(RunFrame('t', {task!r}, None, None, 'w', 30000, False, None, None))
     await asyncio.sleep(0.3)
@@ -983,6 +989,8 @@ class TestParentDeath:
         code = PARENT_PROGRAM.format(
             paths=sys.path,
             child=SCRIPTED_CHILD,
+            preload=SCRIPTED_PRELOAD,
+            mode=_start_path.mode.value,
             task=task_name,
         )
         parent = subprocess.Popen(

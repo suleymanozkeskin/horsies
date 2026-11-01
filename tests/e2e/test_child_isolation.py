@@ -10,7 +10,8 @@ import asyncio
 import os
 import signal
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ from sqlalchemy import text
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
+from horsies.core.worker.config import ChildPreload
+from horsies.core.worker.preload import PreloadUnsupported, preload_support
 
 from tests.broker_resources_support import current_resources
 from tests.e2e.helpers.assertions import unwrap_send
@@ -33,6 +36,45 @@ INSTANCE = 'tests.e2e.tasks.instance_child_isolation:app'
 PREFETCH_INSTANCE = 'tests.e2e.tasks.instance_child_isolation_prefetch:app'
 SLOW_START_S = 60.0
 FINISH_TIMEOUT_S = 40.0
+
+
+@dataclass(slots=True)
+class _StartPath:
+    mode: ChildPreload = ChildPreload.NONE
+
+
+_start_path = _StartPath()
+
+
+@pytest.fixture(
+    autouse=True,
+    params=[ChildPreload.NONE, ChildPreload.LIBRARY, ChildPreload.APP],
+    ids=['exec', 'library', 'app'],
+)
+def start_path(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Run every test here on each way a child can start. Preload needs Linux."""
+    if request.param is not ChildPreload.NONE and isinstance(
+        preload_support(),
+        PreloadUnsupported,
+    ):
+        pytest.skip('this host cannot run the preload parent')
+    _start_path.mode = request.param
+    yield
+    _start_path.mode = ChildPreload.NONE
+
+
+def _worker(
+    instance_path: str,
+    *,
+    extra_args: list[str] | None = None,
+    **options: Any,
+) -> Any:
+    start_path_argument = f'--child-preload={_start_path.mode.value}'
+    return run_worker(
+        instance_path,
+        extra_args=[*(extra_args or []), start_path_argument],
+        **options,
+    )
 
 
 def _ready_check(task: Any) -> Callable[[], bool]:
@@ -102,7 +144,7 @@ async def test_timeout_leaves_healthy_siblings_running(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#375: one timeout does not touch the other children."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=4,
         ready_check=_ready_check(isolation.healthcheck),
@@ -134,7 +176,7 @@ async def test_crash_leaves_healthy_siblings_running(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#375: one crash fails that task only, at once and without the reaper."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=3,
         ready_check=_ready_check(isolation.healthcheck),
@@ -168,7 +210,7 @@ async def test_child_stops_when_the_parent_dies(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#410: no orphan keeps running, heartbeating, or stamping the row."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
@@ -188,7 +230,7 @@ async def test_sigterm_to_every_process_still_drains(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#411: systemd and Heroku signal every process, and tasks must finish."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
@@ -216,7 +258,7 @@ async def test_timeout_does_not_count_the_wait_for_a_slot(
     isolation_prefetch_broker: PostgresBroker,
 ) -> None:
     """#412: each task runs 1.5 s of its 2 s limit, wherever it waited."""
-    with run_worker(
+    with _worker(
         PREFETCH_INSTANCE,
         processes=1,
         ready_check=_ready_check(prefetch.healthcheck),
@@ -244,7 +286,7 @@ async def test_timeout_kill_spares_the_next_task(
     finishes or times out, the next task has no timeout and must complete.
     """
     session_factory = current_resources(isolation_prefetch_broker).session_factory
-    with run_worker(
+    with _worker(
         PREFETCH_INSTANCE,
         processes=1,
         ready_check=_ready_check(prefetch.healthcheck),
@@ -271,7 +313,7 @@ async def test_timeout_kill_reaches_task_subprocesses(
 ) -> None:
     """#414: a timed-out task leaves no subprocess behind."""
     marker = tmp_path / 'subprocess_pid'
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
@@ -299,7 +341,7 @@ async def test_forked_helper_does_not_hide_a_dead_child(
     isolation_broker: PostgresBroker,
 ) -> None:
     """#415: the worker sees the death while the helper still lives."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
@@ -329,7 +371,7 @@ async def test_multiprocessing_works_inside_a_task(
     start_method: str,
 ) -> None:
     """A task may start its own processes from the child program."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
@@ -348,7 +390,7 @@ async def test_drain_deadline_records_the_crash_at_once(
     isolation_broker: PostgresBroker,
 ) -> None:
     """A task past --drain-timeout fails now, with no wait for the reaper."""
-    with run_worker(
+    with _worker(
         INSTANCE,
         processes=1,
         ready_check=_ready_check(isolation.healthcheck),
