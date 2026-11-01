@@ -468,6 +468,9 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Action responses no longer carry `next_attempt_number`.** The field was
+  always `null` after the manual retry was removed. The web UI action
+  responses keep `outcome`, `was_status` and `warning`.
 - New command `horsies skills install --target DIR [--force]`. It copies
   the skill folder from the installed package to `DIR/horsies/`. `--target`
   is required, because each agent tool reads a different skills directory.
@@ -647,6 +650,12 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **The web UI no longer shows a Retry action that the server cannot run.**
+  The server removed the manual task retry route, so the Retry button on a
+  task detail panel could only fail. The button, its confirm text, the
+  `TASK_NOT_RETRYABLE` and `TASK_EXPIRY_PASSED` conflict codes in the UI
+  types, and the `--enable-actions` help text for retry are removed. To run
+  a terminal task again, use the rerun API.
 - **A task cancel accepts every form of a task id that Python reads as a
   UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
   cancel now uses the canonical id text, and the result carries it.

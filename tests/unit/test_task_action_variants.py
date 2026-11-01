@@ -51,7 +51,10 @@ from horsies.monitoring.task_actions import (
     TaskCancelled,
     cancel_task,
 )
-from horsies.web.routes.actions import _task_action_failed  # pyright: ignore[reportPrivateUsage]
+from horsies.web.routes.actions import (
+    _succeeded,  # pyright: ignore[reportPrivateUsage]
+    _task_action_failed,  # pyright: ignore[reportPrivateUsage]
+)
 from tests.broker_resources_support import attach_resources, fake_resources
 
 pytestmark = [pytest.mark.unit]
@@ -572,3 +575,15 @@ class TestWebMapping:
 
         assert outcome.status_code == status_code
         assert outcome.content == content
+
+
+class TestSuccessEnvelope:
+    def test_the_success_response_has_outcome_status_and_warning_only(self) -> None:
+        outcome = _succeeded('cancelled', was_status='RUNNING')
+
+        assert outcome.status_code == 200
+        assert outcome.content == {
+            'outcome': 'cancelled',
+            'was_status': 'RUNNING',
+            'warning': None,
+        }

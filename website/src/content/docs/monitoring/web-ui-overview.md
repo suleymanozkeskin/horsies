@@ -132,7 +132,7 @@ Actions are off by default. When a deployment enables them, five are available:
 
 | Entity | Actions |
 |---|---|
-| Task | Cancel, Retry |
+| Task | Cancel |
 | Workflow run | Pause, Resume, Cancel |
 
 Semantics are exact and, in two places, surprising: cancelling a RUNNING task
