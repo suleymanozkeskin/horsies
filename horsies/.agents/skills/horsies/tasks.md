@@ -585,6 +585,7 @@ Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above 
 - `dict` keys that collide after `str()` coercion
 - Non-finite floats (`nan`, `inf`)
 - A lone surrogate in a string or a dict key, for example a file name that `os.listdir()` decoded with `surrogateescape`
+- A value that holds itself, or a value nested too deep: pydantic refuses at 255 levels of lists and dicts, and `loads_json` refuses text past 300 levels
 
 ### Return type serialization
 

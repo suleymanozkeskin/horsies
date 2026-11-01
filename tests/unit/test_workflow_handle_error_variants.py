@@ -45,7 +45,11 @@ from horsies.web.routes.actions import (
     _handle_failed,
     build_router,
 )
-from tests.broker_resources_support import attach_resources, fake_resources
+from tests.broker_resources_support import (
+    attach_resources,
+    fake_resources,
+    resources_of,
+)
 
 pytestmark = [pytest.mark.unit]
 
@@ -341,6 +345,18 @@ class TestStoredSubworkflowSummary:
         assert 'sub_workflow_summary JSON corrupt for node parent:0' in err.message
 
     @pytest.mark.asyncio
+    async def test_a_summary_past_the_depth_bound_is_stored_data_invalid(self) -> None:
+        handle = _tasks_handle('{"status":' + '[' * 1_100 + ']' * 1_100 + '}')
+
+        result = await handle.tasks_async()
+
+        assert is_err(result)
+        err = result.err_value
+        assert isinstance(err, HandleStoredDataInvalid)
+        assert isinstance(err.exception, SerializationError)
+        assert 'nested deeper than' in err.message
+
+    @pytest.mark.asyncio
     async def test_an_invalid_summary_is_stored_data_invalid(self) -> None:
         handle = _tasks_handle('{"status": "NOT_A_STATUS", "total_tasks": 1}')
 
@@ -367,6 +383,36 @@ WEB_STATUS_CODES: dict[type[Any], int] = {
     HandleEventLoopLimit: 503,
     HandleStoredDataInvalid: 500,
 }
+
+
+class TestStoredWorkflowResult:
+    @pytest.mark.asyncio
+    async def test_a_result_past_the_depth_bound_is_a_deserialization_error(
+        self,
+    ) -> None:
+        """Before, `RecursionError` left `get()`."""
+        row = MagicMock()
+        row.result = (
+            '{"__h_task_result__":true,"ok":'
+            + '[' * 1_100 + ']' * 1_100
+            + ',"err":null}'
+        )
+        read = MagicMock()
+        read.fetchone.return_value = row
+        session = AsyncMock()
+        session.execute = AsyncMock(return_value=read)
+        handle = _handle_with_session(session)
+        handle.out_type = int
+
+        result = await handle._get_result(await resources_of(handle.broker))
+
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert result.err.message is not None
+        assert 'nested deeper than' in result.err.message
 
 
 class TestWebMapping:

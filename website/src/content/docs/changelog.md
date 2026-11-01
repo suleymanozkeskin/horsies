@@ -538,8 +538,43 @@ there is no migration contract between pre-1.0 versions.
   - A task that returns such a value, or whose `TaskError.data` holds one,
     ends with `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`.
 
-  Any other `ValueError` from the dump propagates, also the `Circular
-  reference detected (depth exceeded)` of a value that is only deep.
+  Any other `ValueError` from the dump propagates.
+- **Breaking: `encode_value` raises `ValueValidationError` for a value that
+  is nested too deep.** Pydantic refuses a dump at 255 levels of nesting, and
+  it says `Circular reference detected (depth exceeded)` also for a finite
+  value. The text names the kwarg. Before, a raw `ValueError` left
+  `encode_value`. Each caller gets the same outcome as for a value that holds
+  itself: `TaskSendValidationFailed` from `.send()`,
+  `CONFIG_INVALID_SCHEDULE` from `prepare_schedules`,
+  `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`) from `app.workflow()`, and
+  `WORKER_SERIALIZATION_ERROR` for a task, not `TASK_EXCEPTION`.
+- **Breaking: `encode_value` raises `ValueValidationError` for `bytes` that
+  are not UTF-8.** This holds at a declared `bytes` position and at `Any`,
+  also for a dict key. The text is fixed and holds no byte value. Before, a
+  raw `UnicodeDecodeError` left `encode_value`. A `build_with()` kwarg fails
+  spec construction with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A
+  `TaskError.data` ends the task with `WORKER_SERIALIZATION_ERROR`, not
+  `TASK_EXCEPTION`. Registration refuses `bytes` in a task signature, so
+  `.send()` and a schedule do not reach this. A `UnicodeDecodeError` from a
+  decode in a computed field propagates.
+- **Breaking: the JSON boundary refuses nesting deeper than 300 levels.**
+  `MAX_JSON_DEPTH` in `horsies.core.codec.json_value` is the bound. It counts
+  nested lists and dicts.
+  - `dumps_json` returns `Err`, and `encode_value` raises `StrictJsonError` at a
+    `JsonValue` position, for a deeper value and for a value that holds itself.
+    Before, `RecursionError` left `dumps_json`, which returns a `SerdeResult`,
+    and `.send()`, `prepare_schedules` and `app.workflow()`. These now give
+    `TaskSendValidationFailed`, `CONFIG_INVALID_SCHEDULE` and
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`).
+  - `loads_json` and `loads_json_bytes` return `Err` for a deeper text. Before,
+    a text of 1,000 or more levels raised `RecursionError` out of the parse or
+    out of the next walk. A stored task or workflow result is now
+    `RESULT_DESERIALIZATION_ERROR`, kwargs in a worker are
+    `WORKER_SERIALIZATION_ERROR`, and `enqueue_async` returns
+    `BrokerInvalidInput`.
+  - Each value that `encode_value` accepts stays inside the bound, because
+    pydantic refuses a dump at 255 levels. A text of 301 or more levels that a
+    `dumps_json` caller stored before this release no longer parses.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
