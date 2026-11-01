@@ -23,8 +23,12 @@ from horsies.core.models.workflow import (
     WorkflowStatus,
     WorkflowTaskStatus,
     OnError,
+    HandleDbOperationFailed,
     HandleErrorCode,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
 )
+from horsies.core.codec.json_io import SerializationError
 from horsies.core.types.result import is_ok, is_err
 from horsies.core.workflows.engine import on_workflow_task_complete
 from horsies.core.workflows.lifecycle import expire_paused_workflows
@@ -835,7 +839,7 @@ class TestWorkflowHandleSubWorkflowFields:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Corrupt sub_workflow_summary JSON propagates as Err(HandleOperationError)."""
+        """Corrupt sub_workflow_summary JSON is Err(HandleStoredDataInvalid) with the cause."""
         task_a = make_simple_task(app, 'subwf_corrupt_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 
@@ -871,7 +875,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.tasks_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(err, HandleStoredDataInvalid)
+        assert err.code == HandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.exception, SerializationError)
         assert 'sub_workflow_summary JSON corrupt' in err.message
 
     async def test_subworkflow_node_with_bad_status_summary_returns_err(
@@ -885,7 +891,7 @@ class TestWorkflowHandleSubWorkflowFields:
 
         Regression: an invalid persisted status used to be silently coerced to
         WorkflowStatus.FAILED, masquerading as a genuine child failure. It must
-        now surface as Err(HandleOperationError) instead.
+        now surface as Err(HandleStoredDataInvalid) with the ValueError.
         """
         task_a = make_simple_task(app, 'subwf_badstatus_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -922,7 +928,9 @@ class TestWorkflowHandleSubWorkflowFields:
         tasks_r = await handle.tasks_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
-        assert err.code == HandleErrorCode.DB_OPERATION_FAILED
+        assert isinstance(err, HandleStoredDataInvalid)
+        assert err.code == HandleErrorCode.STORED_DATA_INVALID
+        assert isinstance(err.exception, ValueError)
         assert 'sub_workflow_summary invalid for node' in err.message
 
 
@@ -2002,6 +2010,145 @@ class TestWorkflowHandlePauseResume:
 
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
+class TestResumeCommitSplit:
+    """A database error before the resume commit and one after it are two states."""
+
+    async def _paused_workflow(
+        self, broker: PostgresBroker, app: Horsies, name: str,
+    ) -> WorkflowHandle[Any]:
+        task_a = make_simple_task(app, f'{name}_a')
+        task_b = make_simple_task(app, f'{name}_b')
+        node_a = TaskNode(fn=task_a, kwargs={'value': 1})
+        node_b = TaskNode(fn=task_b, kwargs={'value': 2}, waits_for=[node_a])
+        spec = make_workflow_spec(broker=broker, name=name, tasks=[node_a, node_b])
+        handle = await start_ok(spec, broker)
+        pause_r = await handle.pause_async()
+        assert is_ok(pause_r)
+        assert pause_r.ok_value is True
+        return handle
+
+    async def test_recovery_db_error_returns_resume_recovery_failed(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The resume committed: the workflow is RUNNING."""
+        handle = await self._paused_workflow(broker, app, 'resume_recovery_err')
+        db_exc = OperationalError('recovery pass', {}, Exception('connection lost'))
+
+        with patch(
+            'horsies.core.workflows.recovery.recover_stuck_workflow_tree',
+            new=AsyncMock(side_effect=db_exc),
+        ):
+            resume_r = await handle.resume_async()
+
+        assert is_err(resume_r)
+        err = resume_r.err_value
+        assert isinstance(err, HandleResumeRecoveryFailed)
+        assert err.exception is db_exc
+        assert err.workflow_id == handle.workflow_id
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.RUNNING
+
+    async def test_db_error_before_the_commit_returns_db_operation_failed(
+        self,
+        clean_workflow_tables: None,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        """The resume transaction rolled back: the workflow stays PAUSED."""
+        handle = await self._paused_workflow(broker, app, 'resume_commit_err')
+        db_exc = OperationalError('cascade', {}, Exception('connection lost'))
+
+        with patch(
+            'horsies.core.workflows.lifecycle.cascade_resume_to_children',
+            new=AsyncMock(side_effect=db_exc),
+        ):
+            resume_r = await handle.resume_async()
+
+        assert is_err(resume_r)
+        err = resume_r.err_value
+        assert isinstance(err, HandleDbOperationFailed)
+        assert err.exception is db_exc
+        assert err.retryable is True
+        status_r = await handle.status_async()
+        assert is_ok(status_r)
+        assert status_r.ok_value == WorkflowStatus.PAUSED
+
+
+class TestUnknownStoredWorkflowStatus:
+    """horsies_workflows.status has no CHECK constraint; a value outside WorkflowStatus does not parse."""
+
+    async def _workflow_with_status(
+        self, session: AsyncSession, broker: PostgresBroker, app: Horsies, name: str,
+    ) -> WorkflowHandle[Any]:
+        task_a = make_simple_task(app, f'{name}_a')
+        spec = make_workflow_spec(
+            broker=broker, name=name, tasks=[TaskNode(fn=task_a, kwargs={'value': 1})],
+        )
+        handle = await start_ok(spec, broker)
+        await session.execute(
+            text("UPDATE horsies_workflows SET status = 'NOT_A_STATUS' WHERE id = :wf_id"),
+            {'wf_id': handle.workflow_id},
+        )
+        await session.commit()
+        return handle
+
+    async def test_status_returns_stored_data_invalid(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_read')
+
+        status_r = await handle.status_async()
+
+        assert is_err(status_r)
+        err = status_r.err_value
+        assert isinstance(err, HandleStoredDataInvalid)
+        assert isinstance(err.exception, ValueError)
+        assert 'NOT_A_STATUS' in err.message
+
+    async def test_cancel_returns_stored_data_invalid_and_changes_nothing(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_cancel')
+
+        cancel_r = await handle.cancel_async()
+
+        assert is_err(cancel_r)
+        assert isinstance(cancel_r.err_value, HandleStoredDataInvalid)
+        row = (await session.execute(
+            text('SELECT status FROM horsies_workflows WHERE id = :wf_id'),
+            {'wf_id': handle.workflow_id},
+        )).fetchone()
+        assert row is not None
+        assert row.status == 'NOT_A_STATUS'
+
+    async def test_get_folds_it_into_broker_error(
+        self,
+        clean_workflow_tables: None,
+        session: AsyncSession,
+        broker: PostgresBroker,
+        app: Horsies,
+    ) -> None:
+        handle = await self._workflow_with_status(session, broker, app, 'unknown_status_get')
+
+        result = await handle.get_async(timeout_ms=0)
+
+        assert result.is_err()
+        assert result.unwrap_err().error_code is OperationalErrorCode.BROKER_ERROR
+        assert 'NOT_A_STATUS' in (result.unwrap_err().message or '')
+
+
 class TestWorkflowHandleInfraErrors:
     """Tests for infrastructure error handling in WorkflowHandle methods."""
 

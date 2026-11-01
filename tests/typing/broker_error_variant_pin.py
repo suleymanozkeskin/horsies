@@ -10,8 +10,6 @@ field on the wrong variant fails the check.
 
 from __future__ import annotations
 
-from typing import assert_never
-
 from horsies import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
@@ -72,13 +70,3 @@ def owner_only_on_the_conflict(
 ) -> None:
     _ = conflict.owner_task_id
     _ = mismatch.owner_task_id  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
-
-
-def every_variant_is_matched(error: BrokerOperationError) -> str:
-    match error:
-        case BrokerOperationFailed() | BrokerEnqueueFailed():
-            return 'operation'
-        case BrokerPayloadMismatch() | BrokerIdempotencyKeyConflict():
-            return 'conflict'
-        case _ as unreachable:
-            assert_never(unreachable)  # pyright: ignore[reportArgumentType]
