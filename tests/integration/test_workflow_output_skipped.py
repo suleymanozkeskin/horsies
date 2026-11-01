@@ -14,7 +14,7 @@ output, or a stored child result that does not parse, makes a FAILED node, so
 from __future__ import annotations
 
 import json
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import pytest
 import pytest_asyncio
@@ -536,11 +536,7 @@ class TestOutputNodeUnderSuccessPolicy:
             name='output_skipped_policy_parent',
             tasks=[sub],
             output=sub,
-            # ``required`` is typed for TaskNode. Spec validation accepts every
-            # node of the spec.
-            success_policy=SuccessPolicy(
-                cases=[SuccessCase(required=[cast('TaskNode[Any]', sub)])],
-            ),
+            success_policy=SuccessPolicy(cases=[SuccessCase(required=[sub])]),
             definition_key='tests.integration.output_skipped_policy_parent.v1',
         )
         handle = await start_ok(spec, broker)
