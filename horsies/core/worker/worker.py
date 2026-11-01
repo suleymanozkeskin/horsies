@@ -86,8 +86,6 @@ from horsies.core.worker.sql import (  # noqa: F401
 
 logger = get_logger('worker')
 
-# How long running tasks get to finish at shutdown.
-_DRAIN_TIMEOUT_S = 300.0
 _HOOK_FAILURE_MESSAGE = (
     'on_child_process_start hook failed in a worker child (see the child log '
     'line above for the hook name); fix the hook, the worker will not '
@@ -731,11 +729,11 @@ class Worker(
         # row; without a bound, one hung task would make the worker unkillable
         # except by external SIGKILL.
         if self._slots is not None:
-            report = await self._slots.stop(_DRAIN_TIMEOUT_S)
+            report = await self._slots.stop(self.cfg.drain_timeout_s)
             if report.killed_task_ids:
                 logger.error(
                     'Drain exceeded %.0fs (hung task?); killed tasks: %s',
-                    _DRAIN_TIMEOUT_S,
+                    self.cfg.drain_timeout_s,
                     list(report.killed_task_ids),
                 )
             logger.info('Worker child processes stopped')

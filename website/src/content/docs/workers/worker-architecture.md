@@ -157,6 +157,7 @@ From `WorkerConfig`:
 | `pgbouncer_transaction_mode` | Disables child-process prepared statements for PgBouncer transaction pooling |
 | `queues` | Queue names to process |
 | `processes` | Child process count |
+| `drain_timeout_s` | Seconds to wait for running tasks at shutdown |
 | `parent_pool_size` | Worker coordinator SQLAlchemy pool size |
 | `parent_max_overflow` | Worker coordinator overflow connections |
 | `child_pool_min_size` | Minimum per-child psycopg pool size |
@@ -182,12 +183,22 @@ On SIGTERM/SIGINT the worker:
 
 1. Stops new claims
 2. Returns tasks that wait for a child to `PENDING`, because they have not started
-3. Waits up to 300 seconds for running tasks
+3. Waits up to `--drain-timeout` seconds for running tasks (default 300)
 4. Kills the children that still run a task. Each of these tasks takes the [child crash](heartbeats-recovery#child-process-crash) path
 5. Waits for pending result writes
 6. Closes database connections
 
-Set the stop window of your supervisor above 300 seconds, or the supervisor can kill the worker first.
+Set `--drain-timeout` below the stop window of your supervisor, and leave a few seconds for result writes. If the supervisor kills the worker first, its running tasks wait for the reaper. At the deadline, the worker records each killed task at once.
+
+| Supervisor | Default stop window | Signal goes to |
+| ---------- | ------------------- | -------------- |
+| Fly.io | 5 s (`kill_timeout`), SIGINT | Main process |
+| Docker | 10 s (`docker stop --time`) | Main process |
+| Kubernetes | 30 s (`terminationGracePeriodSeconds`) | Main process |
+| Amazon ECS | 30 s (`stopTimeout`) | Main process |
+| Heroku | 30 s | Every process |
+| systemd | 90 s (`TimeoutStopSec`) | Every process, or the main process with `KillMode=mixed` |
+
 
 Children ignore SIGTERM and SIGINT. The worker decides when a child stops, so a task continues when a supervisor signals every process. A subprocess that a task starts does not ignore these signals. To keep such a subprocess running on systemd, set `KillMode=mixed`.
 

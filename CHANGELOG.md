@@ -432,6 +432,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **`WorkerConfig.drain_timeout_s` and `horsies worker --drain-timeout` set the
+  shutdown drain.** The default stays 300 seconds. At the deadline the worker
+  kills the children that still run a task, and each task takes the crash path,
+  so its row does not wait for the reaper. Set it below the stop window of your
+  supervisor.
 - New command `horsies skills install --target DIR [--force]`. It copies
   the skill folder from the installed package to `DIR/horsies/`. `--target`
   is required, because each agent tool reads a different skills directory.
