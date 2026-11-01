@@ -945,6 +945,30 @@ class TestEnqueueAsync:
         session.execute.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_lone_surrogate_in_kwargs_is_refused_as_invalid_input(self) -> None:
+        """A lone surrogate never reaches the UTF-8 encode of the input envelope."""
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='test-task-id',
+            enqueue_sha='test-sha',
+            kwargs_json=r'{"x":"\ud800"}',
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(message=message, exception=cause):
+                assert 'kwargs JSON corrupt' in message
+                assert 'lone surrogate' in message
+                assert isinstance(cause, SerializationError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        session.execute.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_overflowing_number_in_kwargs_is_refused_as_invalid_input(self) -> None:
         """A number outside finite binary64 never reaches the input envelope."""
         broker = _make_broker()

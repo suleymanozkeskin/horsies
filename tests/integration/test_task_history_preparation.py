@@ -188,8 +188,12 @@ class TestPreparation:
             await engine.dispose()
 
     @pytest.mark.asyncio
-    async def test_overflowing_number_is_a_decode_failure_of_its_row_only(
-        self, make_database: MakeDatabase
+    @pytest.mark.parametrize(
+        'refused_kwargs',
+        ['{"x": 1e9999}', r'{"x": "\ud800"}'],
+    )
+    async def test_refused_value_is_a_decode_failure_of_its_row_only(
+        self, make_database: MakeDatabase, refused_kwargs: str
     ) -> None:
         url = await make_database()
         await _prepare_db(url)
@@ -197,13 +201,13 @@ class TestPreparation:
         try:
             async with engine.begin() as connection:
                 await install_program_state(connection)
-                overflowing = await insert_legacy_task(
+                refused = await insert_legacy_task(
                     connection,
                     status='FAILED',
                     kind=None,
                     disposition=None,
                     retain=None,
-                    kwargs_json='{"x": 1e9999}',
+                    kwargs_json=refused_kwargs,
                 )
                 valid = await insert_legacy_task(
                     connection,
@@ -235,11 +239,11 @@ class TestPreparation:
                     ).all()
                 }
                 assert (
-                    rows[overflowing].prepared_rerun_input_disposition
+                    rows[refused].prepared_rerun_input_disposition
                     == 'DECLINED_BY_POLICY'
                 )
-                assert rows[overflowing].input_digest is None
-                assert rows[overflowing].prepared_rerun_input_inline is None
+                assert rows[refused].input_digest is None
+                assert rows[refused].prepared_rerun_input_inline is None
                 assert rows[valid].prepared_rerun_input_disposition == 'INLINE'
         finally:
             await engine.dispose()

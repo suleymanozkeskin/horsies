@@ -226,6 +226,7 @@ class TestAttemptDecodeFailures:
             (b'[NaN]', 'invalid_json'),
             (b'[Infinity]', 'invalid_json'),
             (b'[1e9999]', 'invalid_json'),
+            (rb'["\ud800"]', 'invalid_json'),
             (b'[' + b'1' * 5000 + b']', 'invalid_json'),
             (b'{}', 'expected_array'),
             (b'[{}]', 'expected_positional_row'),
@@ -325,6 +326,7 @@ class TestResultEnvelope:
             b'{"x":NaN}',
             b'{"x":Infinity}',
             b'{"x":1e9999}',
+            rb'{"x":"\ud800"}',
             b'{"x":' + b'1' * 5000 + b'}',
         ],
     )
