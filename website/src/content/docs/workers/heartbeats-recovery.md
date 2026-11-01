@@ -193,6 +193,8 @@ RecoveryConfig(
 
 A child process crash is detected at once (see [Child Process Crash](#child-process-crash)). When the whole worker process or its machine stops, its children stop too, and its RUNNING tasks are recovered by the reaper, which runs inside workers. The reaper treats a task as stale `running_stale_threshold_ms` after its last runner heartbeat and acts on it at its next pass (`check_interval_ms`). With the defaults (heartbeat every 30 s, threshold 300 s, reaper pass every 30 s), recovery happens 4.5 to 5.5 minutes after the worker stops. A `WORKER_CRASHED` retry then waits its retry policy delay, counted from recovery. If no worker is running, recovery waits until a worker starts.
 
+Until then, the `RUNNING` rows of the dead worker count against each queue's `max_concurrency`. A new worker has free children, but a queue at its limit waits for the reaper.
+
 To recover faster, lower `runner_heartbeat_interval_ms` and `running_stale_threshold_ms` together. A lower threshold also raises the risk of [false positives](#false-positives-tasks-marked-stale-but-running).
 
 ## Database Schema
