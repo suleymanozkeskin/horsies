@@ -13,10 +13,12 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from tests.docs_examples.extract import (
+    count_modes,
     Block,
     BlockMode,
     ExtractError,
     MarkerWithoutPythonFence,
+    SkipWithoutKind,
     SkipWithoutReason,
     UnknownMarker,
     UnparsableBlock,
@@ -64,22 +66,47 @@ class TestReadBlocks:
         assert blocks[0].mode is BlockMode.ALONE
 
     def test_skip_marker_with_reason_allows_invalid_code(self) -> None:
-        blocks = _blocks('<!-- check: skip -- pseudo-code -->\n```python\nx = ???\n```\n')
+        blocks = _blocks('<!-- check: skip elided -- pseudo-code -->\n```python\nx = ???\n```\n')
 
-        assert blocks[0].mode is BlockMode.SKIP
+        assert blocks[0].mode is BlockMode.SKIP_ELIDED
 
     def test_mdx_marker_form(self) -> None:
-        blocks = _blocks('{/* check: skip -- pseudo-code */}\n```python\nx = ???\n```\n', MDX_PAGE)
+        blocks = _blocks('{/* check: skip elided -- pseudo-code */}\n```python\nx = ???\n```\n', MDX_PAGE)
 
-        assert blocks[0].mode is BlockMode.SKIP
+        assert blocks[0].mode is BlockMode.SKIP_ELIDED
 
     def test_indented_fence_is_dedented(self) -> None:
         blocks = _blocks('- item\n\n  ```python\n  if x:\n      y = 1\n  ```\n')
 
         assert blocks[0].code == 'if x:\n    y = 1'
 
+    @pytest.mark.parametrize(
+        ('kind', 'mode'),
+        [
+            ('elided', BlockMode.SKIP_ELIDED),
+            ('partial', BlockMode.SKIP_PARTIAL),
+            ('defect', BlockMode.SKIP_DEFECT),
+        ],
+    )
+    def test_skip_kinds(self, kind: str, mode: BlockMode) -> None:
+        blocks = _blocks(f'<!-- check: skip {kind} -- why -->\n```python\nx = ???\n```\n')
+
+        assert blocks[0].mode is mode
+
+    def test_skip_without_kind_is_an_error(self) -> None:
+        errors = _errors('<!-- check: skip -- why -->\n```python\nx = 1\n```\n')
+
+        assert errors == (SkipWithoutKind(page=PAGE, line=1),)
+
+    def test_skip_with_unknown_kind_is_an_error(self) -> None:
+        errors = _errors('<!-- check: skip later -- why -->\n```python\nx = 1\n```\n')
+
+        assert errors == (
+            UnknownMarker(page=PAGE, line=1, text='<!-- check: skip later -- why -->'),
+        )
+
     def test_skip_without_reason_is_an_error(self) -> None:
-        errors = _errors('<!-- check: skip -->\n```python\nx = 1\n```\n')
+        errors = _errors('<!-- check: skip defect -->\n```python\nx = 1\n```\n')
 
         assert errors == (SkipWithoutReason(page=PAGE, line=1),)
 
@@ -137,7 +164,7 @@ class TestRenderPageFiles:
         assert 'x = 1' not in files['docs_page__line5.py']
 
     def test_skipped_block_is_not_written(self) -> None:
-        text = '<!-- check: skip -- pseudo-code -->\n```python\nx = ???\n```\n'
+        text = '<!-- check: skip elided -- pseudo-code -->\n```python\nx = ???\n```\n'
 
         assert render_page_files(_blocks(text)) == {}
 
@@ -166,6 +193,24 @@ class TestExtractAll:
 
         assert errors == ()
         assert list(output.glob('*.py')) == []
+
+
+class TestCountModes:
+    def test_counts_every_mode(self, tmp_path: Path) -> None:
+        docs = tmp_path / 'website' / 'src' / 'content' / 'docs'
+        docs.mkdir(parents=True)
+        (docs / 'a.md').write_text(
+            '```python\nx = 1\n```\n'
+            '<!-- check: alone -->\n```python\ny = 1\n```\n'
+            '<!-- check: skip defect -- why -->\n```python\nz = 1\n```\n'
+        )
+
+        counts = count_modes(tmp_path)
+
+        assert counts[BlockMode.CHAINED] == 1
+        assert counts[BlockMode.ALONE] == 1
+        assert counts[BlockMode.SKIP_DEFECT] == 1
+        assert counts[BlockMode.SKIP_ELIDED] == 0
 
 
 class TestFindPages:

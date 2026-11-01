@@ -9,7 +9,7 @@ For full scheduler documentation, see [Scheduler Overview](/scheduling/scheduler
 
 ## Scheduled Tasks
 
-<!-- check: skip -- imports a placeholder module -->
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 from .config import app

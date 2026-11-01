@@ -327,7 +327,7 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 Domain-specific errors use string codes:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 
@@ -564,7 +564,7 @@ error[HRS-007]: cycle detected in workflow DAG
 
 Access fields programmatically when catching the exception:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies.core.errors import HorsiesError
 

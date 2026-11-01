@@ -106,7 +106,7 @@ construction). See website docs `workers/child-process-hooks`.
 
 **Result retrieval** (use when you have a task ID but no `TaskHandle`):
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 broker = app.get_broker()
 
@@ -263,7 +263,7 @@ Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
 
 ## QueueMode
 
-<!-- check: skip -- shows the library definition, not user code -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class QueueMode(Enum):
     DEFAULT = 'default'
@@ -324,7 +324,7 @@ enqueues (including `args_from` injection) warn only; task results warn
 only — results are never rejected. Subworkflow child-start kwargs are not
 yet checked.
 
-<!-- check: skip -- does not type-check: reportArgumentType -->
+<!-- check: skip defect -- does not type-check: reportArgumentType -->
 ```python
 from horsies import PayloadPolicy
 
@@ -648,7 +648,7 @@ cannot.
 
 ### Weekday and Month
 
-<!-- check: skip -- shows the library definition, not user code -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class Weekday(str, Enum):
     MONDAY = 'monday'

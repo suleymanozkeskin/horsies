@@ -17,7 +17,7 @@ This page demonstrates common workflow patterns for production scenarios. Each p
 
 Build workflows conditionally based on runtime flags. Useful when workflow structure depends on input data or feature flags.
 
-<!-- check: skip -- imports a placeholder module -->
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from typing import Any
 from horsies import TaskNode, SubWorkflowNode, OnError
@@ -94,7 +94,7 @@ def start_order_workflow(
 
 Run many independent tasks in parallel. Queue `max_concurrency` controls parallelism.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskResult, TaskError
 from horsies import TaskNode, AnyNode
@@ -153,7 +153,7 @@ Sequential execution where each task waits for the previous.
 
 Key is to use `waits_for` with one of the target previous nodes.
 
-<!-- check: skip -- imports a placeholder module -->
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from .tasks import (
     validate_order,
@@ -227,7 +227,7 @@ def fulfillment_workflow(order: Order) -> None:
 
 Start a workflow without waiting for completion. Useful for background processing.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 def trigger_shipment_tracking(shipment_id: str) -> bool:
     node_fetch: TaskNode[CarrierStatus] = TaskNode(
@@ -271,7 +271,7 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
 
 A task that orchestrates a workflow internally. Useful for composing complex operations as a single schedulable unit.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task('process_returns', queue_name='standard')
 def process_returns_task() -> TaskResult[dict[str, str], TaskError]:

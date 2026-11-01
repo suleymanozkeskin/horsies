@@ -66,7 +66,7 @@ Requirements:
 
 Create `producer.py`:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 from instance import app, add_numbers, process_data

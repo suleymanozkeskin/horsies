@@ -17,7 +17,7 @@ This page lists every user-facing change against 0.1.1 and the mechanical fix fo
 
 `*args` (`VAR_POSITIONAL`), `**kwargs` (`VAR_KEYWORD`), and positional-only parameters (`def f(x, /):`) raise `SignatureValidationError` at `@app.task` time.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 @app.task("bad")
@@ -66,7 +66,7 @@ def validate_input(
 
 Positional arguments to send/schedule are rejected with `Err(TaskSendError(code=VALIDATION_FAILED))`.
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # Wrong
 match my_task.send(5, 3):
@@ -85,7 +85,7 @@ The user-facing contract is keyword-only. The wrapper may still accept `*args` a
 
 `TaskNode` no longer accepts an `args` field. Pass all data through `kwargs`.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 node = TaskNode(fn=step_task, args=("hello",))
@@ -104,7 +104,7 @@ In-process subworkflow handoff no longer round-trips through a JSON envelope. `b
 
 The scheduler service rejects schedules carrying positional `args` with `Err(BrokerOperationError(code=ENQUEUE_FAILED))`. Use `kwargs` only.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 TaskSchedule(
@@ -129,7 +129,7 @@ TaskSchedule(
 
 The broker no longer exposes a typed result fetch. Use `app.get_result(...)` / `app.get_result_async(...)` for typed decode, or `broker.get_raw_result_record_async(...)` for the raw envelope.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 result = await broker.get_result_async(task_id, timeout_ms=5000)
@@ -187,7 +187,7 @@ See [Serialization](../../internals/serialization) for the full envelope shape (
 
 ### `exception` field shape tightened
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 TaskError.exception: BaseException | FlattenedException | None
 ```
@@ -198,7 +198,7 @@ In-process the value is a live `BaseException`. On the wire it flattens to a `Fl
 
 `TaskError(error_code="WORKER_RESOLUTION_ERROR")` raises `ValueError` at construction time. Built-in codes must be passed as enum members:
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 TaskError(error_code="WORKER_RESOLUTION_ERROR")
@@ -216,7 +216,7 @@ The canonical `app.get_broker()` sets both `app._broker = broker` AND `broker.ap
 
 If you maintain test fixtures that bypass `app.get_broker()`:
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 app = Horsies(config)

@@ -9,7 +9,7 @@ Two approaches: functional (inline) and class-based.
 
 ### Functional — `app.workflow()`
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 spec = app.workflow(
     name: str,
@@ -32,7 +32,7 @@ Best for dynamic workflows where node kwargs depend on runtime inputs.
 
 ### Class-based — `WorkflowDefinition`
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
@@ -65,7 +65,7 @@ Best for static, reusable DAGs.
 
 Override `build_with()` to accept runtime parameters. This is the child-workflow form. The engine calls `build_with()` when it enqueues a `SubWorkflowNode`, and binds queue and priority for the child nodes at that time:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class ChildPipeline(WorkflowDefinition[ProcessedData]):
     name = "child_pipeline"
@@ -108,7 +108,7 @@ def build_regional_workflow(region: str) -> WorkflowSpec:
 
 ## TaskNode
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class TaskNode(Generic[OkT]):
@@ -144,7 +144,7 @@ Set `node_id` on every node. The docs site recommends it too.
 - The id is the key of `handle.results()`, the lookup key of `result_for()`, and `WorkflowTaskInfo.node_id`.
 - An explicit id stays the same through reorders and renames.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
 ```
@@ -153,7 +153,7 @@ fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
 
 `result_for()` accepts a `NodeKey` and looks up the result by `node_id`. Build the key from the explicit id string. The task module then does not import the workflow module.
 
-<!-- check: skip -- does not type-check: reportAssignmentType -->
+<!-- check: skip defect -- does not type-check: reportAssignmentType -->
 ```python
 from horsies import NodeKey, TaskError, TaskResult, WorkflowContext
 
@@ -181,7 +181,7 @@ def summarize_rows(
 
 ## SubWorkflowNode
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class SubWorkflowNode(Generic[OkT]):
@@ -206,7 +206,7 @@ Differences from `TaskNode`:
 
 ## NodeFactory / `.node()` — Two-Step Builder
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Step 1: workflow options → NodeFactory
 factory = my_task.node(
@@ -304,7 +304,7 @@ All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, 
 
 ### All methods
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # Status
 def status(self) -> HandleResult[WorkflowStatus]
@@ -420,7 +420,7 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED | FAILED | SKIPPED
 
 ### WorkflowTaskInfo
 
-<!-- check: skip -- shows the library definition, not user code -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
 class WorkflowTaskInfo:
@@ -453,7 +453,7 @@ class WorkflowTaskInfo:
 
 ## SuccessPolicy / SuccessCase
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 policy = SuccessPolicy(
     cases=[
@@ -474,7 +474,7 @@ policy = SuccessPolicy(
 
 Injected when a task declares `workflow_ctx: WorkflowContext | None = None`:
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 class WorkflowContext(BaseModel):
     workflow_id: str
@@ -494,7 +494,7 @@ class WorkflowContext(BaseModel):
 
 **Scope:** Only nodes in `workflow_ctx_from` are accessible. Others raise `KeyError`.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("aggregate")
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Report, TaskError]:
@@ -509,7 +509,7 @@ def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Repo
 
 Lighter alternative — metadata only, no result access:
 
-<!-- check: skip -- shows the library definition, not user code -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
 class WorkflowMeta:
@@ -523,7 +523,7 @@ Does **not** require `workflow_ctx_from`.
 
 ## NodeKey
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass(frozen=True)
 class NodeKey(Generic[OkT]):
@@ -536,7 +536,7 @@ class NodeKey(Generic[OkT]):
 
 ## SubWorkflowSummary
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class SubWorkflowSummary(Generic[OkT]):
@@ -591,7 +591,7 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 - Positional args not supported on workflow nodes (HRS-026).
 - With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("process")
 def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
@@ -653,7 +653,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 
 ## All Public Imports
 
-<!-- check: skip -- does not type-check: reportAssignmentType -->
+<!-- check: skip defect -- does not type-check: reportAssignmentType -->
 ```python
 from horsies import (
     # Spec construction

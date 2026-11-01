@@ -146,7 +146,7 @@ error[HRS-103]: invalid queue_name 'nonexistent'
 
 In addition to per-queue concurrency, you can limit total RUNNING tasks across all queues:
 
-<!-- check: skip -- does not type-check: reportArgumentType -->
+<!-- check: skip defect -- does not type-check: reportArgumentType -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

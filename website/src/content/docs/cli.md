@@ -275,7 +275,7 @@ If the module contains exactly one `Horsies` instance, the `:name` suffix can be
 
 ## Module Discovery
 
-<!-- check: skip -- does not type-check: reportCallIssue -->
+<!-- check: skip defect -- does not type-check: reportCallIssue -->
 ```python
 # instance.py
 from horsies import Horsies, AppConfig, PostgresConfig

@@ -5,13 +5,21 @@ module reads every page, applies the block markers, and writes one file per
 page. Pyright then runs over the written files (``pyrightconfig.docs.json``).
 
 Markers. A marker is a comment on the line directly above the opening fence,
-in the style of the ``members`` markers: ``<!-- check: skip -- reason -->`` in
-``.md`` and ``{/* check: skip -- reason */}`` in ``.mdx``.
+in the style of the ``members`` markers: ``<!-- check: skip KIND -- reason -->``
+in ``.md`` and ``{/* check: skip KIND -- reason */}`` in ``.mdx``.
 
 - No marker: the block is chained. The chained blocks of one page are written
   to one file in page order, so a block sees the names of the blocks above it.
 - ``check: alone``: the block is written to its own file and sees no other block.
-- ``check: skip -- reason``: the block is not written. The reason is required.
+- ``check: skip KIND -- reason``: the block is not written. The kind and the
+  reason are required. The kind says why the block is not checked:
+
+  - ``elided``: the block shortens or abbreviates on purpose (pseudo-code, a
+    signature, a deliberate wrong form, a library definition).
+  - ``partial``: the block is correct but relies on context that the page does
+    not show (names that no block defines).
+  - ``defect``: the block is wrong for the current API. It is a known docs
+    defect, to be fixed, and the skip only keeps CI green until then.
 
 A chained or ``alone`` block that does not parse is an error, so a new
 fragment cannot enter the docs unmarked.
@@ -46,13 +54,17 @@ _FENCE: Final = re.compile(r'^(?P<indent>\s*)```(?P<lang>\w*)')
 _MARKER_LINE: Final = re.compile(
     r'^\s*(?:<!--\s*check:(?P<html>.*?)-->|\{/\*\s*check:(?P<mdx>.*?)\*/\})\s*$'
 )
-_MARKER_BODY: Final = re.compile(r'^\s*(?P<kind>\w+)\s*(?:--\s*(?P<reason>.*?))?\s*$')
+_MARKER_BODY: Final = re.compile(
+    r'^\s*(?P<kind>\w+)(?:\s+(?P<skip_kind>\w+))?\s*(?:--\s*(?P<reason>.*?))?\s*$'
+)
 
 
 class BlockMode(Enum):
     CHAINED = 'chained'
     ALONE = 'alone'
-    SKIP = 'skip'
+    SKIP_ELIDED = 'skip elided'
+    SKIP_PARTIAL = 'skip partial'
+    SKIP_DEFECT = 'skip defect'
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +97,18 @@ class SkipWithoutReason:
 
 
 @dataclass(frozen=True, slots=True)
+class SkipWithoutKind:
+    page: Path
+    line: int
+
+    def message(self) -> str:
+        return (
+            f'{self.page}:{self.line}: "check: skip" needs a kind: '
+            '"check: skip elided|partial|defect -- reason"'
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MarkerWithoutPythonFence:
     page: Path
     line: int
@@ -102,16 +126,24 @@ class UnparsableBlock:
     def message(self) -> str:
         return (
             f'{self.page}:{self.line}: block does not parse ({self.cause}). '
-            'Fix it, or mark it with "check: skip -- reason".'
+            'Fix it, or mark it with "check: skip KIND -- reason".'
         )
 
 
-ExtractError = UnknownMarker | SkipWithoutReason | MarkerWithoutPythonFence | UnparsableBlock
+ExtractError = (
+    UnknownMarker | SkipWithoutKind | SkipWithoutReason | MarkerWithoutPythonFence | UnparsableBlock
+)
 
 
 def describe_error(error: ExtractError) -> str:
     match error:
-        case UnknownMarker() | SkipWithoutReason() | MarkerWithoutPythonFence() | UnparsableBlock():
+        case (
+            UnknownMarker()
+            | SkipWithoutKind()
+            | SkipWithoutReason()
+            | MarkerWithoutPythonFence()
+            | UnparsableBlock()
+        ):
             return error.message()
         case _:
             assert_never(error)
@@ -119,7 +151,7 @@ def describe_error(error: ExtractError) -> str:
 
 def _parse_marker(
     page: Path, line: int, text: str
-) -> Result[BlockMode, UnknownMarker | SkipWithoutReason]:
+) -> Result[BlockMode, UnknownMarker | SkipWithoutKind | SkipWithoutReason]:
     match _MARKER_LINE.match(text):
         case None:
             return Err(UnknownMarker(page=page, line=line, text=text.strip()))
@@ -129,15 +161,37 @@ def _parse_marker(
     if parsed is None:
         return Err(UnknownMarker(page=page, line=line, text=text.strip()))
     reason = parsed.group('reason')
+    skip_kind = parsed.group('skip_kind')
     match parsed.group('kind'):
         case 'alone':
             return Ok(BlockMode.ALONE)
-        case 'skip' if reason:
-            return Ok(BlockMode.SKIP)
-        case 'skip':
+        case 'skip' if False:
+            return Err(SkipWithoutKind(page=page, line=line))
+        case 'skip' if not reason:
             return Err(SkipWithoutReason(page=page, line=line))
+        case 'skip':
+            return _skip_mode(page, line, skip_kind, text)
         case _:
             return Err(UnknownMarker(page=page, line=line, text=text.strip()))
+
+
+def _skip_mode(
+    page: Path, line: int, skip_kind: str, text: str
+) -> Result[BlockMode, UnknownMarker]:
+    match skip_kind:
+        case 'elided':
+            return Ok(BlockMode.SKIP_ELIDED)
+        case 'partial':
+            return Ok(BlockMode.SKIP_PARTIAL)
+        case 'defect':
+            return Ok(BlockMode.SKIP_DEFECT)
+        case _:
+            return Err(UnknownMarker(page=page, line=line, text=text.strip()))
+
+
+SKIP_MODES: Final = frozenset(
+    {BlockMode.SKIP_ELIDED, BlockMode.SKIP_PARTIAL, BlockMode.SKIP_DEFECT}
+)
 
 
 def _dedent(lines: list[str], indent: str) -> str:
@@ -188,7 +242,7 @@ def read_blocks(page: Path, text: str) -> Result[tuple[Block, ...], tuple[Extrac
         return Err((MarkerWithoutPythonFence(page=page, line=pending[0]),))
     unparsable: list[ExtractError] = []
     for block in blocks:
-        if block.mode is BlockMode.SKIP:
+        if block.mode in SKIP_MODES:
             continue
         try:
             ast.parse(block.code)
@@ -231,7 +285,7 @@ def render_page_files(blocks: tuple[Block, ...]) -> dict[str, str]:
         stem = _stem(block.page)
         source = f'# source: {block.page.as_posix()}:{block.line}\n{block.code}\n\n'
         match block.mode:
-            case BlockMode.SKIP:
+            case BlockMode.SKIP_ELIDED | BlockMode.SKIP_PARTIAL | BlockMode.SKIP_DEFECT:
                 continue
             case BlockMode.CHAINED:
                 name = f'{stem}.py'
@@ -284,6 +338,19 @@ def extract_all(repo_root: Path, output_dir: Path) -> tuple[ExtractError, ...]:
     return tuple(errors)
 
 
+def count_modes(repo_root: Path) -> dict[BlockMode, int]:
+    """Count the blocks of every page by mode. A page with errors adds nothing."""
+    counts = {mode: 0 for mode in BlockMode}
+    for page in find_pages(repo_root):
+        match read_blocks(page, (repo_root / page).read_text()):
+            case Ok(blocks):
+                for block in blocks:
+                    counts[block.mode] += 1
+            case Err():
+                continue
+    return counts
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 2:
         print('usage: extract.py OUTPUT_DIR', file=sys.stderr)
@@ -291,6 +358,8 @@ def main(argv: list[str]) -> int:
     errors = extract_all(Path.cwd(), Path(argv[1]))
     for error in errors:
         print(describe_error(error), file=sys.stderr)
+    counts = count_modes(Path.cwd())
+    print(', '.join(f'{mode.value}: {count}' for mode, count in counts.items()))
     return 1 if errors else 0
 
 

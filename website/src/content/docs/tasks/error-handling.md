@@ -63,7 +63,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
 > concrete class you expect (this matters when retry policies key on
 > the mapped error code).
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task(
     "fetch_api_data",
@@ -200,7 +200,7 @@ This pattern only runs when the downstream task actually executes. With `join="a
 
 Prefer explicit returns over raising exceptions:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import RetrievalCode, Ok, Err
 from instance import my_task
@@ -240,7 +240,7 @@ Create a handler that **returns actions**, not just logs.
 
 **Don't raise exceptions for flow control.**
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - exceptions break control flow
 if result.is_err():
@@ -254,7 +254,7 @@ if result.is_err():
 
 **Don't ignore errors after logging.**
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - logs but continues as if nothing happened
 if result.is_err():
@@ -269,7 +269,7 @@ if result.is_err():
 
 **Don't manually retry errors that should be auto-retried.**
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - duplicates library retry logic
 if error.error_code == "RATE_LIMITED":

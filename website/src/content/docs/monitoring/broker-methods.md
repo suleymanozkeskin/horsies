@@ -118,7 +118,7 @@ Fetch metadata for a single task by ID. Returns `Ok(None)` if the task does not 
 **Returns:** `BrokerResult[TaskInfo | None]`. At the broker layer, `include_result=True` populates `TaskInfo.raw_result` only. Use `app.get_task_info_async(...)` when you want the local app to also populate `decoded_result` and `result_decoded`.
 Sync wrapper: `broker.get_task_info(...)`.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 result = await broker.get_task_info_async(
     task_id,

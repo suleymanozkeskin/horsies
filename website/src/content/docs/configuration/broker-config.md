@@ -259,7 +259,7 @@ A process can open this once per set:
 keeps its set and its idle connections, and the sixth open loop gets
 `EVENT_LOOP_LIMIT`.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()

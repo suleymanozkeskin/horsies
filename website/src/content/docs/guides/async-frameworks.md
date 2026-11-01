@@ -23,7 +23,6 @@ The sync forms block their thread. On a thread that runs an event loop, the bloc
 
 Close the broker at shutdown with `close_async()`. It returns a `BrokerResult`. Handle the `Err` side.
 
-<!-- check: skip -- imports a placeholder module -->
 ```python
 import logging
 from collections.abc import AsyncIterator
@@ -58,7 +57,6 @@ api = FastAPI(lifespan=lifespan)
 
 An `async def` endpoint uses `send_async()`, `start_async()` and `get_async()`.
 
-<!-- check: skip -- does not type-check: reportReturnType -->
 ```python
 @api.post("/welcome/{address}")
 async def welcome(address: str) -> dict[str, str]:
@@ -75,7 +73,6 @@ A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqu
 
 FastAPI runs a plain `def` endpoint in a thread pool. That thread has no event loop, so the sync form is allowed. The sync form runs on the broker's own runner loop.
 
-<!-- check: skip -- does not type-check: reportReturnType -->
 ```python
 @api.post("/welcome-blocking/{address}")
 def welcome_blocking(address: str) -> dict[str, str]:
@@ -100,7 +97,7 @@ An ASGI server such as uvicorn runs one loop for each process, so a server stays
 
 **Don't call sync `close()` in a coroutine.** It returns `ASYNC_CONTEXT` and closes nothing.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 broker.close()
@@ -111,7 +108,7 @@ await broker.close_async()
 
 **Don't create an event loop for each call.** Each open loop keeps its resource set. The sixth open loop gets `EVENT_LOOP_LIMIT`.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()

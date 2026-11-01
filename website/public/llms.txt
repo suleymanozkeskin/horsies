@@ -616,7 +616,7 @@ Registry (HRS-300-HRS-399):
 - join="any"/"quorum": downstream can still run if success threshold met
 - SKIPPED cascades for join="all" with allow_failed_deps=False
 - on_error="fail" (default): store error, continue DAG, mark FAILED when all terminal
-- on_error="pause": immediately pause, block new enqueues, await resume
+- OnError.PAUSE: immediately pause, block new enqueues, await resume
 
 ### Utilities
 - slugify(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)

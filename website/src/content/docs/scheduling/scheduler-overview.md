@@ -42,7 +42,7 @@ The scheduler:
 
 Add a `ScheduleConfig` to your `AppConfig`:
 
-<!-- check: skip -- does not type-check: reportCallIssue -->
+<!-- check: skip defect -- does not type-check: reportCallIssue -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
@@ -78,7 +78,7 @@ Run separately from workers. One scheduler per cluster is sufficient.
 
 Each schedule has a unique name used for state tracking:
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskSchedule(
     name="daily-report",  # Must be unique
@@ -91,7 +91,7 @@ TaskSchedule(
 
 The `task_name` must match a registered `@app.task()`:
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task("generate_report")
 def generate_report() -> TaskResult[str, TaskError]:
@@ -108,7 +108,7 @@ TaskSchedule(
 
 How often the scheduler checks for due schedules:
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 ScheduleConfig(
     check_interval_seconds=1,  # Check every second
@@ -192,7 +192,7 @@ Schedules are validated at startup:
 - Queue must be valid (CUSTOM mode)
 - Required arguments must be provided
 
-<!-- check: skip -- pseudo-code or a signature, not valid Python -->
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # This will fail at scheduler start:
 TaskSchedule(

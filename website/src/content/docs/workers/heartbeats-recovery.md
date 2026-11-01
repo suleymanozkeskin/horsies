@@ -52,7 +52,7 @@ CLAIMED                          RUNNING
 
 The reaper periodically checks for stale tasks:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Simplified logic
 for task in tasks.filter(status='CLAIMED'):
@@ -121,7 +121,7 @@ This runs before workflow finalization, so dependents are resolved in the same r
 
 ## Configuration
 
-<!-- check: skip -- does not type-check: reportCallIssue -->
+<!-- check: skip defect -- does not type-check: reportCallIssue -->
 ```python
 from horsies.core.models.recovery import RecoveryConfig
 
@@ -151,7 +151,7 @@ config = AppConfig(
 
 Stale thresholds must be at least 2x the heartbeat interval:
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Valid
 RecoveryConfig(
@@ -213,7 +213,7 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 
 Query stale tasks:
 
-<!-- check: skip -- does not type-check: reportCallIssue -->
+<!-- check: skip defect -- does not type-check: reportCallIssue -->
 ```python
 broker = app.get_broker()
 

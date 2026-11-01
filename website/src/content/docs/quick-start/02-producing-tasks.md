@@ -9,7 +9,7 @@ tags: [quickstart, tasks]
 
 Decorate a function with `@app.task()` to register it. Provide a task name and the target queue:
 
-<!-- check: skip -- imports a placeholder module -->
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from horsies import TaskResult, TaskError
 from .config import app
@@ -48,7 +48,7 @@ Every task returns `TaskResult[T, TaskError]`. Use `TaskResult(ok=value)` for su
 
 `send()` dispatches the task to its queue and returns a `TaskSendResult[TaskHandle[T]]` — a `Result` type that is either `Ok(TaskHandle)` on success or `Err(TaskSendError)` on failure:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 
@@ -65,7 +65,7 @@ match validate_order.send(order=order):
 
 `send_async()` and `get_async()` are the async equivalents:
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 
@@ -80,7 +80,7 @@ match await validate_order.send_async(order=order):
 
 `schedule()` dispatches the task after a delay (in seconds):
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 

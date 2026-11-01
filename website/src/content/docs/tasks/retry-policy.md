@@ -289,7 +289,7 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
 
 ### Database Transaction with Deadlock Retry
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task(
     "update_inventory",

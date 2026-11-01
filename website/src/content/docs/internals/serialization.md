@@ -118,7 +118,7 @@ Values flowing through a task signature must classify as **one** of:
 
 Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
 
-<!-- check: skip -- uses names that the page does not define -->
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Horsies, TaskResult, TaskError, JsonValue
 from pydantic import BaseModel
@@ -238,7 +238,7 @@ Primitive entry points for non-`TaskResult` values (workflow kwargs, success pol
 
 ### `JsonValue`
 
-<!-- check: skip -- shows the library definition, not user code -->
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type JsonValue = (
     None | bool | int | float | str
@@ -257,7 +257,7 @@ Raised by strict codec primitives and the JSON parse guards for strict JSON viol
 
 **Don't use `Any`, `object`, or bare containers in task signatures.** They are rejected at registration time.
 
-<!-- check: skip -- shows a wrong form next to the right one -->
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong — raises SignatureValidationError
 @app.task("bad")
