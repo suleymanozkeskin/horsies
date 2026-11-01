@@ -729,6 +729,7 @@ horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N]
 | `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 1`, or `0` to disable). See [Child process recycling](#child-process-recycling) |
 | `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB; fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
 | `--drain-timeout` | `300` | Seconds to wait for running tasks at shutdown (finite, `> 0`); then the worker kills their children. Set below the supervisor's stop window (Docker 10 s, Kubernetes 30 s, ECS 30 s, Heroku 30 s, Fly.io 5 s) |
+| `--child-preload` | `library` | What a Linux worker imports once before it forks children. `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec` |
 
 Startup: logging → import app → `app.check()` → schema init with retry → start processes.
 SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to `--drain-timeout` seconds for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.
