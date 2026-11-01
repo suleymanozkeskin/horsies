@@ -3,10 +3,9 @@
 import type { TaskStatus } from '@/types/tasks';
 import type { WorkflowStatus } from '@/types/workflows';
 
-/** The five actions the UI can invoke. Workflow restart does not exist. */
+/** The four actions the UI can invoke. Task retry and workflow restart do not exist. */
 export type ActionKind =
   | 'task-cancel'
-  | 'task-retry'
   | 'workflow-pause'
   | 'workflow-resume'
   | 'workflow-cancel';
@@ -19,7 +18,7 @@ export interface EntityRef {
   id: string;
 }
 
-export type ActionOutcome = 'cancelled' | 'retried' | 'paused' | 'resumed';
+export type ActionOutcome = 'cancelled' | 'paused' | 'resumed';
 
 /** The only warning the server emits: resume committed, recovery pass failed. */
 export type ActionWarning = 'post_resume_recovery_failed';
@@ -29,8 +28,6 @@ export interface ActionResponse {
   outcome: ActionOutcome;
   /** Task actions only: the status the row held before the CAS. */
   was_status?: TaskStatus;
-  /** Retry only: the attempt number the next run will record. */
-  next_attempt_number?: number;
   warning?: ActionWarning | null;
 }
 
@@ -39,8 +36,6 @@ export interface ActionResponse {
  * force-disabled server-side regardless of policy. */
 export type ConflictCode =
   | 'TASK_NOT_CANCELLABLE'
-  | 'TASK_NOT_RETRYABLE'
-  | 'TASK_EXPIRY_PASSED'
   | 'STATE_CONFLICT'
   | 'SCHEMA_INCOMPATIBLE';
 
