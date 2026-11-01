@@ -50,6 +50,9 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import (
+    BreakdownLimit,
+    TaskPage,
+    WorkflowRunsLimit,
     ErrorCategory,
     MonitoringQueryDbOperationFailed,
     MonitoringQueryHistoryContractViolation,
@@ -701,7 +704,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -730,7 +733,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -755,7 +758,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -780,7 +783,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=2,
+            limit=BreakdownLimit(value=2),
         )
 
         assert is_ok(result)
@@ -809,7 +812,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -839,7 +842,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -875,8 +878,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=2,
+            page=TaskPage(offset=0, limit=2),
         )
 
         assert is_ok(result)
@@ -905,8 +907,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='asc',
-            offset=1,
-            limit=1,
+            page=TaskPage(offset=1, limit=1),
         )
 
         assert is_ok(page)
@@ -945,8 +946,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir=sort_dir,
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -979,8 +979,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='completed_at',
             sort_dir=sort_dir,
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1018,8 +1017,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='exec_s',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1050,8 +1048,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1080,8 +1077,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1113,8 +1109,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1140,8 +1135,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1173,8 +1167,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1201,8 +1194,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1238,8 +1230,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1281,8 +1272,7 @@ class TestListTasks:
                 retried_only=False,
                 sort_by='enqueued_at',
                 sort_dir='desc',
-                offset=0,
-                limit=50,
+                page=TaskPage(offset=0, limit=50),
             )
         finally:
             event.remove(sync_engine, 'before_cursor_execute', capture_statement)
@@ -1322,8 +1312,7 @@ async def rows_by_category(
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
-        offset=0,
-        limit=200,
+        page=TaskPage(offset=0, limit=200),
     )
     assert is_ok(result)
     return result.ok_value.rows
@@ -1511,7 +1500,7 @@ class TestErrorCategoryFilter:
             error_codes=[],
             error_categories=[ErrorCategory.OUTCOME],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(stats)
@@ -1713,8 +1702,7 @@ class TestTaskDurations:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=1,
+            page=TaskPage(offset=0, limit=1),
         )
         assert is_ok(result)
         row = result.ok_value.rows[0]
@@ -1914,7 +1902,7 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=30)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
         assert [run.name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
@@ -1930,7 +1918,7 @@ class TestListWorkflowRuns:
         )
 
         result = await list_workflow_runs(
-            broker, name='alpha_flow', status='FAILED', limit=30
+            broker, name='alpha_flow', status='FAILED', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
@@ -1943,7 +1931,7 @@ class TestListWorkflowRuns:
         await insert_rows(session, make_workflow(status='RUNNING'))
 
         result = await list_workflow_runs(
-            broker, name=None, status='NOT_A_STATUS', limit=30
+            broker, name=None, status='NOT_A_STATUS', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
@@ -1957,7 +1945,7 @@ class TestListWorkflowRuns:
             *[make_workflow(created_at=ago(index + 1)) for index in range(4)],
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=2)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=2))
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
@@ -1976,7 +1964,7 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=30)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
         walls = {run.name: run.wall_s for run in result.ok_value}
@@ -2373,8 +2361,7 @@ class TestDatabaseFailure:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_err(result)
@@ -2452,8 +2439,7 @@ async def _unfiltered_list(broker: PostgresBroker) -> Any:
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
-        offset=0,
-        limit=50,
+        page=TaskPage(offset=0, limit=50),
     )
 
 
@@ -2521,8 +2507,7 @@ class TestUnfilteredHistoryTotalContract:
                 retried_only=False,
                 sort_by='enqueued_at',
                 sort_dir='desc',
-                offset=0,
-                limit=50,
+                page=TaskPage(offset=0, limit=50),
             )
 
         assert is_ok(result)
