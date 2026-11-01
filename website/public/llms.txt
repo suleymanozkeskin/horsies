@@ -283,7 +283,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
-- `HandleResult[T]` = Result[T, HandleOperationError]; the error carries a HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, LOOP_RUNNER_FAILED, INTERNAL_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- `HandleResult[T]` = Result[T, HandleOperationError]; HandleOperationError is a union of frozen variants, one per HandleErrorCode member; every variant has code, message, retryable, workflow_id. HandleWorkflowNotFound, HandleDbOperationFailed (exception: BaseException; retryable is the driver classification; a write rolled back or its commit outcome is unknown), HandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), HandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), HandleLoopRunnerFailed (exception), HandleEventLoopLimit (loop_limit), HandleAsyncContext. Match on the variant. A defect in pause or resume propagates
+- HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, LOOP_RUNNER_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
 
 ### WorkflowStatus (enum)
 - PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_auto_cancel_after elapses
