@@ -197,14 +197,97 @@ worker_pool_size + worker_max_overflow
 ```
 
 Child DB connections are lazy by default (`worker_child_pool_min_size=0`). A child
-is a new interpreter started with `exec`, so it inherits no parent database
-socket.
+inherits no database socket from the worker.
+
+### Child process model
+
+A worker owns one child process and one private socket per slot. On Linux a
+preload parent imports code once and forks each child. Other platforms start
+each child with `exec`. `--child-preload` selects the mode:
+
+| Mode | Imports before the fork | Effect |
+|---|---|---|
+| `library` (default) | Horsies and its dependencies | Each child still imports the app |
+| `app` | Also the app | Module code runs once, hooks still run in every child, and the worker refuses to start if the import leaves a Python thread or a socket |
+| `none` | No preload parent | Every child starts with `exec` |
+
+8 children, real task work, Postgres in the loop. Memory is summed PSS:
+
+| App | Mode | Next child, p50 | Memory |
+|---|---|---:|---:|
+| Small | `none` | 618 ms | 461 MiB |
+| Small | `library` | 27 ms | 169 MiB |
+| Small | `app` | 20 ms | 151 MiB |
+| With pandas | `none` | 1,174 ms | 715 MiB |
+| With pandas | `library` | 486 ms | 472 MiB |
+| With pandas | `app` | 26 ms | 236 MiB |
+
+With 4 children, the whole worker at start is 290 / 159 / 146 MiB on the small
+app and 445 / 342 / 212 MiB with pandas (`none` / `library` / `app`).
+
+Failures stay with one task:
+
+- A timeout kills that child and the subprocesses in its session. A subprocess
+  that calls `setsid` leaves the session and is not killed.
+- A crash or an out-of-memory kill recovers that task only. Other tasks continue.
+- The worker's death stops each child at once. A subprocess that a task started
+  keeps running, because the child cannot act after a SIGKILL.
+- SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
+  stop a running task. The worker drains it. Task subprocesses do get the signal.
+- A dead preload parent stops no task. New children use `exec` until it is back.
+- A child that cannot boot gets 3 attempts, then the worker exits non-zero. An
+  outside SIGKILL of a booting replacement child uses no attempt while another
+  child is serving. It does count at first start, and when no other child serves.
+
+A child differs from a `multiprocessing` process: `parent_process()` returns
+`None`, `current_process().name` is `horsies-child-<slot>`, and a `__main__:app`
+locator is refused at start. In `ps`, a forked child shows the preload parent's
+command line.
+
+Choosing a mode: keep `library` unless memory is the limit. It shares Horsies and
+its dependencies, so an app with heavy imports gains little: an app that imports
+boto3, openai, google-genai, firebase-admin, and lxml, with 4 children, uses
+651 MiB on 0.4.6, 575 MiB with `library`, and 298 MiB with `app`. Before `app`
+goes to production, run it on staging with real calls to every client library
+inside tasks. Passing the guard does not prove that a library works after a fork.
+
+Traps with preload. Check each one before you change `--child-preload`:
+
+- **Import-time settings in `.env`:** `library` and `app` import psycopg,
+  SQLAlchemy, and pydantic before the app runs, so `load_dotenv()` in the app is
+  too late for `PSYCOPG_IMPL`. Put such a value in the process environment.
+- **Monkeypatching:** a patch that must run before those imports, such as
+  gevent, is too late. Use `--child-preload=none`.
+- **Clients built at import (`app` only):** module code runs once, in the preload
+  parent. Build a client in an `on_child_process_start` hook, which runs in every
+  child after the fork.
+- **Native threads (`app` only):** the guard sees Python threads and sockets. It
+  does not see a BLAS pool or a gRPC client built at import, and those may hang
+  or fail in a child.
+- **Code reload (`app` only):** a recycled child is a new fork of the same preload
+  parent, so it keeps the old code. New code needs a worker restart. With
+  `library`, a recycled child still loads the app from disk, but it keeps the
+  library code, so an in-place package upgrade needs a restart.
+- **Counting children:** process-name greps such as `multiprocessing-fork` find
+  nothing. A forked child shows `preload_main`, and there is one more process than
+  `--processes`.
+- **`children_memory_mb`:** it sums RSS, so with preload it counts each shared page
+  once per child and reads above real use. Use it to see one child grow, and read
+  the container or cgroup total for the footprint.
+- **Stop window:** set `--drain-timeout` below the supervisor's stop window. The
+  default of 300 s is above Docker's 10 s, and above Kubernetes' 30 s.
 
 ### Child process recycling
 
 Two knobs recycle worker children to bound memory. Recycling is per-child and
 staggered: each child has its own counter/threshold and is replaced
-individually, never in lockstep.
+individually, never in lockstep. The worker decides, from the task count and
+the RSS in each result. On Linux a recycle is cheap: with 10,000 no-op tasks and
+8 children, `N=100` drains 803 tasks/s against 853 with recycling off, and with
+`exec` it drains 437 against 819.
+
+RSS counts pages shared with the preload parent. Set the memory knob against
+RSS, and use the cgroup total or PSS for the real footprint.
 
 **Count — `WorkerConfig.max_tasks_per_child`** (CLI `--max-tasks-per-child`,
 default `100`): recycle each child after N tasks, returning retained memory
@@ -735,6 +818,7 @@ horsies worker <module> [--processes N] [--loglevel LEVEL] [--max-claim-batch N]
 | `--max-tasks-per-child` | `100` | Recycle a child after N tasks (`>= 1`, or `0` to disable). See [Child process recycling](#child-process-recycling) |
 | `--max-memory-per-child-mb` | _(off)_ | Recycle a child once its RSS reaches N MB; fails startup if N is at/below the warmed baseline. See [Child process recycling](#child-process-recycling) |
 | `--drain-timeout` | `300` | Seconds to wait for running tasks at shutdown (finite, `> 0`); then the worker kills their children. Set below the supervisor's stop window (Docker 10 s, Kubernetes 30 s, ECS 30 s, Heroku 30 s, Fly.io 5 s) |
+| `--child-preload` | `library` | What a Linux worker imports once before it forks children. `library`: library code. `app`: library and app, so children share module state; the worker refuses to start if the import leaves a Python thread or a socket. `none`: every child starts with `exec`. Other platforms always use `exec` |
 
 Startup: logging → import app → `app.check()` → schema init with retry → start processes.
 SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a child to PENDING, waits up to `--drain-timeout` seconds for running tasks, then kills their children. On systemd set `KillMode=mixed`; in Docker use the exec form of `CMD`.

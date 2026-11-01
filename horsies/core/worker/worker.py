@@ -36,6 +36,7 @@ from horsies.core.worker.slots import (
     PoolStopped,
     SlotPool,
     SlotPoolConfig,
+    PreloadRefused,
     SpawnFailed,
 )
 from horsies.core.worker.child_runner import (  # noqa: F401
@@ -316,6 +317,7 @@ class Worker(
             ),
             max_tasks_per_child=self.cfg.max_tasks_per_child,
             max_memory_per_child_mb=self.cfg.max_memory_per_child_mb,
+            child_preload=self.cfg.child_preload,
         )
 
     def _pending_task_limit(self) -> int:
@@ -374,7 +376,7 @@ class Worker(
                 self._stop_for_child_hook_failure(
                     ChildHookFailedError(_HOOK_FAILURE_MESSAGE),
                 )
-            case SpawnFailed() | BootAttemptsExhausted():
+            case SpawnFailed() | BootAttemptsExhausted() | PreloadRefused():
                 raise ChildStartFailedError(f'worker child start failed: {failure}')
             case _ as unreachable:
                 assert_never(unreachable)

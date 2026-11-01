@@ -17,10 +17,15 @@ from horsies.core.worker.child_protocol import (
     FRAME_HEADER,
     MAX_BODY_BYTES,
     MAX_META_BYTES,
+    ChildForkedFrame,
     EncodedFrame,
+    ForkFailedFrame,
     FrameOverBound,
     InitFrame,
     MalformedFrame,
+    PreloadFrame,
+    PreloadReadyFrame,
+    PreloadRefusedFrame,
     ReadyFrame,
     ResultFrame,
     RssMb,
@@ -29,8 +34,10 @@ from horsies.core.worker.child_protocol import (
     StopFrame,
     decode_child_frame,
     decode_parent_frame,
+    decode_preload_frame,
     encode_child_frame,
     encode_parent_frame,
+    encode_preload_frame,
     parse_header,
 )
 
@@ -152,6 +159,36 @@ class TestChildFrames:
         frame = ResultFrame('task-1', True, 'x', None, RssUnreadable())
         meta, _ = _split(encode_child_frame(frame))
         assert isinstance(decode_child_frame(meta, b'\xff'), Err)
+
+
+class TestPreloadFrames:
+    @pytest.mark.parametrize(
+        'frame',
+        [
+            PreloadReadyFrame(pid=7),
+            ChildForkedFrame(pid=8),
+            ForkFailedFrame(reason='EAGAIN'),
+            PreloadRefusedFrame(reason='threads started during import'),
+        ],
+    )
+    def test_round_trip(self, frame: PreloadFrame) -> None:
+        encoded = encode_preload_frame(frame)
+        assert encoded.body == b''
+        assert decode_preload_frame(encoded.head[FRAME_HEADER.size :]) == Ok(frame)
+
+    @pytest.mark.parametrize(
+        'meta',
+        [
+            b'',
+            b'{',
+            b'{"kind":"unknown"}',
+            b'{"kind":"child_forked"}',
+            b'{"kind":"child_forked","pid":"1"}',
+            b'{"kind":"fork_failed","reason":1}',
+        ],
+    )
+    def test_bad_metadata_is_refused(self, meta: bytes) -> None:
+        assert isinstance(decode_preload_frame(meta), Err)
 
 
 class TestHeader:

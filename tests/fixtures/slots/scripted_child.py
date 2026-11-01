@@ -11,6 +11,7 @@ database.
 from __future__ import annotations
 
 import ctypes
+import gc
 import os
 import signal
 import socket
@@ -75,6 +76,18 @@ def _boot(init: InitFrame) -> None:
             raise AssertionError(mode)
 
 
+def _socket_count() -> int:
+    """Count the sockets this process holds, past the standard streams."""
+    count = 0
+    for entry in os.listdir('/proc/self/fd'):
+        fd = int(entry)
+        try:
+            count += fd > 2 and os.readlink(f'/proc/self/fd/{fd}').startswith('socket:')
+        except OSError:
+            continue
+    return count
+
+
 def _half_frame() -> bytes:
     encoded = encode_parent_frame(StopFrame())
     return encoded.head[: FRAME_HEADER.size] + b'x' * 8
@@ -87,6 +100,10 @@ def _run(frame: RunFrame, init: InitFrame) -> WireResult:
             return True, argument, None
         case 'pid':
             return _pid_result()
+        case 'freeze_count':
+            return True, str(gc.get_freeze_count()), None
+        case 'socket_count':
+            return True, str(_socket_count()), None
         case 'state':
             return True, f'{sys.argv!r}|{sys.path[:1]!r}|{__debug__}', None
         case 'zero_header':
