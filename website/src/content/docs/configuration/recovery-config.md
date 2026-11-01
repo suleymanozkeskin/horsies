@@ -17,6 +17,7 @@ Horsies automatically detects and recovers these tasks.
 
 ## Basic Usage
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.recovery import RecoveryConfig
 

@@ -61,14 +61,15 @@ endpoint — `LISTEN` requires a real session and does not survive transaction
 pooling:
 
 ```python
+from pydantic import SecretStr
 import os
 
 from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ['DATABASE_URL_POOLED'],
-        session_database_url=os.environ['DATABASE_URL_DIRECT'],
+        database_url=SecretStr(os.environ['DATABASE_URL_POOLED']),
+        session_database_url=SecretStr(os.environ['DATABASE_URL_DIRECT']),
         pgbouncer_transaction_mode=True,
     ),
 )
@@ -102,7 +103,7 @@ from horsies import AppConfig, PostgresConfig
 config = AppConfig(
     prefetch_buffer=24,        # claim ahead: 2–3× processes
     claim_lease_ms=120_000,    # required when prefetch_buffer > 0
-    broker=PostgresConfig(database_url=os.environ['DATABASE_URL']),
+    broker=PostgresConfig(database_url=SecretStr(os.environ['DATABASE_URL'])),
 )
 ```
 
@@ -129,7 +130,7 @@ from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ['DATABASE_URL'],
+        database_url=SecretStr(os.environ['DATABASE_URL']),
         pool_pre_ping=False,
         worker_child_pool_check=False,
     ),
@@ -168,7 +169,7 @@ window only for poolers that reap faster than 30s:
 ```python
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ['DATABASE_URL'],
+        database_url=SecretStr(os.environ['DATABASE_URL']),
         tcp_keepalives_idle=15,
         tcp_keepalives_interval=5,
     ),

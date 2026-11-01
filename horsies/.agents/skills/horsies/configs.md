@@ -106,6 +106,7 @@ construction). See website docs `workers/child-process-hooks`.
 
 **Result retrieval** (use when you have a task ID but no `TaskHandle`):
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 broker = app.get_broker()
 
@@ -262,6 +263,7 @@ Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
 
 ## QueueMode
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class QueueMode(Enum):
     DEFAULT = 'default'
@@ -323,10 +325,12 @@ only — results are never rejected. Subworkflow child-start kwargs are not
 yet checked.
 
 ```python
-from horsies import PayloadPolicy
+from pydantic import SecretStr
+
+from horsies import AppConfig, PayloadPolicy, PostgresConfig
 
 AppConfig(
-    broker=broker,
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
     payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
 )
 ```
@@ -645,6 +649,7 @@ cannot.
 
 ### Weekday and Month
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class Weekday(str, Enum):
     MONDAY = 'monday'
