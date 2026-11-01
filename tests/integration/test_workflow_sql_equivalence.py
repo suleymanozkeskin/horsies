@@ -26,7 +26,7 @@ from horsies.core.workflows.sql import (
 
 # The exact forms replaced in the v8 rewrite, kept here as the oracle.
 OLD_TERMINAL_SQL = text("""
-    SELECT wt.node_id, wt.task_index, wt.task_name, wt.result,
+    SELECT wt.node_id, wt.task_index, wt.task_name, wt.status, wt.result,
            wt.sub_definition_key
     FROM horsies_workflow_tasks wt
     WHERE wt.workflow_id = :wf_id

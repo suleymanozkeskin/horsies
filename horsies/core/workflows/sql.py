@@ -558,7 +558,7 @@ GET_WORKFLOW_DAG_EDGES_SQL = text("""
 """)
 
 GET_TASK_RESULTS_BY_INDEXES_SQL = text("""
-    SELECT node_id, task_index, task_name, result, sub_definition_key
+    SELECT node_id, task_index, task_name, status, result, sub_definition_key
     FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id
       AND task_index = ANY(:idxs)
