@@ -92,6 +92,7 @@ Terminal outcome codes for tasks and workflows.
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped | No |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed | No |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied | No |
+| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node; `data` names the workflow and the output node | No |
 
 ### Validation Failure Text
 
@@ -281,7 +282,7 @@ Workflow-specific error codes are distributed across the four families above:
 - **OperationalErrorCode**: `WORKFLOW_ENQUEUE_FAILED`, `SUBWORKFLOW_LOAD_FAILED`
 - **ContractCode**: `WORKFLOW_CTX_MISSING_ID`
 - **RetrievalCode**: `WORKFLOW_NOT_FOUND`
-- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`
+- **OutcomeCode**: `WORKFLOW_PAUSED`, `WORKFLOW_EXPIRED`, `WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `UPSTREAM_SKIPPED`, `SUBWORKFLOW_FAILED`, `WORKFLOW_SUCCESS_CASE_NOT_MET`, `WORKFLOW_OUTPUT_SKIPPED`
 
 ### Workflow Start Errors (WorkflowStartResult)
 

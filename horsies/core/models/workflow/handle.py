@@ -74,6 +74,7 @@ from .enums import (
     WF_TASK_TERMINAL_VALUES,
     WorkflowStatus,
     WorkflowTaskStatus,
+    stored_node_status,
 )
 from .handle_types import (
     HandleAsyncContext,
@@ -361,9 +362,10 @@ def _completed_without_stored_result(
     result column is NULL or empty.
 
     The library writes a result in the same statement that sets
-    ``COMPLETED``: the output node's stored result, the outputless envelope,
-    or the JSON text ``null``. So a NULL or empty result is stored data that
-    does not parse, not a success.
+    ``COMPLETED``: the output node's stored result, an error envelope for an
+    output node with no result, the outputless envelope, or the JSON text
+    ``null`` when that envelope does not serialize. So a NULL or empty result
+    is stored data that does not parse, not a success.
     """
     return TaskResult(
         err=TaskError(
@@ -494,31 +496,6 @@ class _OutputlessTerminals:
 
 
 _OUTPUTLESS_TERMINALS: Any = _OutputlessTerminals()
-
-
-_NODE_STATUS_BY_STORED_VALUE: dict[str, WorkflowTaskStatus] = {
-    status.value: status for status in WorkflowTaskStatus
-}
-
-
-def _stored_node_status(
-    *, workflow_id: str, node_id: str, stored: str,
-) -> WorkflowTaskStatus:
-    """Return the node status that the database row stores.
-
-    The CHECK ``horsies_workflow_tasks_status_check`` allows only the
-    ``WorkflowTaskStatus`` values, so another value means the CHECK is
-    missing or broken. Raises ``AssertionError`` that names the workflow,
-    the node and the stored value.
-    """
-    status = _NODE_STATUS_BY_STORED_VALUE.get(stored)
-    if status is None:
-        raise AssertionError(
-            f'workflow {workflow_id} node {node_id} stores status {stored!r}, '
-            'which is not a WorkflowTaskStatus member; the CHECK '
-            'horsies_workflow_tasks_status_check must forbid it'
-        )
-    return status
 
 
 def _decode_per_task_envelope(
@@ -938,7 +915,9 @@ class WorkflowHandle(Generic[OutT]):
         Block until workflow completes or timeout.
 
         Returns:
-            If output task specified: that task's TaskResult
+            If output task specified: that task's TaskResult. A COMPLETED
+            workflow whose output task is SKIPPED returns
+            ``OutcomeCode.WORKFLOW_OUTPUT_SKIPPED``.
             Otherwise: TaskResult containing dict of terminal task results
         """
         return self._sync_task_result_call(self.get_async, 'get', timeout_ms)
@@ -1522,7 +1501,7 @@ class WorkflowHandle(Generic[OutT]):
                         node_id=row.node_id,
                         index=row.task_index,
                         name=row.task_name,
-                        status=_stored_node_status(
+                        status=stored_node_status(
                             workflow_id=self.workflow_id,
                             node_id=row.node_id,
                             stored=row.status,
