@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timezone
+from typing import Annotated
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import AfterValidator
 
+from horsies.core.codec.json_io import SerializationError, dumps_json
+from horsies.core.codec.kwargs import encode_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
-    BrokerInvalidInput,
     BrokerListenerDisabled,
     BrokerOperationError,
     BrokerOperationFailed,
@@ -33,15 +36,33 @@ from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import ScheduleLockDatabase, Scheduler
 from horsies.core.scheduler.validation import (
-    _serializable_error,
+    _encode_schedule_kwargs,
     _signature_error,
 )
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.utils.fingerprint import enqueue_fingerprint
 from tests.broker_resources_support import (
     attach_loop_limit,
     attach_resources,
     fake_resources,
 )
+
+
+class _Deadline:
+    """The clock of `_deadline_task`: tests move it past the value."""
+
+    passed = False
+
+
+def _not_expired(value: str) -> str:
+    if _Deadline.passed:
+        raise ValueError('deadline has passed')
+    return value
+
+
+def _deadline_task(*, deadline: Annotated[str, AfterValidator(_not_expired)]) -> None:
+    """A parameter whose validator can refuse later what it accepted at boot."""
+    return None
 
 
 def _utc(
@@ -241,14 +262,14 @@ class TestSignatureError:
 
 
 # =============================================================================
-# validation._serializable_error
+# validation._encode_schedule_kwargs
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestSerializableError:
-    """Schedules whose kwargs pass sig.bind but cannot be wire-encoded must be
-    rejected at startup, not fail ENQUEUE_FAILED on every tick."""
+class TestEncodeScheduleKwargs:
+    """Schedules whose kwargs pass sig.bind but cannot go on the wire must be
+    rejected at startup, not on every tick."""
 
     def _make_app_with_task(self, task: MagicMock) -> MagicMock:
         config = ScheduleConfig(
@@ -270,39 +291,101 @@ class TestSerializableError:
             kwargs=kwargs,
         )
 
-    def test_no_kwargs_ok(self) -> None:
+    def _blob_app(self, *, reject_bytes: int | None) -> MagicMock:
+        def blob_fn(*, blob: str) -> None:
+            return None
+
+        app = self._make_app_with_task(_make_task_mock(blob_fn))
+        app.config.payload = PayloadPolicy(warn_bytes=None, reject_bytes=reject_bytes)
+        return app
+
+    def test_no_kwargs_is_ok_none(self) -> None:
         def f() -> str:
             return 'ok'
 
         app = self._make_app_with_task(_make_task_mock(f))
-        assert _serializable_error(app, self._schedule({})) is None
+        assert _encode_schedule_kwargs(app, self._schedule({})) == Ok(None)
 
-    def test_plain_kwargs_ok(self) -> None:
+    def test_plain_kwargs_give_the_wire_text(self) -> None:
         def f(value: int) -> str:
             return str(value)
 
         app = self._make_app_with_task(_make_task_mock(f))
-        assert _serializable_error(app, self._schedule({'value': 5})) is None
+        result = _encode_schedule_kwargs(app, self._schedule({'value': 5}))
+        assert result == dumps_json({'value': 5})
 
     def test_engine_injected_kwarg_rejected(self) -> None:
         def f(x: int, workflow_ctx: WorkflowContext | None = None) -> str:
             return str(x)
 
         app = self._make_app_with_task(_make_task_mock(f))
-        error = _serializable_error(app, self._schedule({'x': 1, 'workflow_ctx': None}))
-        assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'not encodable' in error.message
+        result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_ctx': None}))
+        assert is_err(result)
+        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in result.err_value.message
 
     def test_taskresult_typed_kwarg_rejected(self) -> None:
         def f(dep: TaskResult[int, TaskError]) -> str:
             return 'ok'
 
         app = self._make_app_with_task(_make_task_mock(f))
-        error = _serializable_error(app, self._schedule({'dep': TaskResult(ok=1)}))
-        assert error is not None
-        assert error.code == ErrorCode.CONFIG_INVALID_SCHEDULE
-        assert 'not encodable' in error.message
+        result = _encode_schedule_kwargs(app, self._schedule({'dep': TaskResult(ok=1)}))
+        assert is_err(result)
+        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not encodable' in result.err_value.message
+
+    def test_serialize_failure_rejected_with_the_cause(self) -> None:
+        def f(value: int) -> str:
+            return str(value)
+
+        app = self._make_app_with_task(_make_task_mock(f))
+        with patch(
+            'horsies.core.scheduler.validation.dumps_json',
+            return_value=Err(SerializationError('bad kwargs')),
+        ):
+            result = _encode_schedule_kwargs(app, self._schedule({'value': 5}))
+
+        assert is_err(result)
+        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'not JSON-serializable' in result.err_value.message
+        assert result.err_value.notes == ['serialization error: bad kwargs']
+
+    def test_kwargs_over_the_limit_rejected_with_size_and_limit(self) -> None:
+        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        app = self._blob_app(reject_bytes=256)
+
+        result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
+
+        assert is_err(result)
+        assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert result.err_value.message == "schedule 's' kwargs exceed payload.reject_bytes"
+        assert result.err_value.notes == [
+            f'kwargs payload size: {len(wire_text)} bytes',
+            'payload.reject_bytes: 256',
+        ]
+
+    def test_kwargs_equal_to_the_limit_pass(self) -> None:
+        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        app = self._blob_app(reject_bytes=len(wire_text))
+
+        result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
+
+        assert result == Ok(wire_text)
+
+    def test_one_character_over_the_limit_is_rejected(self) -> None:
+        wire_text = dumps_json({'blob': 'x' * 2048}).ok_value
+        app = self._blob_app(reject_bytes=len(wire_text) - 1)
+
+        result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
+
+        assert is_err(result)
+
+    def test_no_limit_passes_any_size(self) -> None:
+        app = self._blob_app(reject_bytes=None)
+
+        result = _encode_schedule_kwargs(app, self._schedule({'blob': 'x' * 2048}))
+
+        assert is_ok(result)
 
 
 # =============================================================================
@@ -760,6 +843,58 @@ class TestValidateSchedules:
         exc = exc_info.value
         assert exc.code == ErrorCode.TASK_NOT_REGISTERED
         assert 'not registered' in exc.message
+
+    def test_kwargs_over_the_limit_raise_configuration_error(self) -> None:
+        """A schedule over payload.reject_bytes fails boot, once."""
+        def blob_fn(*, blob: str) -> None:
+            return None
+
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    kwargs={'blob': 'x' * 2048},
+                ),
+            ],
+        )
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(blob_fn)},
+        )
+        app.config.payload = PayloadPolicy(warn_bytes=None, reject_bytes=256)
+        scheduler = Scheduler(app)
+
+        with pytest.raises(ConfigurationError) as exc_info:
+            scheduler._validate_schedules()
+
+        assert exc_info.value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'payload.reject_bytes' in exc_info.value.message
+
+    def test_a_valid_schedule_keeps_its_encoded_kwargs(self) -> None:
+        def value_fn(*, value: int) -> None:
+            return None
+
+        config = ScheduleConfig(
+            schedules=[
+                TaskSchedule(
+                    name='s',
+                    task_name='my_task',
+                    pattern=IntervalSchedule(seconds=5),
+                    kwargs={'value': 5},
+                ),
+            ],
+        )
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(value_fn)},
+        )
+        scheduler = Scheduler(app)
+
+        scheduler._validate_schedules()
+
+        assert scheduler._encoded_kwargs == {'s': dumps_json({'value': 5}).ok_value}
 
     def test_disabled_schedule_skipped(self) -> None:
         """Disabled schedules are not validated."""
@@ -2496,44 +2631,6 @@ class TestEnqueueScheduledTask:
         scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('enqueued-id'))
         return scheduler
 
-    async def test_oversized_schedule_kwargs_rejected_before_broker(self) -> None:
-        """payload.reject_bytes fails the slot closed; the broker is never
-        called. Wiring test for the guardrail in _enqueue_scheduled_task —
-        reverting that guard in place fails here."""
-        from horsies.core.codec.payload_guard import reset_payload_warnings
-        reset_payload_warnings()
-
-        def blob_fn(*, blob: str) -> None:
-            return None
-
-        config = ScheduleConfig(
-            schedules=[
-                TaskSchedule(
-                    name='s',
-                    task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
-                    kwargs={'blob': 'x' * 2048},
-                ),
-            ],
-        )
-        task_mock = _make_task_mock(blob_fn)
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
-        app.config.payload = PayloadPolicy(warn_bytes=64, reject_bytes=256)
-        scheduler = Scheduler(app)
-        scheduler.broker = _make_broker_mock()
-        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('enqueued-id'))
-
-        result = await scheduler._enqueue_scheduled_task(
-            config.schedules[0],
-            slot_time=_utc(2025, 6, 1, 12, 0, 0),
-        )
-
-        assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidInput)
-        assert result.err_value.exception == NoCause()
-        assert 'payload.reject_bytes=256' in result.err_value.message
-        scheduler.broker.enqueue_async.assert_not_awaited()
-
     async def test_no_broker_raises_runtime_error(self) -> None:
         """broker=None → RuntimeError."""
         config = ScheduleConfig(
@@ -2576,79 +2673,134 @@ class TestEnqueueScheduledTask:
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
-    async def test_kwargs_encode_failure_returns_invalid_input_with_the_cause(self) -> None:
-        """A kwarg that fails its declared type → Err(INVALID_INPUT) with the codec error."""
+    async def test_start_not_run_raises_with_the_schedule_name(self) -> None:
+        """A tick before start() is a defect, not a refused slot."""
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=5),
-            kwargs={'key': 'val'},
         )
         config = ScheduleConfig(schedules=[schedule])
-        def echo(*, key: str) -> str:
-            return key
-
-        task_mock = _make_task_mock(echo)
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(lambda: 'ok')},
+        )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
-        encode_error = ValueValidationError('key: Input should be a valid integer [int_parsing]')
 
-        with patch(
-            'horsies.core.scheduler.service.encode_kwargs',
-            side_effect=encode_error,
-        ):
-            result = await scheduler._enqueue_scheduled_task(  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(RuntimeError, match="Schedule 's' has no encoded kwargs"):
+            await scheduler._enqueue_scheduled_task(
                 schedule,
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
-                assert "Failed to encode kwargs for schedule 's'" in message
-                assert cause is encode_error
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
         scheduler.broker.enqueue_async.assert_not_called()
 
-    async def test_kwargs_serialization_failure_returns_err(self) -> None:
-        """dumps_json returning Err on encoded kwargs → Err(INVALID_INPUT) with that cause.
-
-        Strict-serde phase 3 routes scheduler kwargs through `encode_kwargs`
-        then `dumps_json`; this test patches the final stringification step
-        (the only post-encoding failure surface) to verify error wrapping.
-        """
+    async def test_a_value_refused_after_boot_is_sent_as_boot_encoded_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Regression: a validator that reads the clock accepts a value at boot
+        and refuses it later. The tick does not parse the value again, so the
+        slot does not wedge; the worker refuses the value when it decodes."""
         schedule = TaskSchedule(
             name='s',
             task_name='my_task',
             pattern=IntervalSchedule(seconds=5),
-            kwargs={'key': 'val'},
+            kwargs={'deadline': 'soon'},
         )
         config = ScheduleConfig(schedules=[schedule])
-        task_mock = _make_task_mock(lambda key: key)
-        app = _make_app(schedule_config=config, tasks={'my_task': task_mock})
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(_deadline_task)},
+        )
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler._validate_schedules()
 
-        serialize_error = TypeError('bad kwargs')
+        monkeypatch.setattr(_Deadline, 'passed', True)
+        with pytest.raises(ValueValidationError, match='deadline has passed'):
+            encode_kwargs(_deadline_task, schedule.kwargs)
+
+        result = await scheduler._enqueue_scheduled_task(
+            schedule,
+            slot_time=_utc(2025, 6, 1, 12, 0, 0),
+        )
+
+        assert result == Ok('task-1')
+        enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
+        assert enqueue_kwargs['kwargs_json'] == dumps_json({'deadline': 'soon'}).ok_value
+
+    async def test_the_fingerprint_covers_the_text_boot_encoded(self) -> None:
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs={'value': 5},
+        )
+        config = ScheduleConfig(schedules=[schedule])
+
+        def value_fn(*, value: int) -> None:
+            return None
+
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(value_fn)},
+        )
+        scheduler = Scheduler(app)
+        scheduler.broker = _make_broker_mock()
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler._validate_schedules()
+
         with patch(
-            'horsies.core.scheduler.service.dumps_json',
-            return_value=Err(serialize_error),
-        ):
+            'horsies.core.scheduler.service.enqueue_fingerprint',
+            wraps=enqueue_fingerprint,
+        ) as fingerprint:
             result = await scheduler._enqueue_scheduled_task(
                 schedule,
                 slot_time=_utc(2025, 6, 1, 12, 0, 0),
             )
 
-        assert is_err(result)
-        match result.err_value:
-            case BrokerInvalidInput(message=message, exception=cause):
-                assert 'kwargs' in message
-                assert cause is serialize_error
-            case other:
-                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
-        assert result.err_value.retryable is False
+        assert result == Ok('task-1')
+        wire_text = dumps_json({'value': 5}).ok_value
+        assert fingerprint.call_args.kwargs['kwargs_json'] == wire_text
+
+    async def test_stored_kwargs_warn_at_the_tick(self) -> None:
+        schedule = TaskSchedule(
+            name='s',
+            task_name='my_task',
+            pattern=IntervalSchedule(seconds=5),
+            kwargs={'value': 5},
+        )
+        config = ScheduleConfig(schedules=[schedule])
+
+        def value_fn(*, value: int) -> None:
+            return None
+
+        app = _make_app(
+            schedule_config=config,
+            tasks={'my_task': _make_task_mock(value_fn)},
+        )
+        scheduler = Scheduler(app)
+        scheduler.broker = _make_broker_mock()
+        scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-1'))
+        scheduler._validate_schedules()
+
+        with patch(
+            'horsies.core.scheduler.service.warn_if_payload_large',
+        ) as warn:
+            await scheduler._enqueue_scheduled_task(
+                schedule,
+                slot_time=_utc(2025, 6, 1, 12, 0, 0),
+            )
+
+        warn.assert_called_once_with(
+            app.config.payload,
+            task_name='my_task',
+            kind='kwargs',
+            encoded_len=len(dumps_json({'value': 5}).ok_value),
+        )
 
     async def test_happy_path_calls_broker_with_correct_params(self) -> None:
         """Full success: broker.enqueue_async called with deterministic task_id and sent_at=slot_time."""
@@ -2666,6 +2818,7 @@ class TestEnqueueScheduledTask:
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
         scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-abc'))
+        scheduler._validate_schedules()
 
         slot = _utc(2025, 6, 1, 12, 0, 0)
         result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
@@ -2692,14 +2845,19 @@ class TestEnqueueScheduledTask:
         scheduler = Scheduler(app)
         scheduler.broker = _make_broker_mock()
         scheduler.broker.enqueue_async = AsyncMock(return_value=Ok('task-xyz'))
+        scheduler._validate_schedules()
 
         slot = _utc(2025, 6, 1, 12, 0, 0)
-        result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
+        with patch(
+            'horsies.core.scheduler.service.warn_if_payload_large',
+        ) as warn:
+            result = await scheduler._enqueue_scheduled_task(schedule, slot_time=slot)
 
         assert not is_err(result)
         enqueue_kwargs = scheduler.broker.enqueue_async.await_args.kwargs
         assert enqueue_kwargs['args_json'] is None
         assert enqueue_kwargs['kwargs_json'] is None
+        warn.assert_not_called()
 
 
 # =============================================================================

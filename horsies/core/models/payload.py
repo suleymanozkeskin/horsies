@@ -17,8 +17,9 @@ class PayloadPolicy(BaseModel):
     - warn_bytes: Log a structured warning when a payload exceeds this size,
       rate-limited to once per (task_name, kind) per process. None disables.
     - reject_bytes: Fail an enqueue closed (typed PAYLOAD_TOO_LARGE error,
-      nothing written) when its payload exceeds this size. Applies to
-      enqueue payloads only — results are never rejected (completed work
+      nothing written) when its payload exceeds this size. A schedule over
+      this size fails scheduler start and ``check``. Applies to enqueue
+      payloads only — results are never rejected (completed work
       is never destroyed over size; results warn only). None (default)
       disables rejection.
     """

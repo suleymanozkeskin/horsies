@@ -106,6 +106,8 @@ TaskSchedule(
 )
 ```
 
+The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
+
 ### Queue Override
 
 In CUSTOM mode, override the task's default queue:
@@ -219,6 +221,7 @@ At scheduler startup, validates:
 1. **Task exists**: `task_name` must be registered
 2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
 3. **Arguments complete**: Required task parameters must be provided
+4. **Arguments encodable**: `kwargs` must encode against the task's types and fit `payload.reject_bytes`
 
 ```python
 # Will fail at startup:

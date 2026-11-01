@@ -187,6 +187,7 @@ Schedules are validated at startup:
 - Task must be registered
 - Queue must be valid (CUSTOM mode)
 - Required arguments must be provided
+- Kwargs must encode against the task's types and fit `payload.reject_bytes`
 
 ```python
 # This will fail at scheduler start:
@@ -196,6 +197,8 @@ TaskSchedule(
     ...
 )
 ```
+
+The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
 
 ## Graceful Shutdown
 
