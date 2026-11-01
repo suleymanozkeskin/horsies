@@ -85,10 +85,7 @@ export function useEntityAction<TDetail>(
   const liveMode = useLiveMode();
   const { revokeActions } = useCapability();
   // Captured at submit time; the settle predicates compare against it.
-  const contextRef = useRef<SettleContext>({
-    wasStatus: null,
-    retryCountBefore: null,
-  });
+  const contextRef = useRef<SettleContext>({ wasStatus: null });
   // Latest options without rebuilding every callback on each panel render.
   const optionsRef = useRef(options);
   optionsRef.current = options;

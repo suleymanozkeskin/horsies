@@ -12,7 +12,9 @@ takes the node queue from the rule that ``app.workflow()`` uses.
 
 from __future__ import annotations
 
+import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -49,6 +51,7 @@ pytestmark = [pytest.mark.unit]
 DATABASE_URL = 'postgresql+psycopg://u:p@localhost:5432/db'
 WORKFLOW_ID = '3c7e9a10-5b2d-4f8e-a1c3-7d9e0f1a2b3c'
 DEFECT_MARKER = 'defect-marker-7d41'
+GOOD_UNTIL = datetime(2099, 1, 1, tzinfo=timezone.utc)
 
 
 def _default_app() -> Horsies:
@@ -238,6 +241,66 @@ class TestTransactionSerializationError:
                 await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
 
         assert exc_info.value is defect
+        session.commit.assert_not_awaited()
+
+
+class TestTransactionGoodUntilMerge:
+    """The transaction merges a node's ``good_until`` into the task options.
+
+    The options are the task decorator's serialization of a validated
+    ``TaskOptions``. Options that are JSON but not an object are a defect,
+    as options that do not parse are: the merge raises with the node name,
+    and nothing commits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_merged_options_carry_good_until(self) -> None:
+        # Control for the test below: the same start with valid options.
+        app = _default_app()
+        echo = _register_echo(app)
+        spec = app.workflow(
+            name='good-until-merge-wf',
+            tasks=[TaskNode(fn=echo, kwargs={'value': 1}, good_until=GOOD_UNTIL)],
+            definition_key=_definition_key('good_until_merge'),
+        )
+        session = _accepting_session(app)
+
+        result = await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
+
+        assert is_ok(result)
+        [row] = _workflow_task_rows(session)
+        stored_options = json.loads(row['task_options'])
+        assert stored_options['good_until'] == GOOD_UNTIL.isoformat()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('options_json', 'type_name'),
+        [('"just a string"', 'str'), ('[1, 2]', 'list'), ('null', 'NoneType')],
+        ids=['string', 'array', 'null'],
+    )
+    async def test_options_that_are_not_an_object_raise_and_nothing_commits(
+        self,
+        options_json: str,
+        type_name: str,
+    ) -> None:
+        app = _default_app()
+        echo = _register_echo(app)
+        # Only a defect or a write to the private attribute makes this.
+        setattr(echo, 'task_options_json', options_json)
+        spec = app.workflow(
+            name='good-until-not-an-object-wf',
+            tasks=[TaskNode(fn=echo, kwargs={'value': 1}, good_until=GOOD_UNTIL)],
+            definition_key=_definition_key('good_until_not_an_object'),
+        )
+        session = _accepting_session(app)
+
+        with pytest.raises(SerializationError) as exc_info:
+            await start_workflow_async(spec, app.get_broker(), WORKFLOW_ID)
+
+        assert str(exc_info.value) == (
+            'Task options for node start_catches.echo are not a JSON object: '
+            f'got {type_name}'
+        )
         session.commit.assert_not_awaited()
 
 

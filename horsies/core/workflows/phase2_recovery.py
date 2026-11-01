@@ -37,6 +37,7 @@ from horsies.core.codec.typed import (
     decode_task_error,
     validate_task_result_envelope,
 )
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.history.names import WORKFLOW_PHASE2_PENDING
 from horsies.core.history.phase2.consumption import (
     Phase2Disposition,
@@ -176,7 +177,12 @@ def _recovered_failure_result(
     recovery never depends on the local task registry.
 
     A terminal task with no stored error still has to say something
-    true, so the status names what happened.
+    true, so the status names what happened. A stored envelope or error
+    that does not decode is stored data, and it gets the same constructed
+    error: ``validate_task_result_envelope`` refuses with
+    ``StrictJsonError``, and ``decode_task_error`` refuses with
+    ``StrictJsonError`` or ``ValueValidationError``. Any other exception is
+    a defect and propagates.
     """
     if node_result_json is not None:
         parsed = loads_json(node_result_json)
@@ -186,13 +192,16 @@ def _recovered_failure_result(
                 err_slot = envelope.get('err')
                 if err_slot is not None:
                     return TaskResult(err=decode_task_error(err_slot))
-            except StrictJsonError:
-                # A stored envelope that will not validate is reported
-                # through the constructed error below rather than
-                # failing the recovery of a task that has already run.
+            except (StrictJsonError, ValueValidationError) as exc:
+                # A stored envelope or error that will not decode is
+                # reported through the constructed error below rather
+                # than failing the recovery of a task that has already
+                # run.
                 logger.error(
-                    'Phase-2 recovery could not validate the stored result '
-                    'envelope; recording the terminal status instead',
+                    'Phase-2 recovery could not decode the stored result '
+                    'envelope (%s: %s); recording the terminal status instead',
+                    type(exc).__name__,
+                    exc,
                 )
 
     error_code: OutcomeCode | RetrievalCode | OperationalErrorCode

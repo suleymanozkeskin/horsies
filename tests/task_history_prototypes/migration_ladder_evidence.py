@@ -36,6 +36,7 @@ from horsies.core.history.cutover.ladder import (
     fit_run,
 )
 from horsies.core.history.cutover.preparation import (
+    PreparationBlocked,
     PreparationComplete,
     PreparationCursor,
     prepare_legacy_batch,
@@ -466,6 +467,8 @@ async def _drive_preparation(
         await connection.commit()
         if isinstance(outcome, PreparationComplete):
             break
+        if isinstance(outcome, PreparationBlocked):
+            raise AssertionError(f'preparation is blocked: {outcome!r}')
         cursor = outcome.cursor
         cumulative += outcome.rows_prepared
         batches += 1

@@ -46,6 +46,7 @@ from .enums import OutT, OnError
 from .nodes import (
     TaskNode,
     SubWorkflowNode,
+    AnyNode,
     SuccessCase,
     SuccessPolicy,
 )
@@ -415,14 +416,14 @@ class WorkflowSpec(Generic[OutT]):
             for case in self.success_policy.cases:
                 new_cases.append(SuccessCase(
                     required=[
-                        cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                        old_to_new.get(id(t), t)
                         for t in case.required
                     ],
                 ))
-            new_optional: list[TaskNode[Any]] | None = None
+            new_optional: list[AnyNode] | None = None
             if self.success_policy.optional is not None:
                 new_optional = [
-                    cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                    old_to_new.get(id(t), t)
                     for t in self.success_policy.optional
                 ]
             self.success_policy = SuccessPolicy(

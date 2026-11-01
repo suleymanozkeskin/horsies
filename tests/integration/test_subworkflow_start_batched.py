@@ -3,8 +3,9 @@
 Pins the flat-statement child-start shape (one bulk node insert + one bulk
 root-task insert instead of 1 INSERT per child node + 3 statements per
 child root) and its equivalence: fast child roots land ENQUEUED + linked +
-claimable with child-scoped meta, dependents stay PENDING, and corrupt
-root task_options demote to the per-node path failing THAT child root.
+claimable with child-scoped meta, and dependents stay PENDING. Task options
+of a child root that do not parse are a defect: the child start raises
+and the start rolls back.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
 from horsies.core.types.result import is_err
@@ -29,12 +31,33 @@ from tests.broker_resources_support import current_resources
 pytestmark = [pytest.mark.integration]
 
 
+def _broken_build_def(suffix: str) -> type[WorkflowDefinition[int]]:
+    """A child definition whose build_with raises: a SubWorkflowNode for it
+    fails in the child start with WORKFLOW_ENQUEUE_FAILED."""
+
+    class BrokenBuild(WorkflowDefinition[int]):
+        name = f'broken_build_wf_{suffix}'
+        definition_key = f'broken-build-{suffix}'
+
+        @classmethod
+        def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+            _ = app, args, params
+            raise RuntimeError('build_with refused')
+
+    return BrokenBuild
+
+
 def _child_def(
     app: Horsies, n_children: int, *, shape: str, corrupt_root: bool = False,
-    on_error: Any = None,
+    failing_sub_root: bool = False, on_error: Any = None,
 ) -> type[WorkflowDefinition[int]]:
-    """shape='flat': all roots. shape='chain': single root chain."""
+    """shape='flat': all roots. shape='chain': single root chain.
+
+    corrupt_root: node 0 is a TaskNode whose task options do not parse.
+    failing_sub_root: node 0 is a SubWorkflowNode whose build_with raises.
+    """
     suffix = uuid.uuid4().hex[:8]
+    broken_def = _broken_build_def(suffix) if failing_sub_root else None
 
     @app.task(task_name=f'bulk_child_{suffix}')
     def child_task(*, value: int) -> TaskResult[int, TaskError]:
@@ -55,10 +78,15 @@ def _child_def(
 
         @classmethod
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-            nodes: list[TaskNode[int]] = []
+            nodes: list[TaskNode[int] | SubWorkflowNode[int]] = []
             for i in range(n_children):
-                fn = corrupt_fn if (corrupt_root and i == 0) else child_task
                 waits = [nodes[-1]] if (shape == 'chain' and nodes) else []
+                if broken_def is not None and i == 0:
+                    nodes.append(
+                        SubWorkflowNode(workflow_def=broken_def, waits_for=waits),
+                    )
+                    continue
+                fn = corrupt_fn if (corrupt_root and i == 0) else child_task
                 nodes.append(TaskNode(fn=fn, kwargs={'value': i}, waits_for=waits))
             kwargs: dict[str, Any] = {}
             if on_error is not None:
@@ -165,46 +193,39 @@ class TestBulkChildStart:
             assert dep.status == 'PENDING'
             assert dep.task_id is None
 
-    async def test_corrupt_root_options_fail_that_child_root_only(
+    async def test_corrupt_root_options_raise_and_roll_back_the_start(
         self,
         clean_workflow_tables: None,
         app: Horsies,
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        """Equivalence with the per-node path: corrupt decorator-attached
-        task_options on a child ROOT fail that child root (FAILED inside
-        the child workflow), not the parent node — the bulk path demotes
-        the root to the per-node enqueue instead of fast-pathing it."""
+        """Task options of a child ROOT that do not parse are a defect: they
+        come from the task function, not from a stored row. The child start
+        raises SerializationError, as the workflow start transaction does,
+        and the parent start rolls back: no parent or child row is left.
+        The promotion path, which reads stored rows, fails only the node
+        (see test_workflow_promotion_batched)."""
         child_def = _child_def(app, 2, shape='flat', corrupt_root=True)
-        parent_id = await _start_parent(app, broker, child_def)
-        child_id = await _child_id(session, parent_id)
+        parent_name = f'bulk_parent_corrupt_{uuid.uuid4().hex[:6]}'
+        spec = app.workflow(
+            parent_name, [SubWorkflowNode(workflow_def=child_def)],
+            definition_key=f'bulk-parent-corrupt-{uuid.uuid4().hex[:6]}',
+        )
 
-        child_rows = (
+        with pytest.raises(SerializationError, match='root node'):
+            await start_workflow_async(spec, broker)
+
+        leftover = (
             await session.execute(
                 text("""
-                    SELECT task_index, status FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf ORDER BY task_index
+                    SELECT COUNT(*) FROM horsies_workflows
+                    WHERE name IN (:parent, :child)
                 """),
-                {'wf': child_id},
-            )
-        ).fetchall()
-        statuses = {r.task_index: r.status for r in child_rows}
-        assert statuses[0] == 'FAILED'  # the corrupt root
-        assert statuses[1] == 'ENQUEUED'  # the good sibling root
-
-        parent_node = (
-            await session.execute(
-                text("""
-                    SELECT status FROM horsies_workflow_tasks
-                    WHERE workflow_id = :wf AND task_index = 0
-                """),
-                {'wf': parent_id},
+                {'parent': parent_name, 'child': child_def.name},
             )
         ).scalar()
-        # Parent node tracks the child workflow (RUNNING), not the
-        # root's failure — same as the per-node path.
-        assert parent_node == 'RUNNING'
+        assert leftover == 0
 
     async def test_pause_policy_slow_root_failure_reverts_fast_siblings(
         self,
@@ -213,14 +234,15 @@ class TestBulkChildStart:
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        """Child on_error=PAUSE + corrupt (demoted) root + good fast root:
-        the slow root's failure pauses the child BEFORE the fast roots'
-        task rows land, so the fast sibling reverts to READY with no task
-        row — a paused child gains no runnable rows. Resume re-enqueues."""
+        """Child on_error=PAUSE + failing slow root (a SubWorkflowNode whose
+        build_with raises) + good fast root: the slow root's failure pauses
+        the child BEFORE the fast roots' task rows land, so the fast sibling
+        reverts to READY with no task row — a paused child gains no runnable
+        rows. Resume re-enqueues."""
         from horsies.core.models.workflow import OnError
 
         child_def = _child_def(
-            app, 2, shape='flat', corrupt_root=True, on_error=OnError.PAUSE,
+            app, 2, shape='flat', failing_sub_root=True, on_error=OnError.PAUSE,
         )
         parent_id = await _start_parent(app, broker, child_def)
         child_id = await _child_id(session, parent_id)
@@ -235,7 +257,7 @@ class TestBulkChildStart:
             )
         ).fetchall()
         statuses = {r.task_index: r.status for r in rows}
-        assert statuses[0] == 'FAILED'  # the corrupt root
+        assert statuses[0] == 'FAILED'  # the failing subworkflow root
         assert statuses[1] == 'READY'  # reverted, not ENQUEUED
         assert rows[1].task_id is None  # no runnable task row
 
@@ -284,7 +306,8 @@ class TestBulkChildStart:
         """Nested variant of the pause gate: a child workflow's slow root
         can synchronously fail/finalize its own child and queue propagation
         back into the child. Drain that propagation before the child's fast
-        root task rows land."""
+        root task rows land. The grandchild fails during its start because
+        its only root is a SubWorkflowNode whose build_with raises."""
         from horsies.core.models.workflow import OnError
 
         suffix = uuid.uuid4().hex[:8]
@@ -293,11 +316,7 @@ class TestBulkChildStart:
         def fast_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        @app.task(task_name=f'nested_pause_bad_{suffix}')
-        def bad_grandchild_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
-
-        bad_grandchild_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
+        broken_def = _broken_build_def(suffix)
 
         class BadGrandchild(WorkflowDefinition[int]):
             name = f'nested_pause_grandchild_{suffix}'
@@ -305,7 +324,7 @@ class TestBulkChildStart:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = TaskNode(fn=bad_grandchild_task)
+                node = SubWorkflowNode(workflow_def=broken_def)
                 return app.workflow(name=cls.name, tasks=[node], output=node)
 
         class PausingChild(WorkflowDefinition[int]):

@@ -60,7 +60,7 @@ function renderAction(harness: Harness = {}) {
       useEntityAction<Row>({
         entity: { kind: 'task', id: 'task-1' },
         detail,
-        snapshot: () => ({ wasStatus: detail.status, retryCountBefore: 0 }),
+        snapshot: () => ({ wasStatus: detail.status }),
         hasSettled: (_action, row) => row.status === 'CANCELLED',
         reread: harness.reread ?? (async () => detail),
         successContext: () => ({ drainingNodes: 0, workerHostname: 'box-1' }),

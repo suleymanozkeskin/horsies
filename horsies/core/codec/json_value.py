@@ -18,6 +18,8 @@ Defines:
   rejects a numeric literal outside the finite binary64 range.
 - `_reject_lone_surrogate(text, parsed)` — post-parse check for the same
   sites; rejects a string that UTF-8 cannot encode.
+- `escape_lone_surrogates(text)` — makes text that the library did not write
+  safe to put in a library-built error.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ __all__ = [
     '_reject_nonstandard_json_constant',
     '_parse_finite_float',
     '_reject_lone_surrogate',
+    'escape_lone_surrogates',
 ]
 
 
@@ -188,3 +191,20 @@ def _reject_lone_surrogate(text: str, parsed: JsonValue) -> None:
                 stack.extend(mapping.values())
             case _:
                 pass
+
+
+def escape_lone_surrogates(text: str) -> str:
+    """Return `text` with each lone surrogate written as a `\\udXXX` escape.
+
+    For free text that goes into a library-built error and that the library
+    did not write, for example the text of an exception from user code. An
+    error is the report of a failure, so its text must not fail the same way
+    when the library encodes it. All other text does not change.
+
+    Args:
+        text: Any string.
+
+    Returns:
+        A string that UTF-8 can encode.
+    """
+    return text.encode('utf-8', 'backslashreplace').decode('utf-8')

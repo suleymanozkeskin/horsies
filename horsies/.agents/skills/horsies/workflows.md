@@ -9,6 +9,7 @@ Two approaches: functional (inline) and class-based.
 
 ### Functional — `app.workflow()`
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 spec = app.workflow(
     name: str,
@@ -31,6 +32,7 @@ Best for dynamic workflows where node kwargs depend on runtime inputs.
 
 ### Class-based — `WorkflowDefinition`
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
@@ -63,6 +65,7 @@ Best for static, reusable DAGs.
 
 Override `build_with()` to accept runtime parameters. This is the child-workflow form. The engine calls `build_with()` when it enqueues a `SubWorkflowNode`, and binds queue and priority for the child nodes at that time:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class ChildPipeline(WorkflowDefinition[ProcessedData]):
     name = "child_pipeline"
@@ -105,6 +108,7 @@ def build_regional_workflow(region: str) -> WorkflowSpec:
 
 ## TaskNode
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class TaskNode(Generic[OkT]):
@@ -140,6 +144,7 @@ Set `node_id` on every node. The docs site recommends it too.
 - The id is the key of `handle.results()`, the lookup key of `result_for()`, and `WorkflowTaskInfo.node_id`.
 - An explicit id stays the same through reorders and renames.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 fetch = fetch_rows.node(node_id="fetch")(source="warehouse")
 ```
@@ -175,6 +180,7 @@ def summarize_rows(
 
 ## SubWorkflowNode
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class SubWorkflowNode(Generic[OkT]):
@@ -194,11 +200,14 @@ Differences from `TaskNode`:
 - No `fn`, `queue`, `priority`, `good_until` fields.
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects upstream `TaskResult` into `build_with()`.
-- Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`.
+- Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`. The output of a COMPLETED child can be an err: the node is then COMPLETED and holds that err (see SuccessPolicy / SuccessCase).
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
+- The child start encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them (a value that does not fit is `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, and the node fails with `WORKFLOW_ENQUEUE_FAILED`), so a refusal at the child start is a defect: it raises `SerializationError` and the transaction rolls back.
 
 ## NodeFactory / `.node()` — Two-Step Builder
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Step 1: workflow options → NodeFactory
 factory = my_task.node(
@@ -296,6 +305,7 @@ All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, 
 
 ### All methods
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # Status
 def status(self) -> HandleResult[WorkflowStatus]
@@ -342,10 +352,11 @@ appearing during a pause are expected, not a fault.
 ### `get()` semantics
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
-- `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
-- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when no error is stored.
+- `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`). With a success case that does not require the output node: a `SKIPPED` output node → `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`, and a `FAILED` output node → that node's error. A `COMPLETED` row whose result is NULL or empty → `TaskResult(err=TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR))`: the library always stores a result with `COMPLETED`.
+- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when the error is NULL (no error is stored). An empty stored error → `RESULT_DESERIALIZATION_ERROR`.
 - `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
-- The workflow row is removed after `get()` read its terminal status (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
+- A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `TaskResult(err=TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
+- The workflow row is removed after `get()` read its terminal status, also `COMPLETED` (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 
@@ -411,6 +422,7 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED | FAILED | SKIPPED
 
 ### WorkflowTaskInfo
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
 class WorkflowTaskInfo:
@@ -443,6 +455,7 @@ class WorkflowTaskInfo:
 
 ## SuccessPolicy / SuccessCase
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 policy = SuccessPolicy(
     cases=[
@@ -454,15 +467,25 @@ policy = SuccessPolicy(
 )
 ```
 
-- Workflow `COMPLETED` if **any** `SuccessCase` has all `required` tasks `COMPLETED`.
-- `optional` tasks excluded from failure accounting.
+- Workflow `COMPLETED` if **any** `SuccessCase` has all `required` nodes `COMPLETED`.
+- `required` and `optional` take any node: `TaskNode` or `SubWorkflowNode`.
+- `optional` nodes excluded from failure accounting.
 - Without policy: any task failure → `FAILED`.
 - No case satisfied: `WORKFLOW_SUCCESS_CASE_NOT_MET` error.
+- A case does not have to require the output node. The workflow is then `COMPLETED`, and its output node can end `SKIPPED` or `FAILED`.
+  - For a `SKIPPED` output node, the workflow result is an error with `WORKFLOW_OUTPUT_SKIPPED`. The workflow succeeded and has no output; no stored data is corrupt. `data` holds `workflow_id`, `output_node_id`, `output_task_index` and `output_task_name`.
+  - For a `FAILED` output node, the workflow result is that node's error.
+- A `SubWorkflowNode` of such a child is `COMPLETED` and holds the child's err.
+  - `result_for()`, `results()` and `tasks()` return the err.
+  - A dependent receives the err through `args_from` or `workflow_ctx_from`, also with `join="all"` and `allow_failed_deps=False`. `join="any"` and `join="quorum"` count the node as completed.
+  - A parent `SuccessCase` that requires the node is satisfied. A parent whose output node is this node stores the same err, at every nesting level.
+  - `SubWorkflowSummary.output` is `None`.
 
 ## WorkflowContext
 
 Injected when a task declares `workflow_ctx: WorkflowContext | None = None`:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 class WorkflowContext(BaseModel):
     workflow_id: str
@@ -482,6 +505,7 @@ class WorkflowContext(BaseModel):
 
 **Scope:** Only nodes in `workflow_ctx_from` are accessible. Others raise `KeyError`.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("aggregate")
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Report, TaskError]:
@@ -496,6 +520,7 @@ def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> TaskResult[Repo
 
 Lighter alternative — metadata only, no result access:
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
 class WorkflowMeta:
@@ -509,6 +534,7 @@ Does **not** require `workflow_ctx_from`.
 
 ## NodeKey
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass(frozen=True)
 class NodeKey(Generic[OkT]):
@@ -521,6 +547,7 @@ class NodeKey(Generic[OkT]):
 
 ## SubWorkflowSummary
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @dataclass
 class SubWorkflowSummary(Generic[OkT]):
@@ -573,8 +600,9 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 - Receiving function parameter must be typed `TaskResult[T, TaskError]`.
 - Upstream must be in `waits_for` (HRS-008). Keys must not overlap with `kwargs` (HRS-021).
 - Positional args not supported on workflow nodes (HRS-026).
-- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, from a `SubWorkflowNode` that is `COMPLETED` with an err, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("process")
 def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
@@ -620,7 +648,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-028 | `WORKFLOW_CHECK_CASE_INVALID` | Invalid case kwarg dict |
 | HRS-029 | `WORKFLOW_CHECK_BUILDER_EXCEPTION` | Builder raised, returned wrong type, or signature not introspectable |
 | HRS-030 | `WORKFLOW_CHECK_UNDECORATED_BUILDER` | Returns WorkflowSpec without decorator |
-| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
+| HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization, also a lone surrogate in a string or a dict key |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
 | HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |

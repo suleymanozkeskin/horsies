@@ -94,7 +94,7 @@ export interface LeafTask {
   /** Execution time (started -> completed). */
   exec_s: number | null;
   worker_hostname: string | null;
-  /** Absolute expiry. A manual retry is refused once it has passed. */
+  /** Absolute expiry. */
   good_until: string | null;
 }
 

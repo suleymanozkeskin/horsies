@@ -300,6 +300,7 @@ Field domains, range ordering, step span, and satisfiability are checked when th
 **Don't use a wrap-around enum range — use explicit values.** Ranges require
 `start <= end` in canonical order (Monday-Sunday, January-December).
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: wrap-around range -> ConfigurationError when the schedule is built
 CronSchedule(
@@ -322,6 +323,7 @@ CronSchedule(
 the first value, so it is rejected. The span is `max - min`: 59 for minute, 23 for
 hour, 30 for day-of-month, 11 for month, 6 for day-of-week.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: step 24 on hour collapses to {0} -> ConfigurationError
 CronSchedule(
@@ -337,6 +339,7 @@ CronSchedule(
 **Don't construct an unsatisfiable month/day combination.** It is rejected at
 construction, not silently skipped forever.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: February never has a 30th -> ConfigurationError
 CronSchedule(
@@ -374,6 +377,7 @@ run matters.
 
 ## Examples in Context
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from datetime import time
 from horsies.core.models.schedule import (

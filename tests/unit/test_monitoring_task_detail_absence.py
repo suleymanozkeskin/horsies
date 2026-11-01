@@ -109,24 +109,19 @@ class TestTaskDetailNotFound:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('predates', 'reason'),
-        [
-            (True, TaskAbsenceReason.PREDATES_RETAINED_HISTORY),
-            (False, TaskAbsenceReason.WITHIN_RETAINED_HISTORY),
-            (None, TaskAbsenceReason.NOT_CLASSIFIED),
-        ],
-        ids=['predates', 'within', 'unclassified'],
+        'reason',
+        list(TaskAbsenceReason),
+        ids=lambda reason: reason.value,
     )
     async def test_the_reason_is_the_staged_classification(
         self,
         monkeypatch: pytest.MonkeyPatch,
-        predates: bool | None,
         reason: TaskAbsenceReason,
     ) -> None:
         _staged_read(
             monkeypatch,
             published=True,
-            detail=TaskDetailAbsent(task_id=TASK_ID, predates_retained_floor=predates),
+            detail=TaskDetailAbsent(task_id=TASK_ID, reason=reason),
         )
         broker = _broker_with_session(_session(_scalar_result(None)))
 

@@ -106,6 +106,7 @@ construction). See website docs `workers/child-process-hooks`.
 
 **Result retrieval** (use when you have a task ID but no `TaskHandle`):
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 broker = app.get_broker()
 
@@ -334,6 +335,7 @@ Example — 1024 MB quota, 4 procs, ~80 MB task: threshold=300 → ~1249 MB peak
 
 ## QueueMode
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class QueueMode(Enum):
     DEFAULT = 'default'
@@ -385,7 +387,7 @@ against the already-serialized JSON string (no extra serialization pass).
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size; rate-limited to once per (task_name, kind) per process |
-| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written |
+| `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size before anything is written. A schedule over this size fails scheduler start and `horsies check` |
 
 Coverage: `.send()`/`.schedule()` kwargs warn and reject
 (`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails
@@ -395,10 +397,12 @@ only — results are never rejected. Subworkflow child-start kwargs are not
 yet checked.
 
 ```python
-from horsies import PayloadPolicy
+from pydantic import SecretStr
+
+from horsies import AppConfig, PayloadPolicy, PostgresConfig
 
 AppConfig(
-    broker=broker,
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://user:pass@host/db")),
     payload=PayloadPolicy(warn_bytes=1_048_576, reject_bytes=33_554_432),
 )
 ```
@@ -581,7 +585,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `name` | `str` | required | Unique schedule identifier |
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
-| `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction) |
+| `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction). Encoded once at scheduler start: a `default_factory` or a validator that reads the clock runs once per start, not once per fire |
 | `queue_name` | `str \| None` | `None` | Target queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |
@@ -717,6 +721,7 @@ cannot.
 
 ### Weekday and Month
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 class Weekday(str, Enum):
     MONDAY = 'monday'

@@ -1,18 +1,16 @@
 // Action affordances for the two detail surfaces.
 //
-// Actions live in detail panels only. Table and run-list rows carry neither the
-// full eligibility data (`good_until` is on the leaf, not the row) nor enough
-// context for a destructive click to be safe.
+// Actions live in detail panels only. Table and run-list rows do not carry
+// enough context for a destructive click to be safe.
 
 import { Link } from '@tanstack/react-router';
-import { Ban, Pause, Play, RotateCcw } from 'lucide-react';
+import { Ban, Pause, Play } from 'lucide-react';
 
 import { useCapability } from '@/actions/capability';
 import { ActionConfirmDialog } from '@/actions/confirm-dialog';
 import {
   MANAGED_BY_WORKFLOW_PREFIX,
   taskCancelConfirm,
-  taskRetryConfirm,
   WORKFLOW_CONFIRM,
   type ConfirmCopy,
 } from '@/actions/copy';
@@ -84,7 +82,7 @@ function ActionButton({
 }
 
 /**
- * A workflow-bound row carries no task-level actions: retrying it would orphan
+ * A workflow-bound row carries no task-level actions: cancelling it would orphan
  * or hang the node, and the workflow owns its lifecycle. The note links to the
  * owning run — or degrades to a plain sentence when the server does not supply
  * the reference, which is also what an older backend returns.
@@ -120,7 +118,7 @@ function ManagedByWorkflowNote({ detail }: { detail: TaskDetail }) {
 
 export function TaskActionBar({ view }: { view: TaskActionsView }) {
   const { canAct } = useCapability();
-  const { detail, controls, cancel, retry, nextAttempt } = view;
+  const { detail, controls, cancel } = view;
 
   if (detail === undefined) {
     return null;
@@ -137,18 +135,11 @@ export function TaskActionBar({ view }: { view: TaskActionsView }) {
     controls.state.phase === 'confirming' || controls.state.phase === 'submitting';
   const confirmContext = {
     status: detail.leaf.status,
-    queueName: detail.queue_name,
     workerHostname: detail.leaf.worker_hostname,
-    nextAttempt,
   };
   const copy: ConfirmCopy | null =
-    pending === 'task-cancel'
-      ? taskCancelConfirm(confirmContext)
-      : pending === 'task-retry'
-        ? taskRetryConfirm(confirmContext)
-        : null;
-  const availability =
-    pending === 'task-cancel' ? cancel : pending === 'task-retry' ? retry : null;
+    pending === 'task-cancel' ? taskCancelConfirm(confirmContext) : null;
+  const availability = pending === 'task-cancel' ? cancel : null;
 
   return (
     <div className="flex flex-wrap gap-2">
@@ -159,14 +150,6 @@ export function TaskActionBar({ view }: { view: TaskActionsView }) {
         availability={cancel}
         busy={controls.busy}
         destructive
-        onSelect={controls.begin}
-      />
-      <ActionButton
-        action="task-retry"
-        label="Retry"
-        icon={RotateCcw}
-        availability={retry}
-        busy={controls.busy}
         onSelect={controls.begin}
       />
       {copy !== null && availability !== null && (
