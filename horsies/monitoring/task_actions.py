@@ -350,11 +350,14 @@ async def cancel_task(
         permitted_statuses += (TaskStatus.RUNNING,)
 
     # Identity columns are uuid; text that does not parse as one cannot
-    # name any task, and must not reach a CAST that would error instead.
+    # name any task. Python also accepts forms that the Postgres uuid cast
+    # refuses (for example a ``urn:uuid:`` prefix), so every statement gets
+    # the canonical text.
     try:
-        uuid.UUID(task_id)
+        canonical_id = str(uuid.UUID(task_id))
     except ValueError:
         return _not_found(task_id)
+    task_id = canonical_id
 
     match await broker.select_resources():
         case Err(loop_limit):

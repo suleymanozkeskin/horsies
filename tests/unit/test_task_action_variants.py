@@ -497,6 +497,38 @@ class TestCancelBoundaries:
         assert result.err_value.task_id == 'not-a-uuid'
 
     @pytest.mark.asyncio
+    async def test_a_uuid_form_the_database_refuses_reaches_it_as_canonical_text(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        execute = AsyncMock(return_value=_missed_row())
+        broker, _ = _broker_with_session(execute)
+        _patch_history(monkeypatch, published=False, read=RuntimeError('not called'))
+
+        result = await cancel_task(broker, f'urn:uuid:{TASK_ID.upper()}')
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskActionNotFound)
+        assert result.err_value.task_id == TASK_ID
+        assert execute.await_args is not None
+        assert execute.await_args.args[1] == {'id': TASK_ID}
+
+    @pytest.mark.asyncio
+    async def test_a_canonical_id_reaches_the_cancel_statement(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        broker, _ = _broker_with_session(
+            AsyncMock(return_value=_locked_row(is_workflow_task=False)),
+        )
+        apply = AsyncMock(return_value=_applied(TaskStatus.PENDING))
+        monkeypatch.setattr(task_actions_module, 'apply_async', apply)
+
+        result = await cancel_task(broker, '{' + TASK_ID.replace('-', '') + '}')
+
+        assert result == Ok(TaskCancelled(task_id=TASK_ID, was_status=TaskStatus.PENDING))
+        assert apply.await_args is not None
+        assert apply.await_args.args[1].task_id == TASK_ID
+
+    @pytest.mark.asyncio
     async def test_a_database_failure_keeps_the_cause(self) -> None:
         cause = OperationalError('SELECT 1', {}, Exception('connection lost'))
         broker, _ = _broker_with_session(AsyncMock(side_effect=cause))
