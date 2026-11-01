@@ -41,6 +41,8 @@ class MockFn(TaskFunction[Any, Any]):
     """Minimal TaskFunction mock for unit tests."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
@@ -82,6 +84,8 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     """MockFn that accepts workflow_ctx (passes HRS-010 validator)."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
