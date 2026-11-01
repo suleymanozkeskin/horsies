@@ -230,7 +230,8 @@ Failures stay with one task:
 - A timeout kills that child and the subprocesses in its session. A subprocess
   that calls `setsid` leaves the session and is not killed.
 - A crash or an out-of-memory kill recovers that task only. Other tasks continue.
-- The worker's death stops each child at once.
+- The worker's death stops each child at once. A subprocess that a task started
+  keeps running, because the child cannot act after a SIGKILL.
 - SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
   stop a running task. The worker drains it. Task subprocesses do get the signal.
 - A dead preload parent stops no task. New children use `exec` until it is back.
