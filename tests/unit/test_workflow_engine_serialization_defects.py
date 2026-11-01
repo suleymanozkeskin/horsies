@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -47,6 +48,7 @@ from horsies.core.models.workflow import (
 from horsies.core.task_decorator import TaskFunction
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.engine import (
+    _decode_stored_task_result,
     _handle_workflow_task_failure,
     _ser_or_raise,
     enqueue_subworkflow_task,
@@ -99,6 +101,31 @@ class _RefusedOk(BaseModel):
     @classmethod
     def refuse(cls, value: int) -> int:
         raise RuntimeError(f'cannot check {LONE_SURROGATE_TEXT}: {value}')
+
+
+class _EchoingModel(BaseModel):
+    """A validator that writes the refused value in its error text."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}')
+
+
+class _ConstantSurrogateModel(BaseModel):
+    """A validator whose own text holds a lone surrogate.
+
+    Stored JSON cannot hold one, so a decode reaches the case only this way.
+    """
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}{LONE_SURROGATE_TEXT}')
 
 
 class _RecordingSession:
@@ -578,6 +605,162 @@ def _surrogate_child_workflow(
             return WorkflowSpec(name=cls.name, tasks=[node], output=node)
 
     return ChildWorkflow
+
+
+class TestValidatorTextWithALoneSurrogate:
+    def test_a_node_kwarg_is_hrs_031_at_spec_construction(self) -> None:
+        """Before, the raw `UnicodeEncodeError` left `app.workflow()`."""
+        app = _real_app()
+
+        @app.task('surrogate.echoing')
+        def echoing(*, x: _EchoingModel) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x.name))
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='surrogate-validator',
+                tasks=[TaskNode(fn=echoing, kwargs={'x': {'name': LONE_SURROGATE_TEXT}})],
+                definition_key=_key('validator'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'a validation error holds a lone surrogate' in ' '.join(
+            raised.value.notes,
+        )
+
+    def test_a_stored_result_decode_folds_into_a_deserialization_error(self) -> None:
+        """Before, the raw `UnicodeEncodeError` left the engine's decode, so
+        the promotion raised on each finalize retry and recovery pass."""
+        app = _real_app()
+
+        @app.task('surrogate.constant')
+        def constant() -> TaskResult[_ConstantSurrogateModel, TaskError]:
+            return TaskResult(ok=_ConstantSurrogateModel.model_construct(name='n'))
+
+        _ = constant
+        stored = '{"__h_task_result__":true,"ok":{"name":"plain"},"err":null}'
+
+        decoded = _decode_stored_task_result(
+            stored, app=app, task_name='surrogate.constant', context={},
+        )
+
+        error = decoded.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'a validation error holds a lone surrogate' in (error.message or '')
+        assert error.data == {'stage': 'decode'}
+
+
+class _ListValued(Enum):
+    MEMBER = [1]
+
+
+class TestDictKeyWithoutAJsonForm:
+    """Registration refuses these types in a task signature, so `.send()` and
+    a schedule cannot reach this. It does not check a `build_with()` parameter."""
+
+    @pytest.mark.parametrize(
+        ('value', 'type_name'),
+        [
+            ({_ListValued.MEMBER: 1}, 'list'),
+            ({frozenset({1}): 1}, 'frozenset'),
+        ],
+        ids=['enum-list-value', 'frozenset'],
+    )
+    def test_a_subworkflow_node_kwarg_is_hrs_031(
+        self,
+        value: dict[Any, int],
+        type_name: str,
+    ) -> None:
+        """Before, the raw `TypeError` left `app.workflow()`."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'no-json-key-child'
+            definition_key = _key('no_json_key_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, labels: Any = None, **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='no-json-key',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                )],
+                definition_key=_key('no_json_key'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert f'`{type_name}` not valid as object key' in ' '.join(
+            raised.value.notes,
+        )
+
+
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
+
+
+class TestValueThatHoldsItself:
+    """Before, the raw `ValueError` left `app.workflow()`."""
+
+    def test_a_task_node_kwarg_is_hrs_031(self) -> None:
+        app = _real_app()
+
+        @app.task('circular.linked')
+        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        node = _Linked()
+        node.next = node
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='circular-task-node',
+                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                definition_key=_key('circular_task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (id repeated)' in ' '.join(
+            raised.value.notes,
+        )
+
+    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+        """Registration does not check a `build_with()` parameter, so `Any`
+        is possible there."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'circular-child'
+            definition_key = _key('circular_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, labels: Any = None, **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        value: list[Any] = []
+        value.append(value)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='circular-sub-node',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                )],
+                definition_key=_key('circular_sub_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (id repeated)' in ' '.join(
+            raised.value.notes,
+        )
 
 
 class TestChildStartOfALoneSurrogate:

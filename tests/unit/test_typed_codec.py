@@ -19,6 +19,7 @@ import datetime
 import decimal
 import enum
 import uuid
+from collections.abc import Iterable, Iterator
 from typing import (
     Annotated,
     Any,
@@ -31,7 +32,8 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, computed_field
+from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import (
@@ -798,6 +800,309 @@ class TestEncodeValueRefusesALoneSurrogate:
         assert 'keep-out' not in str(raised.value)
         assert raised.value.__context__ is None
         assert raised.value.__cause__ is None
+
+
+def _echo_in_value_error(value: str) -> str:
+    raise ValueError(f'bad name {value}')
+
+
+def _echo_in_assertion_error(value: str) -> str:
+    raise AssertionError(f'bad name {value}')
+
+
+def _echo_in_custom_error_context(value: str) -> str:
+    raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
+def _refuse_with_constant_lone_surrogate(value: str) -> str:
+    raise ValueError(f'bad name {value}{chr(0xd800)}')
+
+
+_VALIDATORS_THAT_ECHO = [
+    _echo_in_value_error,
+    _echo_in_assertion_error,
+    _echo_in_custom_error_context,
+]
+_VALIDATOR_IDS = ['value-error', 'assertion-error', 'custom-error-context']
+
+
+class TestValidatorTextWithALoneSurrogate:
+    """Pydantic cannot build the error text, and raises `UnicodeEncodeError`."""
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_encode_value_refuses_it(self, validator: Any) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT,
+                Annotated[str, AfterValidator(validator)],
+                location=('note',),
+            )
+
+        assert str(raised.value) == (
+            'note: a validation error holds a lone surrogate, which UTF-8 '
+            'cannot encode'
+        )
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_the_refusal_holds_no_input_value(self, validator: Any) -> None:
+        """The `UnicodeEncodeError` holds the text, so it is not chained."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT, Annotated[str, AfterValidator(validator)],
+            )
+
+        assert 'keep-out' not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+    def test_decode_value_refuses_a_lone_surrogate_in_the_validator_text(self) -> None:
+        """A stored value cannot hold a lone surrogate: `loads_json` refuses
+        it. The validator text can, because the validator writes that text."""
+        with pytest.raises(StrictJsonError) as raised:
+            decode_value(
+                'plain',
+                Annotated[str, AfterValidator(_refuse_with_constant_lone_surrogate)],
+            )
+
+        assert str(raised.value) == (
+            'a validation error holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        assert raised.value.__context__ is None
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_a_validator_refusal_without_a_surrogate_is_unchanged(
+        self, validator: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError, match='bad name plain'):
+            encode_value('plain', Annotated[str, AfterValidator(validator)])
+
+
+class _ListValued(enum.Enum):
+    MEMBER = [1]
+
+
+class _DictValued(enum.Enum):
+    MEMBER = {'k': 1}
+
+
+class _SetValued(enum.Enum):
+    MEMBER = {1}
+
+
+class _FrozensetValued(enum.Enum):
+    MEMBER = frozenset({1})
+
+
+class TestDictKeyWithoutAJsonForm:
+    """`dump_python` raises a plain `TypeError` for these keys."""
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type', 'type_name'),
+        [
+            ({_ListValued.MEMBER: 1}, dict[_ListValued, int], 'list'),
+            ({_DictValued.MEMBER: 1}, dict[_DictValued, int], 'dict'),
+            ({_SetValued.MEMBER: 1}, dict[_SetValued, int], 'set'),
+            ({_FrozensetValued.MEMBER: 1}, dict[_FrozensetValued, int], 'frozenset'),
+            ({frozenset({1}): 1}, dict[frozenset[int], int], 'frozenset'),
+            ({(frozenset({1}),): 1}, dict[tuple[frozenset[int]], int], 'frozenset'),
+            ({frozenset({1}): 1}, Any, 'frozenset'),
+            ({'k': {_ListValued.MEMBER: 1}}, dict[str, dict[_ListValued, int]], 'list'),
+        ],
+        ids=[
+            'enum-list-value', 'enum-dict-value', 'enum-set-value',
+            'enum-frozenset-value', 'frozenset', 'tuple-with-frozenset',
+            'frozenset-at-any', 'nested',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+        type_name: str,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('labels',))
+
+        assert str(raised.value) == (
+            f'labels: serialization failed: `{type_name}` not valid as object key'
+        )
+        assert raised.value.__context__ is None
+
+    def test_the_text_has_no_location_part_without_a_location(self) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value({frozenset({1}): 1}, dict[frozenset[int], int])
+
+        assert str(raised.value) == (
+            'serialization failed: `frozenset` not valid as object key'
+        )
+
+
+class _TypeErrorInComputedField(BaseModel):
+    text: str
+
+    @computed_field
+    @property
+    def derived(self) -> int:
+        raise TypeError(self.text)
+
+
+def _yield_then_raise_type_error() -> Iterator[int]:
+    yield 1
+    raise TypeError('defect in a generator')
+
+
+class TestTypeErrorThatIsADefect:
+    """Only the full text of the key refusal is a catalog refusal."""
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'defect in a computed field',
+            'wrapped: `list` not valid as object key',
+            '`list` not valid as object key: wrapped',
+            'list not valid as object key',
+        ],
+        ids=['other-text', 'text-in-front', 'text-behind', 'no-backticks'],
+    )
+    def test_a_type_error_from_a_computed_field_propagates(self, text: str) -> None:
+        with pytest.raises(TypeError) as raised:
+            encode_value(_TypeErrorInComputedField(text=text), _TypeErrorInComputedField)
+
+        assert str(raised.value) == text
+
+    def test_a_type_error_from_a_generator_propagates(self) -> None:
+        with pytest.raises(TypeError, match='defect in a generator'):
+            encode_value(_yield_then_raise_type_error(), Iterable[int])
+
+
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: Optional['_Linked'] = None
+
+
+def _linked_to_itself() -> _Linked:
+    node = _Linked()
+    node.next = node
+    return node
+
+
+def _list_that_holds_itself() -> list[Any]:
+    value: list[Any] = []
+    value.append(value)
+    return value
+
+
+def _dict_that_holds_itself() -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    value['self'] = value
+    return value
+
+
+def _nested_list(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+class _ValueErrorInComputedField(BaseModel):
+    text: str
+
+    @computed_field
+    @property
+    def derived(self) -> int:
+        raise ValueError(self.text)
+
+
+def _yield_then_raise_value_error() -> Iterator[int]:
+    yield 1
+    raise ValueError('defect in a generator')
+
+
+class TestValueThatHoldsItself:
+    """`dump_python` raises a plain `ValueError` for these values."""
+
+    @pytest.mark.parametrize(
+        ('make_value', 'expected_type'),
+        [
+            (_list_that_holds_itself, Any),
+            (_dict_that_holds_itself, Any),
+            (lambda: {'key': _list_that_holds_itself()}, dict[str, Any]),
+            (lambda: [_list_that_holds_itself()], list[Any]),
+            (_linked_to_itself, _Linked),
+            (_linked_to_itself, Any),
+        ],
+        ids=[
+            'list', 'dict', 'in-dict-value', 'in-list',
+            'typed-model', 'model-at-any',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        make_value: Any,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(make_value(), expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: '
+            'Circular reference detected (id repeated)'
+        )
+        assert raised.value.__context__ is None
+
+
+class TestValueErrorThatStaysRaw:
+    """Only the full text of the refusal is in the catalog."""
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'defect in a computed field',
+            'wrapped: Circular reference detected (id repeated)',
+            'Circular reference detected (id repeated): wrapped',
+            'Circular reference detected (depth exceeded)',
+        ],
+        ids=['other-text', 'text-in-front', 'text-behind', 'depth-text'],
+    )
+    def test_a_value_error_from_a_computed_field_propagates(self, text: str) -> None:
+        with pytest.raises(ValueError) as raised:
+            encode_value(
+                _ValueErrorInComputedField(text=text), _ValueErrorInComputedField,
+            )
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == text
+
+    def test_a_value_error_from_a_generator_propagates(self) -> None:
+        with pytest.raises(ValueError) as raised:
+            encode_value(_yield_then_raise_value_error(), Iterable[int])
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == 'defect in a generator'
+
+    def test_a_value_that_is_only_deep_propagates(self) -> None:
+        """Pydantic reports depth with a text that says circular. The value
+        does not hold itself, so it is not this refusal."""
+        with pytest.raises(ValueError) as raised:
+            encode_value(_nested_list(300), Any)
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == 'Circular reference detected (depth exceeded)'
+
+    def test_a_unicode_decode_error_propagates(self) -> None:
+        """It is a `ValueError` subclass with another text."""
+        with pytest.raises(UnicodeDecodeError):
+            encode_value(b'\xff', Any)
+
+    def test_the_subclass_refusals_keep_their_own_arms(self) -> None:
+        """`PydanticSerializationError` and `UnicodeEncodeError` are a
+        `ValueError` too. Their arms must come first."""
+        with pytest.raises(ValueValidationError, match='Unable to serialize unknown type'):
+            encode_value(object(), Any)
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value({LONE_SURROGATE_TEXT: 1}, Any)
 
 
 class TestEncodeValueKeepsValidText:
