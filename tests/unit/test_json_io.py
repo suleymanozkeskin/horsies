@@ -3,7 +3,7 @@
 dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
 emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity)
-and numeric literals outside the finite binary64 range.
+numeric literals outside the finite binary64 range, and lone surrogates.
 """
 
 from __future__ import annotations
@@ -181,6 +181,50 @@ class TestLoadsJson:
         result = loads_json(document)
         assert not is_err(result)
         assert result.ok_value == [expected]
+
+    @pytest.mark.parametrize(
+        'document',
+        [
+            r'"\ud800"',
+            r'"\uDFFF"',
+            r'{"x":"\ud800"}',
+            r'{"\ud800":1}',
+            r'[["a\ud800b"]]',
+            r'"\ude00\ud83d"',
+            r'"\ud83d\u0041"',
+            r'"\\\ud800"',
+            '"\ud800"',
+            '[' * 900 + r'"\ud800"' + ']' * 900,
+        ],
+    )
+    def test_lone_surrogate_rejected(self, document: str) -> None:
+        result = loads_json(document)
+        assert is_err(result)
+        assert 'lone surrogate' in str(result.err_value)
+
+    def test_lone_surrogate_rejection_text_holds_no_input_value(self) -> None:
+        result = loads_json(r'{"secret":"abc\ud800"}')
+        assert is_err(result)
+        assert 'abc' not in str(result.err_value)
+        assert 'secret' not in str(result.err_value)
+
+    @pytest.mark.parametrize(
+        ('document', 'expected'),
+        [
+            (r'"\ud83d\ude00"', '😀'),
+            (r'"\uD83D\uDE00"', '😀'),
+            ('"😀"', '😀'),
+            (r'"\u00e9"', 'é'),
+            (r'"\\ud800"', '\\ud800'),
+            (r'{"\ud83d\ude00":"\ud83d\ude00"}', {'😀': '😀'}),
+        ],
+    )
+    def test_valid_text_keeps_its_value(
+        self, document: str, expected: object,
+    ) -> None:
+        result = loads_json(document)
+        assert not is_err(result)
+        assert result.ok_value == expected
 
     def test_integer_literal_stays_an_integer_past_the_float_range(self) -> None:
         digits = '1' * 400

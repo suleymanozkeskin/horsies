@@ -435,6 +435,15 @@ and there is no migration contract between pre-1.0 versions.
   underflows, such as `1e-9999`, still parses to `0.0`.
 - **`decode_input_envelope` returns `InputEnvelopeCorrupt` for an integer
   over the parse limit of 4300 digits.** Before, it raised `ValueError`.
+- **`loads_json` refuses a lone UTF-16 surrogate.** An escape such as
+  `\ud800` decoded to a string that UTF-8 cannot encode, so the failure came
+  later: one such row aborted a cutover preparation batch, and a rerun of a
+  stored envelope raised `UnicodeEncodeError`. Each reader now refuses the
+  value: `enqueue_async` returns `INVALID_INPUT` and writes nothing, the worker
+  returns `WORKER_SERIALIZATION_ERROR`, cutover preparation counts the row as a
+  decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
+  refused such a string. A surrogate pair such as `\ud83d\ude00` is one valid
+  character and stays accepted.
 
 ## [0.5.5] - 2026-10-28
 
