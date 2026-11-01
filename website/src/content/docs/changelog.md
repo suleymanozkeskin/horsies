@@ -637,6 +637,8 @@ there is no migration contract between pre-1.0 versions.
   repair reaches the limit sooner. The worker health surface gets
   `failures_counted` and `limit_reached` per case, `over_failure_limit` for each
   workflow recovery pass, and `raised_counted` for each phase-2 pass.
+- The top-level `errors` of the `workflow_recovery` health counts every recovery
+  case. Before, it left out `case_0`, `case_1`, `case_1_5` and `case_1_6`.
 - The parent advancement after a global workflow completion runs in its own
   SAVEPOINT. A raise there no longer rolls back the completion of the child, so
   the child ends, and recovery counts the raise on the parent workflow.

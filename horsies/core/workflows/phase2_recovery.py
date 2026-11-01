@@ -57,12 +57,13 @@ from horsies.core.models.tasks import (
     TaskError,
     TaskResult,
 )
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import is_err
 from horsies.core.workflows.engine import (
     apply_node_progression,
     node_status_for_terminal_task,
 )
 from horsies.core.workflows.recovery_limit import (
+    RecoveryCandidateOutcome,
     RecoveryCase,
     RecoveryRaise,
     RecoveryRaiseClass,
@@ -510,14 +511,16 @@ async def _record_raised_row(
     """Count one persistent raise of a row, and stop its workflow at the bound.
 
     Runs in a new transaction, because the raise rolled back the transaction
-    of the row. Discovery stops at the bound, so a limit write that fails
-    rolls this attempt back too. The row then stays under the bound and the
-    next pass tries again.
+    of the row. Discovery stops at the bound, so the bound must not be
+    reached unless the limit applied. A limit write that fails, or that a
+    PAUSED workflow refuses, rolls this attempt back. The row then stays
+    under the bound. A later pass, after a resume, raises again and applies
+    the limit to a RUNNING workflow.
 
     Returns:
         `_RaisedRowRecorded` when the attempt committed;
-        `_RaisedRowNotRecorded` when the write failed, or when the row is
-        gone. After that outcome nothing changed.
+        `_RaisedRowNotRecorded` when a write failed, when the limit was
+        refused, or when the row is gone. After that outcome nothing changed.
     """
     try:
         async with session_factory() as session:
@@ -541,34 +544,38 @@ async def _record_raised_row(
                     quarantined=False,
                     quarantine_refusal=None,
                 )
-            quarantined, refusal = await _quarantine_exhausted_row(
-                session,
-                task_id=task_id,
-                attempt_count=int(attempt_count),
-                disposition=RAISED_FAILURE_CLASS,
-            )
             failure = RecoveryRaise.of(
                 exc,
                 workflow_id=str(context.workflow_id),
                 task_index=int(context.task_index),
                 case=RecoveryCase.PHASE2_PROGRESSION,
             )
-            limit_result = await apply_recovery_limit(
-                session, failure, int(attempt_count),
+            record = report_recovery_limit(
+                await apply_recovery_limit(
+                    session, failure, int(attempt_count),
+                ),
+                failure,
+                int(attempt_count),
             )
-            _ = report_recovery_limit(
-                limit_result, failure, int(attempt_count),
-            )
-            match limit_result:
-                case Err():
-                    await session.rollback()
-                    return _RaisedRowNotRecorded()
-                case Ok():
+            match record:
+                case RecoveryCandidateOutcome.LIMIT_REACHED:
+                    quarantined, refusal = await _quarantine_exhausted_row(
+                        session,
+                        task_id=task_id,
+                        attempt_count=int(attempt_count),
+                        disposition=RAISED_FAILURE_CLASS,
+                    )
                     await session.commit()
                     return _RaisedRowRecorded(
                         quarantined=quarantined,
                         quarantine_refusal=refusal,
                     )
+                case (
+                    RecoveryCandidateOutcome.COUNTED
+                    | RecoveryCandidateOutcome.NOT_COUNTED
+                ):
+                    await session.rollback()
+                    return _RaisedRowNotRecorded()
                 case _ as unreachable:
                     assert_never(unreachable)
     except SQLAlchemyError as write_error:

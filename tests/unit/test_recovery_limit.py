@@ -9,6 +9,7 @@ nothing.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -24,17 +25,19 @@ from sqlalchemy.exc import (
 )
 
 from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
+from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import decode_task_error, encode_task_error
 from horsies.core.models.recovery import (
     DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT,
     RecoveryConfig,
 )
-from horsies.core.models.tasks import OperationalErrorCode
+from horsies.core.models.tasks import OperationalErrorCode, TaskError
 from horsies.core.types.result import Err, Ok, Result, is_ok
 from horsies.core.workflows import recovery
 from horsies.core.workflows.recovery import (
     RecoveryCaseMetrics,
     RecoveryReport,
+    _GlobalCandidateOutcome,
     _recovered_count,
     _run_recovery_candidate,
 )
@@ -51,8 +54,10 @@ from horsies.core.workflows.recovery_limit import (
     RecoveryRaiseClass,
     RecoveryWrite,
     RecoveryWriteFailed,
+    _limit_json,
     classify_recovery_raise,
     recovery_limit_error,
+    recovery_limit_payloads,
     report_recovery_limit,
 )
 
@@ -397,6 +402,157 @@ class TestHealth:
         assert isinstance(cases, dict)
         assert cases['case_1']['failures_counted'] == 3
         assert cases['case_1']['limit_reached'] == 1
+
+
+class TestRecoveryLimitPayloads:
+    def test_both_forms_hold_the_same_error(self) -> None:
+        error = recovery_limit_error(_failure(), 25)
+
+        payloads = recovery_limit_payloads(error)
+
+        workflow_error = loads_json(payloads.workflow_error_json)
+        node_result = loads_json(payloads.node_result_json)
+        assert is_ok(workflow_error)
+        assert is_ok(node_result)
+        envelope = node_result.ok_value
+        assert isinstance(envelope, dict)
+        assert sorted(envelope) == ['__h_task_result__', 'err', 'ok']
+        assert envelope['err'] == workflow_error.ok_value
+        assert (
+            decode_task_error(workflow_error.ok_value).error_code
+            is OperationalErrorCode.WORKFLOW_RECOVERY_LIMIT_REACHED
+        )
+
+    def test_an_error_that_does_not_encode_raises(self) -> None:
+        """A defect is loud. It does not store a fallback text."""
+        error = TaskError(
+            error_code=OperationalErrorCode.WORKFLOW_RECOVERY_LIMIT_REACHED,
+            message='unescaped \ud800',
+        )
+        with pytest.raises(StrictJsonError):
+            recovery_limit_payloads(error)
+
+    def test_a_value_that_does_not_serialize_raises(self) -> None:
+        with pytest.raises(SerializationError):
+            _limit_json({'text': 'unescaped \ud800'})
+
+
+class TestTopLevelErrors:
+    """The published count adds the pass-level count and every case."""
+
+    def test_it_adds_the_stored_count_and_each_case(self) -> None:
+        report = RecoveryReport(errors=1)
+        for number, metrics in enumerate(report.metrics.values(), start=1):
+            metrics.errors = number
+
+        assert report.health()['errors'] == 1 + 1 + 2 + 3 + 4 + 5 + 6
+
+    def test_a_case_error_alone_is_published(self) -> None:
+        report = RecoveryReport()
+        report.metrics['case_1_6'].errors = 1
+
+        assert report.health()['errors'] == 1
+
+
+def _session_factory(audit_row: Any) -> MagicMock:
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    result = MagicMock()
+    result.one_or_none = MagicMock(return_value=audit_row)
+    session.execute = AsyncMock(return_value=result)
+    return MagicMock(return_value=session)
+
+
+def _audit_row(*, completion: bool, orphan: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        scanned_count=1,
+        completion_ids=['completion'] if completion else [],
+        orphan_ids=['orphan'] if orphan else [],
+        orphan_names=['name'] if orphan else [],
+        claim_token='token',
+    )
+
+
+@pytest.mark.asyncio
+class TestEachFailureCountsOnce:
+    """Each step that adds to a case must not add to the pass-level count."""
+
+    @staticmethod
+    async def _health(audit_row: Any, **patches: Any) -> dict[str, object]:
+        report = RecoveryReport()
+        with (
+            patch.object(recovery, 'recover_stuck_workflows', AsyncMock(return_value=0)),
+            patch.multiple(recovery, **patches),
+        ):
+            await recovery._recover_stuck_workflows_global(
+                _session_factory(audit_row),
+                None,
+                report,
+                _COUNTING,
+            )
+        return report.health()
+
+    async def test_a_failed_renewal_for_a_completion(self) -> None:
+        health = await self._health(
+            _audit_row(completion=True, orphan=False),
+            _renew_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
+        )
+        assert health['errors'] == 1
+
+    async def test_a_failed_renewal_for_an_orphan(self) -> None:
+        health = await self._health(
+            _audit_row(completion=False, orphan=True),
+            _renew_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
+            _release_global_claim=AsyncMock(),
+        )
+        assert health['errors'] == 1
+
+    async def test_a_failed_orphan_candidate(self) -> None:
+        health = await self._health(
+            _audit_row(completion=False, orphan=True),
+            _renew_global_claim=AsyncMock(return_value=True),
+            _release_global_claim=AsyncMock(),
+            _recover_global_orphan_candidate=AsyncMock(
+                return_value=_GlobalCandidateOutcome.ERROR,
+            ),
+        )
+        assert health['errors'] == 1
+
+    async def test_a_failed_release_counts_in_each_case_that_it_serves(self) -> None:
+        health = await self._health(
+            _audit_row(completion=False, orphan=False),
+            _release_global_claim=AsyncMock(side_effect=RuntimeError('lost')),
+        )
+        assert health['errors'] == 2
+
+    async def test_a_failed_audit_counts_in_each_case_that_it_serves(self) -> None:
+        session = AsyncMock()
+        session.__aenter__ = AsyncMock(return_value=session)
+        session.__aexit__ = AsyncMock(return_value=None)
+        session.execute = AsyncMock(side_effect=RuntimeError('audit failed'))
+        with (
+            patch.object(recovery, 'recover_stuck_workflows', AsyncMock(return_value=0)),
+            pytest.raises(recovery.RecoveryPassFailure) as raised,
+        ):
+            await recovery.recover_stuck_workflows_global(
+                MagicMock(return_value=session),
+            )
+        assert raised.value.health()['errors'] == 2
+        assert str(raised.value.error) == 'audit failed'
+
+    async def test_a_failure_that_no_case_counted_is_pass_level(self) -> None:
+        with (
+            patch.object(
+                recovery,
+                '_recover_stuck_workflows_global',
+                AsyncMock(side_effect=RuntimeError('commit failed')),
+            ),
+            pytest.raises(recovery.RecoveryPassFailure) as raised,
+        ):
+            await recovery.recover_stuck_workflows_global(MagicMock())
+        assert raised.value.health()['errors'] == 1
+        assert raised.value.report.errors == 1
 
 
 class TestConfig:

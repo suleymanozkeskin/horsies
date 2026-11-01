@@ -182,7 +182,8 @@ configuration snapshot, refreshed with each snapshot:
   `raised_counted` rows whose progression raised a persistent error, and
   the quarantine function's refusals verbatim).
 - `workflow_recovery` — the last workflow recovery pass: `recovered`,
-  `errors`, and per case the rows selected, refusals and errors.
+  `errors`, and per case the rows selected, refusals and errors. The
+  top-level `errors` adds every case and the failures that no case counted.
   `failures_counted` and `limit_reached` per case show the
   [recovery limit](../configuration/recovery-config#workflow-recovery-limit).
   `over_failure_limit` counts the `RUNNING` workflows at or over the limit:

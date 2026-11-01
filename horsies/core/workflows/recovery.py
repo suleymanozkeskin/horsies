@@ -583,7 +583,12 @@ def completion_candidate_yield(audit: AuditResult) -> float | None:
 
 @dataclass
 class RecoveryReport:
-    """Health result for one global recovery pass."""
+    """Health result for one global recovery pass.
+
+    `errors` holds only the failures of the pass that no case counted. The
+    published `errors` adds the errors of every case, so each failure counts
+    once. A step that serves two cases, such as the audit, counts in each.
+    """
 
     recovered: int = 0
     errors: int = 0
@@ -597,7 +602,9 @@ class RecoveryReport:
     def health(self) -> dict[str, object]:
         return {
             'recovered': self.recovered,
-            'errors': self.errors,
+            'errors': self.errors + sum(
+                metrics.errors for metrics in self.metrics.values()
+            ),
             'over_failure_limit': self.over_failure_limit,
             'completion_candidate_yield': completion_candidate_yield(self.audit),
             'cases': {
@@ -622,6 +629,17 @@ class RecoveryPassFailure(Exception):
         return snapshot
 
 
+class _CaseCountedFailure(Exception):
+    """A raise that ends the pass after a case put it in its errors.
+
+    The global pass unwraps it, so that one failure counts once.
+    """
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__(str(error))
+        self.error = error
+
+
 class _GlobalCandidateOutcome(Enum):
     APPLIED = 'applied'
     STATE_REFUSED = 'state_refused'
@@ -639,11 +657,12 @@ async def _execute_candidate_query(
 ) -> list[Any]:
     try:
         return list((await session.execute(statement, parameters)).fetchall())
-    except Exception:
-        if metrics is not None:
-            metrics.duration_ms = int((time.monotonic() - started) * 1000)
-            metrics.errors += 1
-        raise
+    except Exception as error:
+        if metrics is None:
+            raise
+        metrics.duration_ms = int((time.monotonic() - started) * 1000)
+        metrics.errors += 1
+        raise _CaseCountedFailure(error) from error
 
 async def recover_stuck_workflows(
     session: 'AsyncSession',
@@ -1237,13 +1256,13 @@ async def _recover_stuck_workflows_global(
             )
             audit = result.one_or_none()
             await session.commit()
-    except Exception:
+    except Exception as error:
         duration_ms = int((time.monotonic() - started) * 1000)
         report.metrics['case_2_3'].duration_ms = duration_ms
         report.metrics['case_2_3'].errors += 1
         report.metrics['case_4'].duration_ms = duration_ms
         report.metrics['case_4'].errors += 1
-        raise
+        raise _CaseCountedFailure(error) from error
 
     duration_ms = int((time.monotonic() - started) * 1000)
     case_2_3 = report.metrics['case_2_3']
@@ -1285,7 +1304,6 @@ async def _recover_stuck_workflows_global(
                 )
             except Exception as error:
                 logger.error(f'Workflow audit claim renewal failed: {error}')
-                report.errors += 1
                 case_2_3.errors += 1
                 owns_claim = False
                 break
@@ -1311,7 +1329,7 @@ async def _recover_stuck_workflows_global(
                     owns_claim = False
                     break
                 case _GlobalCandidateOutcome.ERROR:
-                    report.errors += 1
+                    pass  # The candidate counted it in `case_2_3`.
                 case _ as unreachable:
                     assert_never(unreachable)
 
@@ -1330,7 +1348,6 @@ async def _recover_stuck_workflows_global(
                     logger.error(
                         f'Workflow audit claim renewal failed: {error}'
                     )
-                    report.errors += 1
                     case_4.errors += 1
                     owns_claim = False
                     break
@@ -1355,7 +1372,6 @@ async def _recover_stuck_workflows_global(
                         break
                     case _GlobalCandidateOutcome.ERROR:
                         case_4.errors += 1
-                        report.errors += 1
                     case _ as unreachable:
                         assert_never(unreachable)
     finally:
@@ -1364,7 +1380,6 @@ async def _recover_stuck_workflows_global(
                 await _release_global_claim(session_factory, claim_token)
             except Exception as error:
                 logger.error(f'Workflow audit claim release failed: {error}')
-                report.errors += 1
                 case_2_3.errors += 1
                 case_4.errors += 1
 
@@ -1404,6 +1419,8 @@ async def recover_stuck_workflows_global(
             failure_limit,
         )
         return report
+    except _CaseCountedFailure as counted:
+        raise RecoveryPassFailure(report, counted.error) from counted.error
     except Exception as error:
         report.errors += 1
         raise RecoveryPassFailure(report, error) from error

@@ -53,6 +53,8 @@ from horsies.core.workflows.engine import (
 )
 from horsies.core.workflows.phase2_recovery import (
     Phase2RecoverySummary,
+    _RaisedRowNotRecorded,
+    _record_raised_row,
     drive_phase2_recovery,
 )
 from horsies.core.workflows.recovery import (
@@ -458,6 +460,7 @@ class TestCountsUnderTheLimit:
         assert await _node_status(harness, workflow_id, 0) == 'READY'
         assert [r.metrics['case_1'].failures_counted for r in reports] == [1, 1]
         assert [r.metrics['case_1'].limit_reached for r in reports] == [0, 0]
+        assert [r.health()['errors'] for r in reports] == [1, 1]
 
     async def test_two_cases_of_one_workflow_count_once_in_one_pass(
         self, harness: Harness,
@@ -926,7 +929,7 @@ class TestGlobalCompletion:
         await _execute(harness, 'DROP TRIGGER limit_test_kill ON horsies_workflows')
         await _execute(harness, 'DROP FUNCTION limit_test_kill()')
         assert report.metrics['case_2_3'].errors == 1
-        assert report.errors == 1
+        assert report.health()['errors'] == 1
         assert await _failed_passes(harness, workflow_id) is None
 
         await _run_pass(harness)
@@ -1131,6 +1134,57 @@ class TestPhase2Catch:
         await _stop_raising_on_update(harness, table='horsies_workflows')
         await _run_phase2(harness)
 
+        assert await _workflow_status(harness, workflow_id) == 'FAILED'
+
+
+class TestPhase2PauseWindow:
+    async def test_a_pause_at_the_bound_leaves_the_row_for_a_later_pass(
+        self, harness: Harness,
+    ) -> None:
+        """The workflow pauses after the raise and before the limit write.
+        Discovery stops at the bound, so a stored attempt would leave the
+        resumed workflow RUNNING with no path to end."""
+        workflow_id, task_id = await _start_a_then_b(harness)
+        for _ in range(LIMIT - 1):
+            await _run_phase2(harness)
+        await _execute(
+            harness,
+            "UPDATE horsies_workflows SET status = 'PAUSED' WHERE id = :id",
+            id=workflow_id,
+        )
+
+        row = await _record_raised_row(
+            harness.sessions,
+            task_id=task_id,
+            exc=RuntimeError('raised before the pause'),
+            quarantine_after_attempts=LIMIT,
+        )
+
+        assert isinstance(row, _RaisedRowNotRecorded)
+        async with harness.sessions() as session:
+            stored = (
+                await session.execute(
+                    text(
+                        'SELECT attempt_count, recovery_source '
+                        'FROM horsies_workflow_phase2_pending '
+                        'WHERE task_id = :id',
+                    ),
+                    {'id': task_id},
+                )
+            ).one()
+        assert stored.attempt_count == LIMIT - 1
+        assert stored.recovery_source == 'HISTORY'
+        assert await _workflow_status(harness, workflow_id) == 'PAUSED'
+
+        await _execute(
+            harness,
+            "UPDATE horsies_workflows SET status = 'RUNNING' WHERE id = :id",
+            id=workflow_id,
+        )
+        summary = await _run_phase2(harness)
+
+        assert summary.considered == 1
+        assert summary.quarantined == 1
         assert await _workflow_status(harness, workflow_id) == 'FAILED'
 
 

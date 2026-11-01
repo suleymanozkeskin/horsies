@@ -20,10 +20,9 @@ from typing import TYPE_CHECKING, Final, Literal, assert_never
 from sqlalchemy import text
 from sqlalchemy.exc import PendingRollbackError, SQLAlchemyError
 
-from horsies.core.codec.error_payload import serialize_error_payload
-from horsies.core.codec.json_io import SerializationError, dumps_json
+from horsies.core.codec.json_io import Json, SerializationError, dumps_json
 from horsies.core.codec.json_value import escape_lone_surrogates
-from horsies.core.codec.typed import encode_task_error
+from horsies.core.codec.typed import encode_task_result
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -165,6 +164,14 @@ class RecoveryRaise:
 
 
 @dataclass(frozen=True, slots=True)
+class RecoveryLimitPayloads:
+    """The limit error in the two forms that it is stored in."""
+
+    workflow_error_json: str
+    node_result_json: str
+
+
+@dataclass(frozen=True, slots=True)
 class PassCounted:
     """This raise added one to the count."""
 
@@ -295,6 +302,42 @@ def recovery_limit_error(failure: RecoveryRaise, failed_passes: int) -> TaskErro
     )
 
 
+def _limit_json(value: Json) -> str:
+    """Serialize a part of the limit error, or raise.
+
+    Raises:
+        SerializationError: the value does not serialize. The limit error is
+            built only from escaped text, so this is a defect.
+    """
+    match dumps_json(value):
+        case Ok(serialized):
+            return serialized
+        case Err(cause):
+            raise SerializationError(
+                f'Failed to serialize the workflow recovery limit error: {cause}',
+            ) from cause
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def recovery_limit_payloads(error: TaskError) -> RecoveryLimitPayloads:
+    """Encode the limit error once, for the workflow row and the node row.
+
+    A defect here raises. It does not fall back to a stored text that hides
+    the error.
+
+    Raises:
+        StrictJsonError: the error does not encode.
+        ValueValidationError: the error does not encode.
+        SerializationError: the encoded error does not serialize.
+    """
+    envelope = encode_task_result(TaskResult(err=error), type(None))
+    return RecoveryLimitPayloads(
+        workflow_error_json=_limit_json(envelope['err']),
+        node_result_json=_limit_json(envelope),
+    )
+
+
 async def _count_recovery_raise(
     session: 'AsyncSession',
     policy: CountFailures,
@@ -349,9 +392,7 @@ def _write_failed(
 async def _write_limit(
     session: 'AsyncSession',
     failure: RecoveryRaise,
-    *,
-    error_json: str,
-    node_result_json: str,
+    payloads: RecoveryLimitPayloads,
 ) -> RecoveryLimitOutcome:
     """Stop the workflow with SQL only, under the workflow row lock.
 
@@ -377,14 +418,14 @@ async def _write_limit(
             {
                 'wf_id': workflow_id,
                 'idx': failure.task_index,
-                'result': node_result_json,
+                'result': payloads.node_result_json,
                 'terminal_states': WF_TASK_TERMINAL_VALUES,
             },
         )
     await session.execute(SKIP_UNSTARTED_NODES_SQL, {'workflow_id': workflow_id})
     await session.execute(
         KEEP_FIRST_WORKFLOW_ERROR_SQL,
-        {'workflow_id': workflow_id, 'error': error_json},
+        {'workflow_id': workflow_id, 'error': payloads.workflow_error_json},
     )
     has_live_node = (
         await session.execute(HAS_LIVE_NODE_SQL, {'workflow_id': workflow_id})
@@ -415,31 +456,16 @@ async def apply_recovery_limit(
     The next raise tries the write again.
 
     Raises:
-        SerializationError: the limit error does not serialize. It is built
-            only from escaped text, so this is a defect.
+        StrictJsonError: from ``recovery_limit_payloads``.
+        ValueValidationError: from ``recovery_limit_payloads``.
+        SerializationError: from ``recovery_limit_payloads``.
     """
-    error = recovery_limit_error(failure, failed_passes)
-    match dumps_json(encode_task_error(error)):
-        case Ok(error_json):
-            pass
-        case Err(cause):
-            raise SerializationError(
-                f'Failed to serialize the limit error of workflow '
-                f'{failure.workflow_id}: {cause}',
-            ) from cause
-        case _ as unreachable:
-            assert_never(unreachable)
-    node_result_json = serialize_error_payload(TaskResult(err=error))
+    payloads = recovery_limit_payloads(
+        recovery_limit_error(failure, failed_passes),
+    )
     try:
         async with session.begin_nested():
-            return Ok(
-                await _write_limit(
-                    session,
-                    failure,
-                    error_json=error_json,
-                    node_result_json=node_result_json,
-                ),
-            )
+            return Ok(await _write_limit(session, failure, payloads))
     except SQLAlchemyError as exc:
         return Err(_write_failed(RecoveryWrite.LIMIT, failure.workflow_id, exc))
 
