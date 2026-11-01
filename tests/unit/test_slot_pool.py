@@ -33,7 +33,10 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     encode_child_frame,
 )
+from horsies.core.worker import slots
 from horsies.core.worker.slots import (
+    CHILD_BOOT_ATTEMPTS,
+    CHILD_BOOT_KILL_DELAY_MAX_S,
     SLOT_DEFECT_LIMIT,
     Assigned,
     BootAttemptsExhausted,
@@ -61,6 +64,7 @@ from horsies.core.worker.slots import (
     child_exit_from_returncode,
     describe_exit,
     interpreter_flags,
+    outside_kill_delay_s,
 )
 
 SCRIPTED_CHILD = str(Path(__file__).parent.parent / 'fixtures' / 'slots' / 'scripted_child.py')
@@ -881,6 +885,57 @@ class TestSlotDefects:
             for _ in range(SLOT_DEFECT_LIMIT - 1):
                 await _outcome(pool.submit(self._unsendable()))
             assert await _result_json(pool.submit(_frame('echo', 'ok'))) == 'ok'
+
+
+@pytest.mark.asyncio(loop_scope='function')
+class TestBootKills:
+    """An outside SIGKILL on a replacement child says nothing about the code."""
+
+    async def test_kills_of_a_replacement_do_not_stop_the_pool(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        kills = CHILD_BOOT_ATTEMPTS + 2
+        marks = tmp_path / 'marks'
+        init = _init(f'killed_after_first:{marks}', (str(kills),))
+        pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
+
+        assert await _result_json(pool.submit(_frame('echo', 'first'))) == 'first'
+        assert await _result_json(pool.submit(_frame('echo', 'next'))) == 'next'
+
+        assert len(marks.read_text()) == kills + 2
+        assert pool._failure is None
+
+    async def test_a_kill_during_the_first_start_still_counts(self) -> None:
+        pool = SlotPool(_config(init=_init('killed_always')), pending_limit=10)
+        match await asyncio.wait_for(pool.start(), OUTCOME_TIMEOUT_S):
+            case Err(BootAttemptsExhausted(attempts=attempts)):
+                assert attempts == CHILD_BOOT_ATTEMPTS
+            case other:
+                raise AssertionError(other)
+        await pool.stop(0)
+
+    async def test_a_replacement_that_cannot_boot_still_counts(
+        self,
+        pool_factory: PoolFactory,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'CHILD_BOOT_RETRY_DELAY_S', 0.01)
+        init = _init(f'fails_after_first:{tmp_path / "marks"}', ('100',))
+        pool = await pool_factory(_config(init=init, max_tasks_per_child=1))
+
+        await _outcome(pool.submit(_frame('echo', 'first')))
+
+        failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
+        assert isinstance(failure, BootAttemptsExhausted)
+
+    async def test_the_wait_grows_and_stays_bounded(self) -> None:
+        assert outside_kill_delay_s(1) < outside_kill_delay_s(2)
+        assert outside_kill_delay_s(10_000) == CHILD_BOOT_KILL_DELAY_MAX_S
 
 
 @pytest.mark.asyncio(loop_scope='function')

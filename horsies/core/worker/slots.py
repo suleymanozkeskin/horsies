@@ -59,6 +59,7 @@ CHILD_ENTRY: Final[tuple[str, ...]] = ('-m', 'horsies.core.worker.child_main')
 SOCKET_BUFFER_BYTES: Final = 4 << 20
 CHILD_BOOT_ATTEMPTS: Final = 3
 CHILD_BOOT_RETRY_DELAY_S: Final = 0.5
+CHILD_BOOT_KILL_DELAY_MAX_S: Final = 5.0
 CHILD_READY_TIMEOUT_S: Final = 120.0
 CHILD_STOP_TIMEOUT_S: Final = 10.0
 CHILD_KILL_WAIT_S: Final = 30.0
@@ -690,6 +691,11 @@ class _Slot:
     defects: int = 0
 
 
+def outside_kill_delay_s(kills_in_a_row: int) -> float:
+    """Return the wait before the next child. It grows, and it stays bounded."""
+    return min(CHILD_BOOT_RETRY_DELAY_S * kills_in_a_row, CHILD_BOOT_KILL_DELAY_MAX_S)
+
+
 class SlotPool:
     """A FIFO in the parent and one coroutine per slot.
 
@@ -838,7 +844,9 @@ class SlotPool:
             self._config.init,
             process_name=f'{self._config.init.process_name}-{slot.index}',
         )
-        for attempt in range(1, CHILD_BOOT_ATTEMPTS + 1):
+        attempt = 0
+        outside_kills = 0
+        while attempt < CHILD_BOOT_ATTEMPTS:
             if self._stopping:
                 return Err(PoolStopped())
             match await Child.start(self._config, init):
@@ -871,6 +879,16 @@ class SlotPool:
             slot.child = None
             if self._stopping:
                 return Err(PoolStopped())
+            if self._is_outside_kill_of_replacement(ready):
+                outside_kills += 1
+                logger.warning(
+                    'Replacement child on slot %s was killed during boot, %s in a row',
+                    slot.index,
+                    outside_kills,
+                )
+                await asyncio.sleep(outside_kill_delay_s(outside_kills))
+                continue
+            attempt += 1
             logger.warning(
                 'Child boot attempt %s/%s failed on slot %s: %s',
                 attempt,
@@ -881,6 +899,22 @@ class SlotPool:
             if attempt < CHILD_BOOT_ATTEMPTS:
                 await asyncio.sleep(CHILD_BOOT_RETRY_DELAY_S * attempt)
         return Err(BootAttemptsExhausted(CHILD_BOOT_ATTEMPTS, last_detail))
+
+    def _is_outside_kill_of_replacement(
+        self,
+        ready: ChildFrame | ChildLost | WaitExpired,
+    ) -> bool:
+        """Tell a SIGKILL from outside apart from a child that cannot boot.
+
+        Such a kill says nothing about the code, so it does not spend an attempt
+        and cannot stop a worker with healthy tasks. A first start still counts
+        it: no task runs yet, and a supervisor should see the failure.
+        """
+        match ready:
+            case ChildLost(child_exit=KilledBySignal(signal_number=signal.SIGKILL)):
+                return self._first_generation.done()
+            case _:
+                return False
 
     def _note_ready(self, slot: _Slot, baseline: ChildBaseline) -> None:
         if self._first_generation.done():
