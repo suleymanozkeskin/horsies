@@ -518,6 +518,15 @@ and there is no migration contract between pre-1.0 versions.
   `CONFIG_INVALID_SCHEDULE` from `prepare_schedules`,
   `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`) from `app.workflow()`, and
   `WORKER_SERIALIZATION_ERROR` for a task, not `TASK_EXCEPTION`.
+- **Breaking: `encode_value` raises `ValueValidationError` for `bytes` that
+  are not UTF-8.** This holds at a declared `bytes` position and at `Any`,
+  also for a dict key. The text is fixed and holds no byte value. Before, a
+  raw `UnicodeDecodeError` left `encode_value`. A `build_with()` kwarg fails
+  spec construction with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A
+  `TaskError.data` ends the task with `WORKER_SERIALIZATION_ERROR`, not
+  `TASK_EXCEPTION`. Registration refuses `bytes` in a task signature, so
+  `.send()` and a schedule do not reach this. A `UnicodeDecodeError` from a
+  decode in a computed field propagates.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

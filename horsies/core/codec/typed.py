@@ -138,6 +138,11 @@ _NO_JSON_KEY_TEXT: Final = re.compile(r'`\w+` not valid as object key')
 key without a JSON form. Its one placeholder is a type name, so it holds no
 input value. `_dump` matches all of it: any other `TypeError` is a defect."""
 
+_NOT_UTF8_REASON: Final = 'invalid utf-8'
+"""The `reason` of the `UnicodeDecodeError` that `dump_python` raises for `bytes`
+that are not UTF-8. A decode in Python gives another reason, such as `invalid
+start byte`, so a bad decode in a computed field stays a defect."""
+
 _NOT_SERIALIZABLE_VALUE_TEXTS: Final = frozenset({
     'Circular reference detected (id repeated)',
     'Circular reference detected (depth exceeded)',
@@ -205,9 +210,9 @@ def encode_value(
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
        A dict key with a lone surrogate raises at a position without a
        declared key type; `_dump` makes that a `StrictJsonError`. A dict key
-       without a JSON form, a value that holds itself and a value that is
-       nested too deep raise too; `_dump` makes those a
-       `ValueValidationError`.
+       without a JSON form, a value that holds itself, a value that is nested
+       too deep and `bytes` that are not UTF-8 raise too; `_dump` makes those
+       a `ValueValidationError`.
     4. `_scan_wire_json` rejects non-finite floats and strings with a lone
        surrogate at any depth, so `encode_value` refuses each string that
        `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
@@ -357,8 +362,14 @@ def _dump(
     that is nested too deep. The same rule applies: only the full text is
     this refusal. Any other `ValueError` propagates, for example from a
     computed field. The arm comes after the arms for
-    `PydanticSerializationError` and `UnicodeEncodeError`, because both are a
-    `ValueError`.
+    `PydanticSerializationError`, `UnicodeEncodeError` and
+    `UnicodeDecodeError`, because each is a `ValueError`.
+
+    Pydantic raises `UnicodeDecodeError` for `bytes` that are not UTF-8, at
+    a declared `bytes` position and at `Any`, also as a dict key. Its text
+    and its `object` hold the bytes, so the refusal has a fixed text and is
+    raised outside the `except` block. Only the `reason` of pydantic is this
+    refusal; a decode error from Python code propagates.
     """
     failure: StrictJsonError | ValueValidationError
     try:
@@ -367,6 +378,12 @@ def _dump(
         failure = ValueValidationError(f'serialization failed: {error}')
     except UnicodeEncodeError:
         failure = StrictJsonError(lone_surrogate_text('a dict key', location))
+    except UnicodeDecodeError as error:
+        if error.reason != _NOT_UTF8_REASON:
+            raise
+        failure = ValueValidationError(
+            _with_location('serialization failed: bytes that are not UTF-8', location),
+        )
     except TypeError as error:
         if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
             raise

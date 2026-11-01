@@ -32,7 +32,7 @@ from typing import (
 )
 
 import pytest
-from pydantic import AfterValidator, BaseModel, Field, computed_field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
 from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.json_io import dumps_json
@@ -61,6 +61,7 @@ from horsies.core.codec.typed import (
 
 
 LONE_SURROGATE_TEXT = f'keep-out{chr(0xd800)}'
+NOT_UTF8 = b'\xff'
 
 
 class _User(BaseModel):
@@ -1148,11 +1149,6 @@ class TestValueErrorThatStaysRaw:
         assert type(raised.value) is ValueError
         assert str(raised.value) == 'defect in a generator'
 
-    def test_a_unicode_decode_error_propagates(self) -> None:
-        """It is a `ValueError` subclass with another text."""
-        with pytest.raises(UnicodeDecodeError):
-            encode_value(b'\xff', Any)
-
     def test_the_subclass_refusals_keep_their_own_arms(self) -> None:
         """`PydanticSerializationError` and `UnicodeEncodeError` are a
         `ValueError` too. Their arms must come first."""
@@ -1160,6 +1156,101 @@ class TestValueErrorThatStaysRaw:
             encode_value(object(), Any)
         with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
             encode_value({LONE_SURROGATE_TEXT: 1}, Any)
+        with pytest.raises(ValueValidationError, match='bytes that are not UTF-8'):
+            encode_value(NOT_UTF8, Any)
+
+
+class _BytesField(BaseModel):
+    payload: bytes
+
+
+class _OptionalBytesField(BaseModel):
+    payload: Optional[bytes] = None
+
+
+class _Base64BytesField(BaseModel):
+    model_config = ConfigDict(ser_json_bytes='base64')
+
+    payload: bytes
+
+
+@dataclasses.dataclass
+class _BytesDataclass:
+    payload: bytes
+
+
+class _DecodeInComputedField(BaseModel):
+    number: int = 1
+
+    @computed_field
+    @property
+    def decoded(self) -> str:
+        return NOT_UTF8.decode('utf-8')
+
+
+class TestBytesThatAreNotUtf8:
+    """`dump_python` raises `UnicodeDecodeError` for these values.
+
+    A declared `bytes` position and `Any` behave the same.
+    """
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (NOT_UTF8, bytes),
+            (NOT_UTF8, Optional[bytes]),
+            ([NOT_UTF8], list[bytes]),
+            ({'key': NOT_UTF8}, dict[str, bytes]),
+            ((NOT_UTF8,), tuple[bytes, ...]),
+            ({NOT_UTF8: 1}, dict[bytes, int]),
+            (_BytesField(payload=NOT_UTF8), _BytesField),
+            (_OptionalBytesField(payload=NOT_UTF8), _OptionalBytesField),
+            (_BytesDataclass(payload=NOT_UTF8), _BytesDataclass),
+            (NOT_UTF8, Any),
+            (bytearray(NOT_UTF8), Any),
+            ({'key': NOT_UTF8}, Any),
+            ([NOT_UTF8], Any),
+            ({'key': NOT_UTF8}, dict[str, Any]),
+            ({NOT_UTF8: 1}, Any),
+        ],
+        ids=[
+            'bytes', 'optional', 'in-list', 'in-dict-value', 'in-tuple',
+            'declared-key', 'model-field', 'optional-model-field',
+            'dataclass-field', 'at-any', 'bytearray-at-any', 'dict-at-any',
+            'list-at-any', 'any-dict-value', 'key-at-any',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: bytes that are not UTF-8'
+        )
+
+    def test_the_refusal_holds_no_input_value(self) -> None:
+        """The `UnicodeDecodeError` holds the bytes, so it is not chained."""
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(NOT_UTF8, Any)
+
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+    def test_a_decode_error_from_a_computed_field_propagates(self) -> None:
+        """A decode in Python gives another `reason`: a defect stays raw."""
+        with pytest.raises(UnicodeDecodeError) as raised:
+            encode_value(_DecodeInComputedField(), _DecodeInComputedField)
+
+        assert raised.value.reason == 'invalid start byte'
+
+    def test_a_model_that_serializes_bytes_as_base64_is_accepted(self) -> None:
+        encoded = encode_value(_Base64BytesField(payload=NOT_UTF8), _Base64BytesField)
+
+        assert encoded == {'payload': '_w=='}
 
 
 class TestEncodeValueKeepsValidText:

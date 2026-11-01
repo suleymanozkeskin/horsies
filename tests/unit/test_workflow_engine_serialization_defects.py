@@ -789,6 +789,37 @@ class TestValueThatIsTooDeep:
         )
 
 
+class TestBytesThatAreNotUtf8:
+    """Registration refuses `bytes` in a task signature, so `.send()` and a
+    schedule cannot reach this. It does not check a `build_with()` parameter."""
+
+    def test_a_subworkflow_node_kwarg_is_hrs_031(self) -> None:
+        """Before, the raw `UnicodeDecodeError` left `app.workflow()`."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'not-utf8-child'
+            definition_key = _key('not_utf8_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, payload: bytes = b'', **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='not-utf8-sub-node',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'payload': b'\xff'},
+                )],
+                definition_key=_key('not_utf8_sub_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'bytes that are not UTF-8' in ' '.join(raised.value.notes)
+
+
 class TestChildStartOfALoneSurrogate:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

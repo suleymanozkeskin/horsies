@@ -937,7 +937,14 @@ def _registered_tasks() -> dict[str, Any]:
             err=TaskError(error_code='MY_ERROR', message='m', data=value),
         )
 
+    @app.task('bytes.error_data')
+    def error_data_is_not_utf8() -> TaskResult[int, TaskError]:
+        return TaskResult(
+            err=TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
+        )
+
     return {
+        'error-data-not-utf8': error_data_is_not_utf8,
         'value-error': returns_echoing,
         'custom-error-context': returns_custom_error,
         'returned-model': returns_itself,
@@ -1346,6 +1353,29 @@ class TestRunTaskEntryErrorPaths:
             'Circular reference detected (depth exceeded)'
             in parsed['err']['message']
         )
+
+    def test_bytes_that_are_not_utf8_in_error_data_end_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """`TaskError.data` is the one task value that registration does not
+        type. The refusal holds no byte value."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_app.tasks.__getitem__ = MagicMock(
+            return_value=_registered_tasks()['error-data-not-utf8'],
+        )
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert 'bytes that are not UTF-8' in parsed['err']['message']
+        assert '0xff' not in parsed['err']['message']
 
     def test_a_validator_text_with_a_lone_surrogate_fails_the_kwargs_decode(
         self,
