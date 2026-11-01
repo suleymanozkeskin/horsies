@@ -7,36 +7,22 @@
 import { useEffect, useState } from 'react';
 
 import type { ActionAvailability } from '@/actions/eligibility';
-import {
-  taskCancelAvailability,
-  taskRetryAvailability,
-} from '@/actions/eligibility';
-import {
-  entityOf,
-  isTaskActionSettled,
-  type SettleContext,
-} from '@/actions/settle';
+import { taskCancelAvailability } from '@/actions/eligibility';
+import { isTaskActionSettled, type SettleContext } from '@/actions/settle';
 import {
   useEntityAction,
   type EntityActionControls,
 } from '@/actions/use-entity-action';
-import { useNow } from '@/hooks/use-now';
 import { useTask } from '@/hooks/use-task';
 import type { ActionKind } from '@/types/actions';
 import type { TaskDetail } from '@/types/tasks';
 
 const taskSnapshot = (detail: TaskDetail | undefined): SettleContext => ({
   wasStatus: detail?.leaf.status ?? null,
-  retryCountBefore: detail?.leaf.retry_count ?? null,
 });
 
-const hasSettled = (
-  action: ActionKind,
-  detail: TaskDetail,
-  context: SettleContext
-): boolean =>
-  entityOf(action) === 'task' &&
-  isTaskActionSettled(action as 'task-cancel' | 'task-retry', detail, context);
+const hasSettled = (action: ActionKind, detail: TaskDetail): boolean =>
+  action === 'task-cancel' && isTaskActionSettled(action, detail);
 
 export interface TaskActionsView {
   detail: TaskDetail | undefined;
@@ -44,9 +30,6 @@ export interface TaskActionsView {
   isError: boolean;
   controls: EntityActionControls;
   cancel: ActionAvailability;
-  retry: ActionAvailability;
-  /** Client-side estimate for the retry confirm copy; the server is final. */
-  nextAttempt: number;
 }
 
 export function useTaskActions(
@@ -54,7 +37,6 @@ export function useTaskActions(
   onGone?: () => void
 ): TaskActionsView {
   const [boost, setBoost] = useState<number | false>(false);
-  const now = useNow(15_000);
   const { detail, isLoading, isError, reread } = useTask(taskId, boost);
 
   const controls = useEntityAction<TaskDetail>({
@@ -80,7 +62,6 @@ export function useTaskActions(
       : {
           isWorkflowTask: detail.is_workflow_task,
           status: detail.leaf.status,
-          goodUntil: detail.leaf.good_until,
         };
 
   return {
@@ -92,10 +73,5 @@ export function useTaskActions(
       eligibilityInput === null
         ? { shown: false }
         : taskCancelAvailability(eligibilityInput),
-    retry:
-      eligibilityInput === null
-        ? { shown: false }
-        : taskRetryAvailability(eligibilityInput, now),
-    nextAttempt: (detail?.leaf.retry_count ?? 0) + 1,
   };
 }

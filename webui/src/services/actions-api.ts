@@ -11,10 +11,6 @@ export const cancelTask = (
     include_running: includeRunning,
   });
 
-/** Reset a FAILED/EXPIRED/CANCELLED task row and re-enqueue it. */
-export const retryTask = (taskId: string): Promise<ActionResponse> =>
-  apiPost<ActionResponse>(`/tasks/${encodeURIComponent(taskId)}/retry`);
-
 export const pauseWorkflow = (workflowId: string): Promise<ActionResponse> =>
   apiPost<ActionResponse>(`/workflows/${encodeURIComponent(workflowId)}/pause`);
 
@@ -39,8 +35,6 @@ export function invokeAction(
   switch (action) {
     case 'task-cancel':
       return cancelTask(entityId, args.includeRunning);
-    case 'task-retry':
-      return retryTask(entityId);
     case 'workflow-pause':
       return pauseWorkflow(entityId);
     case 'workflow-resume':
