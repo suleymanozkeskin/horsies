@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import types
 from collections import deque
 from collections.abc import Iterable
@@ -45,6 +46,7 @@ __all__ = [
     'encode_task_error',
     'encode_task_result',
     'encode_value',
+    'lone_surrogate_text',
     'validate_task_result_envelope',
 ]
 
@@ -131,6 +133,16 @@ _RESERVED_DISCRIMINATOR = '__builtin_task_code__'
 _REPLACEMENT_CHAR: Final = '\ufffd'
 """What `dump_python(mode='json')` writes in a dict key for a lone surrogate."""
 
+_NO_JSON_KEY_TEXT: Final = re.compile(r'`\w+` not valid as object key')
+"""The text of the plain `TypeError` from `dump_python(mode='json')` for a dict
+key without a JSON form. Its one placeholder is a type name, so it holds no
+input value. `_dump` matches all of it: any other `TypeError` is a defect."""
+
+_CIRCULAR_REFERENCE_TEXT: Final = 'Circular reference detected (id repeated)'
+"""The text of the plain `ValueError` from `dump_python` for a value that holds
+itself. `_dump` compares all of it: any other `ValueError` propagates, also the
+`Circular reference detected (depth exceeded)` of a value that is only deep."""
+
 
 # ---------------------------------------------------------------------------
 # TypeAdapter cache
@@ -188,7 +200,9 @@ def encode_value(
        fail closed, symmetric with `decode_value` on the consumer.
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
        A dict key with a lone surrogate raises at a position without a
-       declared key type; `_dump` makes that a `StrictJsonError`.
+       declared key type; `_dump` makes that a `StrictJsonError`. A dict key
+       without a JSON form, and a value that holds itself, raise too; `_dump`
+       makes those a `ValueValidationError`.
     4. `_scan_wire_json` rejects non-finite floats and strings with a lone
        surrogate at any depth, so `encode_value` refuses each string that
        `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
@@ -215,8 +229,8 @@ def encode_value(
 
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
-            a lone surrogate in a string or a dict key, or reserved-key
-            smuggling.
+            a lone surrogate in a string, a dict key or the text of a
+            validator, or reserved-key smuggling.
         ValueValidationError: when `value` doesn't satisfy `expected_type`,
             or pydantic cannot serialize the validated value. The text holds
             no input value.
@@ -268,7 +282,8 @@ def decode_value(
         The decoded Python value.
 
     Raises:
-        StrictJsonError: on reserved-key collision in user-positioned data.
+        StrictJsonError: on reserved-key collision in user-positioned data,
+            or a lone surrogate in the text of a validator.
         ValueValidationError: when `json_value` doesn't satisfy
             `expected_type`. The text holds no input value.
     """
@@ -287,13 +302,27 @@ def _validate(
 ) -> object:
     """`adapter.validate_python(value)`; a refusal raises `ValueValidationError`.
 
-    The error is raised outside the `except` block, so it has no
+    A validator can write a lone surrogate in its error text, for example
+    when it echoes the value. Pydantic then cannot build the error text and
+    raises `UnicodeEncodeError`: `validate_python` does for the text of a
+    `ValueError` or an `AssertionError`, and `ValidationError.errors()` does
+    for the context of a `PydanticCustomError`. A validator cannot raise that
+    error itself, because pydantic reads each `ValueError` as a refusal. So
+    the arm catches only this case, and it raises `StrictJsonError`.
+
+    The error is raised outside the `except` blocks, so it has no
     `__context__` that holds the pydantic error and its input.
     """
+    failure: StrictJsonError | ValueValidationError
     try:
-        return adapter.validate_python(value)
-    except ValidationError as error:
-        failure = ValueValidationError(validation_summary(error, location))
+        try:
+            return adapter.validate_python(value)
+        except ValidationError as error:
+            failure = ValueValidationError(validation_summary(error, location))
+    except UnicodeEncodeError:
+        failure = StrictJsonError(
+            lone_surrogate_text('a validation error', location),
+        )
     raise failure
 
 
@@ -311,6 +340,19 @@ def _dump(
     at a position without a declared key type (`Any`, a bare `dict`). That is
     a `StrictJsonError`, raised outside the `except` block, because the
     `UnicodeEncodeError` holds the input.
+
+    Pydantic raises a plain `TypeError` for a dict key without a JSON form:
+    a `frozenset`, or an Enum member whose value is a list, a dict or a set.
+    Only the text tells that from a defect, for example a `TypeError` from a
+    computed field or a generator, so the text must match in full. Any other
+    `TypeError` propagates. A pydantic that changes the text gives the raw
+    `TypeError` again, not a wrong refusal.
+
+    Pydantic raises a plain `ValueError` for a value that holds itself. The
+    same rule applies: only the full text is this refusal. Any other
+    `ValueError` propagates, for example from a computed field. The arm comes
+    after the arms for `PydanticSerializationError` and `UnicodeEncodeError`,
+    because both are a `ValueError`.
     """
     failure: StrictJsonError | ValueValidationError
     try:
@@ -318,7 +360,19 @@ def _dump(
     except PydanticSerializationError as error:
         failure = ValueValidationError(f'serialization failed: {error}')
     except UnicodeEncodeError:
-        failure = StrictJsonError(_lone_surrogate_text('a dict key', location))
+        failure = StrictJsonError(lone_surrogate_text('a dict key', location))
+    except TypeError as error:
+        if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
+            raise
+        failure = ValueValidationError(
+            _with_location(f'serialization failed: {error}', location),
+        )
+    except ValueError as error:
+        if str(error) != _CIRCULAR_REFERENCE_TEXT:
+            raise
+        failure = ValueValidationError(
+            _with_location(f'serialization failed: {error}', location),
+        )
     raise failure
 
 
@@ -826,17 +880,24 @@ def _dataclass_hints(dc: type) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-def _lone_surrogate_text(
-    subject: Literal['a string', 'a dict key'],
-    location: tuple[str, ...],
-) -> str:
-    """The refusal text for a lone surrogate. It holds no input value."""
-    text = f'{subject} holds a lone surrogate, which UTF-8 cannot encode'
+def _with_location(text: str, location: tuple[str, ...]) -> str:
+    """`text` with `location` in front of it, for example the kwarg name."""
     match location:
         case ():
             return text
         case _:
             return f'{".".join(location)}: {text}'
+
+
+def lone_surrogate_text(
+    subject: Literal['a string', 'a dict key', 'a validation error'],
+    location: tuple[str, ...],
+) -> str:
+    """The refusal text for a lone surrogate. It holds no input value."""
+    return _with_location(
+        f'{subject} holds a lone surrogate, which UTF-8 cannot encode',
+        location,
+    )
 
 
 def _scan_text(
@@ -855,7 +916,7 @@ def _scan_text(
     try:
         text.encode('utf-8')
     except UnicodeEncodeError:
-        failure = StrictJsonError(_lone_surrogate_text(subject, location))
+        failure = StrictJsonError(lone_surrogate_text(subject, location))
     else:
         return
     raise failure
