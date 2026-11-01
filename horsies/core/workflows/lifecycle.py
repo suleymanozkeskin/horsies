@@ -54,9 +54,13 @@ from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_ty
 from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.models.workflow.handle_types import (
-    HandleErrorCode,
-    HandleOperationError,
+    HandleAsyncContext,
+    HandleDbOperationFailed,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
     HandleResult,
+    HandleResumeRecoveryFailed,
+    HandleWorkflowNotFound,
 )
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
@@ -871,13 +875,12 @@ def start_workflow(
 
 def _event_loop_limit(
     workflow_id: str, operation: str, loop_limit: EventLoopLimit,
-) -> Err[HandleOperationError]:
+) -> Err[HandleEventLoopLimit]:
     """Build the lifecycle error for the event loop limit. Nothing ran."""
-    return Err(HandleOperationError(
-        code=HandleErrorCode.EVENT_LOOP_LIMIT,
+    return Err(HandleEventLoopLimit(
         message=f'{operation} of workflow {workflow_id}: {loop_limit.describe()}',
-        retryable=False,
         workflow_id=workflow_id,
+        loop_limit=loop_limit,
     ))
 
 
@@ -904,10 +907,12 @@ async def pause_workflow(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
-        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
-        open event loops and this is a new one; nothing ran.
+        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
+        ``Err(HandleDbOperationFailed)`` on a database error; the
+        transaction rolled back, or its commit outcome is unknown.
+        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
+        of open event loops and this is a new one; nothing ran.
+        Any other exception propagates.
     """
     match await broker.select_resources():
         case Err(loop_limit):
@@ -927,10 +932,8 @@ async def pause_workflow(
                     {'wf_id': workflow_id},
                 )
                 if exists.fetchone() is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {workflow_id} not found',
-                        retryable=False,
                         workflow_id=workflow_id,
                     ))
                 return Ok(False)
@@ -980,18 +983,9 @@ async def pause_workflow(
             await session.commit()
             return Ok(True)
     except SQLAlchemyError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.DB_OPERATION_FAILED,
+        return Err(HandleDbOperationFailed(
             message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))
@@ -1046,10 +1040,10 @@ def pause_workflow_sync(
 
     Inner async ``Err`` passes through unchanged.
     A failure of the broker's sync runner is returned as
-    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
     as from the async form.
-    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    changes nothing.
+    On a thread that runs an event loop it returns ``HandleAsyncContext``
+    and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1058,7 +1052,7 @@ def pause_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(...)`` on failure — see ``HandleErrorCode``.
+        ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
         LoopRunnerError,
@@ -1067,22 +1061,18 @@ def pause_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleOperationError(
-            code=HandleErrorCode.ASYNC_CONTEXT,
+        return Err(HandleAsyncContext(
             message=async_context_message(
                 f'pause_workflow_sync for workflow {workflow_id}',
                 'pause_workflow(broker, workflow_id)',
             ),
-            retryable=False,
             workflow_id=workflow_id,
         ))
     try:
         return broker.run_sync(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.LOOP_RUNNER_FAILED,
+        return Err(HandleLoopRunnerFailed(
             message=f'Loop runner failed for pause_workflow_sync(): {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))
@@ -1110,10 +1100,15 @@ async def resume_workflow(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
-        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
-        open event loops and this is a new one; nothing ran.
+        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
+        ``Err(HandleDbOperationFailed)`` on a database error before the
+        resume commits; the transaction rolled back, or its commit outcome
+        is unknown.
+        ``Err(HandleResumeRecoveryFailed)`` on a database error in the
+        recovery pass after the commit; the workflow is RUNNING.
+        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
+        of open event loops and this is a new one; nothing ran.
+        Any other exception propagates.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -1145,10 +1140,8 @@ async def resume_workflow(
                     {'wf_id': workflow_id},
                 )
                 if exists.fetchone() is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {workflow_id} not found',
-                        retryable=False,
                         workflow_id=workflow_id,
                     ))
                 return Ok(False)
@@ -1222,7 +1215,15 @@ async def resume_workflow(
             await drain_parent_propagations_in_session(session, broker)
 
             await session.commit()
+    except SQLAlchemyError as exc:
+        return Err(HandleDbOperationFailed(
+            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=is_retryable_connection_error(exc),
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
 
+    try:
         # A task can finish while this transaction has resumed a child workflow
         # but before that status change is visible to the task-completion
         # callback. The callback observes PAUSED and correctly avoids
@@ -1247,24 +1248,16 @@ async def resume_workflow(
                 tree_ids,
             )
             await recovery_session.commit()
-
-        return Ok(True)
     except SQLAlchemyError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.DB_OPERATION_FAILED,
-            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=is_retryable_connection_error(exc),
+        return Err(HandleResumeRecoveryFailed(
+            message=(
+                f'Workflow {workflow_id} resumed; the recovery pass for its '
+                f'tree failed: {type(exc).__name__}: {exc}'
+            ),
             workflow_id=workflow_id,
             exception=exc,
         ))
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=False,
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
+    return Ok(True)
 
 
 
@@ -1375,10 +1368,10 @@ def resume_workflow_sync(
 
     Inner async ``Err`` passes through unchanged.
     A failure of the broker's sync runner is returned as
-    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
     as from the async form.
-    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    changes nothing.
+    On a thread that runs an event loop it returns ``HandleAsyncContext``
+    and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1387,7 +1380,7 @@ def resume_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(...)`` on failure — see ``HandleErrorCode``.
+        ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
         LoopRunnerError,
@@ -1396,22 +1389,18 @@ def resume_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleOperationError(
-            code=HandleErrorCode.ASYNC_CONTEXT,
+        return Err(HandleAsyncContext(
             message=async_context_message(
                 f'resume_workflow_sync for workflow {workflow_id}',
                 'resume_workflow(broker, workflow_id)',
             ),
-            retryable=False,
             workflow_id=workflow_id,
         ))
     try:
         return broker.run_sync(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.LOOP_RUNNER_FAILED,
+        return Err(HandleLoopRunnerFailed(
             message=f'Loop runner failed for resume_workflow_sync(): {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))

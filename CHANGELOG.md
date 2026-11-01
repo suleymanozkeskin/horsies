@@ -76,6 +76,42 @@ and there is no migration contract between pre-1.0 versions.
   `psycopg.Error`, and returns them as `WorkflowStartEnqueueFailed`. Any
   other exception propagates. Before, the start returned every exception
   as `ENQUEUE_FAILED`.
+- **Breaking: `HandleOperationError` is a union of frozen variants, one per
+  `HandleErrorCode` member.** `HandleResult[T]` and the method signatures
+  do not change. Every variant has `code`, `message`, `retryable` and
+  `workflow_id`. Code that reads `err.exception` must match on the variant
+  first; pyright reports each site. `exception` is `BaseException` on
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid`,
+  `HandleResumeRecoveryFailed` and `HandleLoopRunnerFailed`; the other
+  variants have no cause. `HandleEventLoopLimit` carries `loop_limit`.
+  `HandleOperationError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, HandleOperationError)` is not valid on a
+  type alias; match on the variants.
+- **Breaking: `HandleErrorCode.INTERNAL_FAILED` is removed, and a defect in
+  `pause_workflow()` or `resume_workflow()` propagates.** They catch only
+  `sqlalchemy.exc.SQLAlchemyError`. Before, they returned every other
+  exception, also a failed `assert`, as `INTERNAL_FAILED`. Code that names
+  `INTERNAL_FAILED` fails pyright. The web pause and resume routes answer
+  such a defect with HTTP 500, not 503.
+- **New code `HandleErrorCode.STORED_DATA_INVALID`.** `tasks()` returns
+  `HandleStoredDataInvalid` with the parse error for a subworkflow summary
+  that does not parse; before, it returned `DB_OPERATION_FAILED` with
+  `retryable=False` and no cause. `status()` and `cancel()` return it for a
+  stored workflow status that is not a `WorkflowStatus`; before, the
+  `ValueError` propagated. Nothing changed, and the same call returns the
+  same error. `get()` folds it into `BROKER_ERROR`. The web routes answer it
+  with HTTP 500. An exhaustive `match` on `HandleErrorCode` needs a case
+  for it.
+- **New code `HandleErrorCode.RESUME_RECOVERY_FAILED`.** `resume()` returns
+  `HandleResumeRecoveryFailed` when the resume committed and the recovery
+  pass for the workflow tree, which runs after the commit in a second
+  transaction, fails with a database error. The workflow is `RUNNING`; the
+  worker reaper runs the same pass over all workflows. Before, it returned
+  `DB_OPERATION_FAILED`, the code of a failure before the commit. The web
+  resume route answers it as resumed with the `post_resume_recovery_failed`
+  warning and does not read the status again; a `DB_OPERATION_FAILED` from
+  resume is always HTTP 503. An exhaustive `match` on `HandleErrorCode`
+  needs a case for it.
 - **An event loop limit at schema initialization returns
   `EVENT_LOOP_LIMIT`.** Before, a workflow start returned it as
   `ENQUEUE_FAILED`, which `retry_start()` accepted.
