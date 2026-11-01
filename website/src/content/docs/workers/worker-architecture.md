@@ -47,6 +47,19 @@ Benefits:
 - A crash, a timeout, or an exit in one child affects only the task of that child
 - Memory isolation between tasks
 
+## Failure Isolation
+
+Each child holds one task, so a failure stays with that task.
+
+| Case | Result |
+| ---- | ------ |
+| A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed, and the task fails with `TASK_TIMEOUT`. Other tasks continue |
+| A child crashes (segfault, out-of-memory kill, `os._exit()`) | The worker sees the exit at once and recovers that task. Other tasks continue |
+| The worker dies | Each child stops at once, also while C code holds the GIL |
+| A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
+| A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
+| A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task |
+
 ## Execution Flow
 
 ### 1. Startup
@@ -174,6 +187,15 @@ With `app`:
 
 - Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](child-process-hooks), which still runs in every child.
 - The worker refuses to start if the import leaves a Python thread or a socket. A fork copies a lock in whatever state another thread left it, and all children would share one socket.
+
+With 4 children, the whole worker at start, including its main process, is measured as summed PSS:
+
+| App | `none` | `library` | `app` |
+| --- | ------ | --------- | ----- |
+| Small | 290 MiB | 159 MiB | 146 MiB |
+| With pandas | 445 MiB | 342 MiB | 212 MiB |
+
+Throughput is on the [performance](../internals/performance#worker-start-paths) page.
 
 The worker stays the real parent of each child, so exit codes, kills, and parent-death behavior do not change.
 

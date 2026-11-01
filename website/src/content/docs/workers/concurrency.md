@@ -85,9 +85,11 @@ imports everything: a recycle then costs a full import.
 
 ### Choosing N
 
-Recycling cost scales as ~1/N: each recycle pays one child cold start (re-import
-app, rebuild the child connection pool). Pick the **highest N whose peak memory
-stays under the platform quota**. Use the `children_memory_mb` column in
+Recycling cost scales as ~1/N: each recycle pays one child start and rebuilds the
+child connection pool. On Linux a preload parent makes that start cheap: with 10,000
+no-op tasks and 8 children, `N=100` drains 803 tasks/s against 853 with recycling
+off. With `exec` the same test drains 437 against 819. Pick the **highest N whose
+peak memory stays under the platform quota**. Use the `children_memory_mb` column in
 [worker health](../monitoring/worker-health) snapshots to size it — it reports
 the summed RSS of the worker's children, which the parent-only `memory_usage_mb`
 metric does not capture.
@@ -142,7 +144,9 @@ RSS (after `gc.collect()`), and the worker:
 Measure your warmed child baseline first, then leave headroom above it. As a
 reference, a minimal app warms a child to roughly 75 MB (CPython 3.13, Linux)
 before any per-task working set; your baseline is higher with a larger app and
-connection pool. Size for the dyno/container quota:
+connection pool. RSS counts pages that a forked child shares with the preload
+parent, so read `--max-memory-per-child-mb` against RSS, and use the cgroup total or
+PSS for the real footprint. Size for the dyno/container quota:
 
 ```
 (max_memory_per_child_mb + task_peak) × processes + parent RSS + DB/native/page-cache + margin

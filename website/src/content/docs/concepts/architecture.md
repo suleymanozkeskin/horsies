@@ -56,7 +56,8 @@ Workers run tasks in child processes that they own, rather than threads:
 
 - Each task runs in an isolated child process
 - GIL contention is avoided for CPU-bound tasks
-- A crashed task takes down only its own child
+- A crashed or timed-out task takes down only its own child
+- On Linux, children fork from a preload parent, so they start in milliseconds and share memory
 - Child processes send their own heartbeats
 
 ### Type-Safe Results
