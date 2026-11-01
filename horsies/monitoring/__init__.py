@@ -4,7 +4,8 @@ This package is part of horsies core: it needs no optional extra and never
 imports the web layer. Every query takes a ``PostgresBroker``, is async, and
 returns ``MonitoringResult[T]``. ``Err`` holds a ``MonitoringQueryError``
 variant: a database failure, the event loop limit, or history data that
-does not decode. A missing row is ``Ok(None)``.
+does not decode. A missing row is ``Ok(None)``; ``get_task_detail`` returns
+``Ok(TaskDetailNotFound)`` with a ``TaskAbsenceReason``.
 
 The response models are the wire contract for the monitoring UI and are
 unstable pre-1.0.
@@ -52,8 +53,10 @@ from horsies.monitoring.models import (
     LivenessReport,
     ScheduleStateInfo,
     StatusCount,
+    TaskAbsenceReason,
     TaskAttemptInfo,
     TaskDetail,
+    TaskDetailNotFound,
     TaskListPage,
     TaskSummary,
     WorkerHistoryPoint,
@@ -77,8 +80,17 @@ from horsies.monitoring.task_actions import (
     TaskCancelled,
     cancel_task,
 )
-from horsies.monitoring.queries import (
+from horsies.monitoring.pages import (
+    MAX_BREAKDOWN_LIMIT,
+    MAX_TASK_PAGE_LIMIT,
     MAX_TASK_PAGE_REACH,
+    MAX_WORKFLOW_RUNS_LIMIT,
+    BreakdownLimit,
+    PageRefused,
+    TaskPage,
+    WorkflowRunsLimit,
+)
+from horsies.monitoring.queries import (
     SortDirection,
     TaskGroupBy,
     TaskSortField,
@@ -119,8 +131,15 @@ __all__ = [
     'TaskCancelled',
     'cancel_task',
     # Query parameter vocabularies
+    'MAX_BREAKDOWN_LIMIT',
+    'MAX_TASK_PAGE_LIMIT',
     'MAX_TASK_PAGE_REACH',
+    'MAX_WORKFLOW_RUNS_LIMIT',
+    'BreakdownLimit',
+    'PageRefused',
     'SortDirection',
+    'TaskPage',
+    'WorkflowRunsLimit',
     'TaskGroupBy',
     'TaskSortField',
     # Queries
@@ -151,8 +170,10 @@ __all__ = [
     'LivenessReport',
     'ScheduleStateInfo',
     'StatusCount',
+    'TaskAbsenceReason',
     'TaskAttemptInfo',
     'TaskDetail',
+    'TaskDetailNotFound',
     'TaskListPage',
     'TaskSummary',
     'WorkerHistoryPoint',

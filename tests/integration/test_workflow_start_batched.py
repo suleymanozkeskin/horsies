@@ -164,8 +164,8 @@ class TestBatchedStartShape:
         session: AsyncSession,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A node whose kwargs fail to encode mid-build fails the whole
-        start (VALIDATION_FAILED) with no partial rows — params are built
+        """A node whose kwargs fail to encode mid-build is a defect: the
+        SerializationError propagates and no row is left — params are built
         before any INSERT executes, so the transaction has nothing to
         keep. (User input cannot reach this state — spec construction
         already validates — so the encoder is forced to fail.)"""
@@ -186,8 +186,8 @@ class TestBatchedStartShape:
             lifecycle_mod, '_encode_node_kwargs_or_raise', _flaky_encode,
         )
 
-        result = await start_workflow_async(spec, broker)
-        assert is_err(result)
+        with pytest.raises(SerializationError, match='node 2'):
+            await start_workflow_async(spec, broker)
         assert calls['n'] == 2
 
         leftover = (
@@ -250,7 +250,7 @@ class TestBatchedStartShape:
         assert options['good_until'] == deadline.isoformat()
         assert options['retry_policy']['max_retries'] == 5
 
-    async def test_corrupt_task_options_fails_whole_start(
+    async def test_corrupt_task_options_propagate_and_roll_back(
         self,
         clean_workflow_tables: None,
         app: Horsies,
@@ -259,9 +259,10 @@ class TestBatchedStartShape:
     ) -> None:
         """Pinned behavioral difference vs the per-row path: the promotion
         path folds corrupt task_options into a FAILED task (it re-reads
-        rows another transaction wrote); the batched start serialized the
-        JSON moments earlier, so corruption is a horsies bug and fails the
-        whole start (VALIDATION_FAILED), rolling everything back."""
+        rows another transaction wrote); the batched start reads the task
+        decorator's own serialization, so corruption is a defect: the
+        SerializationError propagates and the transaction rolls back."""
+        from horsies.core.codec.json_io import SerializationError
 
         @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
         def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
@@ -275,9 +276,8 @@ class TestBatchedStartShape:
             [TaskNode(fn=corrupt_task, kwargs={'value': 1})],
             definition_key=f'batched-corrupt-{uuid.uuid4().hex[:8]}',
         )
-        result = await start_workflow_async(spec, broker)
-        assert is_err(result)
-        assert result.err_value.code.name == 'VALIDATION_FAILED'
+        with pytest.raises(SerializationError, match='root node'):
+            await start_workflow_async(spec, broker)
 
         leftover = (
             await session.execute(

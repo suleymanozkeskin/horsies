@@ -13,7 +13,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_err
 from horsies.monitoring import (
+    MAX_WORKFLOW_RUNS_LIMIT,
     WorkflowRunDetail,
+    WorkflowRunsLimit,
     WorkflowRunSummary,
     WorkflowTaskDetail,
     get_workflow_node,
@@ -40,11 +42,14 @@ def build_router(broker: PostgresBroker) -> APIRouter:
     async def read_runs(
         name: str | None = Query(default=None),
         run_status: str | None = Query(default=None, alias='status'),
-        limit: int = Query(default=30, ge=1, le=200),
+        limit: int = Query(default=30, ge=1, le=MAX_WORKFLOW_RUNS_LIMIT),
     ) -> list[WorkflowRunSummary]:
         """Recent root runs, newest first. A status no run carries yields []."""
         result = await list_workflow_runs(
-            broker, name=name, status=run_status, limit=limit
+            broker,
+            name=name,
+            status=run_status,
+            limit=WorkflowRunsLimit(value=limit),
         )
         if is_err(result):
             raise query_failed('Workflow runs', result.err_value)

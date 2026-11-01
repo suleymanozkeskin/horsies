@@ -106,9 +106,10 @@ _START_RETRY_MAX_MS: Final[int] = 2000
 def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     """Extract a serde Result or raise with context.
 
-    Used inside the DB transaction zone of ``start_workflow_async``
-    where ``SerializationError`` is caught and converted to
-    ``Err(SERIALIZATION_FAILED)``.
+    Used inside the start transaction of ``start_workflow_async`` and by
+    ``expire_paused_workflows``. Every value it gets there was built and
+    validated in the process, so a ``SerializationError`` is a defect: the
+    start transaction does not catch it, and the transaction rolls back.
     """
     if _is_err(result):
         raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
@@ -119,9 +120,10 @@ def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
     """Encode a TaskNode's static kwargs through strict-serde phase 3.
 
     Routes through `encode_kwargs(task.fn, task.kwargs)` so each kwarg is
-    encoded against its declared parameter type. Raises
-    ``SerializationError`` on encode failure so the caller's existing
-    transaction-zone handling converts it to ``SERIALIZATION_FAILED``.
+    encoded against its declared parameter type. Spec construction already
+    bound, encoded and decoded every kwarg, so an encode failure here is a
+    defect. It raises ``SerializationError`` with the node name; the start
+    transaction does not catch it.
     """
     underlying = underlying_task_fn(task.fn)
     try:
@@ -179,10 +181,10 @@ def root_retry_and_deadline(
 
     Mirrors enqueue_workflow_task's task_options parsing. One deliberate
     difference: the promotion path folds corrupt options into a FAILED task
-    (it re-reads rows written by another transaction); here the JSON was
-    serialized moments ago in this same call, so corruption is a horsies
-    bug — raise SerializationError and fail the whole start loudly
-    (VALIDATION_FAILED, transaction rolled back).
+    (it re-reads rows written by another transaction); here the JSON is the
+    task decorator's own serialization of a validated ``TaskOptions``, so
+    corruption is a defect. The start transaction does not catch the
+    ``SerializationError``: it propagates, and the transaction rolls back.
 
     Raises:
         SerializationError: task_options_json does not parse to an object,
@@ -260,12 +262,13 @@ async def start_workflow_async(
     Returns:
         ``Ok(WorkflowHandle)`` on success.
         ``Err(WorkflowStartError)`` on failure; match on the variant. A
-        ``WorkflowValidationError`` from prevalidation, or a
-        ``SerializationError`` from the start transaction, is
-        ``WorkflowStartValidationFailed``. A database or driver error is
-        ``WorkflowStartEnqueueFailed``. Any other exception from
-        prevalidation or from the start transaction is a defect and
-        propagates.
+        ``WorkflowValidationError`` from prevalidation is
+        ``WorkflowStartValidationFailed``. A database or driver error in the
+        start transaction is ``WorkflowStartEnqueueFailed``. Any other
+        exception from prevalidation or from the start transaction is a
+        defect and propagates, also a ``SerializationError``: the start
+        transaction encodes only values that the process built and
+        validated before the start. The transaction then rolls back.
 
     Notes:
         If workflow_id is provided and already exists, returns existing handle
@@ -472,9 +475,9 @@ async def start_workflow_async(
                 # context assembly and conflict checks.
                 #
                 # NOTE: serialization failures (_ser_or_raise) raise while
-                # building params, before any INSERT executes — the
-                # transaction rolls back with no partial state, same
-                # guarantee the old mid-loop raise had.
+                # building params, before any INSERT executes. They are
+                # defects and propagate; the transaction rolls back with no
+                # partial state.
                 node_params: list[dict[str, Any]] = []
                 fast_root_task_params: list[dict[str, Any]] = []
                 fast_root_indexes: list[int] = []
@@ -551,9 +554,7 @@ async def start_workflow_async(
 
                     # Get task_options_json from the task function (set by @task decorator)
                     # and merge in TaskNode.good_until if set
-                    task_options_json: str | None = getattr(
-                        task.fn, 'task_options_json', None
-                    )
+                    task_options_json: str | None = task.fn.task_options_json
                     if task.good_until is not None:
                         # Merge good_until from TaskNode into task_options
                         base_options: dict[str, Any] = {}
@@ -750,14 +751,6 @@ async def start_workflow_async(
 
         except asyncio.CancelledError:
             raise
-        except SerializationError as exc:
-            # Deterministic — never retry.
-            return Err(WorkflowStartValidationFailed(
-                message=str(exc),
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                exception=exc,
-            ))
         except (SQLAlchemyError, PsycopgError) as exc:
             # A database or driver error. Any other exception is a defect
             # and propagates.

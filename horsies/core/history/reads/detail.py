@@ -125,6 +125,67 @@ class TaskDetailAbsent:
 type TaskDetailResult = LiveTaskLocation | HistoryTaskDetail | TaskDetailAbsent
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryTaskState:
+    """The status and the workflow flag of a history row. Nothing else."""
+
+    task_id: str
+    status: TaskStatus
+    is_workflow_task: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStateAbsent:
+    """Neither the live table nor history holds the task."""
+
+    task_id: str
+
+
+type TaskStateResult = LiveTaskLocation | HistoryTaskState | TaskStateAbsent
+
+
+async def read_task_state(
+    connection: AsyncConnection,
+    *,
+    task_id: str,
+) -> TaskStateResult:
+    """Resolve one task to LIVE, its history status and workflow flag, or absent.
+
+    It reads the same staged detail function as ``read_task_detail``, but
+    it takes two columns of the history row. It does not decode the attempt
+    snapshot and does not classify an absence against the retained-history
+    floor. It does not write.
+
+    Raises:
+        HistoryContractError: the staged function reports an unknown
+            location, or the stored status is not a ``TaskStatus`` member.
+    """
+    row = (
+        await connection.execute(
+            text(
+                'SELECT location, (detail.task_row).status, '
+                '(detail.task_row).is_workflow_task '
+                f'FROM {TASK_DETAIL_FUNCTION}(CAST(:task_id AS uuid)) '
+                'AS detail'
+            ),
+            {'task_id': task_id},
+        )
+    ).one_or_none()
+    if row is None:
+        return TaskStateAbsent(task_id=task_id)
+    if row.location == 'LIVE':
+        return LiveTaskLocation(task_id=task_id)
+    if row.location != 'HISTORY':
+        raise HistoryContractError(
+            f'staged detail returned unknown location {row.location!r}'
+        )
+    return HistoryTaskState(
+        task_id=task_id,
+        status=_history_status(task_id, row.status),
+        is_workflow_task=row.is_workflow_task,
+    )
+
+
 async def read_task_detail(
     connection: AsyncConnection,
     *,

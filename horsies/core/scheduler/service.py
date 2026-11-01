@@ -866,7 +866,7 @@ class Scheduler:
                 error because _validate_schedules already proved it valid.
         """
         task = self.app.tasks.get(schedule.task_name)
-        task_queue = getattr(task, 'task_queue_name', None) if task else None
+        task_queue = task.task_queue_name if task is not None else None
 
         queue_name = (
             schedule.queue_name if schedule.queue_name is not None else task_queue

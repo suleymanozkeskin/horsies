@@ -69,7 +69,7 @@ Errors from `handle.get()` / `get_async()`. These indicate issues retrieving the
 | ---- | ----------- | ----------- |
 | `WAIT_TIMEOUT` | `get()` timed out; task may still be running | No |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database | No |
-| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database | No |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status | No |
 | `RESULT_NOT_AVAILABLE` | Result cache was never set | No |
 | `RESULT_NOT_READY` | Result not yet available; task is still running | No |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this is a new one; not cached, clears when one of those loops closes | No |
@@ -516,7 +516,7 @@ The full list of reserved strings is available at runtime via `BUILTIN_CODE_REGI
 <!-- members: ErrorCode part -->
 | Code | Name | Description |
 | ---- | ---- | ----------- |
-| HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode |
+| HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode or custom queue list: `custom_queues` in `DEFAULT` mode, missing or duplicate `custom_queues` in `CUSTOM` mode, or a `CustomQueueConfig.name` that is empty, has whitespace at the start or the end, or is longer than 100 characters |
 | HRS-201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
 | HRS-202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
 | HRS-203 | `BROKER_INVALID_URL` | Invalid broker URL |

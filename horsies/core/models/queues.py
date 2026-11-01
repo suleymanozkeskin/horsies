@@ -1,8 +1,16 @@
 # app/core/models/queues.py
+from dataclasses import dataclass
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, assert_never
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from typing_extensions import Self
+
+from horsies.core.errors import ConfigurationError, ErrorCode
+from horsies.core.types.result import Err, Ok, Result
+
+# Length of the `queue_name` database columns (tasks and workflow tasks).
+QUEUE_NAME_MAX_LENGTH = 100
 
 
 class QueueMode(Enum):
@@ -22,6 +30,9 @@ class CustomQueueConfig(BaseModel):
         (worker- and cluster-level limits still apply), mirroring
         ``cluster_wide_cap=None``. ``0`` is valid and pauses claiming from
         the queue. Negative values are rejected.
+
+    The name must not be empty, must not start or end with whitespace, and
+    must not be longer than ``QUEUE_NAME_MAX_LENGTH`` characters.
     """
 
     model_config = ConfigDict(extra='forbid')
@@ -29,3 +40,75 @@ class CustomQueueConfig(BaseModel):
     name: str
     priority: int = Field(default=1, ge=1, le=100)
     max_concurrency: Annotated[int, Field(ge=0)] | None = 5
+
+    @model_validator(mode='after')
+    def validate_name(self) -> Self:
+        """Refuse a queue name that no task can use or the database cannot store."""
+        match check_queue_name(self.name):
+            case Ok():
+                return self
+            case Err(refusal):
+                raise ConfigurationError(
+                    message=(
+                        f'invalid queue name {self.name!r}: '
+                        f'{_describe_refusal(refusal)}'
+                    ),
+                    code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+                    notes=[f'CustomQueueConfig(name={self.name!r})'],
+                    help_text=(
+                        'use a non-empty name without leading or trailing '
+                        f'whitespace, at most {QUEUE_NAME_MAX_LENGTH} characters'
+                    ),
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+
+
+@dataclass(frozen=True, slots=True)
+class QueueNameEmpty:
+    """The queue name is the empty string."""
+
+
+@dataclass(frozen=True, slots=True)
+class QueueNameEdgeWhitespace:
+    """The queue name starts or ends with whitespace."""
+
+
+@dataclass(frozen=True, slots=True)
+class QueueNameTooLong:
+    """The queue name is longer than ``QUEUE_NAME_MAX_LENGTH``."""
+
+    length: int
+
+
+type QueueNameRefusal = QueueNameEmpty | QueueNameEdgeWhitespace | QueueNameTooLong
+
+
+def check_queue_name(name: str) -> Result[str, QueueNameRefusal]:
+    """Accept a usable queue name, or name the one rule that it breaks.
+
+    It checks the rules in this order: empty, edge whitespace, length. It
+    does not read the app config.
+    """
+    if name == '':
+        return Err(QueueNameEmpty())
+    if name != name.strip():
+        return Err(QueueNameEdgeWhitespace())
+    if len(name) > QUEUE_NAME_MAX_LENGTH:
+        return Err(QueueNameTooLong(length=len(name)))
+    return Ok(name)
+
+
+def _describe_refusal(refusal: QueueNameRefusal) -> str:
+    match refusal:
+        case QueueNameEmpty():
+            return 'the name is empty'
+        case QueueNameEdgeWhitespace():
+            return 'the name has whitespace at the start or the end'
+        case QueueNameTooLong(length=length):
+            return (
+                f'the name has {length} characters; '
+                f'the maximum is {QUEUE_NAME_MAX_LENGTH}'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
