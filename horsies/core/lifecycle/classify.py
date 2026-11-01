@@ -377,7 +377,7 @@ def _is_workflow_stopped(error: TaskError) -> bool:
     return _error_code_of(error) == _WORKFLOW_STOPPED
 
 
-def _error_code_of(error: TaskError) -> str | None:
+def _error_code_of(error: TaskError) -> str:
     """The error code as it is written to the row.
 
     Task errors carry either a registered enum member or a caller's own

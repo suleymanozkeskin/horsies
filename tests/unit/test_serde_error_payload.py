@@ -238,7 +238,7 @@ class TestTaskErrorModelDumpException:
         assert 'ValueError: boom' in flattened['traceback']
 
     def test_model_dump_json_string_does_not_raise(self) -> None:
-        te = TaskError(message='m', exception=ValueError('boom'))
+        te = TaskError(error_code='MY_CODE', message='m', exception=ValueError('boom'))
         wire = te.model_dump_json()
         parsed: dict[str, Any] = json.loads(wire)
         assert parsed['exception']['type'] == 'ValueError'
@@ -246,12 +246,12 @@ class TestTaskErrorModelDumpException:
     def test_python_mode_keeps_live_exception_object(self) -> None:
         """when_used='json' must not touch python-mode dumps."""
         original = ValueError('boom')
-        te = TaskError(message='m', exception=original)
+        te = TaskError(error_code='MY_CODE', message='m', exception=original)
         dumped = te.model_dump()
         assert dumped['exception'] is original
 
     def test_none_exception_json_mode_is_none(self) -> None:
-        te = TaskError(message='m')
+        te = TaskError(error_code='MY_CODE', message='m')
         assert te.model_dump(mode='json')['exception'] is None
 
     def test_already_flattened_dict_passes_through(self) -> None:
@@ -259,5 +259,5 @@ class TestTaskErrorModelDumpException:
             'type': 'ValueError', 'module': 'builtins', 'message': 'boom',
             'repr': "ValueError('boom')", 'traceback': 'tb',
         }
-        te = TaskError(message='m', exception=flat)
+        te = TaskError(error_code='MY_CODE', message='m', exception=flat)
         assert te.model_dump(mode='json')['exception'] == flat

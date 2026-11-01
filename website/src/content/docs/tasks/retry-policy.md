@@ -281,11 +281,19 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
     try:
         response = requests.get("https://api.example.com")
         if response.status_code == 429:
-            return TaskResult(err=TaskError(error_code="RATE_LIMITED"))
+            return TaskResult(err=TaskError(
+                error_code="RATE_LIMITED",
+                message="the API answered 429",
+            ))
         return TaskResult(ok=response.json())
     except requests.Timeout:
-        return TaskResult(err=TaskError(error_code="TIMEOUT"))
+        return TaskResult(err=TaskError(
+            error_code="TIMEOUT",
+            message="the API did not answer in time",
+        ))
 ```
+
+`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
 
 ### Database Transaction with Deadlock Retry
 

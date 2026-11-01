@@ -170,9 +170,14 @@ class TaskError(BaseModel):
     (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a plain user-defined ``str``.
 
+    **Required field**: ``error_code`` is required and must not be null, on
+    the wire and in the type, because retry matching and outcome routing read
+    it. A stored error without a code is stored data that does not parse.
+    ``message``, ``data`` and ``exception`` are optional.
+
     **Construction**: built-in code values must be passed as enum
-    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR")``
-    raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
+    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR",
+    message="...")`` raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
     instead.  User-defined error codes must be plain ``str``, not
     ``str, Enum`` subclasses.
 
@@ -184,19 +189,24 @@ class TaskError(BaseModel):
     **Deserialization**: use standard ``model_validate()`` /
     ``model_validate_json()`` everywhere — including nested models.
     No special rehydration methods needed.
+
+    **Unknown keys**: refused at construction and at decode. A stored value
+    with a key that this class does not declare is stored data that does not
+    parse. Subclasses inherit the rule, so ``SubWorkflowError`` accepts its
+    own fields and no others.
     """
 
-    model_config = {'arbitrary_types_allowed': True}
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra='forbid')
 
     exception: BaseException | FlattenedException | None = None
-    error_code: Optional[Union[BuiltInTaskCode, str]] = None
+    error_code: BuiltInTaskCode | str
     # Boundary note: values must be JSON-native (str/int/float/bool/
     # None/list/dict). This internal field bypasses the strict JsonValue
     # fence, so non-native values are silently coerced by pydantic's
     # mode='json' dump on the wire (tuple/set → list, Decimal → str) and
     # do not round-trip type-faithfully.
     data: Optional[Any] = None
-    message: Optional[str] = None
+    message: str | None = None
 
     @field_validator('error_code', mode='before')
     @classmethod
@@ -207,16 +217,17 @@ class TaskError(BaseModel):
         - BuiltInTaskCode enum members (pass through)
         - Tagged dict ``{"__builtin_task_code__": "..."}`` (coerce to enum)
         - Plain ``str`` not in reserved set (pass through)
-        - ``None`` (pass through)
 
         Rejects:
+        - ``None``, with one cause: the union below would give one entry per
+          family
         - Plain ``str`` matching a reserved built-in code
         - Foreign ``str, Enum`` types (user enums must use ``.value``)
         """
         if isinstance(value, _BUILTIN_FAMILIES):
             return value
         if value is None:
-            return value
+            raise ValueError('error_code must not be null')
         if isinstance(value, dict):
             if '__builtin_task_code__' not in value:
                 raise ValueError(
@@ -255,9 +266,9 @@ class TaskError(BaseModel):
     @classmethod
     def _serialize_error_code(
         cls,
-        value: BuiltInTaskCode | str | None,
+        value: BuiltInTaskCode | str,
         _info: Any,
-    ) -> dict[str, str] | str | None:
+    ) -> dict[str, str] | str:
         """Serialize error_code with tagged format for built-in codes.
 
         Built-in enum members become ``{"__builtin_task_code__": "VALUE"}``

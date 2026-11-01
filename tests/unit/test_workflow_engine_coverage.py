@@ -2097,9 +2097,18 @@ class TestDecodeErrOnly:
     Pre-fix the function only checked the ``__h_task_result__`` marker and
     trusted everything else, so malformed envelopes (extras, both slots
     populated, missing keys) silently produced a TaskResult. The strict
-    path now returns ``None`` for any envelope that doesn't satisfy the
-    full canonical shape — callers fall back to legacy handling.
+    path now gives ``RESULT_DESERIALIZATION_ERROR`` with the cause for any
+    text that doesn't satisfy the full canonical shape. Only an envelope
+    with no err slot returns ``None``.
     """
+
+    def _assert_stored_data_error(self, raw: str, cause: str) -> None:
+        result = _decode_err_only(raw)
+        assert result is not None
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message is not None
+        assert cause in error.message
 
     def _make_err_envelope_json(self) -> str:
         return (
@@ -2114,23 +2123,23 @@ class TestDecodeErrOnly:
         assert result.err is not None
         assert result.err.message == 'boom'
 
-    def test_returns_none_on_missing_marker(self) -> None:
+    def test_a_missing_marker_names_the_cause(self) -> None:
         raw = (
             '{"ok": null, "err": {"error_code": '
             '{"__builtin_task_code__": "TASK_EXCEPTION"}, '
             '"message": "boom", "data": null, "exception": null}}'
         )
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, '__h_task_result__')
 
-    def test_returns_none_on_marker_false(self) -> None:
+    def test_a_false_marker_names_the_cause(self) -> None:
         raw = (
             '{"__h_task_result__": false, "ok": null, '
             '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
             '"message": "boom", "data": null, "exception": null}}'
         )
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, '__h_task_result__')
 
-    def test_returns_none_on_extras_in_envelope(self) -> None:
+    def test_an_extra_key_in_the_envelope_names_the_cause(self) -> None:
         """Strict envelope rejects unknown top-level keys."""
         raw = (
             '{"__h_task_result__": true, "ok": null, '
@@ -2138,33 +2147,36 @@ class TestDecodeErrOnly:
             '"message": "boom", "data": null, "exception": null}, '
             '"extra_key": "smuggled"}'
         )
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, 'extra_key')
 
-    def test_returns_none_on_both_slots_populated(self) -> None:
+    def test_both_slots_populated_names_the_cause(self) -> None:
         """Envelope with both ok and err populated must be rejected."""
         raw = (
             '{"__h_task_result__": true, "ok": 42, '
             '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
             '"message": "boom", "data": null, "exception": null}}'
         )
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, 'both ok and err')
 
-    def test_returns_none_on_missing_err_key(self) -> None:
+    def test_a_missing_err_key_names_the_cause(self) -> None:
         raw = '{"__h_task_result__": true, "ok": null}'
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, 'missing required keys')
 
-    def test_returns_none_on_missing_ok_key(self) -> None:
+    def test_a_missing_ok_key_names_the_cause(self) -> None:
         raw = (
             '{"__h_task_result__": true, '
             '"err": {"error_code": {"__builtin_task_code__": "TASK_EXCEPTION"}, '
             '"message": "boom", "data": null, "exception": null}}'
         )
-        assert _decode_err_only(raw) is None
+        self._assert_stored_data_error(raw, 'missing required keys')
 
-    def test_returns_none_on_non_dict_payload(self) -> None:
-        assert _decode_err_only('null') is None
-        assert _decode_err_only('"a string"') is None
-        assert _decode_err_only('[]') is None
+    def test_json_that_is_not_an_object_names_the_cause(self) -> None:
+        self._assert_stored_data_error('null', 'must be a JSON object')
+        self._assert_stored_data_error('"a string"', 'must be a JSON object')
+        self._assert_stored_data_error('[]', 'must be a JSON object')
+
+    def test_text_that_is_not_json_names_the_cause(self) -> None:
+        self._assert_stored_data_error('not json at all', 'is not JSON')
 
     def test_returns_none_on_ok_only_envelope(self) -> None:
         """Ok-only envelopes are not in this helper's jurisdiction."""

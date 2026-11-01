@@ -32,8 +32,8 @@ from typing import TYPE_CHECKING, Any, assert_never
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from horsies.core.codec.json_io import loads_json
-from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.json_io import SerializationError, loads_json
+from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.typed import (
     decode_task_error,
     validate_task_result_envelope,
@@ -192,6 +192,32 @@ class Phase2RecoverySummary:
     names why its evidence could not be relocated."""
 
 
+def _undecodable_failure_result(
+    terminal_status: str,
+    cause: SerializationError | StrictJsonError,
+) -> TaskResult[Any, TaskError]:
+    """``RESULT_DESERIALIZATION_ERROR`` for a stored result that does not decode.
+
+    ``cause`` can hold text from a stored row, so a lone surrogate in it is
+    escaped: the failure handler encodes this error, and a raise there would
+    repeat on each recovery pass until the recovery limit fails the workflow.
+    """
+    logger.error(
+        'Phase-2 recovery could not decode the stored result (%s: %s)',
+        type(cause).__name__,
+        cause,
+    )
+    return TaskResult(
+        err=TaskError(
+            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            message=escape_lone_surrogates(
+                f'Stored result of the failed node does not decode: {cause}',
+            ),
+            data={'task_status': terminal_status},
+        ),
+    )
+
+
 def _recovered_failure_result(
     terminal_status: str,
     node_result_json: str | None,
@@ -204,33 +230,33 @@ def _recovered_failure_result(
     is decoded — TaskError has a fixed schema and needs no ok-type — so
     recovery never depends on the local task registry.
 
-    A terminal task with no stored error still has to say something
-    true, so the status names what happened. A stored envelope or error
-    that does not decode is stored data, and it gets the same constructed
-    error: ``validate_task_result_envelope`` refuses with
-    ``StrictJsonError``, and ``decode_task_error`` refuses with
-    ``StrictJsonError`` or ``ValueValidationError``. Any other exception is
-    a defect and propagates.
+    Outcomes:
+        - A stored error that decodes: that error.
+        - Stored data that does not parse: ``RESULT_DESERIALIZATION_ERROR``,
+          with the cause in the message. ``loads_json`` refuses text that is
+          not JSON, ``validate_task_result_envelope`` refuses with
+          ``StrictJsonError``, and ``decode_task_error`` refuses with
+          ``StrictJsonError`` or ``ValueValidationError``.
+        - No stored result, or an envelope with no err slot: the error that
+          the terminal status names, because the task has to say something
+          true.
+
+    Any other exception is a defect and propagates.
     """
     if node_result_json is not None:
         parsed = loads_json(node_result_json)
-        if not is_err(parsed):
-            try:
-                envelope = validate_task_result_envelope(parsed.ok_value)
-                err_slot = envelope.get('err')
-                if err_slot is not None:
-                    return TaskResult(err=decode_task_error(err_slot))
-            except (StrictJsonError, ValueValidationError) as exc:
-                # A stored envelope or error that will not decode is
-                # reported through the constructed error below rather
-                # than failing the recovery of a task that has already
-                # run.
-                logger.error(
-                    'Phase-2 recovery could not decode the stored result '
-                    'envelope (%s: %s); recording the terminal status instead',
-                    type(exc).__name__,
-                    exc,
-                )
+        if is_err(parsed):
+            return _undecodable_failure_result(terminal_status, parsed.err_value)
+        try:
+            envelope = validate_task_result_envelope(parsed.ok_value)
+            err_slot = envelope.get('err')
+            if err_slot is not None:
+                return TaskResult(err=decode_task_error(err_slot))
+        except (StrictJsonError, ValueValidationError) as exc:
+            # A stored envelope or error that will not decode is reported
+            # through this error rather than failing the recovery of a task
+            # that has already run.
+            return _undecodable_failure_result(terminal_status, exc)
 
     error_code: OutcomeCode | RetrievalCode | OperationalErrorCode
     match terminal_status:

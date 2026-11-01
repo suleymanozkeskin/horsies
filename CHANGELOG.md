@@ -654,6 +654,27 @@ and there is no migration contract between pre-1.0 versions.
   negative `limit` gave a different result in each read, and a direct
   `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
   answers do not change.
+- **Breaking: `TaskError` refuses a key that it does not declare.** The rule
+  applies at construction and at decode, and `SubWorkflowError` inherits it. A
+  stored error with an unknown key is stored data that does not parse: the
+  refusal names the key, and each reader folds it as for any other stored
+  error that does not decode. Before, the key was dropped, so `{"nope": 1}`
+  read as an error with no code and no message. A task that returns a
+  `TaskError` subclass with its own fields fails with
+  `WORKER_SERIALIZATION_ERROR`. Before, those fields were dropped.
+- **Breaking: `TaskError.error_code` is required and must not be null, on the
+  wire and in the type.** `message`, `data` and `exception` stay optional, and
+  `error_code` stays `BuiltInTaskCode | str`. Before, `TaskError(message='m')`
+  built an error with no code, and `TaskError()` built an empty one. Now each
+  raises `ValidationError` (a `ValueError`). In a task body, that exception ends
+  the task with `UNHANDLED_EXCEPTION`. Pyright reports these calls.
+- **Breaking: a stored error without a code does not decode.** This includes
+  rows that an earlier version wrote with a null `error_code`. No migration
+  rewrites them. `TaskHandle.get()`, `WorkflowHandle.get()` and `result_for()`
+  return `RESULT_DESERIALIZATION_ERROR` with the cause. `app.get_result()` and
+  `app.get_task_info(include_result=True)` return
+  `Err(BrokerInvalidJsonPayload)`. `app.get_raw_result()` still returns the
+  stored value.
 
 ### Changed
 
@@ -894,11 +915,19 @@ and there is no migration contract between pre-1.0 versions.
   change the result, with or without `optional`. Before, the docs said that
   `optional` excludes a node from failure accounting.
 - **Phase-2 recovery progresses a failed node whose stored error does not
-  decode as a `TaskError`.** The recovery records the error that the
-  terminal status names, as it does for a stored result envelope that does
-  not validate. The log names the refusal. Before, the
+  decode as a `TaskError`, and it records the cause.** The recovery records
+  `RESULT_DESERIALIZATION_ERROR` with the cause in the message. A stored
+  result envelope that does not validate and stored text that is not JSON get
+  the same error. The log names the refusal. Before, the
   `ValueValidationError` of the decode rolled back the recovery of that row
-  on each pass, and the node did not progress.
+  on each pass, and the node did not progress. Text that is not JSON recorded
+  the error that the terminal status names.
+- **A workflow keeps the cause when the stored result of its first failed task
+  does not parse.** This applies to text that is not JSON, a result envelope
+  that does not validate, and an error that does not decode. The workflow
+  error is `RESULT_DESERIALIZATION_ERROR` with the cause in the message.
+  Before, the cause was lost, and the workflow took a NULL error or
+  `WORKFLOW_SUCCESS_CASE_NOT_MET`.
 - **A lone surrogate in the text of a node failure no longer loses the
   text.** The text of an exception from `build_with()` can hold one, for
   example a file name. The node now fails with the text, with the surrogate
