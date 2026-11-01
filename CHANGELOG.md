@@ -10,6 +10,28 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: a workflow whose recovery raises on every pass now fails.** After
+  `workflow_recovery_failure_limit` reaper passes (default 25) with a persistent
+  raise, the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A persistent
+  raise is a defect, stored data that the engine cannot use, or a SQL error
+  outside `OperationalError`. Before, the reaper logged the raise on each pass,
+  and the workflow stayed `RUNNING`. A workflow in that state when you upgrade
+  reaches the limit and fails: at the default check interval, that is 750
+  seconds after the first pass. Set a higher limit to get more time for a fix.
+  A connection, lock or timeout error does not count, so a database outage
+  cannot fail a workflow.
+- **Breaking: a phase-2 row whose progression raises a persistent error now
+  counts toward `phase2_quarantine_after_attempts`.** At that bound the row moves
+  to quarantine, and the workflow fails with
+  `WORKFLOW_RECOVERY_LIMIT_REACHED`. Before, the raise did not count, and the
+  row was retried on every pass.
+- **An exhaustive `match` on `OperationalErrorCode` needs a
+  `WORKFLOW_RECOVERY_LIMIT_REACHED` case.** The code string is now reserved: an
+  `exception_mapper` or `default_unhandled_error_code` with that value fails
+  `horsies check` with `HRS-212`.
+- **Schema v52 adds the table `horsies_workflow_recovery_failures`.** The table
+  is new and empty, so the migration takes no lock on an existing table. A
+  worker applies it at start.
 - **Breaking: a schedule whose kwargs exceed `payload.reject_bytes` fails at
   scheduler start.** `Scheduler.start()` raises `ConfigurationError`
   (`HRS-205`, `CONFIG_INVALID_SCHEDULE`), and `horsies check` reports the
@@ -635,6 +657,22 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- Workflow recovery has a limit. A workflow whose recovery raises a persistent
+  error in `workflow_recovery_failure_limit` reaper passes fails closed. The
+  node that raised goes `FAILED`, other `PENDING` and `READY` nodes go
+  `SKIPPED`, a stored first error stays, and live nodes finish. The new setting
+  `RecoveryConfig.workflow_recovery_failure_limit` has the default 25 and the
+  range 3–1000. The count is stored in the new table
+  `horsies_workflow_recovery_failures`, so a worker restart keeps it, and all
+  workers share it. The count has no reset, so a later unrelated raise after a
+  repair reaches the limit sooner. The worker health surface gets
+  `failures_counted` and `limit_reached` per case, `over_failure_limit` for each
+  workflow recovery pass, and `raised_counted` for each phase-2 pass.
+- The top-level `errors` of the `workflow_recovery` health counts every recovery
+  case. Before, it left out `case_0`, `case_1`, `case_1_5` and `case_1_6`.
+- The parent advancement after a global workflow completion runs in its own
+  SAVEPOINT. A raise there no longer rolls back the completion of the child, so
+  the child ends, and recovery counts the raise on the parent workflow.
 - **`SuccessCase.required` and `SuccessPolicy.optional` accept any node.**
   The element type is `AnyNode` (`TaskNode[Any] | SubWorkflowNode[Any]`).
   Before, it was `TaskNode[Any]`, but spec validation already accepted a
