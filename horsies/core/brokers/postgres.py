@@ -35,6 +35,7 @@ from horsies.core.brokers.resources import (
 from horsies.core.brokers.session_capability import probe_session_capability
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
+    BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerErrorCode,
     BrokerEventLoopLimit,
@@ -44,11 +45,11 @@ from horsies.core.brokers.result_types import (
     BrokerInvalidTaskOptions,
     BrokerListenerDisabled,
     BrokerLoopRunnerFailed,
-    BrokerOperationError,
     BrokerOperationFailed,
     BrokerOperationFailedCode,
     BrokerPayloadMismatch,
     BrokerResult,
+    BrokerSyncCallError,
     RawResultRecord,
 )
 from horsies.core.models.broker import PostgresConfig
@@ -177,7 +178,7 @@ def _loop_limit_err(
 
 def _loop_runner_err(
     sync_call: str, exc: LoopRunnerError,
-) -> Err[BrokerOperationError]:
+) -> Err[BrokerLoopRunnerFailed]:
     """Build the broker error for a sync facade whose runner could not run the call.
 
     Nothing ran. Not retryable: a stopped runner does not start again.
@@ -192,7 +193,7 @@ def _loop_runner_err(
 
 def _async_context_err(
     sync_call: str, async_call: str,
-) -> Err[BrokerOperationError]:
+) -> Err[BrokerAsyncContext]:
     """Build the broker error for a sync facade called inside a running event loop.
 
     Nothing ran, and the sync runner was not started.
@@ -1893,7 +1894,7 @@ class PostgresBroker:
         task_options_value: Any,
         retention_class_key: str,
         retain_rerun_input: bool,
-    ) -> BrokerResult[dict[str, Any]]:
+    ) -> Result[dict[str, Any], BrokerInvalidInput]:
         """The cutover column values for one fresh enqueue.
 
         The command fingerprint covers the carried JSON strings as-is;
@@ -1914,7 +1915,9 @@ class PostgresBroker:
             encode_input_envelope_v1,
         )
 
-        def parsed(label: str, value: str | None) -> Any:
+        def parsed(
+            label: str, value: str | None,
+        ) -> Result[Any, BrokerInvalidInput]:
             if value is None:
                 return Ok(None)
             loaded = loads_json(value)
@@ -2081,7 +2084,7 @@ class PostgresBroker:
         retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
         idempotency_key: Optional[str] = None,
-    ) -> BrokerResult[str]:
+    ) -> Result[str, BrokerEnqueueError]:
         match await self.select_resources():
             case Err(loop_limit):
                 return _loop_limit_err('enqueue', loop_limit)
@@ -2302,7 +2305,7 @@ class PostgresBroker:
         task_name: str,
         key_digest: bytes,
         command_fingerprint: bytes,
-    ) -> BrokerResult[str]:
+    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Bind a claimed key to an exact existing live task atomically.
 
         The reservation claim already ran in ``session``. Locking the task row
@@ -2380,7 +2383,7 @@ class PostgresBroker:
         task_id: str,
         enqueue_sha: str,
         task_name: str,
-    ) -> BrokerResult[str]:
+    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
         """Verify a conflicting task_id has the same payload.
 
         Called when INSERT ... ON CONFLICT DO NOTHING returns no row.
@@ -3813,7 +3816,7 @@ class PostgresBroker:
         idempotency_key: Optional[str] = None,
         retention_class_key: str | None = DEFAULT_RETENTION_CLASS_KEY,
         retain_rerun_input: Optional[bool] = None,
-    ) -> BrokerResult[str]:
+    ) -> Result[str, BrokerEnqueueError | BrokerSyncCallError]:
         """Synchronous task submission (runs enqueue_async in background loop).
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``

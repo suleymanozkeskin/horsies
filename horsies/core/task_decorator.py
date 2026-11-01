@@ -72,6 +72,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
+    BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
@@ -82,10 +83,10 @@ from horsies.core.brokers.result_types import (
     BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
-    BrokerOperationError,
     BrokerOperationFailed,
     BrokerPayloadMismatch,
     BrokerResult,
+    BrokerSyncCallError,
     RawResultRecord,
     broker_error_cause,
 )
@@ -1299,7 +1300,7 @@ def create_task_wrapper(
     # ---- Broker-to-TaskSendError mapping ----
 
     def _map_broker_err(
-        broker_err: BrokerOperationError,
+        broker_err: BrokerEnqueueError | BrokerSyncCallError,
         task_id: str,
         payload: TaskSendPayload,
     ) -> _BrokerSendError:
@@ -1346,20 +1347,17 @@ def create_task_wrapper(
                     message=message,
                     exception=exception,
                 )
-            case (
-                BrokerOperationFailed()
-                | BrokerEnqueueFailed()
-                | BrokerNotAttached()
-                | BrokerNoTypeAvailable()
-                | BrokerInvalidJsonPayload()
-                | BrokerListenerDisabled()
+            case BrokerEnqueueFailed(
+                message=message,
+                retryable=retryable,
+                exception=exception,
             ):
                 return TaskSendEnqueueFailed(
                     task_id=task_id,
                     payload=payload,
-                    message=broker_err.message,
-                    retryable=broker_err.retryable,
-                    exception=broker_error_cause(broker_err),
+                    message=message,
+                    retryable=retryable,
+                    exception=exception,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
