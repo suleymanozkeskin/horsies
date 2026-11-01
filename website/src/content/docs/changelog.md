@@ -366,6 +366,23 @@ there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **`enqueue_async` refuses bad input before the database, with its own code.**
+  A refused input used to fall into the `except Exception` of the write, so a
+  direct call got `ENQUEUE_FAILED`, whose contract says the write may have
+  happened, and a send got an error that the retry methods accepted. These now
+  give `INVALID_INPUT` and write nothing, and a send gets `VALIDATION_FAILED`:
+  an empty task or queue name, a priority outside 1..100, a naive `good_until`,
+  a negative `enqueue_delay_seconds`, an empty `retention_class_key`, an empty
+  idempotency key or one over 255 bytes, a naive `sent_at`, and a naive
+  `enqueued_at`. A naive `sent_at` raised a raw `TypeError` before, and a naive
+  `enqueued_at` was stored under the session time zone with no error.
+  `args_json` must be null or an empty array, because the worker refuses every
+  other row, and `kwargs_json` must be an object or null. An empty string is
+  refused for both, and a falsy value no longer turns into an empty container.
+- **Breaking: a code defect in the enqueue write crashes loud.** The write now
+  catches database, network and history-contract errors only, so any other
+  exception leaves `enqueue_async`, and so leaves `send()`. Schema init keeps its
+  catch: an incomplete cutover is still `ENQUEUE_FAILED`.
 - **Breaking: `WorkflowHandle.results()` and `tasks()` return
   `HandleWorkflowNotFound` for an id that has no workflow.** The same is
   true for `results_async()` and `tasks_async()`. Each method reads the
@@ -683,6 +700,14 @@ there is no migration contract between pre-1.0 versions.
   decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
   refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
   character and stays accepted.
+- **`prepare_legacy_batch` no longer aborts on a row that breaks an enqueue
+  rule.** An empty task or queue name, or a priority outside 1..100, raised a
+  raw `ValueError` out of the batch, so one row stopped every row around it and
+  the error did not name it. The row now stays unprepared, and
+  `PreparationBatch.refused_rows` names it with the rule. The walk ends in the
+  new `PreparationBlocked`, which counts the rows that remain, not in
+  `PreparationComplete`. Repair the rows and run preparation again; the tighten
+  refuses while any remain.
 
 ## 0.5.5 — 2026-10-28
 

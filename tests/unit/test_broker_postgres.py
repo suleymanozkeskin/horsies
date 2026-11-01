@@ -15,9 +15,11 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 
 from sqlalchemy.exc import OperationalError as SAOperationalError
+from sqlalchemy.exc import TimeoutError as SATimeoutError
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -28,6 +30,14 @@ from horsies.core.brokers.result_types import (
     BrokerListenerDisabled,
 )
 from horsies.core.codec.json_io import SerializationError
+from horsies.core.models.payload import PayloadPolicy
+from horsies.core.models.task_send_types import (
+    TaskSendErrorCode,
+    TaskSendValidationFailed,
+)
+from horsies.core.task_decorator import create_task_wrapper
+from horsies.core.history.rerun.input_envelope import encode_input_envelope_v1
+from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.archive.versions import archive_digest
 from horsies.core.history.reads.detail import HistoryTaskDetail
 from horsies.core.types.error_detail import NoCause
@@ -837,7 +847,7 @@ class TestEnqueueAsync:
             'default',
             task_id='test-task-id',
             enqueue_sha='test-sha',
-            args_json='[1, 2]',
+            args_json='[]',
             kwargs_json='{"key": "val"}',
         )
 
@@ -1263,17 +1273,13 @@ class TestEnqueueIdempotency:
         session = _make_conflict_session(existing_sha=None)
         _set_resources(broker, session_factory=MagicMock(return_value=session))
 
-        result = await broker.enqueue_async(
-            'my_task',
-            task_id='dup-id',
-            enqueue_sha='test-sha',
-        )
+        with pytest.raises(AssertionError, match='enqueue_sha is NULL'):
+            await broker.enqueue_async(
+                'my_task',
+                task_id='dup-id',
+                enqueue_sha='test-sha',
+            )
 
-        # The assertion fires inside _verify_enqueue_conflict, which is
-        # caught by the outer try/except in enqueue_async -> Err(ENQUEUE_FAILED).
-        assert is_err(result)
-        assert result.err_value.code == BrokerErrorCode.ENQUEUE_FAILED
-        assert result.err_value.retryable is False
 
     @pytest.mark.asyncio
     async def test_enqueue_same_id_row_deleted_returns_non_retryable_err(self) -> None:
@@ -1304,7 +1310,7 @@ class TestEnqueueIdempotency:
                 True,
                 id='driver-connection-error',
             ),
-            pytest.param(ValueError('row decode failed'), False, id='other-error'),
+            pytest.param(OSError('socket closed'), False, id='os-error'),
         ],
     )
     async def test_enqueue_same_id_select_fails_classifies_the_cause(
@@ -3774,3 +3780,360 @@ class TestHistoryTaskInfoResultDecode:
                 assert 'invalid_json' in message
             case other:
                 raise AssertionError(f'expected INVALID_JSON_PAYLOAD, got {other!r}')
+
+
+class _DatabaseMustNotRun:
+    """Broker wiring for a refused input: any database use fails the test."""
+
+    def __init__(self) -> None:
+        self.broker = _make_broker()
+        self.engine, self.conn = _make_enqueue_engine()
+        self.session = _make_enqueue_session()
+        _set_resources(
+            self.broker,
+            engine=self.engine,
+            session_factory=MagicMock(return_value=self.session),
+        )
+
+    def assert_nothing_ran(self) -> None:
+        self.conn.execute.assert_not_awaited()
+        self.session.execute.assert_not_awaited()
+
+
+REFUSED_ARGS = ['5', '"abc"', '{"a":1}', '0', 'false', '""', '{}', '[1]', '[null]', '']
+REFUSED_KWARGS = ['5', '"a"', '[1]', 'true', '0', 'false', '""', '[]', '']
+
+
+@pytest.mark.unit
+class TestEnqueueInputRefusal:
+    """A refused input is refused before the database, with its own code."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('args_json', REFUSED_ARGS)
+    async def test_args_shape_is_refused(self, args_json: str) -> None:
+        wiring = _DatabaseMustNotRun()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', args_json=args_json,
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert 'args JSON' in result.err_value.message
+        wiring.assert_nothing_ran()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('kwargs_json', REFUSED_KWARGS)
+    async def test_kwargs_shape_is_refused(self, kwargs_json: str) -> None:
+        wiring = _DatabaseMustNotRun()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', kwargs_json=kwargs_json,
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert 'kwargs JSON' in result.err_value.message
+        wiring.assert_nothing_ran()
+
+    @pytest.mark.asyncio
+    async def test_shape_refusal_text_holds_no_input_value(self) -> None:
+        wiring = _DatabaseMustNotRun()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', kwargs_json='"secret-value"',
+        )
+
+        assert is_err(result)
+        assert 'secret-value' not in result.err_value.message
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'overrides',
+        [
+            pytest.param({'task_name': ''}, id='empty-task-name'),
+            pytest.param({'queue_name': ''}, id='empty-queue-name'),
+            pytest.param({'priority': 0}, id='priority-below'),
+            pytest.param({'priority': 101}, id='priority-above'),
+            pytest.param({'good_until': datetime(2030, 1, 1)}, id='naive-good-until'),
+            pytest.param({'enqueue_delay_seconds': -1}, id='negative-delay'),
+            pytest.param({'retention_class_key': ''}, id='empty-retention-key'),
+        ],
+    )
+    async def test_command_rule_is_refused_with_its_cause(
+        self, overrides: dict[str, Any],
+    ) -> None:
+        wiring = _DatabaseMustNotRun()
+        values: dict[str, Any] = {'task_name': 'my_task', 'queue_name': 'default'}
+        values.update(overrides)
+
+        result = await wiring.broker.enqueue_async(
+            task_id='t', enqueue_sha='s', **values,
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(exception=cause):
+                assert isinstance(cause, ValueError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        wiring.assert_nothing_ran()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'key',
+        [
+            pytest.param('', id='empty'),
+            pytest.param('k' * 256, id='over-the-byte-bound'),
+            pytest.param('\ud800', id='not-utf8-encodable'),
+        ],
+    )
+    async def test_idempotency_key_is_refused(self, key: str) -> None:
+        wiring = _DatabaseMustNotRun()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', idempotency_key=key,
+        )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerInvalidInput(exception=cause):
+                assert isinstance(cause, ValueError)
+            case other:
+                raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
+        wiring.assert_nothing_ran()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('field', ['sent_at', 'enqueued_at'])
+    async def test_naive_instant_is_refused(self, field: str) -> None:
+        wiring = _DatabaseMustNotRun()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task',
+            task_id='t',
+            enqueue_sha='s',
+            **{field: datetime(2020, 1, 1)},
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        assert f'{field} must be timezone-aware' in result.err_value.message
+        wiring.assert_nothing_ran()
+
+    @pytest.mark.asyncio
+    async def test_send_with_an_empty_key_is_validation_failed(self) -> None:
+        """A normal send reaches this, through the real broker and mapping."""
+        wiring = _DatabaseMustNotRun()
+        app = MagicMock()
+        app.config.queue_mode.name = 'DEFAULT'
+        app.config.resend_on_transient_err = False
+        app.config.payload = PayloadPolicy()
+        app.are_sends_suppressed.return_value = False
+        app.validate_queue_name.return_value = 'default'
+        app.get_broker.return_value = wiring.broker
+
+        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=x)
+
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = await wrapper.with_options(idempotency_key='').send_async(x=1)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
+        wiring.assert_nothing_ran()
+        # TaskSendRetryable excludes this variant, so a retry is a type error,
+        # and at run time it is a defect that crashes loud.
+        with pytest.raises(AssertionError, match='unreachable'):
+            await wrapper.retry_send_async(result.err_value)  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.asyncio
+    async def test_refused_input_needs_no_schema_init(self) -> None:
+        """With the database down, a bad input is still INVALID_INPUT."""
+        wiring = _DatabaseMustNotRun()
+        wiring.broker._initialized = False
+        wiring.broker._ensure_initialized = AsyncMock(
+            side_effect=SAOperationalError('connect', None, Exception('down'))
+        )
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', priority=0,
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidInput)
+        wiring.broker._ensure_initialized.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refused_task_options_need_no_schema_init(self) -> None:
+        wiring = _DatabaseMustNotRun()
+        wiring.broker._ensure_initialized = AsyncMock()
+
+        result = await wiring.broker.enqueue_async(
+            'my_task', task_id='t', enqueue_sha='s', task_options='{bad',
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, BrokerInvalidTaskOptions)
+        wiring.broker._ensure_initialized.assert_not_awaited()
+
+
+@pytest.mark.unit
+class TestEnqueueAcceptedInput:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('args_json', 'kwargs_json', 'expected'),
+        [
+            (None, None, {}),
+            ('null', 'null', {}),
+            ('[]', '{}', {}),
+            ('[ ]', '{"a":1}', {'a': 1}),
+        ],
+    )
+    async def test_envelope_bytes_do_not_change(
+        self, args_json: str | None, kwargs_json: str | None, expected: dict[str, int],
+    ) -> None:
+        broker = _make_broker()
+        engine, conn = _make_enqueue_engine()
+        _set_resources(broker, engine=engine)
+
+        result = await broker.enqueue_async(
+            'my_task',
+            task_id='t',
+            enqueue_sha='s',
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            retain_rerun_input=True,
+        )
+
+        assert is_ok(result)
+        params = conn.execute.await_args.args[1]
+        assert params['prepared_rerun_input_inline'] == encode_input_envelope_v1(
+            args=[], kwargs=expected, options=None,
+        )
+        assert params['args'] == args_json
+        assert params['kwargs'] == kwargs_json
+
+
+@pytest.mark.unit
+class TestEnqueueCatch:
+    """Schema init and the write section each state what they catch."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'message',
+        [
+            'database schema v99 is newer than this build supports (v51)',
+            'schema migrations are current but the offline task-history cutover is incomplete',
+            'schema advisory lock ownership was lost',
+        ],
+    )
+    async def test_schema_init_operator_state_stays_enqueue_failed(
+        self, message: str,
+    ) -> None:
+        broker = _make_broker()
+        engine, _conn = _make_enqueue_engine()
+        _set_resources(broker, engine=engine)
+        state = RuntimeError(message)
+        broker._ensure_initialized = AsyncMock(side_effect=state)
+
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerEnqueueFailed(retryable=retryable, exception=cause):
+                assert retryable is False
+                assert cause is state
+            case other:
+                raise AssertionError(f'expected ENQUEUE_FAILED, got {other!r}')
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('error', 'retryable'),
+        [
+            pytest.param(
+                SAOperationalError('INSERT', None, Exception('conn lost')),
+                True,
+                id='driver-connection-error',
+            ),
+            pytest.param(SATimeoutError('pool'), True, id='pool-timeout'),
+            pytest.param(OSError('socket closed'), False, id='os-error'),
+            pytest.param(TimeoutError('timed out'), False, id='timeout-error'),
+            pytest.param(
+                psycopg.errors.InternalError('boom'), False, id='psycopg-error',
+            ),
+        ],
+    )
+    async def test_write_error_keeps_its_classification(
+        self, error: Exception, retryable: bool,
+    ) -> None:
+        broker = _make_broker()
+        engine, conn = _make_enqueue_engine()
+        _set_resources(broker, engine=engine)
+        conn.execute = AsyncMock(side_effect=error)
+
+        result = await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerEnqueueFailed(retryable=flag, exception=cause):
+                assert flag is retryable
+                assert cause is error
+            case other:
+                raise AssertionError(f'expected ENQUEUE_FAILED, got {other!r}')
+
+    @pytest.mark.asyncio
+    async def test_reservation_decode_failure_stays_enqueue_failed(self) -> None:
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+        refusal = HistoryContractError('reservation outcome row did not decode')
+
+        with patch(
+            'horsies.core.history.identity.reservations.claim_key_reservation',
+            AsyncMock(side_effect=refusal),
+        ):
+            result = await broker.enqueue_async(
+                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+            )
+
+        assert is_err(result)
+        match result.err_value:
+            case BrokerEnqueueFailed(exception=cause):
+                assert cause is refusal
+            case other:
+                raise AssertionError(f'expected ENQUEUE_FAILED, got {other!r}')
+
+    @pytest.mark.asyncio
+    async def test_defect_in_the_write_crashes_loud(self) -> None:
+        broker = _make_broker()
+        engine, conn = _make_enqueue_engine()
+        _set_resources(broker, engine=engine)
+        conn.execute = AsyncMock(side_effect=TypeError('defect'))
+
+        with pytest.raises(TypeError, match='defect'):
+            await broker.enqueue_async('my_task', task_id='t', enqueue_sha='s')
+
+    @pytest.mark.asyncio
+    async def test_defect_in_the_keyed_write_crashes_loud(self) -> None:
+        broker = _make_broker()
+        session = _make_enqueue_session()
+        session.connection = AsyncMock(side_effect=TypeError('defect'))
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with pytest.raises(TypeError, match='defect'):
+            await broker.enqueue_async(
+                'my_task', task_id='t', enqueue_sha='s', idempotency_key='key',
+            )
+
+    @pytest.mark.asyncio
+    async def test_defect_in_the_conflict_read_crashes_loud(self) -> None:
+        broker = _make_broker()
+        engine, _conn = _make_enqueue_engine(inserted=False)
+        _set_resources(broker, engine=engine)
+        session = _make_conflict_session(select_raises=TypeError('defect'))
+        _set_resources(broker, session_factory=MagicMock(return_value=session))
+
+        with pytest.raises(TypeError, match='defect'):
+            await broker.enqueue_async('my_task', task_id='dup', enqueue_sha='s')

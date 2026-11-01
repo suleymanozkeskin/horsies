@@ -2,7 +2,8 @@
 from __future__ import annotations
 import asyncio, hashlib, contextlib, os, random, threading, time, uuid
 from collections.abc import AsyncGenerator, Callable, Coroutine
-from typing import Any, Optional, TYPE_CHECKING, assert_never, cast
+from dataclasses import dataclass
+from typing import Any, Final, Optional, TYPE_CHECKING, assert_never, cast
 from datetime import datetime, timedelta, timezone
 import psycopg
 from sqlalchemy.ext.asyncio import (
@@ -12,7 +13,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
 )
 from sqlalchemy import text, select
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from pydantic import ValidationError
 from horsies.core.brokers.listener import PostgresListener
 from horsies.core.brokers.resources import (
@@ -92,6 +93,7 @@ from horsies.core.models.health import (
     WorkerPingRequest,
     WorkerStateSnapshot,
 )
+from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.ddl.classes import (
     DEFAULT_RETENTION_CLASS_KEY,
     resolve_retention_class_key,
@@ -162,6 +164,171 @@ def _enqueue_failed(message: str, exc: BaseException) -> Err[BrokerEnqueueFailed
             exception=without_validation_input(exc),
         )
     )
+
+
+_DRIVER_ERRORS: Final = (SQLAlchemyError, psycopg.Error, OSError)
+"""What a statement can raise when the database or the network fails."""
+
+_ENQUEUE_WRITE_ERRORS: Final = (*_DRIVER_ERRORS, HistoryContractError)
+"""The enqueue write catches these, and a code defect crashes loud.
+
+``HistoryContractError`` is the reservation outcome that did not decode.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedEnqueue:
+    """The checked input of one enqueue. Only the database can refuse it now."""
+
+    insert_params: dict[str, Any]
+    command_fingerprint: bytes
+    scoped_key_digest: bytes | None
+
+
+_SENT_AT_FUTURE_TOLERANCE: Final = timedelta(seconds=5)
+"""Absorbs trivial clock drift in the future ``sent_at`` guard."""
+
+
+def _check_enqueue_timing(
+    *,
+    sent_at: datetime | None,
+    enqueued_at: datetime | None,
+    enqueue_delay_seconds: int | None,
+) -> Result[None, BrokerInvalidInput]:
+    """Refuse a call whose instants cannot mean what they say.
+
+    A naive instant cannot be compared with now, and a naive ``enqueued_at``
+    would be stored under the session time zone: a wrong instant. ``sent_at``
+    is an immutable call-site timestamp, not a scheduling mechanism: a future
+    one with no explicit schedule is almost certainly legacy ETA usage that
+    would silently run immediately, because ``enqueued_at`` defaults to NOW().
+    """
+    if enqueued_at is not None and enqueue_delay_seconds is not None:
+        return Err(BrokerInvalidInput(
+            message='Cannot specify both enqueued_at and enqueue_delay_seconds',
+            exception=NoCause(),
+        ))
+    for label, instant in (('sent_at', sent_at), ('enqueued_at', enqueued_at)):
+        if instant is not None and instant.tzinfo is None:
+            return Err(BrokerInvalidInput(
+                message=f'{label} must be timezone-aware',
+                exception=NoCause(),
+            ))
+    if (
+        sent_at is not None
+        and sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
+        and enqueued_at is None
+        and enqueue_delay_seconds is None
+    ):
+        return Err(BrokerInvalidInput(
+            message=(
+                'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
+                'sent_at is a call-site timestamp, use enqueued_at or '
+                'enqueue_delay_seconds to schedule deferred execution'
+            ),
+            exception=NoCause(),
+        ))
+    return Ok(None)
+
+
+def _parse_enqueue_task_options(
+    task_name: str, task_options: str | None,
+) -> Result[tuple[Json, int], BrokerInvalidTaskOptions]:
+    """Parse task options to their value and retry limit.
+
+    ``serialize_task_options()`` always produces this text, so malformed JSON
+    is a bug, not a runtime condition, and it must not be silently swallowed.
+    """
+    if not task_options:
+        return Ok((None, 0))
+    opts_r = loads_json(task_options)
+    if is_err(opts_r):
+        return Err(BrokerInvalidTaskOptions(
+            message=f'task_options JSON corrupt: {opts_r.err_value}',
+            exception=opts_r.err_value,
+        ))
+    retry_limit_r = stored_max_retries(opts_r.ok_value)
+    if is_err(retry_limit_r):
+        detail = retry_limit_r.err_value.detail
+        return Err(BrokerInvalidTaskOptions(
+            message=f'task_options refused for {task_name}: {detail}',
+            exception=NoCause(),
+        ))
+    return Ok((opts_r.ok_value, retry_limit_r.ok_value))
+
+
+def _parse_enqueue_json(
+    label: str, task_name: str, text: str,
+) -> Result[Json, BrokerInvalidInput]:
+    """Parse one JSON input text.
+
+    Empty text is refused: it is not JSON, and ``loads_json`` reads it as null.
+    """
+    if not text:
+        return Err(BrokerInvalidInput(
+            message=f'{label} JSON corrupt for {task_name}: empty text',
+            exception=NoCause(),
+        ))
+    loaded = loads_json(text)
+    if is_err(loaded):
+        return Err(BrokerInvalidInput(
+            message=f'{label} JSON corrupt for {task_name}: {loaded.err_value}',
+            exception=loaded.err_value,
+        ))
+    return loaded
+
+
+def _check_enqueue_args(
+    task_name: str, args_json: str | None,
+) -> Result[None, BrokerInvalidInput]:
+    """Refuse args text that no worker can run.
+
+    The worker takes only a null or an empty array, so anything else is
+    refused here and not at run time. The text names no input value.
+    """
+    if args_json is None:
+        return Ok(None)
+    parsed = _parse_enqueue_json('args', task_name, args_json)
+    if is_err(parsed):
+        return parsed
+    match parsed.ok_value:
+        case None | []:
+            return Ok(None)
+        case other:
+            return Err(BrokerInvalidInput(
+                message=(
+                    f'args JSON for {task_name} must be null or an empty array, '
+                    f'got {type(other).__name__}; positional args are not supported'
+                ),
+                exception=NoCause(),
+            ))
+
+
+def _parse_enqueue_kwargs(
+    task_name: str, kwargs_json: str | None,
+) -> Result[dict[str, Any], BrokerInvalidInput]:
+    """Parse kwargs text to its object. Null and absent are an empty object.
+
+    The refusal text names the JSON type, not the input value.
+    """
+    if kwargs_json is None:
+        return Ok({})
+    parsed = _parse_enqueue_json('kwargs', task_name, kwargs_json)
+    if is_err(parsed):
+        return parsed
+    match parsed.ok_value:
+        case None:
+            return Ok({})
+        case dict() as kwargs:
+            return Ok(kwargs)
+        case other:
+            return Err(BrokerInvalidInput(
+                message=(
+                    f'kwargs JSON for {task_name} must be an object or null, '
+                    f'got {type(other).__name__}'
+                ),
+                exception=NoCause(),
+            ))
 
 
 def _loop_limit_err(
@@ -1888,6 +2055,7 @@ class PostgresBroker:
         priority: int,
         args_json: str | None,
         kwargs_json: str | None,
+        kwargs: dict[str, Any],
         good_until: Optional[datetime],
         enqueue_delay_seconds: Optional[int],
         task_options: Optional[str],
@@ -1915,53 +2083,37 @@ class PostgresBroker:
             encode_input_envelope_v1,
         )
 
-        def parsed(
-            label: str, value: str | None,
-        ) -> Result[Any, BrokerInvalidInput]:
-            if value is None:
-                return Ok(None)
-            loaded = loads_json(value)
-            if is_err(loaded):
-                return Err(BrokerInvalidInput(
-                    message=(
-                        f'{label} JSON corrupt for {task_name}: '
-                        f'{loaded.err_value}'
-                    ),
-                    exception=loaded.err_value,
-                ))
-            return loaded
-
-        args_r = parsed('args', args_json)
-        if is_err(args_r):
-            return args_r
-        kwargs_r = parsed('kwargs', kwargs_json)
-        if is_err(kwargs_r):
-            return kwargs_r
-
         # task_options arrives both as the stored string (fingerprint
         # input) and as the value the caller already parsed once for
         # retry-policy extraction; parsing it again here would be the
         # second parse of the same string on every enqueue.
         payload = encode_input_envelope_v1(
-            args=args_r.ok_value or [],
-            kwargs=kwargs_r.ok_value or {},
+            args=[],
+            kwargs=kwargs,
             options=task_options_value,
         )
         digest = sha256(payload).digest()
-        fingerprint = EnqueueCommandV1(
-            task_name=task_name,
-            queue_name=queue_name,
-            priority=priority,
-            args_json=args_json,
-            kwargs_json=kwargs_json,
-            good_until=good_until,
-            enqueue_delay_seconds=enqueue_delay_seconds,
-            task_options_json=task_options,
-            retention_class_key=retention_class_key,
-            retain_rerun_input=retain_rerun_input,
-            rerun_of_task_id=None,
-            rerun_root_task_id=None,
-        ).fingerprint
+        try:
+            command = EnqueueCommandV1(
+                task_name=task_name,
+                queue_name=queue_name,
+                priority=priority,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                good_until=good_until,
+                enqueue_delay_seconds=enqueue_delay_seconds,
+                task_options_json=task_options,
+                retention_class_key=retention_class_key,
+                retain_rerun_input=retain_rerun_input,
+                rerun_of_task_id=None,
+                rerun_root_task_id=None,
+            )
+        except ValueError as exc:
+            return Err(BrokerInvalidInput(
+                message=f'enqueue input refused for {task_name}: {exc}',
+                exception=exc,
+            ))
+        fingerprint = command.fingerprint
 
         if not retain_rerun_input:
             disposition: dict[str, Any] = {
@@ -1992,6 +2144,108 @@ class PostgresBroker:
                 **disposition,
             }
         )
+
+    @staticmethod
+    def _prepare_enqueue(
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+        queue_name: str,
+        priority: int,
+        args_json: str | None,
+        kwargs_json: str | None,
+        sent_at: Optional[datetime],
+        enqueued_at: Optional[datetime],
+        enqueue_delay_seconds: Optional[int],
+        good_until: Optional[datetime],
+        task_options: Optional[str],
+        retention_class_key: str,
+        retain_rerun_input: bool,
+        idempotency_key: Optional[str],
+    ) -> Result[_PreparedEnqueue, BrokerInvalidInput | BrokerInvalidTaskOptions]:
+        """Check one enqueue's input and build its row. Touches no database.
+
+        Every refusal means nothing was written, so a refused input never
+        looks like a write that may have happened. A lone surrogate in
+        ``task_name`` or ``queue_name`` raises ``UnicodeEncodeError`` from the
+        fingerprint: those are programmer constants, so it crashes loud.
+        """
+        timing_r = _check_enqueue_timing(
+            sent_at=sent_at,
+            enqueued_at=enqueued_at,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+        )
+        if is_err(timing_r):
+            return timing_r
+        args_r = _check_enqueue_args(task_name, args_json)
+        if is_err(args_r):
+            return args_r
+        kwargs_r = _parse_enqueue_kwargs(task_name, kwargs_json)
+        if is_err(kwargs_r):
+            return kwargs_r
+        options_r = _parse_enqueue_task_options(task_name, task_options)
+        if is_err(options_r):
+            return options_r
+        task_options_value, max_retries = options_r.ok_value
+
+        # The cutover payload: command fingerprint, retention
+        # snapshot, and the prepared rerun-input envelope, computed
+        # here so every producer path carries them without call-site
+        # changes. Values are real for every new row; the columns
+        # are transitionally nullable (v27) only for rows written by
+        # older code, which the cutover migration's backfill owns.
+        cutover = PostgresBroker._cutover_enqueue_values(
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            kwargs=kwargs_r.ok_value,
+            good_until=good_until,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            task_options=task_options,
+            task_options_value=task_options_value,
+            retention_class_key=retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+        )
+        if is_err(cutover):
+            return cutover
+
+        scoped_key_digest: bytes | None = None
+        if idempotency_key is not None:
+            from horsies.core.history.identity.keys import ScopedIdempotencyKey
+
+            try:
+                scoped_key_digest = ScopedIdempotencyKey(
+                    task_name=task_name, key=idempotency_key
+                ).digest
+            except ValueError as exc:
+                return Err(BrokerInvalidInput(
+                    message=f'idempotency key refused for {task_name}: {exc}',
+                    exception=exc,
+                ))
+        return Ok(_PreparedEnqueue(
+            insert_params=PostgresBroker._enqueue_insert_params(
+                task_id=task_id,
+                task_name=task_name,
+                queue_name=queue_name,
+                priority=priority,
+                args_json=args_json,
+                kwargs_json=kwargs_json,
+                call_site_sent_at=sent_at or datetime.now(timezone.utc),
+                enqueued_at=enqueued_at,
+                enqueue_delay_seconds=enqueue_delay_seconds,
+                good_until=good_until,
+                max_retries=max_retries,
+                task_options=task_options,
+                enqueue_sha=enqueue_sha,
+                scoped_key_digest=scoped_key_digest,
+                cutover_values=cutover.ok_value,
+            ),
+            command_fingerprint=cutover.ok_value['command_fingerprint'],
+            scoped_key_digest=scoped_key_digest,
+        ))
 
     @staticmethod
     def _enqueue_insert_params(
@@ -2100,201 +2354,164 @@ class PostgresBroker:
         # None means inherit the deployment's standing policy.
         if retain_rerun_input is None:
             retain_rerun_input = self.config.retain_rerun_input_default
-        if enqueued_at is not None and enqueue_delay_seconds is not None:
-            return Err(BrokerInvalidInput(
-                message='Cannot specify both enqueued_at and enqueue_delay_seconds',
-                exception=NoCause(),
-            ))
-        # Guard: sent_at is an immutable call-site timestamp, not a scheduling
-        # mechanism.  A future sent_at without an explicit enqueued_at or
-        # enqueue_delay_seconds is almost certainly legacy ETA usage that would
-        # silently run immediately (enqueued_at defaults to NOW()).
-        # 5-second tolerance absorbs trivial clock drift.
-        _SENT_AT_FUTURE_TOLERANCE = timedelta(seconds=5)
-        if (
-            sent_at is not None
-            and sent_at > datetime.now(timezone.utc) + _SENT_AT_FUTURE_TOLERANCE
-            and enqueued_at is None
-            and enqueue_delay_seconds is None
-        ):
-            return Err(BrokerInvalidInput(
-                message=(
-                    'sent_at is in the future without enqueued_at or enqueue_delay_seconds; '
-                    'sent_at is a call-site timestamp, use enqueued_at or '
-                    'enqueue_delay_seconds to schedule deferred execution'
-                ),
-                exception=NoCause(),
-            ))
+        prepared_r = self._prepare_enqueue(
+            task_id=task_id,
+            enqueue_sha=enqueue_sha,
+            task_name=task_name,
+            queue_name=queue_name,
+            priority=priority,
+            args_json=args_json,
+            kwargs_json=kwargs_json,
+            sent_at=sent_at,
+            enqueued_at=enqueued_at,
+            enqueue_delay_seconds=enqueue_delay_seconds,
+            good_until=good_until,
+            task_options=task_options,
+            retention_class_key=resolved_retention_class_key,
+            retain_rerun_input=retain_rerun_input,
+            idempotency_key=idempotency_key,
+        )
+        if is_err(prepared_r):
+            return prepared_r
+        prepared = prepared_r.ok_value
+
+        # Schema init keeps a broad catch, as ensure_schema_initialized does:
+        # it raises RuntimeError for operator states such as an incomplete
+        # cutover, and each of those is a failed enqueue, not a crash.
         try:
             await self._ensure_initialized(resources)
-
-            call_site_sent_at = sent_at or datetime.now(timezone.utc)
-
-            # Parse retry configuration from task_options; the parsed value
-            # is reused by the cutover computation below so the string is
-            # decoded exactly once per enqueue.
-            # task_options is always produced by serialize_task_options() — malformed JSON
-            # is a bug, not a runtime condition, and must not be silently swallowed.
-            max_retries = 0
-            task_options_value: Json = None
-            if task_options:
-                opts_r = loads_json(task_options)
-                if is_err(opts_r):
-                    return Err(BrokerInvalidTaskOptions(
-                        message=f'task_options JSON corrupt: {opts_r.err_value}',
-                        exception=opts_r.err_value,
-                    ))
-                task_options_value = opts_r.ok_value
-                retry_limit_r = stored_max_retries(task_options_value)
-                if is_err(retry_limit_r):
-                    detail = retry_limit_r.err_value.detail
-                    return Err(BrokerInvalidTaskOptions(
-                        message=f'task_options refused for {task_name}: {detail}',
-                        exception=NoCause(),
-                    ))
-                max_retries = retry_limit_r.ok_value
-
-            # The cutover payload: command fingerprint, retention
-            # snapshot, and the prepared rerun-input envelope, computed
-            # here so every producer path carries them without call-site
-            # changes. Values are real for every new row; the columns
-            # are transitionally nullable (v27) only for rows written by
-            # older code, which the cutover migration's backfill owns.
-            cutover = self._cutover_enqueue_values(
-                task_name=task_name,
-                queue_name=queue_name,
-                priority=priority,
-                args_json=args_json,
-                kwargs_json=kwargs_json,
-                good_until=good_until,
-                enqueue_delay_seconds=enqueue_delay_seconds,
-                task_options=task_options,
-                task_options_value=task_options_value,
-                retention_class_key=resolved_retention_class_key,
-                retain_rerun_input=retain_rerun_input,
-            )
-            if is_err(cutover):
-                return cutover
-
-            scoped_key_digest: Optional[bytes] = None
-            if idempotency_key is not None:
-                from horsies.core.history.identity.keys import (
-                    ScopedIdempotencyKey,
-                )
-
-                scoped_key_digest = ScopedIdempotencyKey(
-                    task_name=task_name, key=idempotency_key
-                ).digest
-
-            insert_params = self._enqueue_insert_params(
-                task_id=task_id,
-                task_name=task_name,
-                queue_name=queue_name,
-                priority=priority,
-                args_json=args_json,
-                kwargs_json=kwargs_json,
-                call_site_sent_at=call_site_sent_at,
-                enqueued_at=enqueued_at,
-                enqueue_delay_seconds=enqueue_delay_seconds,
-                good_until=good_until,
-                max_retries=max_retries,
-                task_options=task_options,
-                enqueue_sha=enqueue_sha,
-                scoped_key_digest=scoped_key_digest,
-                cutover_values=cutover.ok_value,
-            )
-
-            if scoped_key_digest is not None:
-                async with resources.session_factory() as session:
-                    # Claim and insert in ONE transaction: the claim
-                    # reuses the command fingerprint computed for the
-                    # cutover columns, and a replayed key returns the
-                    # committed request's id — the same result shape as
-                    # a fresh enqueue, no distinguishability flag.
-                    from horsies.core.history.identity.keys import (
-                        IDEMPOTENCY_SCOPE_VERSION,
-                    )
-                    from horsies.core.history.identity.reservations import (
-                        ReservationApplied,
-                        ReservationConflict,
-                        ReservationReplay,
-                        claim_key_reservation,
-                    )
-
-                    claim = await claim_key_reservation(
-                        await session.connection(),
-                        key_digest=scoped_key_digest,
-                        key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
-                        reservation_window_seconds=int(
-                            self.idempotency_reservation_window
-                            .total_seconds()
-                        ),
-                        fingerprint_version=1,
-                        fingerprint=cutover.ok_value['command_fingerprint'],
-                        task_id=task_id,
-                    )
-                    match claim:
-                        case ReservationReplay(task_id=existing):
-                            await session.rollback()
-                            return Ok(existing)
-                        case ReservationConflict(task_id=owner):
-                            await session.rollback()
-                            return Err(
-                                BrokerIdempotencyKeyConflict(
-                                    message=(
-                                        f'idempotency key for {task_name} '
-                                        f'is reserved by task {owner} '
-                                        'with a different command'
-                                    ),
-                                    owner_task_id=owner,
-                                )
-                            )
-                        case ReservationApplied():
-                            pass
-                    result = await session.execute(
-                        ENQUEUE_INSERT_SQL, insert_params
-                    )
-                    row = result.fetchone()
-                    if row is None:
-                        return await self._bind_key_after_task_id_conflict(
-                            session,
-                            task_id=task_id,
-                            enqueue_sha=enqueue_sha,
-                            task_name=task_name,
-                            key_digest=scoped_key_digest,
-                            command_fingerprint=cutover.ok_value[
-                                'command_fingerprint'
-                            ],
-                        )
-                    await session.commit()
-            else:
-                # Unkeyed enqueue is one atomic INSERT; autocommit skips
-                # the BEGIN/COMMIT round trips a session transaction pays.
-                # The connection-level isolation override is reset when
-                # the connection returns to the pool.
-                async with resources.engine.connect() as conn:
-                    autocommit_conn = await conn.execution_options(
-                        isolation_level='AUTOCOMMIT',
-                    )
-                    result = await autocommit_conn.execute(
-                        ENQUEUE_INSERT_SQL, insert_params
-                    )
-                    row = result.fetchone()
-
-            if row is not None:
-                # Row inserted — fresh enqueue succeeded.
-                return Ok(task_id)
-
-            # Conflict: task_id already exists. Verify payload identity via stored SHA.
-            return await self._verify_enqueue_conflict(
-                resources, task_id, enqueue_sha, task_name,
-            )
-
         except Exception as exc:
             return _enqueue_failed(
                 f'Failed to enqueue task {task_name}: {exc}',
                 exc,
             )
+
+        try:
+            if prepared.scoped_key_digest is not None:
+                return await self._insert_keyed_enqueue(
+                    resources,
+                    task_id=task_id,
+                    enqueue_sha=enqueue_sha,
+                    task_name=task_name,
+                    key_digest=prepared.scoped_key_digest,
+                    command_fingerprint=prepared.command_fingerprint,
+                    insert_params=prepared.insert_params,
+                )
+            return await self._insert_unkeyed_enqueue(
+                resources,
+                task_id=task_id,
+                enqueue_sha=enqueue_sha,
+                task_name=task_name,
+                insert_params=prepared.insert_params,
+            )
+        except _ENQUEUE_WRITE_ERRORS as exc:
+            return _enqueue_failed(
+                f'Failed to enqueue task {task_name}: {exc}',
+                exc,
+            )
+
+    async def _insert_unkeyed_enqueue(
+        self,
+        resources: BrokerResources,
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+        insert_params: dict[str, Any],
+    ) -> Result[str, BrokerEnqueueFailed | BrokerPayloadMismatch]:
+        """Insert one row, then verify the payload on a task id conflict.
+
+        Unkeyed enqueue is one atomic INSERT; autocommit skips the
+        BEGIN/COMMIT round trips a session transaction pays. The
+        connection-level isolation override is reset when the connection
+        returns to the pool.
+        """
+        async with resources.engine.connect() as conn:
+            autocommit_conn = await conn.execution_options(
+                isolation_level='AUTOCOMMIT',
+            )
+            result = await autocommit_conn.execute(
+                ENQUEUE_INSERT_SQL, insert_params
+            )
+            row = result.fetchone()
+
+        if row is not None:
+            # Row inserted — fresh enqueue succeeded.
+            return Ok(task_id)
+
+        # Conflict: task_id already exists. Verify payload identity via stored SHA.
+        return await self._verify_enqueue_conflict(
+            resources, task_id, enqueue_sha, task_name,
+        )
+
+    async def _insert_keyed_enqueue(
+        self,
+        resources: BrokerResources,
+        *,
+        task_id: str,
+        enqueue_sha: str,
+        task_name: str,
+        key_digest: bytes,
+        command_fingerprint: bytes,
+        insert_params: dict[str, Any],
+    ) -> Result[str, BrokerEnqueueError]:
+        """Claim the key and insert in ONE transaction.
+
+        The claim reuses the command fingerprint computed for the cutover
+        columns, and a replayed key returns the committed request's id: the
+        same result shape as a fresh enqueue, no distinguishability flag.
+        """
+        from horsies.core.history.identity.keys import IDEMPOTENCY_SCOPE_VERSION
+        from horsies.core.history.identity.reservations import (
+            ReservationApplied,
+            ReservationConflict,
+            ReservationReplay,
+            claim_key_reservation,
+        )
+
+        async with resources.session_factory() as session:
+            claim = await claim_key_reservation(
+                await session.connection(),
+                key_digest=key_digest,
+                key_scope_version=IDEMPOTENCY_SCOPE_VERSION,
+                reservation_window_seconds=int(
+                    self.idempotency_reservation_window.total_seconds()
+                ),
+                fingerprint_version=1,
+                fingerprint=command_fingerprint,
+                task_id=task_id,
+            )
+            match claim:
+                case ReservationReplay(task_id=existing):
+                    await session.rollback()
+                    return Ok(existing)
+                case ReservationConflict(task_id=owner):
+                    await session.rollback()
+                    return Err(
+                        BrokerIdempotencyKeyConflict(
+                            message=(
+                                f'idempotency key for {task_name} '
+                                f'is reserved by task {owner} '
+                                'with a different command'
+                            ),
+                            owner_task_id=owner,
+                        )
+                    )
+                case ReservationApplied():
+                    pass
+            result = await session.execute(ENQUEUE_INSERT_SQL, insert_params)
+            row = result.fetchone()
+            if row is None:
+                return await self._bind_key_after_task_id_conflict(
+                    session,
+                    task_id=task_id,
+                    enqueue_sha=enqueue_sha,
+                    task_name=task_name,
+                    key_digest=key_digest,
+                    command_fingerprint=command_fingerprint,
+                )
+            await session.commit()
+        return Ok(task_id)
 
     async def _bind_key_after_task_id_conflict(
         self,
@@ -2395,7 +2612,7 @@ class PostgresBroker:
                         select(TaskModel.enqueue_sha).where(TaskModel.id == task_id),
                     )
                 ).fetchone()
-        except Exception as exc:
+        except _DRIVER_ERRORS as exc:
             # SELECT failed — task exists (conflict proves it) but we cannot
             # confirm payload identity. The driver classification of the
             # cause decides retryable, as at every other driver site; a
