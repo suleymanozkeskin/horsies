@@ -237,7 +237,7 @@ node_b_recover: TaskNode[str] = TaskNode(
 )
 ```
 
-The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. An err still arrives with `join="any"` / `join="quorum"`, from a `SubWorkflowNode` that is COMPLETED with an err (see [Output Node Under a Success Policy](#output-node-under-a-success-policy)), or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. An err still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 ### PAUSE Semantics (Cooperative Stop)
 
@@ -330,7 +330,7 @@ TaskNode supports three join modes via the `join` parameter:
 | `any` | Task runs when ANY dependency succeeds (COMPLETED) |
 | `quorum` | Task runs when at least `min_success` dependencies succeed |
 
-**Note:** `COMPLETED` means the dependency returned `TaskResult.ok`. A dependency that finished execution but returned `TaskResult.err` is `FAILED`, not `COMPLETED`. A `SubWorkflowNode` is different: it is `COMPLETED` when its child workflow is `COMPLETED`, and it can hold an err. See [Output Node Under a Success Policy](#output-node-under-a-success-policy).
+**Note:** `COMPLETED` means the dependency returned `TaskResult.ok`. A dependency that finished execution but returned `TaskResult.err` is `FAILED`, not `COMPLETED`. The same rule applies to a `SubWorkflowNode`: see [Output Node Under a Success Policy](#output-node-under-a-success-policy).
 
 ### AND-join (join="all")
 
@@ -681,15 +681,28 @@ def read_label(handle: WorkflowHandle[str]) -> str | None:
     raise RuntimeError(result.err_value.message)
 ```
 
-A `SubWorkflowNode` of such a child workflow is COMPLETED and holds the child's err:
+A node is COMPLETED only when its result is ok, so the status of a `SubWorkflowNode` follows the output of its child, not the status of its child. A `SubWorkflowNode` of such a child workflow is FAILED and holds the child's err:
 
+- `on_error` runs, as for a failed task.
+- A dependent with `allow_failed_deps=False` is SKIPPED. A dependent with `allow_failed_deps=True` receives the err through `args_from` or `workflow_ctx_from`.
+- `join="any"` and `join="quorum"` do not count the node.
+- A `SuccessCase` that requires the node is not met.
 - `result_for()`, `results()` and `tasks()` return the err.
-- A dependent receives the err through `args_from` or `workflow_ctx_from`. This is also true with `join="all"` and `allow_failed_deps=False`, because the node is COMPLETED. Check `is_err()` before `unwrap()`.
-- `join="any"` and `join="quorum"` count the node as completed.
-- A parent `SuccessCase` that requires the node is satisfied.
-- A parent whose output node is this node stores the same err, and its `get()` returns it. This is true at every nesting level. `data` names the workflow that holds the SKIPPED output node.
-- In the `get()` map of an outputless parent, the entry of the node holds the err.
-- `SubWorkflowSummary.output` is `None`.
+- Without a success policy, the parent is FAILED, and its `get()` returns the err.
+- `SubWorkflowSummary.status` is COMPLETED on this FAILED node, because the child is COMPLETED. `SubWorkflowSummary.output` is `None`.
+
+A child workflow with no output node is not affected: its `SubWorkflowNode` is COMPLETED with `ok=None`.
+
+**A parent that completes with this node.** The parent's success case can leave the node out: the node is in `optional`, or in no case. The node is still FAILED, and `on_error` still runs:
+
+- With `OnError.FAIL`, the node's error is stored on the workflow, and the workflow stays RUNNING. The success case then decides COMPLETED. A COMPLETED parent keeps the node's error in its error column, as for a failed `TaskNode`.
+- With `OnError.PAUSE`, the parent pauses.
+
+If the node is also the parent's output node, the parent stores the same err, and its `get()` returns it. A `SubWorkflowNode` of that parent is FAILED in the same way, and `data` still names the workflow that holds the SKIPPED output node.
+
+**Nesting without a success policy.** The parent is FAILED, so the next level sees a failed child: its node holds a `SubWorkflowError` with `SUBWORKFLOW_FAILED`. The message of the first error is in `SubWorkflowSummary.error_summary`.
+
+**A child result that does not parse.** A COMPLETED child whose stored result is not a well-formed result envelope also makes a FAILED node, with `RESULT_DESERIALIZATION_ERROR`. The node keeps the stored text, and each reader reports that code. If the child stores no result, the node stores an error envelope with that code.
 
 An outputless workflow has no output node, so its terminal nodes are its output. In its `get()` map, the entry of a SKIPPED terminal node holds `WORKFLOW_OUTPUT_SKIPPED`, and `data` names that node.
 

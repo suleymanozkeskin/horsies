@@ -1993,7 +1993,7 @@ class TestOnChildWorkflowComplete:
     async def test_parent_paused_stops_propagation(self) -> None:
         row = SimpleNamespace(
             status='COMPLETED',
-            result=None,
+            result='{"__h_task_result__":true,"ok":1,"err":null}',
             error=None,
             parent_workflow_id='wf-parent',
             parent_task_index=0,

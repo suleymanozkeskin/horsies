@@ -200,7 +200,7 @@ Differences from `TaskNode`:
 - No `fn`, `queue`, `priority`, `good_until` fields.
 - `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
 - `args_from` injects upstream `TaskResult` into `build_with()`.
-- Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`. The output of a COMPLETED child can be an err: the node is then COMPLETED and holds that err (see SuccessPolicy / SuccessCase).
+- The node follows the child's output: child COMPLETED with an ok output → node COMPLETED with output; child COMPLETED with an err output → node FAILED with that err (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowError`.
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
 - An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
 - The child start encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them (a value that does not fit is `WORKFLOW_KWARGS_NOT_SERIALIZABLE`, and the node fails with `WORKFLOW_ENQUEUE_FAILED`), so a refusal at the child start is a defect: it raises `SerializationError` and the transaction rolls back.
@@ -474,11 +474,13 @@ policy = SuccessPolicy(
 - A case does not have to require the output node. The workflow is then `COMPLETED`, and its output node can end `SKIPPED` or `FAILED`.
   - For a `SKIPPED` output node, the workflow result is an error with `WORKFLOW_OUTPUT_SKIPPED`. The workflow succeeded and has no output; no stored data is corrupt. `data` holds `workflow_id`, `output_node_id`, `output_task_index` and `output_task_name`.
   - For a `FAILED` output node, the workflow result is that node's error.
-- A `SubWorkflowNode` of such a child is `COMPLETED` and holds the child's err.
-  - `result_for()`, `results()` and `tasks()` return the err.
-  - A dependent receives the err through `args_from` or `workflow_ctx_from`, also with `join="all"` and `allow_failed_deps=False`. `join="any"` and `join="quorum"` count the node as completed.
-  - A parent `SuccessCase` that requires the node is satisfied. A parent whose output node is this node stores the same err, at every nesting level.
-  - `SubWorkflowSummary.output` is `None`.
+- A node is `COMPLETED` only when its result is ok. A `SubWorkflowNode` of such a child is `FAILED` and holds the child's err.
+  - `on_error` runs. A dependent with `allow_failed_deps=False` is `SKIPPED`; with `allow_failed_deps=True` it receives the err. `join="any"` and `join="quorum"` do not count the node. A `SuccessCase` that requires the node is not met.
+  - `result_for()`, `results()` and `tasks()` return the err. Without a success policy the parent is `FAILED`, and its `get()` returns the err.
+  - `SubWorkflowSummary.status` is `COMPLETED` on this `FAILED` node. `SubWorkflowSummary.output` is `None`.
+  - A parent can complete when the node is in `optional` or in no case. `OnError.FAIL` stores the node's error on the workflow, and the workflow stays `RUNNING`; the success case then decides. A `COMPLETED` parent keeps that error in its error column, as for a failed `TaskNode`. `OnError.PAUSE` pauses the parent.
+  - The next level sees a parent that is `FAILED` as a failed child, with `SUBWORKFLOW_FAILED`. A parent that is `COMPLETED` with this node as its output stores the err, so the next level is `FAILED` with the same err.
+- A `COMPLETED` child whose stored result is not a well-formed result envelope makes a `FAILED` node with `RESULT_DESERIALIZATION_ERROR`. The node keeps the stored text. If the child stores no result, the node stores an error envelope with that code.
 
 ## WorkflowContext
 
@@ -599,7 +601,7 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 - Receiving function parameter must be typed `TaskResult[T, TaskError]`.
 - Upstream must be in `waits_for` (HRS-008). Keys must not overlap with `kwargs` (HRS-021).
 - Positional args not supported on workflow nodes (HRS-026).
-- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, from a `SubWorkflowNode` that is `COMPLETED` with an err, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive an err. An err arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python

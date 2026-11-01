@@ -3,9 +3,12 @@
 A success case that does not require the output node lets a workflow be
 COMPLETED while that node is SKIPPED or FAILED. A SKIPPED output node stores an
 error envelope with ``WORKFLOW_OUTPUT_SKIPPED``. A FAILED output node stores its
-own error. A parent workflow copies the child's result text into its
-``SubWorkflowNode``, so both cases make a COMPLETED node with an err, and every
-reader of the result column decodes that envelope.
+own error.
+
+A ``SubWorkflowNode`` is COMPLETED only when the child's output is ok, as a task
+node is. An err output makes a FAILED node that holds the child's text. A stored
+child result that does not parse makes a FAILED node with
+``RESULT_DESERIALIZATION_ERROR``, so a COMPLETED node always holds an ok.
 
 An outputless workflow has no output node, so its terminal nodes are its output.
 A SKIPPED terminal gets the same code in its entry. The shape of that envelope
@@ -28,7 +31,11 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.codec.typed import decode_task_result
+from horsies.core.codec.typed import (
+    decode_task_error,
+    decode_task_result,
+    encode_task_error,
+)
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
@@ -51,8 +58,15 @@ from horsies.core.models.workflow.handle import (
 )
 from horsies.core.types.result import Err
 from horsies.core.workflows.engine import (
+    _ChildOutputAbsent,
+    _ChildOutputError,
+    _ChildOutputless,
+    _ChildOutputUnreadable,
+    _ChildOutputValue,
     _decode_err_only,
     _decode_stored_task_result,
+    _parse_child_output,
+    _unreadable_child_error,
     check_workflow_completion,
     get_dependency_results,
     get_dependency_results_with_names,
@@ -67,15 +81,18 @@ from horsies.core.workflows.sql import (
     GET_CHILD_WORKFLOW_INFO_SQL,
     GET_DEPENDENCY_RESULTS_SQL,
     GET_DEPENDENCY_RESULTS_WITH_NAMES_SQL,
+    GET_FIRST_FAILED_TASK_RESULT_SQL,
     GET_OUTPUT_TASK_RESULT_SQL,
     GET_TASK_RESULTS_BY_INDEXES_SQL,
     GET_TASK_STATUSES_SQL,
     GET_WORKFLOW_COMPLETION_STATUS_SQL,
     GET_WORKFLOW_DAG_EDGES_SQL,
+    GET_WORKFLOW_ON_ERROR_SQL,
     GET_WORKFLOW_STATUS_SQL,
     LOCK_WORKFLOW_FOR_COMPLETION_CHECK_SQL,
     MARK_WORKFLOW_COMPLETED_SQL,
     MARK_WORKFLOW_FAILED_SQL,
+    PAUSE_WORKFLOW_ON_ERROR_SQL,
     SET_WORKFLOW_ERROR_SQL,
     UPDATE_PARENT_NODE_RESULT_SQL,
 )
@@ -94,6 +111,18 @@ OK_RESULT_TEXT = '{"__h_task_result__":true,"ok":7,"err":null}'
 ERR_RESULT_TEXT = serialize_error_payload(
     TaskResult(err=TaskError(error_code='LABEL_REFUSED', message='refused')),
 )
+OUTPUTLESS_RESULT_TEXT = (
+    '{"__h_task_result__":true,"__h_outputless_terminals__":true,'
+    '"ok":{"results_by_id":{},"task_name_by_id":{},'
+    '"definition_key_by_id":{}},"err":null}'
+)
+UNREADABLE_TEXTS = {
+    'text-null': 'null',
+    'not-json': 'not{json',
+    'not-an-envelope': '{"ok": 99}',
+    'both-slots': '{"__h_task_result__":true,"ok":1,"err":{"message":"x"}}',
+    'err-slot-refused': '{"__h_task_result__":true,"ok":null,"err":7}',
+}
 LIVE_STATUSES = [
     status for status in WorkflowTaskStatus if not status.is_terminal
 ]
@@ -542,13 +571,13 @@ class TestReaders:
             task_index=0,
             task_name=_ChildDefinition.name,
             node_id=node_id,
-            status='COMPLETED',
+            status='FAILED',
             result=await _skipped_output_text(),
             sub_definition_key=CHILD_KEY,
         )
 
     @pytest.mark.asyncio
-    async def test_dependency_results_of_a_completed_node(
+    async def test_dependency_results_of_a_failed_node(
         self, app: Horsies, registered_child: None,
     ) -> None:
         recorder = _Session({
@@ -562,7 +591,7 @@ class TestReaders:
         assert results[0].err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
 
     @pytest.mark.asyncio
-    async def test_dependency_results_with_names_of_a_completed_node(
+    async def test_dependency_results_with_names_of_a_failed_node(
         self, app: Horsies, registered_child: None,
     ) -> None:
         recorder = _Session({
@@ -579,11 +608,46 @@ class TestReaders:
         assert by_id.err_value.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
 
 
+class TestChildOutputParse:
+    """Each stored form of a child result is one variant."""
+
+    def test_ok_envelope(self) -> None:
+        parsed = _parse_child_output(OK_RESULT_TEXT)
+
+        assert parsed == _ChildOutputValue(value=7, text=OK_RESULT_TEXT)
+
+    def test_err_envelope(self) -> None:
+        parsed = _parse_child_output(ERR_RESULT_TEXT)
+
+        assert isinstance(parsed, _ChildOutputError)
+        assert parsed.error.error_code == 'LABEL_REFUSED'
+        assert parsed.text == ERR_RESULT_TEXT
+
+    def test_outputless_envelope(self) -> None:
+        assert _parse_child_output(OUTPUTLESS_RESULT_TEXT) == _ChildOutputless()
+
+    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
+    def test_no_text(self, stored: str | None) -> None:
+        assert _parse_child_output(stored) == _ChildOutputAbsent()
+
+    @pytest.mark.parametrize(
+        'stored', UNREADABLE_TEXTS.values(), ids=UNREADABLE_TEXTS.keys(),
+    )
+    def test_text_that_does_not_parse(self, stored: str) -> None:
+        parsed = _parse_child_output(stored)
+
+        assert isinstance(parsed, _ChildOutputUnreadable)
+        assert parsed.text == stored
+        assert parsed.cause
+
+
 class TestParentNode:
-    """A child COMPLETED with an err result makes a COMPLETED parent node."""
+    """A node is COMPLETED only when the output of its COMPLETED child is ok."""
 
     @staticmethod
-    def _session(child_result: str) -> _Session:
+    def _session(
+        child_result: str | None, *, on_error: str = 'fail',
+    ) -> _Session:
         return _Session({
             GET_CHILD_WORKFLOW_INFO_SQL: [
                 SimpleNamespace(
@@ -599,6 +663,8 @@ class TestParentNode:
                 SimpleNamespace(id='wf-parent'),
             ],
             UPDATE_PARENT_NODE_RESULT_SQL: [SimpleNamespace(task_index=0)],
+            GET_WORKFLOW_ON_ERROR_SQL: [SimpleNamespace(on_error=on_error)],
+            PAUSE_WORKFLOW_ON_ERROR_SQL: [SimpleNamespace(id='wf-parent')],
             GET_WORKFLOW_STATUS_SQL: [SimpleNamespace(status='RUNNING')],
         })
 
@@ -610,34 +676,131 @@ class TestParentNode:
         ) as dependents, patch(
             'horsies.core.workflows.engine.check_workflow_completion',
             new=AsyncMock(),
-        ) as completion:
+        ) as completion, patch(
+            'horsies.core.workflows.engine.cascade_pause_to_children',
+            new=AsyncMock(),
+        ):
             await on_subworkflow_complete(recorder.session, 'child-1')
         return dependents, completion
 
+    @staticmethod
+    def _workflow_error(recorder: _Session) -> TaskError:
+        stored = recorder.params_of(SET_WORKFLOW_ERROR_SQL)['error']
+        return decode_task_error(json.loads(stored))
+
+    @pytest.mark.asyncio
+    async def test_ok_output_makes_a_completed_node(self) -> None:
+        recorder = self._session(OK_RESULT_TEXT)
+
+        dependents, completion = await self._complete_child(recorder)
+
+        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'COMPLETED'
+        assert params['result'] == OK_RESULT_TEXT
+        assert not recorder.executed(SET_WORKFLOW_ERROR_SQL)
+        dependents.assert_awaited_once()
+        completion.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_outputless_child_makes_a_completed_node(self) -> None:
+        recorder = self._session(OUTPUTLESS_RESULT_TEXT)
+
+        await self._complete_child(recorder)
+
+        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'COMPLETED'
+        assert decode_task_result(json.loads(params['result']), type(None)).is_ok()
+        assert not recorder.executed(SET_WORKFLOW_ERROR_SQL)
+
     @pytest.mark.asyncio
     @pytest.mark.parametrize('child', ['skipped-output', 'failed-output'])
-    async def test_node_is_completed_and_keeps_the_child_text(
+    async def test_err_output_makes_a_failed_node_with_the_child_text(
         self, child: str,
     ) -> None:
-        child_result = (
-            await _skipped_output_text()
+        child_result, expected_code = (
+            (await _skipped_output_text(), OutcomeCode.WORKFLOW_OUTPUT_SKIPPED)
             if child == 'skipped-output'
-            else ERR_RESULT_TEXT
+            else (ERR_RESULT_TEXT, 'LABEL_REFUSED')
         )
         recorder = self._session(child_result)
 
         dependents, completion = await self._complete_child(recorder)
 
         params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
-        assert params['status'] == 'COMPLETED'
+        assert params['status'] == 'FAILED'
         assert params['result'] == child_result
-        # No failure policy runs: the parent's error column stays as it is.
-        assert not recorder.executed(SET_WORKFLOW_ERROR_SQL)
+        assert self._workflow_error(recorder).error_code == expected_code
         dependents.assert_awaited_once()
         completion.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_summary_has_no_output_and_the_child_counts(self) -> None:
+    async def test_failure_policy_uses_the_stored_node_error(self) -> None:
+        """The handler selects the first failed node: its text is the child's."""
+        recorder = self._session(ERR_RESULT_TEXT)
+        recorder.rows[GET_FIRST_FAILED_TASK_RESULT_SQL] = [
+            SimpleNamespace(task_name='child', result=ERR_RESULT_TEXT),
+        ]
+
+        await self._complete_child(recorder)
+
+        assert self._workflow_error(recorder).error_code == 'LABEL_REFUSED'
+
+    @pytest.mark.asyncio
+    async def test_pause_policy_pauses_the_parent(self) -> None:
+        recorder = self._session(ERR_RESULT_TEXT, on_error='pause')
+
+        dependents, completion = await self._complete_child(recorder)
+
+        stored = recorder.params_of(PAUSE_WORKFLOW_ON_ERROR_SQL)['error']
+        assert decode_task_error(json.loads(stored)).error_code == 'LABEL_REFUSED'
+        dependents.assert_not_awaited()
+        completion.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'stored', UNREADABLE_TEXTS.values(), ids=UNREADABLE_TEXTS.keys(),
+    )
+    async def test_text_that_does_not_parse_makes_a_failed_node(
+        self, stored: str,
+    ) -> None:
+        recorder = self._session(stored)
+
+        await self._complete_child(recorder)
+
+        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'FAILED'
+        assert params['result'] == stored
+        err = self._workflow_error(recorder)
+        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'child-1' in (err.message or '')
+        assert err.data == {'workflow_id': 'child-1'}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('stored', [None, ''], ids=['null', 'empty'])
+    async def test_no_text_makes_a_failed_node_with_an_envelope(
+        self, stored: str | None,
+    ) -> None:
+        """A node without a result gives its readers no entry."""
+        recorder = self._session(stored)
+
+        await self._complete_child(recorder)
+
+        params = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)
+        assert params['status'] == 'FAILED'
+        err = _stored_err(params['result'])
+        assert err.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert err.data == {'workflow_id': 'child-1'}
+        assert self._workflow_error(recorder).message == err.message
+
+    def test_cause_with_a_lone_surrogate_is_escaped(self) -> None:
+        """The failure handler encodes this error and raises for a surrogate."""
+        err = _unreadable_child_error('child-1', f'bad {chr(0xdc80)} text')
+
+        assert '\\udc80' in (err.message or '')
+        assert encode_task_error(err)
+
+    @pytest.mark.asyncio
+    async def test_summary_of_a_failed_node_has_the_child_status(self) -> None:
         recorder = self._session(await _skipped_output_text())
 
         await self._complete_child(recorder)
@@ -650,15 +813,28 @@ class TestParentNode:
         assert summary.skipped_tasks == 1
 
     @pytest.mark.asyncio
-    async def test_two_levels_keep_the_named_outcome(self) -> None:
-        """Each level's output node is the COMPLETED node of the level below."""
+    async def test_summary_of_an_ok_output_holds_the_value(self) -> None:
+        recorder = self._session(OK_RESULT_TEXT)
+
+        await self._complete_child(recorder)
+
+        summary = SubWorkflowSummary.from_json(
+            json.loads(recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['summary']),
+        )
+        assert summary.output == 7
+
+    @pytest.mark.asyncio
+    async def test_two_levels_keep_the_code_when_a_case_lets_the_level_complete(
+        self,
+    ) -> None:
+        """Each level's output node is the FAILED node of the level below."""
         stored = await _skipped_output_text()
 
         for _ in range(2):
             recorder = self._session(stored)
             await self._complete_child(recorder)
             node_result = recorder.params_of(UPDATE_PARENT_NODE_RESULT_SQL)['result']
-            stored = await _final_result(_output_row('COMPLETED', node_result))
+            stored = await _final_result(_output_row('FAILED', node_result))
 
         err = _stored_err(stored)
         assert err.error_code is OutcomeCode.WORKFLOW_OUTPUT_SKIPPED
