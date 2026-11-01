@@ -523,6 +523,12 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **A task cancel accepts every form of a task id that Python reads as a
+  UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
+  cancel now uses the canonical id text, and the result carries it.
+- **A cancel of a task in history reads only the status and the workflow
+  flag.** A history row whose attempt snapshot does not decode no longer
+  fails the cancel.
 - **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
   reports a version mismatch.** The stored and expected versions are equal in
   this state. The banner now names the one version, says that the offline
