@@ -10,6 +10,8 @@ error. dumps_canonical_json is the one canonical form for hashed or stored text.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from horsies.core.codec.json_io import (
@@ -18,7 +20,13 @@ from horsies.core.codec.json_io import (
     loads_json,
     loads_json_bytes,
 )
-from horsies.core.codec.json_value import escape_lone_surrogates
+from horsies.core.codec.json_value import (
+    JSON_TEXT_TOO_DEEP,
+    MAX_JSON_DEPTH,
+    JsonValue,
+    escape_lone_surrogates,
+)
+from horsies.core.codec.typed import _scan_reserved_keys  # pyright: ignore[reportPrivateUsage]
 from horsies.core.types.result import is_err
 
 
@@ -263,6 +271,147 @@ class TestLoadsJson:
         result = loads_json(f'[{digits}]')
         assert not is_err(result)
         assert result.ok_value == [int(digits)]
+
+
+def _nested_text(depth: int) -> str:
+    """Return a JSON text with `depth` nested lists around one number."""
+    return '[' * depth + '1' + ']' * depth
+
+
+def _nested_value(depth: int) -> JsonValue:
+    """Return a value with `depth` nested lists around one number."""
+    value: JsonValue = 1
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def _text_that_alternates(depth: int) -> str:
+    """Return a JSON text with `depth` levels, of lists and dicts in turn."""
+    opening = ('[', '{"key":')
+    closing = (']', '}')
+    levels = range(depth)
+    return (
+        ''.join(opening[level % 2] for level in levels)
+        + '1'
+        + ''.join(closing[level % 2] for level in reversed(levels))
+    )
+
+
+@pytest.mark.unit
+class TestDumpsJsonDepthBound:
+    def test_a_value_at_the_bound_is_accepted(self) -> None:
+        assert not is_err(dumps_json(_nested_value(MAX_JSON_DEPTH)))
+
+    def test_one_level_more_is_refused(self) -> None:
+        result = dumps_json(_nested_value(MAX_JSON_DEPTH + 1))
+
+        assert is_err(result)
+        assert 'nested deeper than' in str(result.err_value)
+
+    def test_a_list_that_holds_itself_is_refused(self) -> None:
+        """Before, this raised `RecursionError` out of a `SerdeResult`."""
+        value: list[object] = []
+        value.append(value)
+
+        result = dumps_json(value)
+
+        assert is_err(result)
+        assert 'or it holds itself' in str(result.err_value)
+
+    def test_a_dict_that_holds_itself_is_refused(self) -> None:
+        value: dict[str, object] = {}
+        value['self'] = value
+
+        result = dumps_json(value)
+
+        assert is_err(result)
+        assert 'or it holds itself' in str(result.err_value)
+
+    def test_a_scalar_below_the_deepest_list_does_not_count(self) -> None:
+        """Only a list or a dict adds a level."""
+        wide: list[JsonValue] = [1, 'text', None, True, 0.5]
+        value: JsonValue = wide
+        for _ in range(MAX_JSON_DEPTH - 1):
+            value = [value, 1]
+
+        assert not is_err(dumps_json(value))
+
+
+@pytest.mark.unit
+class TestLoadsJsonDepthBound:
+    @pytest.mark.parametrize(
+        'document',
+        [
+            _nested_text(MAX_JSON_DEPTH),
+            _text_that_alternates(MAX_JSON_DEPTH),
+            '[[1],' + _nested_text(MAX_JSON_DEPTH - 1) + ']',
+        ],
+        ids=['lists', 'lists-and-dicts', 'more-brackets-than-the-bound'],
+    )
+    def test_a_document_at_the_bound_is_accepted(self, document: str) -> None:
+        assert not is_err(loads_json(document))
+
+    @pytest.mark.parametrize(
+        'document',
+        [
+            _nested_text(MAX_JSON_DEPTH + 1),
+            _text_that_alternates(MAX_JSON_DEPTH + 1),
+            '[' + '[1],' * 500 + _nested_text(MAX_JSON_DEPTH) + ']',
+            _nested_text(5_000),
+        ],
+        ids=['lists', 'lists-and-dicts', 'in-the-last-branch', 'parser-accepts-it'],
+    )
+    def test_a_document_past_the_bound_is_refused(self, document: str) -> None:
+        result = loads_json(document)
+
+        assert is_err(result)
+        assert str(result.err_value) == f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'
+
+    def test_a_document_too_deep_for_the_parser_is_refused(self) -> None:
+        """`json.loads` raises `RecursionError` at this depth."""
+        result = loads_json(_nested_text(200_000))
+
+        assert is_err(result)
+        assert str(result.err_value) == f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'
+
+    def test_a_stored_payload_past_the_bound_is_refused(self) -> None:
+        result = loads_json_bytes(_nested_text(MAX_JSON_DEPTH + 1).encode())
+
+        assert is_err(result)
+        assert str(result.err_value) == f'JSON parse failed: {JSON_TEXT_TOO_DEEP}'
+
+    def test_a_wide_document_with_many_brackets_is_accepted(self) -> None:
+        """The count of brackets exceeds the bound, the nesting does not."""
+        document = '[' + ','.join(['{"key":[1]}'] * MAX_JSON_DEPTH) + ']'
+
+        result = loads_json(document)
+
+        assert not is_err(result)
+        assert result.ok_value == [{'key': [1]}] * MAX_JSON_DEPTH
+
+    @pytest.mark.parametrize(
+        'document',
+        [
+            '"' + '[' * (MAX_JSON_DEPTH + 1) + '"',
+            '["' + '{' * (MAX_JSON_DEPTH + 1) + '"]',
+        ],
+        ids=['string', 'string-in-a-list'],
+    )
+    def test_brackets_in_a_string_are_not_nesting(self, document: str) -> None:
+        assert not is_err(loads_json(document))
+
+    def test_each_walker_works_at_the_bound(self) -> None:
+        """A value that `loads_json` returns stays inside the recursion limit."""
+        result = loads_json(_nested_text(MAX_JSON_DEPTH))
+
+        assert not is_err(result)
+        _scan_reserved_keys(result.ok_value)
+        assert not is_err(dumps_json(result.ok_value))
+        assert dumps_canonical_json(result.ok_value) == _nested_text(MAX_JSON_DEPTH)
+
+    def test_the_bound_leaves_room_for_the_stack_of_the_caller(self) -> None:
+        assert 3 * MAX_JSON_DEPTH <= sys.getrecursionlimit()
 
 
 @pytest.mark.unit

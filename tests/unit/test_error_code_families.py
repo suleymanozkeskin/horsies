@@ -52,10 +52,9 @@ class TestTaggedSerialization:
         data = te.model_dump(mode='json')
         assert data['error_code'] == 'MY_CUSTOM_CODE'
 
-    def test_none_serializes_as_null(self) -> None:
-        te = TaskError(error_code=None, message='none')
-        data = te.model_dump(mode='json')
-        assert data['error_code'] is None
+    def test_none_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match='error_code must not be null'):
+            TaskError.model_validate({'error_code': None, 'message': 'none'})
 
     @pytest.mark.parametrize(
         'code',
@@ -174,10 +173,9 @@ class TestUserStringPassthrough:
         assert restored.error_code == user_code
         assert type(restored.error_code) is str
 
-    def test_none_stays_none(self) -> None:
-        original = TaskError(error_code=None, message='test')
-        restored = TaskError.model_validate_json(original.model_dump_json())
-        assert restored.error_code is None
+    def test_a_null_code_does_not_round_trip(self) -> None:
+        with pytest.raises(ValidationError, match='error_code must not be null'):
+            TaskError.model_validate_json('{"error_code": null, "message": "test"}')
 
     def test_former_hydration_code_is_a_user_code(self) -> None:
         """``'PYDANTIC_HYDRATION_ERROR'`` is not reserved: it stays a

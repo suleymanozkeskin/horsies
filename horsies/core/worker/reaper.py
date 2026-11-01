@@ -26,6 +26,7 @@ from horsies.core.worker.runtime import (
 from horsies.core.worker.sql import (
     DELETE_EXPIRED_WORKER_STATES_SQL,
     DELETE_EXPIRED_WORKFLOWS_SQL,
+    DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
     REAPER_GATE_TRY_LOCK_SQL,
     _RETENTION_PASS_TIME_BUDGET_S,
 )
@@ -317,6 +318,7 @@ class ReaperMixin:
             recovery_report = await recover_stuck_workflows_global(
                 resources.session_factory,
                 temp_broker,
+                failure_limit=recovery_cfg.workflow_recovery_failure_limit,
             )
             self._workflow_recovery_health = recovery_report.health()
             if recovery_report.recovered > 0:
@@ -373,6 +375,7 @@ class ReaperMixin:
                 'retained': phase2.retained,
                 'failed': phase2.failed,
                 'quarantined': phase2.quarantined,
+                'raised_counted': phase2.raised_counted,
                 'over_attempt_bound': phase2.over_attempt_bound,
                 'retained_details': list(phase2.retained_details),
                 'quarantine_refusals': list(phase2.quarantine_refusals),
@@ -425,6 +428,13 @@ class ReaperMixin:
                         deadline,
                         batch_size,
                         drained_when='empty_batch',
+                    )
+                    await self._delete_expired_in_batches(
+                        resources.session_factory,
+                        DELETE_ORPHANED_RECOVERY_FAILURES_SQL,
+                        {},
+                        deadline,
+                        batch_size,
                     )
 
                 if deleted_worker_states > 0 or deleted_workflows > 0:

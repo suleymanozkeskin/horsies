@@ -23,6 +23,7 @@ from collections.abc import Iterable, Iterator
 from typing import (
     Annotated,
     Any,
+    ClassVar,
     Literal,
     NamedTuple,
     Optional,
@@ -32,15 +33,18 @@ from typing import (
 )
 
 import pytest
-from pydantic import AfterValidator, BaseModel, Field, computed_field
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, computed_field
 from pydantic_core import PydanticCustomError
 
-from horsies.core.codec.json_io import dumps_json
+from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.json_value import (
+    MAX_JSON_DEPTH,
     JsonValue,
     StrictJsonError,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
+from horsies.core.models.tasks import TaskResult
+from horsies.core.types.result import is_ok
 from horsies.core.codec.typed import (
     Json,
     _get_adapter,  # pyright: ignore[reportPrivateUsage]
@@ -61,6 +65,7 @@ from horsies.core.codec.typed import (
 
 
 LONE_SURROGATE_TEXT = f'keep-out{chr(0xd800)}'
+NOT_UTF8 = b'\xff'
 
 
 class _User(BaseModel):
@@ -1000,10 +1005,27 @@ def _dict_that_holds_itself() -> dict[str, Any]:
 
 
 def _nested_list(depth: int) -> list[Any]:
-    value: list[Any] = []
-    for _ in range(depth):
+    """A finite list with `depth` levels of nesting and a number inside."""
+    value: list[Any] = [1]
+    for _ in range(depth - 1):
         value = [value]
     return value
+
+
+def _nested_dict(depth: int) -> dict[str, Any]:
+    """A finite dict with `depth` levels of nesting and a number inside."""
+    value: dict[str, Any] = {'key': 1}
+    for _ in range(depth - 1):
+        value = {'key': value}
+    return value
+
+
+def _linked_chain(length: int) -> _Linked:
+    """A finite chain of `length` instances of a self-referencing model."""
+    node = _Linked()
+    for _ in range(length - 1):
+        node = _Linked(next=node)
+    return node
 
 
 class _ValueErrorInComputedField(BaseModel):
@@ -1053,18 +1075,67 @@ class TestValueThatHoldsItself:
         assert raised.value.__context__ is None
 
 
+class TestValueThatIsTooDeep:
+    """`dump_python` raises a plain `ValueError` for a value nested too deep.
+
+    The text says circular, but the value is finite.
+    """
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (_nested_list(300), Any),
+            (_nested_dict(300), Any),
+            ({'key': _nested_list(300)}, dict[str, Any]),
+            (_linked_chain(300), _Linked),
+            (_linked_chain(300), Any),
+        ],
+        ids=['list', 'dict', 'in-dict-value', 'typed-model', 'model-at-any'],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: '
+            'Circular reference detected (depth exceeded)'
+        )
+        assert raised.value.__context__ is None
+
+    @pytest.mark.parametrize(
+        ('depth', 'accepted'),
+        [(254, True), (255, False)],
+        ids=['deepest-accepted', 'first-refused'],
+    )
+    def test_the_limit_is_the_limit_of_the_dump(
+        self,
+        depth: int,
+        accepted: bool,
+    ) -> None:
+        match accepted:
+            case True:
+                assert encode_value(_nested_list(depth), Any) is not None
+            case False:
+                with pytest.raises(ValueValidationError):
+                    encode_value(_nested_list(depth), Any)
+
+
 class TestValueErrorThatStaysRaw:
-    """Only the full text of the refusal is in the catalog."""
+    """Only the full text of a refusal is in the catalog."""
 
     @pytest.mark.parametrize(
         'text',
         [
             'defect in a computed field',
             'wrapped: Circular reference detected (id repeated)',
-            'Circular reference detected (id repeated): wrapped',
-            'Circular reference detected (depth exceeded)',
+            'Circular reference detected (depth exceeded): wrapped',
+            'Circular reference detected',
         ],
-        ids=['other-text', 'text-in-front', 'text-behind', 'depth-text'],
+        ids=['other-text', 'text-in-front', 'text-behind', 'shared-prefix'],
     )
     def test_a_value_error_from_a_computed_field_propagates(self, text: str) -> None:
         with pytest.raises(ValueError) as raised:
@@ -1082,20 +1153,6 @@ class TestValueErrorThatStaysRaw:
         assert type(raised.value) is ValueError
         assert str(raised.value) == 'defect in a generator'
 
-    def test_a_value_that_is_only_deep_propagates(self) -> None:
-        """Pydantic reports depth with a text that says circular. The value
-        does not hold itself, so it is not this refusal."""
-        with pytest.raises(ValueError) as raised:
-            encode_value(_nested_list(300), Any)
-
-        assert type(raised.value) is ValueError
-        assert str(raised.value) == 'Circular reference detected (depth exceeded)'
-
-    def test_a_unicode_decode_error_propagates(self) -> None:
-        """It is a `ValueError` subclass with another text."""
-        with pytest.raises(UnicodeDecodeError):
-            encode_value(b'\xff', Any)
-
     def test_the_subclass_refusals_keep_their_own_arms(self) -> None:
         """`PydanticSerializationError` and `UnicodeEncodeError` are a
         `ValueError` too. Their arms must come first."""
@@ -1103,6 +1160,163 @@ class TestValueErrorThatStaysRaw:
             encode_value(object(), Any)
         with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
             encode_value({LONE_SURROGATE_TEXT: 1}, Any)
+        with pytest.raises(ValueValidationError, match='bytes that are not UTF-8'):
+            encode_value(NOT_UTF8, Any)
+
+
+class _BytesField(BaseModel):
+    payload: bytes
+
+
+class _OptionalBytesField(BaseModel):
+    payload: Optional[bytes] = None
+
+
+class _Base64BytesField(BaseModel):
+    model_config = ConfigDict(ser_json_bytes='base64')
+
+    payload: bytes
+
+
+@dataclasses.dataclass
+class _BytesDataclass:
+    payload: bytes
+
+
+class _DecodeInComputedField(BaseModel):
+    number: int = 1
+
+    @computed_field
+    @property
+    def decoded(self) -> str:
+        return NOT_UTF8.decode('utf-8')
+
+
+class TestDepthBoundAndTheLimitOfTheDump:
+    """`MAX_JSON_DEPTH` must stay above the deepest value that `encode_value`
+    accepts. If not, the engine refuses a value that the encode accepted."""
+
+    deepest_accepted_value: ClassVar[int] = 254
+    levels_of_the_envelopes: ClassVar[int] = 16
+
+    def test_the_deepest_result_passes_the_boundary_in_its_envelope(self) -> None:
+        value = _nested_list(self.deepest_accepted_value)
+        envelope = encode_task_result(TaskResult(ok=value), Any)
+
+        text = dumps_json(envelope)
+        assert is_ok(text)
+        parsed = loads_json(text.ok_value)
+        assert is_ok(parsed)
+        assert decode_task_result(parsed.ok_value, Any).ok_value == value
+
+    def test_the_bound_leaves_room_for_the_envelopes(self) -> None:
+        wrapped = encode_value(_nested_list(self.deepest_accepted_value), Any)
+        for _ in range(self.levels_of_the_envelopes):
+            wrapped = {'envelope': wrapped}
+
+        assert is_ok(dumps_json(wrapped))
+
+    def test_a_text_past_the_limit_of_the_dump_is_a_catalog_refusal(self) -> None:
+        """Stored text inside the bound can still be too deep for a model."""
+        parsed = loads_json('[' * MAX_JSON_DEPTH + ']' * MAX_JSON_DEPTH)
+
+        assert is_ok(parsed)
+        with pytest.raises(ValueValidationError):
+            decode_value(parsed.ok_value, JsonValue)
+
+
+class TestValueOutsideTheDepthBound:
+    @pytest.mark.parametrize(
+        'expected_type',
+        [JsonValue, Optional[JsonValue]],
+        ids=['json-value', 'optional-json-value'],
+    )
+    def test_a_list_that_holds_itself_is_a_strict_refusal(
+        self,
+        expected_type: Any,
+    ) -> None:
+        """Before, the fence raised `RecursionError`."""
+        value: list[object] = []
+        value.append(value)
+
+        with pytest.raises(StrictJsonError, match='or it holds itself'):
+            encode_value(value, expected_type)
+
+    def test_a_finite_value_past_the_bound_is_a_strict_refusal(self) -> None:
+        with pytest.raises(StrictJsonError, match='nested deeper than 300 levels'):
+            encode_value(_nested_list(MAX_JSON_DEPTH + 1), JsonValue)
+
+    def test_a_value_between_the_limit_and_the_bound_is_a_catalog_refusal(
+        self,
+    ) -> None:
+        """The fence accepts it, and the validation of `JsonValue` refuses it."""
+        with pytest.raises(ValueValidationError):
+            encode_value(_nested_list(MAX_JSON_DEPTH), JsonValue)
+
+
+class TestBytesThatAreNotUtf8:
+    """`dump_python` raises `UnicodeDecodeError` for these values.
+
+    A declared `bytes` position and `Any` behave the same.
+    """
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (NOT_UTF8, bytes),
+            (NOT_UTF8, Optional[bytes]),
+            ([NOT_UTF8], list[bytes]),
+            ({'key': NOT_UTF8}, dict[str, bytes]),
+            ((NOT_UTF8,), tuple[bytes, ...]),
+            ({NOT_UTF8: 1}, dict[bytes, int]),
+            (_BytesField(payload=NOT_UTF8), _BytesField),
+            (_OptionalBytesField(payload=NOT_UTF8), _OptionalBytesField),
+            (_BytesDataclass(payload=NOT_UTF8), _BytesDataclass),
+            (NOT_UTF8, Any),
+            (bytearray(NOT_UTF8), Any),
+            ({'key': NOT_UTF8}, Any),
+            ([NOT_UTF8], Any),
+            ({'key': NOT_UTF8}, dict[str, Any]),
+            ({NOT_UTF8: 1}, Any),
+        ],
+        ids=[
+            'bytes', 'optional', 'in-list', 'in-dict-value', 'in-tuple',
+            'declared-key', 'model-field', 'optional-model-field',
+            'dataclass-field', 'at-any', 'bytearray-at-any', 'dict-at-any',
+            'list-at-any', 'any-dict-value', 'key-at-any',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: bytes that are not UTF-8'
+        )
+
+    def test_the_refusal_holds_no_input_value(self) -> None:
+        """The `UnicodeDecodeError` holds the bytes, so it is not chained."""
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(NOT_UTF8, Any)
+
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+    def test_a_decode_error_from_a_computed_field_propagates(self) -> None:
+        """A decode in Python gives another `reason`: a defect stays raw."""
+        with pytest.raises(UnicodeDecodeError) as raised:
+            encode_value(_DecodeInComputedField(), _DecodeInComputedField)
+
+        assert raised.value.reason == 'invalid start byte'
+
+    def test_a_model_that_serializes_bytes_as_base64_is_accepted(self) -> None:
+        encoded = encode_value(_Base64BytesField(payload=NOT_UTF8), _Base64BytesField)
+
+        assert encoded == {'payload': '_w=='}
 
 
 class TestEncodeValueKeepsValidText:
