@@ -577,7 +577,7 @@ async def test_task_expires_before_claim(broker: PostgresBroker) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        args_json='[5]',
+        kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
@@ -640,7 +640,7 @@ async def test_good_until_already_past(broker: PostgresBroker) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        args_json='[5]',
+        kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
@@ -803,7 +803,7 @@ def test_wait_timeout(broker: PostgresBroker, app: Horsies) -> None:
     # Submit task but DON'T start worker
     task_id = broker.enqueue(
         task_name='e2e_simple',
-        args_json='[5]',
+        kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',
@@ -927,7 +927,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
     task_id = (await asyncio.to_thread(
         broker.enqueue,
         task_name='e2e_simple',
-        args_json='[5]',
+        kwargs_json='{"x": 5}',
         queue_name='default',
         task_id=str(uuid4()),
         enqueue_sha='test-sha',

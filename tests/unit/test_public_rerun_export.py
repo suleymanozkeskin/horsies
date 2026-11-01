@@ -30,6 +30,7 @@ RERUN_EXPORTS = (
     'RerunKeyConflict',
     'RerunKeyReplay',
     'NotEligibleReason',
+    'TaskAbsenceReason',
 )
 
 

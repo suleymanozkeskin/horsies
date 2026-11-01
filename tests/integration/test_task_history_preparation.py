@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from hashlib import sha256
 
+from typing import Any
+
 import pytest
 from pydantic import SecretStr
 from sqlalchemy import text
@@ -24,8 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.cutover.preparation import (
     PreparationBatch,
+    PreparationBlocked,
     PreparationComplete,
     PreparationCursor,
+    RefusedRow,
     prepare_legacy_batch,
 )
 from horsies.core.history.cutover.relocation import RelocationComplete
@@ -80,6 +84,8 @@ async def run_preparation_to_complete(
         )
         if isinstance(outcome, PreparationComplete):
             return batches, outcome
+        if isinstance(outcome, PreparationBlocked):
+            raise AssertionError(f'preparation is blocked: {outcome!r}')
         batches.append(outcome)
         cursor = outcome.cursor
 
@@ -316,6 +322,199 @@ class TestPreparation:
         finally:
             await engine.dispose()
 
+async def run_preparation_to_the_end(
+    connection: AsyncConnection,
+    *,
+    batch_size: int,
+) -> tuple[list[PreparationBatch], PreparationComplete | PreparationBlocked]:
+    """Drive every batch, and return the outcome that ends the walk."""
+    batches: list[PreparationBatch] = []
+    cursor = PreparationCursor.start()
+    while True:
+        outcome = await prepare_legacy_batch(
+            connection,
+            retain_default=True,
+            batch_size=batch_size,
+            cursor=cursor,
+        )
+        match outcome:
+            case PreparationBatch():
+                batches.append(outcome)
+                cursor = outcome.cursor
+            case PreparationComplete() | PreparationBlocked():
+                return batches, outcome
+
+
+async def break_row(
+    connection: AsyncConnection, task_id: str, assignment: str,
+) -> None:
+    await connection.execute(
+        text(
+            f'UPDATE horsies_tasks SET {assignment} '
+            'WHERE id::text = :task_id'
+        ),
+        {'task_id': task_id},
+    )
+
+
+async def disposition_of(connection: AsyncConnection, task_id: str) -> Any:
+    return (
+        await connection.execute(
+            text(
+                'SELECT prepared_rerun_input_disposition FROM horsies_tasks '
+                'WHERE id::text = :task_id'
+            ),
+            {'task_id': task_id},
+        )
+    ).scalar_one()
+
+
+class TestRefusedRows:
+    """A row with no possible fingerprint stops itself, and nothing else."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('assignment', 'reason'),
+        [
+            ("task_name = ''", 'task_name must be non-empty'),
+            ("queue_name = ''", 'queue_name must be non-empty'),
+            ('priority = 0', 'priority must be between 1 and 100'),
+            ('priority = 101', 'priority must be between 1 and 100'),
+        ],
+    )
+    async def test_the_row_is_named_and_the_batch_continues(
+        self, make_database: MakeDatabase, assignment: str, reason: str,
+    ) -> None:
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                healthy = await insert_legacy_task(
+                    connection, status='FAILED', kind=None,
+                    disposition=None, retain=None,
+                )
+                refused = await insert_legacy_task(
+                    connection, status='FAILED', kind=None,
+                    disposition=None, retain=None,
+                )
+                await break_row(connection, refused, assignment)
+
+                batches, final = await run_preparation_to_the_end(
+                    connection, batch_size=10,
+                )
+
+                named = [row for batch in batches for row in batch.refused_rows]
+                assert named == [RefusedRow(task_id=refused, reason=reason)]
+                assert sum(batch.rows_prepared for batch in batches) == 1
+                assert final == PreparationBlocked(
+                    rows_prepared=1, rows_unprepared=1,
+                )
+                assert await disposition_of(connection, healthy) is not None
+                assert await disposition_of(connection, refused) is None
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_batch_of_only_refused_rows_advances_the_walk(
+        self, make_database: MakeDatabase,
+    ) -> None:
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                task_ids = [
+                    await insert_legacy_task(
+                        connection, status='FAILED', kind=None,
+                        disposition=None, retain=None,
+                    )
+                    for _ in range(3)
+                ]
+                for task_id in task_ids:
+                    await break_row(connection, task_id, 'priority = 0')
+
+                batches, final = await run_preparation_to_the_end(
+                    connection, batch_size=1,
+                )
+
+                assert [batch.rows_prepared for batch in batches] == [0, 0, 0]
+                assert final == PreparationBlocked(
+                    rows_prepared=0, rows_unprepared=3,
+                )
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_refused_live_row_is_not_counted_as_prepared(
+        self, make_database: MakeDatabase,
+    ) -> None:
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                healthy = await insert_legacy_task(
+                    connection, status='FAILED', kind=None,
+                    disposition=None, retain=None,
+                )
+                refused = await insert_legacy_task(
+                    connection, status='PENDING', kind=None,
+                    disposition=None, retain=None,
+                )
+                await break_row(connection, refused, 'priority = 0')
+
+                batches, _ = await run_preparation_to_the_end(
+                    connection, batch_size=10,
+                )
+
+                # One batch holds both rows, so the count is computed.
+                assert len(batches) == 1
+                assert batches[0].rows_prepared == 1
+                assert batches[0].live_rows_prepared == 0
+                assert await disposition_of(connection, healthy) is not None
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
+    async def test_a_repaired_row_completes_on_the_next_run(
+        self, make_database: MakeDatabase,
+    ) -> None:
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                healthy = await insert_legacy_task(
+                    connection, status='FAILED', kind=None,
+                    disposition=None, retain=None,
+                )
+                refused = await insert_legacy_task(
+                    connection, status='FAILED', kind=None,
+                    disposition=None, retain=None,
+                )
+                await break_row(connection, refused, 'priority = 0')
+                _, blocked = await run_preparation_to_the_end(
+                    connection, batch_size=10,
+                )
+                assert isinstance(blocked, PreparationBlocked)
+
+                await break_row(connection, refused, 'priority = 50')
+                _, final = await run_preparation_to_the_end(
+                    connection, batch_size=10,
+                )
+
+                assert final == PreparationComplete(rows_prepared=2)
+                assert await disposition_of(connection, healthy) is not None
+                assert await disposition_of(connection, refused) is not None
+        finally:
+            await engine.dispose()
+
+
 class TestKeysetWatermark:
     @pytest.mark.asyncio
     async def test_the_watermark_bounds_the_selection(
@@ -360,7 +559,11 @@ class TestKeysetWatermark:
                     batch_size=2,
                     cursor=PreparationCursor(after_id=ordered[-1]),
                 )
-                assert isinstance(beyond, PreparationComplete)
+                # Nothing is selected past the watermark, and four rows
+                # remain, so this is not a completion.
+                assert beyond == PreparationBlocked(
+                    rows_prepared=0, rows_unprepared=4,
+                )
 
                 first = await prepare_legacy_batch(
                     connection,

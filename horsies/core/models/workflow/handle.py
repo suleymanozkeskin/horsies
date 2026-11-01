@@ -369,6 +369,31 @@ class _OutputlessTerminals:
 _OUTPUTLESS_TERMINALS: Any = _OutputlessTerminals()
 
 
+_NODE_STATUS_BY_STORED_VALUE: dict[str, WorkflowTaskStatus] = {
+    status.value: status for status in WorkflowTaskStatus
+}
+
+
+def _stored_node_status(
+    *, workflow_id: str, node_id: str, stored: str,
+) -> WorkflowTaskStatus:
+    """Return the node status that the database row stores.
+
+    The CHECK ``horsies_workflow_tasks_status_check`` allows only the
+    ``WorkflowTaskStatus`` values, so another value means the CHECK is
+    missing or broken. Raises ``AssertionError`` that names the workflow,
+    the node and the stored value.
+    """
+    status = _NODE_STATUS_BY_STORED_VALUE.get(stored)
+    if status is None:
+        raise AssertionError(
+            f'workflow {workflow_id} node {node_id} stores status {stored!r}, '
+            'which is not a WorkflowTaskStatus member; the CHECK '
+            'horsies_workflow_tasks_status_check must forbid it'
+        )
+    return status
+
+
 def _decode_per_task_envelope(
     loaded: Json,
     *,
@@ -1432,7 +1457,11 @@ class WorkflowHandle(Generic[OutT]):
                         node_id=row.node_id,
                         index=row.task_index,
                         name=row.task_name,
-                        status=WorkflowTaskStatus(row.status),
+                        status=_stored_node_status(
+                            workflow_id=self.workflow_id,
+                            node_id=row.node_id,
+                            stored=row.status,
+                        ),
                         result=task_result_value,
                         started_at=row.started_at,
                         completed_at=row.completed_at,

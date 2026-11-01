@@ -33,6 +33,13 @@ DECLINED_BY_POLICY — current policy is strict encoding, and declining
 what cannot be strictly encoded is that policy speaking; the archive
 column rightly collapses this with policy-declined, while the batch
 outcome reports the split so the operator report never does.
+
+A row that breaks an ``EnqueueCommandV1`` rule has no fingerprint to compute,
+even from its raw text, so no disposition can be written and the tighten can
+never accept it. The row stays unprepared and the batch reports it by id, so
+the rows around it still prepare. When the walk ends with such rows left it
+returns ``PreparationBlocked``: an operator repairs the rows and runs
+preparation again.
 """
 
 from __future__ import annotations
@@ -99,7 +106,22 @@ class PreparationBatch:
     over_bound_rows: int
     policy_declined_rows: int
     decode_failed_rows: int
+    refused_rows: tuple[RefusedRow, ...]
     cursor: PreparationCursor
+
+
+@dataclass(frozen=True, slots=True)
+class PreparationBlocked:
+    """The walk ended, and rows remain without a prepared disposition.
+
+    Each is a row the batches named in ``PreparationBatch.refused_rows``, or a
+    row behind a resumed cursor. The tighten refuses while any remain, so an
+    operator repairs the refused rows and runs preparation again from
+    ``PreparationCursor.start()``.
+    """
+
+    rows_prepared: int
+    rows_unprepared: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +134,17 @@ class PreparationComplete:
     """
 
     rows_prepared: int
+
+
+@dataclass(frozen=True, slots=True)
+class RefusedRow:
+    """A row that breaks a command rule, so it has no fingerprint.
+
+    ``reason`` is the rule text, and it holds no value from the row.
+    """
+
+    task_id: str
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +163,9 @@ class _PreparedRow:
     decode_failed: bool
 
 
-def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
+def _prepare_one(
+    row: Any, *, retain_default: bool,
+) -> _PreparedRow | RefusedRow:
     retain = (
         bool(row.retain_rerun_input)
         if row.retain_rerun_input is not None
@@ -145,20 +180,24 @@ def _prepare_one(row: Any, *, retain_default: bool) -> _PreparedRow:
         if row.retention_class_key
         else FOREVER_CLASS_KEY
     )
-    fingerprint = EnqueueCommandV1(
-        task_name=row.task_name,
-        queue_name=row.queue_name,
-        priority=row.priority,
-        args_json=row.args,
-        kwargs_json=row.kwargs,
-        good_until=row.good_until,
-        enqueue_delay_seconds=None,
-        task_options_json=row.task_options,
-        retention_class_key=retention_class_key,
-        retain_rerun_input=retain,
-        rerun_of_task_id=None,
-        rerun_root_task_id=None,
-    ).fingerprint
+    try:
+        command = EnqueueCommandV1(
+            task_name=row.task_name,
+            queue_name=row.queue_name,
+            priority=row.priority,
+            args_json=row.args,
+            kwargs_json=row.kwargs,
+            good_until=row.good_until,
+            enqueue_delay_seconds=None,
+            task_options_json=row.task_options,
+            retention_class_key=retention_class_key,
+            retain_rerun_input=retain,
+            rerun_of_task_id=None,
+            rerun_root_task_id=None,
+        )
+    except ValueError as exc:
+        return RefusedRow(task_id=str(row.id), reason=str(exc))
+    fingerprint = command.fingerprint
 
     def parsed(value: str | None) -> Any:
         if value is None:
@@ -221,7 +260,7 @@ async def prepare_legacy_batch(
     retain_default: bool,
     batch_size: int,
     cursor: PreparationCursor,
-) -> PreparationBatch | PreparationComplete:
+) -> PreparationBatch | PreparationBlocked | PreparationComplete:
     """Prepare one bounded batch; the caller owns the transaction.
 
     Selection: ANY row without a prepared disposition — terminal rows
@@ -264,21 +303,55 @@ async def prepare_legacy_batch(
         )
     ).all()
     if not rows:
-        total = (
+        counts = (
             await connection.execute(
                 text(
-                    f"SELECT count(*) FROM {LIVE_TASKS} "
-                    "WHERE prepared_rerun_input_disposition IS NOT NULL"
+                    f"""
+                    SELECT
+                        count(*) FILTER (
+                            WHERE prepared_rerun_input_disposition IS NOT NULL
+                        ) AS prepared,
+                        count(*) FILTER (
+                            WHERE prepared_rerun_input_disposition IS NULL
+                        ) AS unprepared
+                    FROM {LIVE_TASKS}
+                    """
                 )
             )
-        ).scalar_one()
-        return PreparationComplete(rows_prepared=int(total))
+        ).one()
+        if counts.unprepared:
+            return PreparationBlocked(
+                rows_prepared=int(counts.prepared),
+                rows_unprepared=int(counts.unprepared),
+            )
+        return PreparationComplete(rows_prepared=int(counts.prepared))
 
+    outcomes = [
+        (row, _prepare_one(row, retain_default=retain_default)) for row in rows
+    ]
     prepared = [
-        _prepare_one(row, retain_default=retain_default) for row in rows
+        outcome for _, outcome in outcomes if isinstance(outcome, _PreparedRow)
     ]
     live_statuses = {'PENDING', 'CLAIMED', 'RUNNING'}
-    live_rows = sum(row.status in live_statuses for row in rows)
+    live_rows = sum(
+        row.status in live_statuses and isinstance(outcome, _PreparedRow)
+        for row, outcome in outcomes
+    )
+    next_cursor = PreparationCursor(after_id=str(rows[-1].id))
+    refused_rows = tuple(
+        outcome for _, outcome in outcomes if isinstance(outcome, RefusedRow)
+    )
+    if not prepared:
+        return PreparationBatch(
+            rows_prepared=0,
+            live_rows_prepared=0,
+            inline_rows=0,
+            over_bound_rows=0,
+            policy_declined_rows=0,
+            decode_failed_rows=0,
+            refused_rows=refused_rows,
+            cursor=next_cursor,
+        )
     # One executemany, not one statement per row: the per-row loop cost
     # 5.4x relocation per row purely in round trips (605 vs 112 s/M).
     # The class stamp writes the resolved value — identity for rows that
@@ -322,7 +395,7 @@ async def prepare_legacy_batch(
     return PreparationBatch(
         rows_prepared=len(prepared),
         live_rows_prepared=live_rows,
-        cursor=PreparationCursor(after_id=prepared[-1].task_id),
+        cursor=next_cursor,
         inline_rows=sum(p.disposition == 'INLINE' for p in prepared),
         over_bound_rows=sum(p.disposition == 'OVER_BOUND' for p in prepared),
         policy_declined_rows=sum(
@@ -330,4 +403,5 @@ async def prepare_legacy_batch(
             for p in prepared
         ),
         decode_failed_rows=sum(p.decode_failed for p in prepared),
+        refused_rows=refused_rows,
     )
