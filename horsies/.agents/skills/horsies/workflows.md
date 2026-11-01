@@ -467,8 +467,9 @@ policy = SuccessPolicy(
 )
 ```
 
-- Workflow `COMPLETED` if **any** `SuccessCase` has all `required` tasks `COMPLETED`.
-- `optional` tasks excluded from failure accounting.
+- Workflow `COMPLETED` if **any** `SuccessCase` has all `required` nodes `COMPLETED`.
+- `required` and `optional` take any node: `TaskNode` or `SubWorkflowNode`.
+- `optional` nodes excluded from failure accounting.
 - Without policy: any task failure → `FAILED`.
 - No case satisfied: `WORKFLOW_SUCCESS_CASE_NOT_MET` error.
 - A case does not have to require the output node. The workflow is then `COMPLETED`, and its output node can end `SKIPPED` or `FAILED`.
