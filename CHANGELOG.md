@@ -521,6 +521,10 @@ and there is no migration contract between pre-1.0 versions.
   `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
   library. SQL functions write the stored bytes, and `decode_input_envelope`
   reads a stored rerun input.
+- **Unused archive helpers.** `select_result_payload`, its result types,
+  `decode_history_row_version`, and the registry accessors `is_retained` and
+  `retained_versions` had no caller in the library. `RETAINED_ARCHIVE_VERSIONS`
+  stays: the transcode decoder set reads it.
 
 ### Fixed
 
@@ -591,6 +595,15 @@ and there is no migration contract between pre-1.0 versions.
   `ValueError`. `CorruptArchiveValue.detail` for these failures is now
   `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
   `HistoryContractError` for the same text.
+- **`loads_json` refuses a lone UTF-16 surrogate.** An escape such as
+  `\ud800` decoded to a string that UTF-8 cannot encode, so the failure came
+  later: one such row aborted a cutover preparation batch, and a rerun of a
+  stored envelope raised `UnicodeEncodeError`. Each reader now refuses the
+  value: `enqueue_async` returns `INVALID_INPUT` and writes nothing, the worker
+  returns `WORKER_SERIALIZATION_ERROR`, cutover preparation counts the row as a
+  decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
+  refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
+  character and stays accepted.
 
 ## [0.5.5] - 2026-10-28
 
