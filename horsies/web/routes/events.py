@@ -43,11 +43,11 @@ def build_router(broadcaster: EventBroadcaster) -> APIRouter:
                     yield _HEARTBEAT_FRAME
                     continue
                 if event is None:
-                    yield f'data: {json.dumps({"topic": TOPIC_DEGRADED})}\n\n'
+                    yield f'data: {json.dumps({"topic": TOPIC_DEGRADED}, allow_nan=False)}\n\n'
                     return
                 yield (
                     'data: '
-                    f'{json.dumps({"topic": event.topic, "ids": event.ids})}'
+                    f'{json.dumps({"topic": event.topic, "ids": event.ids}, allow_nan=False)}'
                     '\n\n'
                 )
         finally:
