@@ -746,6 +746,44 @@ class TestTaskHandleRecordToTaskResult:
             == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         )
 
+    def test_removed_builtin_code_in_err_slot_rejected(self) -> None:
+        """A stored err slot tagged with the removed code
+        ``PYDANTIC_HYDRATION_ERROR`` fails closed with
+        ``RESULT_DESERIALIZATION_ERROR``."""
+        from horsies.core.types.result import Ok
+        from horsies.core.types.status import TaskStatus
+
+        stored = {
+            '__h_task_result__': True,
+            'ok': None,
+            'err': {
+                'error_code': {'__builtin_task_code__': 'PYDANTIC_HYDRATION_ERROR'},
+                'message': 'stored',
+                'data': None,
+                'exception': None,
+            },
+        }
+        handle: TaskHandle[int] = TaskHandle('task-x', ok_type=int)
+        broker_result = Ok(self._record(
+            status=TaskStatus.FAILED, raw_result=stored,
+        ))
+
+        result = handle._record_to_task_result(  # pyright: ignore[reportPrivateUsage]
+            broker_result, timeout_ms=None,
+        )
+
+        assert result.is_err()
+        assert result.err is not None
+        assert (
+            result.err.error_code
+            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        )
+        assert result.err.message is not None
+        assert (
+            "Unknown built-in task code: 'PYDANTIC_HYDRATION_ERROR'"
+            in result.err.message
+        )
+
     def test_terminal_status_with_none_payload_is_result_not_available(
         self,
     ) -> None:

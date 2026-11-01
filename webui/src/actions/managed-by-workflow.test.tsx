@@ -25,6 +25,7 @@ const META: MonitoringMeta = {
   schema_version: 14,
   expected_schema_version: 14,
   schema_compatible: true,
+  schema_state: 'MATCH',
   actions_disabled_reason: null,
 };
 

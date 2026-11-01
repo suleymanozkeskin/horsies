@@ -136,7 +136,6 @@ Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
 - `RETURN_TYPE_MISMATCH` — returned value doesn't match declared type
-- `PYDANTIC_HYDRATION_ERROR` — legacy code, kept in the enum as a reserved code; the library does not return it (stored payloads no longer carry the `__pydantic_model__` shape that needed a runtime class import)
 - `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID
 - `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id)
 

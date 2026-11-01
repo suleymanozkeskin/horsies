@@ -72,6 +72,8 @@ class MetaResponse(BaseModel):
     ANDed with schema compatibility — while ``can_act`` is this caller's
     policy verdict. A schema the tool cannot write through forces actions off
     for everyone and names itself in ``actions_disabled_reason``.
+    ``schema_state`` is the probe's verdict itself, so a client never derives
+    it from the version numbers.
     """
 
     horsies_version: str
@@ -81,6 +83,7 @@ class MetaResponse(BaseModel):
     schema_version: int | None
     expected_schema_version: int
     schema_compatible: bool
+    schema_state: SchemaState
     actions_disabled_reason: str | None
 
 
@@ -208,6 +211,7 @@ def create_monitoring_app(
             schema_version=schema.version,
             expected_schema_version=schema.expected_version,
             schema_compatible=schema.compatible,
+            schema_state=schema.state,
             actions_disabled_reason=_disabled_reason(schema.state),
         )
 
