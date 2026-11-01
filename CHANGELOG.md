@@ -81,9 +81,29 @@ and there is no migration contract between pre-1.0 versions.
   `ENQUEUE_FAILED`, which `retry_start()` accepted.
 - **`PostgresBroker.ensure_schema_initialized()` returns
   `Result[None, BrokerOperationFailed | BrokerEventLoopLimit]`**, its only
-  failures. The run-time behavior does not change. A `match` on its error
-  with an arm for another broker variant fails strict pyright
-  (`reportUnnecessaryComparison`); remove that arm.
+  failures. The run-time behavior does not change. In a `match` on its
+  error, an arm for another broker variant is dead; remove it. Strict
+  pyright reports such an arm (`reportUnnecessaryComparison`) when it
+  stands alone or in an OR pattern without parentheses, not inside a
+  parenthesized OR pattern.
+- **`PostgresBroker.enqueue_async()` returns
+  `Result[str, BrokerEnqueueError]`, and `enqueue()` returns
+  `Result[str, BrokerEnqueueError | BrokerSyncCallError]`**, their only
+  failures. `BrokerEnqueueError` is `BrokerEnqueueFailed |
+  BrokerPayloadMismatch | BrokerIdempotencyKeyConflict |
+  BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`.
+  `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`.
+  Both are new names, exported from `horsies` and `horsies.core.brokers`.
+  The run-time behavior does not change. Code that assigns the result to
+  `BrokerResult[str]` still type-checks. In a `match` on the error, an arm
+  for `BrokerOperationFailed`, `BrokerNotAttached`,
+  `BrokerNoTypeAvailable`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` is dead; remove it. Strict pyright reports such
+  an arm (`reportUnnecessaryComparison`) when it stands alone or in an OR
+  pattern without parentheses, not inside a parenthesized OR pattern. A
+  send or schedule whose broker returns one of these five variants (only a
+  mock can) fails an assertion that names the variant. Before, it returned
+  `TaskSendEnqueueFailed`.
 - **New broker codes `INVALID_INPUT` and `LISTENER_DISABLED`.** An
   exhaustive `match` on `BrokerErrorCode` needs a case for each. These
   failures move to them:
