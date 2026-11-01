@@ -6,7 +6,15 @@ import pytest
 from sqlalchemy import String
 
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.core.models.queues import QUEUE_NAME_MAX_LENGTH, CustomQueueConfig
+from horsies.core.models.queues import (
+    QUEUE_NAME_MAX_LENGTH,
+    CustomQueueConfig,
+    QueueNameEdgeWhitespace,
+    QueueNameEmpty,
+    QueueNameTooLong,
+    check_queue_name,
+)
+from horsies.core.types.result import Err, Ok
 from horsies.core.models.task_pg import TaskModel
 from horsies.core.models.workflow_pg import WorkflowTaskModel
 
@@ -47,3 +55,18 @@ def test_max_length_matches_database_columns() -> None:
     ):
         assert isinstance(column.type, String)
         assert column.type.length == QUEUE_NAME_MAX_LENGTH
+
+
+class TestCheckQueueName:
+    def test_empty_name_names_the_empty_rule(self) -> None:
+        assert check_queue_name('') == Err(QueueNameEmpty())
+
+    def test_blank_name_names_the_whitespace_rule(self) -> None:
+        assert check_queue_name('   ') == Err(QueueNameEdgeWhitespace())
+
+    def test_long_name_names_the_length(self) -> None:
+        name = 'q' * (QUEUE_NAME_MAX_LENGTH + 1)
+        assert check_queue_name(name) == Err(QueueNameTooLong(length=len(name)))
+
+    def test_usable_name_is_returned(self) -> None:
+        assert check_queue_name('fast') == Ok('fast')
