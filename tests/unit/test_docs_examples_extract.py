@@ -22,6 +22,7 @@ from tests.docs_examples.extract import (
     UnparsableBlock,
     describe_error,
     extract_all,
+    find_pages,
     read_blocks,
     render_page_files,
 )
@@ -165,6 +166,16 @@ class TestExtractAll:
 
         assert errors == ()
         assert list(output.glob('*.py')) == []
+
+
+class TestFindPages:
+    def test_changelog_is_not_a_page(self, tmp_path: Path) -> None:
+        docs = tmp_path / 'website' / 'src' / 'content' / 'docs'
+        docs.mkdir(parents=True)
+        (docs / 'changelog.md').write_text('```python\nx = ???\n```\n')
+        (docs / 'cli.md').write_text('text')
+
+        assert find_pages(tmp_path) == (Path('website/src/content/docs/cli.md'),)
 
 
 class TestRealDocs:

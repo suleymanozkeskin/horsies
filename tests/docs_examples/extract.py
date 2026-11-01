@@ -38,6 +38,8 @@ DOC_ROOTS: Final = (
     Path('horsies') / '.agents' / 'skills',
 )
 PAGE_SUFFIXES: Final = frozenset({'.md', '.mdx'})
+# The changelog shows past versions and has a twin file in the repo root.
+HISTORY_PAGES: Final = frozenset({'changelog.md'})
 PRELUDE_IMPORT: Final = 'from prelude import *  # noqa: F403\n'
 
 _FENCE: Final = re.compile(r'^(?P<indent>\s*)```(?P<lang>\w*)')
@@ -257,7 +259,7 @@ def find_pages(repo_root: Path) -> tuple[Path, ...]:
         found.extend(
             path.relative_to(repo_root)
             for path in sorted((repo_root / root).rglob('*'))
-            if path.suffix in PAGE_SUFFIXES
+            if path.suffix in PAGE_SUFFIXES and path.name not in HISTORY_PAGES
         )
     return tuple(found)
 
