@@ -22,7 +22,7 @@ import socket
 import sys
 import threading
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Final, NoReturn, assert_never
+from typing import Final, NoReturn, assert_never
 
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.logging import get_logger
@@ -47,9 +47,6 @@ from horsies.core.worker.child_protocol import (
     parse_header,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
-
-if TYPE_CHECKING:
-    from horsies.core.app import Horsies
 
 logger = get_logger('worker')
 
@@ -274,25 +271,6 @@ def boot_app(init: InitFrame) -> None:
         init.child_pool_max_size,
         init.child_pool_check,
     )
-
-
-def boot_with_preloaded_app(app: Horsies) -> BootFn:
-    """Return a boot step for a child that inherited ``app`` through a fork."""
-
-    def boot(init: InitFrame) -> None:
-        from horsies.core.worker.child_runner import finish_child_start
-
-        restore_parent_state(init)
-        finish_child_start(
-            app,
-            init.database_url,
-            dict(init.connect_kwargs),
-            init.child_pool_min_size,
-            init.child_pool_max_size,
-            init.child_pool_check,
-        )
-
-    return boot
 
 
 def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:

@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 import textwrap
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock
@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from horsies.core.types.result import Err, Ok, Result
-from horsies.core.worker import preload, slots
+from horsies.core.worker import preload, preload_main, slots
 from horsies.core.worker.child_protocol import (
     ChildForkedFrame,
     ForkFailedFrame,
@@ -681,6 +681,32 @@ class TestRealChildren:
     ) -> None:
         counts = await self._counts(tmp_path, started_pools, ChildPreload.LIBRARY)
         assert counts == (2, 2)
+
+
+class TestChildSteps:
+    def test_a_child_serves_only_after_it_reparents(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``serve`` binds to the real parent, so the order is the contract."""
+        steps: list[str] = []
+
+        def record(step: str) -> Callable[..., None]:
+            def note(*_args: object) -> None:
+                steps.append(step)
+
+            return note
+
+        monkeypatch.setattr(preload_main.os, 'setsid', record('setsid'))
+        monkeypatch.setattr(preload_main, '_wait_for_reparent', record('reparent'))
+        monkeypatch.setattr(preload_main, 'serve', record('serve'))
+        monkeypatch.setattr(preload_main.socket, 'socket', MagicMock())
+
+        with pytest.raises(SystemExit) as stopped:
+            preload_main._run_child(5, 42, MagicMock(), MagicMock())
+
+        assert stopped.value.code == 0
+        assert steps == ['setsid', 'reparent', 'serve']
 
 
 @linux_only

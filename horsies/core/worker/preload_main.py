@@ -40,7 +40,6 @@ from horsies.core.worker.child_main import (
     read_init_frame,
     restore_parent_state,
     run_child_task,
-    boot_with_preloaded_app,
     serve,
 )
 from horsies.core.worker.child_protocol import (
@@ -89,17 +88,21 @@ def _prepare_library(init: InitFrame) -> BootFn:
 
 
 def _prepare_app(init: InitFrame) -> BootFn:
-    """Import the library and the app. Children then share module state."""
+    """Import the library and the app. Children then share module state.
+
+    A child still runs the normal boot: the import cache makes that step
+    cheap, and each child still runs its own hooks and opens its own pool.
+    """
     from horsies.core.worker.child_runner import import_app_for_child
 
-    _prepare_library(init)
-    app = import_app_for_child(
+    boot = _prepare_library(init)
+    import_app_for_child(
         init.app_locator,
         list(init.imports),
         list(init.sys_path_roots),
         init.loglevel,
     )
-    return boot_with_preloaded_app(app)
+    return boot
 
 
 def _open_socket_fds(ctrl_fd: int) -> list[int]:
