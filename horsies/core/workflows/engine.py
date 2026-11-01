@@ -312,6 +312,31 @@ def _ser(result: SerdeResult[str], context: str, fallback: str | None = None) ->
     return result.ok_value
 
 
+def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
+    """Extract a serde serialization Result, or raise with ``context``.
+
+    The engine serializes only values that it built in the process, some of
+    them from values that it parsed from stored rows. A parsed JSON value
+    serializes again, so a failure is a defect: this raises, and the
+    caller's transaction rolls back. Every engine serialization uses this
+    helper, except the outputless workflow result envelope of
+    ``get_workflow_final_result``, which keeps ``_ser``.
+
+    Raises:
+        SerializationError: ``result`` is an Err. The message names
+            ``context`` and the cause.
+    """
+    match result:
+        case Ok(serialized):
+            return serialized
+        case Err(cause):
+            raise SerializationError(
+                f'Failed to serialize {context}: {cause}',
+            ) from cause
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _deser_json(raw: str | None, context: str, fallback: Any = None) -> Any:
     """Deserialize JSON, returning fallback on error."""
     if not raw:
@@ -676,6 +701,12 @@ async def _build_enqueued_task_params(
     Inputs come from the READY→ENQUEUED CAS RETURNING row. Failure means
     THIS node fails (callers fold into ``_fail_enqueued_task``); the only
     statements issued here are the workflow_ctx reads for ctx nodes.
+
+    Raises:
+        SerializationError: the kwargs that this function built do not
+            serialize. It builds them from values that it parsed from the
+            stored row and from encoded dependency results, so this is a
+            defect, not stored data that does not parse.
     """
     max_retries = 0
     good_until_str: str | None = None
@@ -838,13 +869,11 @@ async def _build_enqueued_task_params(
         'task_name': task_name,
     }
 
-    # Serialize kwargs before creating the task — fail early on corrupt data
-    kwargs_json = _ser(dumps_json(kwargs), 'workflow task kwargs')
-    if kwargs_json is None:
-        return Err(_EnqueueBuildError(
-                f'Failed to serialize kwargs for task {task_index}',
-                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            ))
+    # Serialize kwargs before creating the task. Stored data that does not
+    # parse failed this node above; a failure here is a defect and raises.
+    kwargs_json = _ser_or_raise(
+        dumps_json(kwargs), f'kwargs for workflow {workflow_id} task {task_index}',
+    )
 
     # Warn-only payload guardrail: this is the args_from injection point,
     # where an upstream task's result envelope becomes this task's kwargs
@@ -923,8 +952,12 @@ async def enqueue_subworkflow_task(
 
     Raises:
         SerializationError: the task options of a child root, or of a child
-            task with ``good_until``, do not parse. They come from the task
-            function, so this is a defect; it raises before any INSERT.
+            task with ``good_until``, do not parse; or the kwargs of a child
+            node do not encode or serialize; or another value that the child
+            start builds does not serialize. The options come from the task
+            function, and spec construction in ``build_with()`` encoded and
+            decoded every child kwarg, so this is a defect. It raises before
+            this child start writes a row.
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the workflow start path folds a database or driver
             error into WorkflowStartEnqueueFailed with its own retry loop,
@@ -1205,38 +1238,28 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
+            # Spec construction in build_with() encoded and decoded these
+            # kwargs, so a refusal here is a defect and raises.
             try:
                 encoded_child_sub_kwargs = encode_subworkflow_kwargs(
                     child_sub.workflow_def, child_sub.kwargs,
                 )
             except (StrictJsonError, ValueValidationError) as exc:
-                await _fail_enqueued_task(
-                    session, workflow_id, task_index,
-                    (
-                        f'Failed to encode kwargs for child sub '
-                        f'{child_sub.name}: {str(exc)[:200]}'
-                    ),
-                    broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
-            child_kwargs_json = _ser(
-                dumps_json(encoded_child_sub_kwargs), 'child sub kwargs',
+                raise SerializationError(
+                    f'Failed to encode kwargs for child sub {child_sub.name}: '
+                    f'{exc}',
+                ) from exc
+            child_kwargs_json = _ser_or_raise(
+                dumps_json(encoded_child_sub_kwargs),
+                f'kwargs for child sub {child_sub.name}',
             )
-            if child_kwargs_json is None:
-                await _fail_enqueued_task(
-                    session, workflow_id, task_index,
-                    f'Failed to serialize kwargs for child sub {child_sub.name}', broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
             child_node_params.append({
                 'id': child_wt_id,
                 'wf_id': child_id,
                 'idx': child_sub.index,
                 'node_id': child_sub.node_id,
                 'name': child_sub.name,
-                'args': _ser(dumps_json([]), 'positional args', fallback='[]'),
+                'args': _ser_or_raise(dumps_json([]), 'positional args'),
                 'kwargs': child_kwargs_json,
                 'queue': 'default',
                 # Bookkeeping row for a SubWorkflowNode (is_subworkflow=True):
@@ -1246,7 +1269,10 @@ async def enqueue_subworkflow_task(
                 # a constant deliberately — do not "fix" it to a queue priority.
                 'priority': 100,
                 'deps': child_dep_indices,
-                'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
+                'args_from': _ser_or_raise(
+                    dumps_json(child_args_from_indices),
+                    f'args_from for child node {child_sub.name}',
+                )
                 if child_args_from_indices
                 else None,
                 'ctx_from': child_ctx_from_ids,
@@ -1289,34 +1315,23 @@ async def enqueue_subworkflow_task(
             # in user-data positions fail closed before storage. Without
             # this, smuggled args_from envelopes in static kwargs would
             # reach the worker via `child_runner.py`'s args_from path
-            # and bypass the typed decode there.
+            # and bypass the typed decode there. Spec construction in
+            # build_with() encoded and decoded these kwargs, so a refusal
+            # here is a defect and raises.
             try:
                 child_task_underlying_fn = underlying_task_fn(child_task.fn)
                 encoded_child_task_kwargs = dict(
                     encode_kwargs(child_task_underlying_fn, child_task.kwargs),
                 )
             except (StrictJsonError, ValueValidationError) as exc:
-                await _fail_enqueued_task(
-                    session, workflow_id, task_index,
-                    (
-                        f'Failed to encode kwargs for child task '
-                        f'{child_task.name}: {exc}'
-                    ),
-                    broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
-            child_kwargs_json = _ser(
+                raise SerializationError(
+                    f'Failed to encode kwargs for child task {child_task.name}: '
+                    f'{exc}',
+                ) from exc
+            child_kwargs_json = _ser_or_raise(
                 dumps_json(encoded_child_task_kwargs),
-                'child task kwargs',
+                f'kwargs for child task {child_task.name}',
             )
-            if child_kwargs_json is None:
-                await _fail_enqueued_task(
-                    session, workflow_id, task_index,
-                    f'Failed to serialize kwargs for child task {child_task.name}', broker,
-                    error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
-                return None
             # Bind queue/priority through the shared resolver. Subworkflow
             # specs built directly in build_with() (the documented parameterized
             # pattern) never pass through app.workflow(), so their nodes arrive
@@ -1339,7 +1354,7 @@ async def enqueue_subworkflow_task(
                 return None
             child_queue = bound_child.queue
             child_priority = bound_child.priority
-            child_args_json = _ser(dumps_json([]), 'positional args', fallback='[]')
+            child_args_json = _ser_or_raise(dumps_json([]), 'positional args')
 
             is_fast_root = (
                 not child_dep_indices
@@ -1370,16 +1385,10 @@ async def enqueue_subworkflow_task(
                     'task_index': child_task.index,
                     'task_name': child_task.name,
                 }
-                root_kwargs_json = _ser(
-                    dumps_json(root_task_kwargs), 'child root task kwargs',
+                root_kwargs_json = _ser_or_raise(
+                    dumps_json(root_task_kwargs),
+                    f'task kwargs for child root {child_task.name}',
                 )
-                if root_kwargs_json is None:
-                    await _fail_enqueued_task(
-                        session, workflow_id, task_index,
-                        f'Failed to serialize kwargs for child task {child_task.name}', broker,
-                        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                    )
-                    return None
                 root_sent_at = datetime.now(timezone.utc)
                 sha = enqueue_fingerprint(
                     task_name=child_task.name,
@@ -1432,7 +1441,10 @@ async def enqueue_subworkflow_task(
                 'queue': child_queue,
                 'priority': child_priority,
                 'deps': child_dep_indices,
-                'args_from': _ser(dumps_json(child_args_from_indices), 'child args_from')
+                'args_from': _ser_or_raise(
+                    dumps_json(child_args_from_indices),
+                    f'args_from for child node {child_task.name}',
+                )
                 if child_args_from_indices
                 else None,
                 'ctx_from': child_ctx_from_ids,
@@ -1459,7 +1471,10 @@ async def enqueue_subworkflow_task(
             'name': child_spec.name,
             'on_error': child_spec.on_error.value,
             'output_idx': child_output_index,
-            'success_policy': _ser(dumps_json(child_success_policy_json), 'child success_policy')
+            'success_policy': _ser_or_raise(
+                dumps_json(child_success_policy_json),
+                f'success_policy for child workflow {child_spec.name}',
+            )
             if child_success_policy_json
             else None,
             'definition_key': child_spec.definition_key,
@@ -1693,6 +1708,9 @@ async def on_workflow_task_complete(
     Handles workflow task status update and dependency resolution.
 
     Raises:
+        SerializationError: a value that the engine built does not
+            serialize, for example the encoded result envelope. This is a
+            defect; the caller's transaction rolls back.
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
             with bounded retries, pause and resume fold a database error
@@ -1764,10 +1782,9 @@ async def on_workflow_task_complete(
         {
             'tid': task_id,
             'status': new_status,
-            'result': _ser(
+            'result': _ser_or_raise(
                 dumps_json(encoded_result),
-                'task completion result',
-                fallback='null',
+                f'completion result for task {task_id}',
             ),
             'terminal_states': WF_TASK_TERMINAL_VALUES,
         },
@@ -2698,6 +2715,10 @@ async def on_subworkflow_complete(
     Updates parent node status and propagates to parent DAG.
 
     Raises:
+        SerializationError: the parent node result or the child summary
+            does not serialize. The engine builds them from values that it
+            parsed from the child row, so this is a defect; the caller's
+            transaction rolls back.
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
             with bounded retries, pause and resume fold a database error
@@ -2809,10 +2830,9 @@ async def on_subworkflow_complete(
             # typed encode/decode paths treat the nested __h_* markers as
             # user data and reject them. A SubWorkflowNode for a workflow
             # with no explicit output therefore completes with ok=None.
-            parent_node_result = _ser(
+            parent_node_result = _ser_or_raise(
                 dumps_json(encode_task_result(TaskResult(ok=None), Any)),
-                'parent node outputless child result',
-                fallback='null',
+                f'outputless result of child workflow {child_workflow_id}',
             )
         else:
             # Pass through child's explicit output as TaskResult.
@@ -2833,14 +2853,13 @@ async def on_subworkflow_complete(
         # ``sub_workflow_summary``); ``model_dump`` on the concrete
         # class preserves them. The reserved-key scan isn't applied
         # here because this is an engine-internal emit, not user data.
-        parent_node_result = _ser(
+        parent_node_result = _ser_or_raise(
             dumps_json({
                 '__h_task_result__': True,
                 'ok': None,
                 'err': error.model_dump(mode='json'),
             }),
-            'parent node error',
-            fallback='null',
+            f'parent node error for child workflow {child_workflow_id}',
         )
 
     # 4. Serialize parent-side promotion with other completions of the same
@@ -2867,7 +2886,10 @@ async def on_subworkflow_complete(
         {
             'status': parent_node_status,
             'result': parent_node_result,
-            'summary': _ser(dumps_json(child_summary.to_json()), 'child summary', fallback='null'),
+            'summary': _ser_or_raise(
+                dumps_json(child_summary.to_json()),
+                f'summary of child workflow {child_workflow_id}',
+            ),
             'wf_id': parent_wf_id,
             'idx': parent_task_idx,
             'terminal_states': WF_TASK_TERMINAL_VALUES,
@@ -2999,6 +3021,11 @@ async def get_workflow_failure_error(
 
     If success_policy is set but no case satisfied, returns WORKFLOW_SUCCESS_CASE_NOT_MET.
     Otherwise, returns the first failed required task's error.
+
+    Raises:
+        SerializationError: the error that this function selected does not
+            serialize. It decoded that error from a stored row, or built it,
+            so this is a defect; the caller's transaction rolls back.
     """
     from horsies.core.models.tasks import TaskError
 
@@ -3018,10 +3045,9 @@ async def get_workflow_failure_error(
                 # subclass fields (`sub_workflow_id` /
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
-                return _ser(
+                return _ser_or_raise(
                     dumps_json(encode_value(err_tr.err, type(err_tr.err))),
-                    'task error',
-                    fallback='null',
+                    f'first task error of workflow {workflow_id}',
                 )
         return None
 
@@ -3057,14 +3083,13 @@ async def get_workflow_failure_error(
                 # subclass fields (`sub_workflow_id` /
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
-                return _ser(
+                return _ser_or_raise(
                     dumps_json(encode_value(err_tr.err, type(err_tr.err))),
-                    'task error',
-                    fallback='null',
+                    f'first task error of workflow {workflow_id}',
                 )
 
     # No required task failed, but no case was satisfied (all SKIPPED?)
-    return _ser(
+    return _ser_or_raise(
         dumps_json(
             encode_value(
                 TaskError(
@@ -3074,8 +3099,7 @@ async def get_workflow_failure_error(
                 TaskError,
             ),
         ),
-        'success case not met error',
-        fallback='null',
+        f'success case not met error of workflow {workflow_id}',
     )
 
 
@@ -3284,6 +3308,9 @@ async def _handle_workflow_task_failure(
     Handle a failed workflow task based on on_error policy.
 
     Raises:
+        SerializationError: the error of ``result`` does not serialize. It
+            is a value in the process, so this is a defect: the workflow
+            error column does not get NULL in its place.
         Exception: errors propagate to the public engine entry points,
             whose callers own the typed recovery seams.
 
@@ -3328,7 +3355,10 @@ async def _handle_workflow_task_failure(
     # round-trip; ``encode_value(err, TaskError)`` would silently
     # downcast.
     error_payload = (
-        _ser(dumps_json(encode_task_error(result.err)), 'error payload')
+        _ser_or_raise(
+            dumps_json(encode_task_error(result.err)),
+            f'task error of workflow {workflow_id}',
+        )
         if result.is_err() and result.err
         else None
     )

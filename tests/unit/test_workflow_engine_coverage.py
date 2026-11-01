@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows import engine
@@ -329,14 +330,13 @@ class TestEnqueueWorkflowTask:
         assert result is None
 
     @pytest.mark.asyncio
-    async def test_final_kwargs_serialization_fails(self) -> None:
+    async def test_final_kwargs_serialization_failure_raises(self) -> None:
+        """The engine builds the kwargs from values it parsed from the row,
+        so a serialization failure is a defect: it raises and does not fail
+        the node."""
         row = self._base_row()
 
-        call_count = 0
-
         async def _dispatch(stmt: Any, params: Any) -> MagicMock:
-            nonlocal call_count
-            call_count += 1
             if stmt is ENQUEUE_WORKFLOW_TASK_SQL:
                 return _one_result(row)
             return _one_result(SimpleNamespace())
@@ -344,23 +344,20 @@ class TestEnqueueWorkflowTask:
         session = AsyncMock()
         session.execute = AsyncMock(side_effect=_dispatch)
 
-        # First dumps_json call succeeds (for kwargs parsing),
-        # but the final one for kwargs serialization fails
-        call_idx = 0
-
-        def _dumps_side_effect(value: Any) -> Any:
-            nonlocal call_idx
-            call_idx += 1
-            # The kwargs serialization is the first dumps_json call
-            # in enqueue_workflow_task (for the final kwargs)
-            return Err(Exception('kwargs ser fail'))
-
+        # The final kwargs serialization is the only dumps_json call here.
         with patch(
             'horsies.core.workflows.engine.dumps_json',
-            side_effect=_dumps_side_effect,
-        ):
-            result = await enqueue_workflow_task(session, 'wf-1', 0, {})
-        assert result is None
+            return_value=Err(SerializationError('kwargs ser fail')),
+        ), patch(
+            'horsies.core.workflows.engine._fail_enqueued_task',
+            new=AsyncMock(),
+        ) as mock_fail:
+            with pytest.raises(
+                SerializationError,
+                match='Failed to serialize kwargs for workflow wf-1 task 0',
+            ):
+                await enqueue_workflow_task(session, 'wf-1', 0, {})
+        mock_fail.assert_not_called()
 
 
 # ── 4. enqueue_subworkflow_task ──────────────────────────────────────
@@ -720,7 +717,7 @@ class TestEnqueueSubworkflowTask:
         def _dumps_failing(value: Any) -> Any:
             # Fail on child sub kwargs (dict with 'k')
             if isinstance(value, dict) and 'k' in value:
-                return Err(Exception('child kwargs ser fail'))
+                return Err(SerializationError('child kwargs ser fail'))
             return original_dumps(value)
 
         with patch(
@@ -739,12 +736,19 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
             new=AsyncMock(),
-        ):
-            result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {},
-                parent_depth=0, root_workflow_id='root-wf',
-            )
-        assert result is None
+        ) as mock_fail:
+            # Spec construction encoded these kwargs, so a serialization
+            # failure is a defect: it raises before any INSERT and does
+            # not fail the parent node.
+            with pytest.raises(
+                SerializationError,
+                match='Failed to serialize kwargs for child sub child_sub',
+            ):
+                await enqueue_subworkflow_task(
+                    session, broker, 'wf-1', 0, {},
+                    parent_depth=0, root_workflow_id='root-wf',
+                )
+        mock_fail.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_child_task_guard_no_positional_args_fails(self) -> None:
@@ -943,7 +947,7 @@ class TestEnqueueSubworkflowTask:
         def _dumps_failing(value: Any) -> Any:
             # Fail on child task kwargs
             if isinstance(value, dict) and 'data' in value:
-                return Err(Exception('child task kwargs ser fail'))
+                return Err(SerializationError('child task kwargs ser fail'))
             return original_dumps(value)
 
         with patch(
@@ -962,12 +966,19 @@ class TestEnqueueSubworkflowTask:
         ), patch(
             'horsies.core.workflows.engine._fail_enqueued_task',
             new=AsyncMock(),
-        ):
-            result = await enqueue_subworkflow_task(
-                session, broker, 'wf-1', 0, {},
-                parent_depth=0, root_workflow_id='root-wf',
-            )
-        assert result is None
+        ) as mock_fail:
+            # Spec construction encoded these kwargs, so a serialization
+            # failure is a defect: it raises before any INSERT and does
+            # not fail the parent node.
+            with pytest.raises(
+                SerializationError,
+                match='Failed to serialize kwargs for child task child_task',
+            ):
+                await enqueue_subworkflow_task(
+                    session, broker, 'wf-1', 0, {},
+                    parent_depth=0, root_workflow_id='root-wf',
+                )
+        mock_fail.assert_not_called()
 
     @staticmethod
     def _custom_child_task() -> MagicMock:

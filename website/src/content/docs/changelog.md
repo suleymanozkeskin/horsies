@@ -394,8 +394,7 @@ there is no migration contract between pre-1.0 versions.
   when the row of a completed workflow is removed after its status was
   read.** Retention can delete a terminal workflow between the status read
   and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
-  success, for that case. A `COMPLETED` row without a stored result still
-  gives `TaskResult(ok=None)`.
+  success, for that case.
 - **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
   for a stored workflow error that is JSON but not an object.** This is
   true for a failed, cancelled or expired workflow. The message names the
@@ -408,6 +407,15 @@ there is no migration contract between pre-1.0 versions.
   the two refusals of the decode, `StrictJsonError` and
   `ValueValidationError`. Before, it returned `RESULT_DESERIALIZATION_ERROR`
   for every exception from the decode.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a `COMPLETED` workflow whose stored result is NULL or empty, and for
+  an empty stored workflow error.** The library stores a result in the
+  statement that sets `COMPLETED`, and it does not store an empty error. So
+  these values are stored data that does not parse. The message names the
+  case, and `data` holds the workflow id. Before, the result case returned
+  `TaskResult(ok=None)`, a success, and an empty error returned the
+  `OutcomeCode` of the status. A NULL error still gives the `OutcomeCode` of
+  the status: a cancel does not write the error.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -636,6 +644,25 @@ there is no migration contract between pre-1.0 versions.
   without a stored error gets the `OutcomeCode` of the status that `get()`
   read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
   `get()` no longer makes a free-text `WORKFLOW_<status>` code.
+- **A value that the workflow engine built and that does not serialize
+  raises `SerializationError`.** This is true for the kwargs of a promoted
+  node, for each value that a child workflow start writes, for the result
+  of a completed node, for the parent node result and the summary of a
+  finished child workflow, and for the workflow error. The engine builds
+  these values in the process, some of them from values that it parsed from
+  stored rows, so a failure is a defect. The message names the value. The
+  caller rolls back its transaction: the worker's workflow finalize phase
+  returns a finalize error, the reaper logs the recovery candidate as
+  failed, and `start_workflow()` and `resume()` raise the error. Before, the
+  engine logged the failure and stored the text `null` or NULL in the result
+  or error column, or failed the node with `WORKER_SERIALIZATION_ERROR`. The
+  outputless workflow result keeps its fallback.
+- **A child workflow start raises `SerializationError` when the kwargs of a
+  child node do not encode.** Spec construction in `build_with()` encodes and
+  decodes every child kwarg, so a refusal at the child start is a defect. The
+  message names the child node. Before, the child start failed the
+  `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. Stored kwargs of the
+  parent node that do not decode still fail only that node.
 
 ### Removed
 

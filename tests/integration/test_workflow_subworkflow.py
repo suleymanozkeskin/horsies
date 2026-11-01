@@ -13,7 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.codec.json_io import dumps_json, loads_json
+from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
+from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
     decode_task_result,
     encode_task_error,
@@ -28,6 +29,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
     WorkflowContext,
     WorkflowStatus,
+    WorkflowSpec,
     OnError,
 )
 from horsies.core.workflows.engine import (
@@ -1104,16 +1106,16 @@ class TestSubworkflowIntegration:
     async def test_child_task_prepare_failure_does_not_commit_partial_child(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A later child task prep failure must not leave a partial child workflow.
 
         The TaskNode branch of the prepare loop in `enqueue_subworkflow_task`
-        fails the parent node when the kwargs of a child node do not
-        serialize. Spec construction already encodes every kwarg, so the
-        test patches the engine's `_ser` helper to fail only for the second
-        `'child task kwargs'` call: the later node. The first node's params
-        are then built, and the load-bearing assertion is `child_count == 0`.
+        fails the parent node when the queue of a child node does not bind
+        against the app config. `build_with()` returns a `WorkflowSpec`
+        directly, so `app.workflow()` does not bind the queues first, and the
+        later node has a queue that DEFAULT mode refuses. The first node's
+        params are then built, and the load-bearing assertion is
+        `child_count == 0`.
         """
         session, broker, app = setup
         parent_task = make_simple_task(app, 'partial_child_parent_task')
@@ -1135,30 +1137,18 @@ class TestSubworkflowIntegration:
                     return TaskResult(ok=2)
 
                 node_first = TaskNode(fn=child_first)
-                node_later = TaskNode(fn=child_later, waits_for=[node_first])
-                return app.workflow(
+                # DEFAULT mode accepts only the 'default' queue.
+                node_later = TaskNode(
+                    fn=child_later,
+                    waits_for=[node_first],
+                    queue='not_a_configured_queue',
+                )
+                return WorkflowSpec(
                     name=cls.name,
                     tasks=[node_first, node_later],
                     output=node_later,
                     on_error=OnError.FAIL,
-                    definition_key=cls.definition_key,
                 )
-
-        import horsies.core.workflows.engine as engine_mod
-        real_ser = engine_mod._ser  # pyright: ignore[reportPrivateUsage]
-        child_task_kwargs_calls = 0
-
-        def _ser_fail_later_child_task_kwargs(
-            result: Any, context: str, fallback: str | None = None,
-        ) -> str | None:
-            nonlocal child_task_kwargs_calls
-            if context == 'child task kwargs':
-                child_task_kwargs_calls += 1
-                if child_task_kwargs_calls == 2:
-                    return None
-            return real_ser(result, context, fallback)
-
-        monkeypatch.setattr(engine_mod, '_ser', _ser_fail_later_child_task_kwargs)
 
         node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
@@ -1188,7 +1178,8 @@ class TestSubworkflowIntegration:
             tr = _decode_task_result(result_json)
             assert tr is not None and tr.is_err()
             assert tr.err is not None
-            assert tr.err.error_code == 'WORKER_SERIALIZATION_ERROR'
+            assert tr.err.error_code == 'WORKFLOW_ENQUEUE_FAILED'
+            assert 'partial_child_later_task' in (tr.err.message or '')
 
             child_count = await session.scalar(
                 text("""
@@ -1202,26 +1193,24 @@ class TestSubworkflowIntegration:
         finally:
             unregister_workflow_definition(LaterNodePrepFailureChildWorkflow.definition_key)
 
-    async def test_nested_subworkflow_prepare_failure_does_not_commit_partial_child(
+    async def test_nested_subworkflow_kwargs_encode_refusal_raises_and_rolls_back(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A SubWorkflowNode-branch prep failure must not leave a partial child workflow.
+        """A SubWorkflowNode-branch kwargs encode refusal raises; nothing is kept.
 
-        Mirrors `test_child_task_prepare_failure_does_not_commit_partial_child`
-        but exercises the OTHER branch of the prepare loop in
-        `enqueue_subworkflow_task` — the one that handles nested
-        SubWorkflowNode children. WorkflowSpec validation makes the natural
-        trigger (unserializable kwargs) unreachable from userland because
-        the snapshot rejects bad kwargs at build time. To exercise the
-        structural invariant of PR #24 (no DB writes before the prepare
-        loop completes) on this branch, we selectively patch the engine's
-        `_ser` helper to fail only for the `'child sub kwargs'` call site.
+        The SubWorkflowNode branch of the prepare loop in
+        `enqueue_subworkflow_task` encodes the kwargs of each nested
+        SubWorkflowNode. Spec construction in `build_with()` already encoded
+        and decoded them, so a refusal there is a defect: the child start
+        raises `SerializationError` before it writes a row, and the caller's
+        transaction rolls back. The test patches the engine's
+        `encode_subworkflow_kwargs` to refuse, because spec construction
+        already refuses every value that this encode refuses.
 
-        The load-bearing assertion is `child_count == 0`: no orphan child
-        workflow row may be committed when the SubWorkflowNode branch's
-        `_fail_enqueued_task` path executes.
+        After the rollback, no child workflow row exists, the parent node is
+        not FAILED, and the completion of the upstream node is not kept.
         """
         session, broker, app = setup
         parent_task = make_simple_task(app, 'nested_sub_partial_parent_task')
@@ -1275,16 +1264,16 @@ class TestSubworkflowIntegration:
         register_workflow_definition(NestedSubGrandchildWorkflow)
 
         import horsies.core.workflows.engine as engine_mod
-        real_ser = engine_mod._ser
 
-        def _ser_fail_child_sub_kwargs(
-            result: Any, context: str, fallback: str | None = None,
-        ) -> str | None:
-            if context == 'child sub kwargs':
-                return None
-            return real_ser(result, context, fallback)
+        def _refuse_subworkflow_kwargs(
+            workflow_def: Any, kwargs: dict[str, Any],
+        ) -> dict[str, Any]:
+            _ = workflow_def, kwargs
+            raise StrictJsonError('forced encode refusal')
 
-        monkeypatch.setattr(engine_mod, '_ser', _ser_fail_child_sub_kwargs)
+        monkeypatch.setattr(
+            engine_mod, 'encode_subworkflow_kwargs', _refuse_subworkflow_kwargs,
+        )
 
         node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
@@ -1301,20 +1290,25 @@ class TestSubworkflowIntegration:
         handle = await start_ok(spec, broker)
 
         try:
-            await self._complete_task(
-                session, broker, handle.workflow_id, 0, TaskResult(ok=1),
-            )
+            with pytest.raises(
+                SerializationError,
+                match='Failed to encode kwargs for child sub .*forced encode refusal',
+            ):
+                await self._complete_task(
+                    session, broker, handle.workflow_id, 0, TaskResult(ok=1),
+                )
+            await session.rollback()
+
+            upstream_row = await self._get_workflow_task_row(session, handle.workflow_id, 0)
+            assert upstream_row is not None
+            assert upstream_row[0] == 'ENQUEUED'
 
             parent_row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
             assert parent_row is not None
             status, child_id, result_json = parent_row
-            assert status == 'FAILED'
+            assert status == 'PENDING'
             assert child_id is None
-
-            tr = _decode_task_result(result_json)
-            assert tr is not None and tr.is_err()
-            assert tr.err is not None
-            assert tr.err.error_code == 'WORKER_SERIALIZATION_ERROR'
+            assert result_json is None
 
             child_count = await session.scalar(
                 text("""

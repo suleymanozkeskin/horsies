@@ -123,6 +123,53 @@ class TestNoStoredError:
         assert error.message == f'Workflow {status.value.lower()}'
 
 
+class TestCompletedWithoutStoredResult:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'stored_form'),
+        [(None, 'NULL'), ('', 'empty')],
+        ids=['null', 'empty'],
+    )
+    async def test_it_is_a_deserialization_error(
+        self,
+        stored: str | None,
+        stored_form: str,
+    ) -> None:
+        # The library stores a result in the statement that sets COMPLETED,
+        # so a NULL or empty result is stored data that does not parse.
+        handle = _handle(
+            WorkflowStatus.COMPLETED, error_row=SimpleNamespace(result=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == (
+            f'Workflow {WORKFLOW_ID} is COMPLETED and its stored result is '
+            f'{stored_form}'
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
+class TestEmptyStoredError:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', TERMINAL_ERROR_STATUSES, ids=str)
+    async def test_it_is_a_deserialization_error(
+        self, status: WorkflowStatus,
+    ) -> None:
+        # No library writer stores an empty error. Only NULL is "no stored
+        # error" (TestNoStoredError).
+        handle = _handle(status, error_row=SimpleNamespace(error=''))
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == 'Workflow error payload is empty'
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
 class TestLegacyExpiryText:
     @pytest.mark.asyncio
     async def test_the_read_status_decides_the_legacy_expiry_text(self) -> None:
