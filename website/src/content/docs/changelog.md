@@ -271,13 +271,11 @@ there is no migration contract between pre-1.0 versions.
   with the task as a root returned `VALIDATION_FAILED`.
 - **Breaking: a defect in the workflow start checks propagates.** The
   checks before the start transaction return only a
-  `WorkflowValidationError` as `WorkflowStartValidationFailed`, and the
-  start transaction returns only a `SerializationError` as
-  `WorkflowStartValidationFailed`. Any other exception propagates, a
-  `ValueError` included. A node that has positional args or
-  `priority=None` when it reaches the start transaction (only possible
-  through `object.__setattr__` after construction) fails an `assert` that
-  names the node. Before, the start returned a `ValueError`,
+  `WorkflowValidationError` as `WorkflowStartValidationFailed`. Any other
+  exception propagates, a `ValueError` included. A node that has
+  positional args or `priority=None` when it reaches the start transaction
+  (only possible through `object.__setattr__` after construction) fails an
+  `assert` that names the node. Before, the start returned a `ValueError`,
   `MultipleValidationErrors` or `SerializationError` from the checks, and a
   `ValueError` from the transaction, as `VALIDATION_FAILED`.
 - **An exhaustive `match` on `ErrorCode` needs cases for
@@ -379,6 +377,14 @@ there is no migration contract between pre-1.0 versions.
   member. Nothing is written. Before, `rerun_task` raised the error into
   the caller's transaction. It is exported from `horsies`. An exhaustive
   `match` on `RerunOutcome` needs a case for it.
+- **Breaking: a `SerializationError` in the workflow start transaction
+  propagates.** The transaction encodes only values that the process built
+  and validated before the start: the options that the task decorator
+  serialized, and the node kwargs that spec construction encoded and
+  decoded. A failure there is a defect, for example `task_options_json`
+  that was changed after registration. Before, the start returned it as
+  `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
+  is written.
 
 ### Changed
 
