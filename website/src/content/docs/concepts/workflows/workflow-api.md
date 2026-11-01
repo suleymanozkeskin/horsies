@@ -137,6 +137,45 @@ match spec.start():
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
 | `.resume()` / `.resume_async()` | `-> HandleResult[bool]` | Resume paused workflow |
 
+### HandleResult
+
+`HandleResult[T] = Result[T, HandleOperationError]`
+
+Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`.
+
+**HandleOperationError variants:**
+
+`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Any other exception, for example a defect in pause or resume, propagates.
+
+| Variant | `code` | Other fields | `retryable` | After the failure |
+|---|---|---|---|---|
+| `HandleWorkflowNotFound` | `WORKFLOW_NOT_FOUND` | – | `False` | Nothing changed |
+| `HandleDbOperationFailed` | `DB_OPERATION_FAILED` | `exception: BaseException` | Driver classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
+| `HandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
+| `HandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
+| `HandleLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` (the `LoopRunnerError`) | `False` | Nothing ran |
+| `HandleEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` | Nothing ran |
+| `HandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
+
+See [Errors Reference](../../tasks/errors#workflow-handle-errors-handleresult) for when each code occurs.
+
+**Usage:**
+
+```python
+from horsies import Err, HandleResumeRecoveryFailed, Ok
+
+match handle.resume():
+    case Ok(True):
+        print("resumed")
+    case Ok(False):
+        print("not PAUSED; nothing changed")
+    case Err(HandleResumeRecoveryFailed()):
+        # The resume committed. The worker reaper runs the recovery pass again.
+        print("resumed; the recovery pass failed")
+    case Err(err):
+        print(f"[{err.code}] {err.message}")
+```
+
 ### WorkflowTaskInfo
 
 | Attribute | Type | Description |

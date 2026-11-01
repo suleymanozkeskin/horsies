@@ -7,12 +7,17 @@ take types where it is unrepresentable.
 
 from __future__ import annotations
 
+from typing import assert_never
+
 from fastapi import HTTPException, status
 
 from horsies.core.types.status import TaskStatus
 from horsies.monitoring import (
     ErrorCategory,
+    MonitoringQueryDbOperationFailed,
     MonitoringQueryError,
+    MonitoringQueryEventLoopLimit,
+    MonitoringQueryHistoryContractViolation,
     TaskGroupBy,
     TaskSortField,
 )
@@ -98,10 +103,25 @@ def parse_group_by(value: str) -> TaskGroupBy:
 def query_failed(surface: str, error: MonitoringQueryError) -> HTTPException:
     """Map a monitoring query failure to its response.
 
-    The database is the dependency that failed, not the request, so this is
-    503 rather than 500.
+    A database failure and the event loop limit are 503: the dependency
+    failed, not the request, and the state can clear. History data that
+    does not decode is 500: the request was valid, and a repeat gives the
+    same answer until the stored row changes.
     """
-    return HTTPException(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        detail=f'{surface} query failed: {error.message}',
-    )
+    detail = f'{surface} query failed: {error.message}'
+    match error:
+        case MonitoringQueryDbOperationFailed():
+            return HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail,
+            )
+        case MonitoringQueryEventLoopLimit():
+            return HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=detail,
+            )
+        case MonitoringQueryHistoryContractViolation():
+            return HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=detail,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)

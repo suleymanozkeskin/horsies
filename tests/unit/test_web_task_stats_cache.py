@@ -8,10 +8,7 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from horsies.monitoring import MonitoringResult, StatusCount
-from horsies.monitoring.errors import (
-    MonitoringQueryError,
-    MonitoringQueryErrorCode,
-)
+from horsies.monitoring.errors import MonitoringQueryDbOperationFailed
 from horsies.web.task_stats_cache import TaskStatsCache, TaskStatsScope
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -93,8 +90,7 @@ async def test_a_failed_load_is_returned_and_not_cached() -> None:
     clock = FakeClock()
     cache = _cache(clock)
     failure: MonitoringResult[list[StatusCount]] = Err(
-        MonitoringQueryError(
-            code=MonitoringQueryErrorCode.DB_OPERATION_FAILED,
+        MonitoringQueryDbOperationFailed(
             message='task stats query failed',
             retryable=True,
             exception=RuntimeError('boom'),

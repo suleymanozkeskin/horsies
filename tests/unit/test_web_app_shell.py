@@ -41,6 +41,7 @@ from horsies.web import (
     create_monitoring_app,
 )
 from horsies.web import app as web_app_module
+from horsies.web.schema import SchemaProbe, SchemaState, SchemaStatus
 
 pytestmark = [pytest.mark.unit]
 
@@ -136,8 +137,35 @@ class TestMeta:
         assert body['schema_version'] is None
         assert body['expected_schema_version'] == SCHEMA_VERSION
         assert body['schema_compatible'] is False
+        assert body['schema_state'] == 'UNKNOWN'
         assert body['actions_enabled'] is False
         assert body['actions_disabled_reason'] == 'SCHEMA_UNKNOWN'
+
+    @pytest.mark.parametrize('state', list(SchemaState))
+    async def test_reports_the_probe_state_verbatim(
+        self, state: SchemaState, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Each probe state reaches the wire under its own name."""
+
+        class FixedProbe(SchemaProbe):
+            def __init__(self, broker: object) -> None:
+                pass
+
+            async def status(self) -> SchemaStatus:
+                return SchemaStatus(
+                    state=state,
+                    version=None if state is SchemaState.ABSENT else SCHEMA_VERSION,
+                    expected_version=SCHEMA_VERSION,
+                )
+
+        monkeypatch.setattr(web_app_module, 'SchemaProbe', FixedProbe)
+        app = create_monitoring_app(make_horsies_app(), auth_policy=AllowAll())
+
+        async with client_for(app) as client:
+            body = (await client.get('/api/meta')).json()
+
+        assert body['schema_state'] == state.value
+        assert body['schema_compatible'] is (state is SchemaState.MATCH)
 
     async def test_view_only_deployment_reports_no_action_capability(self) -> None:
         app = create_monitoring_app(

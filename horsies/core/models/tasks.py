@@ -60,7 +60,6 @@ class ContractCode(str, Enum):
     """
 
     RETURN_TYPE_MISMATCH = 'RETURN_TYPE_MISMATCH'
-    PYDANTIC_HYDRATION_ERROR = 'PYDANTIC_HYDRATION_ERROR'
     WORKFLOW_CTX_MISSING_ID = 'WORKFLOW_CTX_MISSING_ID'
     # Strict-serde (design §8). Surfaces inside ``TaskError`` for
     # handle-level APIs (``TaskHandle.get`` / ``WorkflowHandle.get``)

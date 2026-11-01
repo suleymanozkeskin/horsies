@@ -1713,12 +1713,12 @@ class Horsies:
 
         True when ``suppress_sends(True)`` was called (worker/scheduler import
         phase, ``check()``, builder execution) or when the environment variable
-        ``TASKLIB_SUPPRESS_SENDS=1`` is set.
+        ``HORSIES_SUPPRESS_SENDS=1`` is set.
 
         This is process-local state — it has no effect on other producers or
         workers in a multi-process cluster.
         """
-        env_flag = os.getenv('TASKLIB_SUPPRESS_SENDS', '').strip()
+        env_flag = os.getenv('HORSIES_SUPPRESS_SENDS', '').strip()
         return self._suppress_sends or env_flag == '1'
 
     # -------- workflow factory --------

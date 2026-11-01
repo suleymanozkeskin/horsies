@@ -72,6 +72,7 @@ from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import is_err, Ok, Err, Result
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
+    BrokerEnqueueError,
     BrokerEnqueueFailed,
     BrokerEventLoopLimit,
     BrokerIdempotencyKeyConflict,
@@ -82,10 +83,10 @@ from horsies.core.brokers.result_types import (
     BrokerLoopRunnerFailed,
     BrokerNoTypeAvailable,
     BrokerNotAttached,
-    BrokerOperationError,
     BrokerOperationFailed,
     BrokerPayloadMismatch,
     BrokerResult,
+    BrokerSyncCallError,
     RawResultRecord,
     broker_error_cause,
 )
@@ -1310,7 +1311,7 @@ def create_task_wrapper(
     # ---- Broker-to-TaskSendError mapping ----
 
     def _map_broker_err(
-        broker_err: BrokerOperationError,
+        broker_err: BrokerEnqueueError | BrokerSyncCallError,
         task_id: str,
         payload: TaskSendPayload,
     ) -> _BrokerSendError:
@@ -1357,20 +1358,17 @@ def create_task_wrapper(
                     message=message,
                     exception=exception,
                 )
-            case (
-                BrokerOperationFailed()
-                | BrokerEnqueueFailed()
-                | BrokerNotAttached()
-                | BrokerNoTypeAvailable()
-                | BrokerInvalidJsonPayload()
-                | BrokerListenerDisabled()
+            case BrokerEnqueueFailed(
+                message=message,
+                retryable=retryable,
+                exception=exception,
             ):
                 return TaskSendEnqueueFailed(
                     task_id=task_id,
                     payload=payload,
-                    message=broker_err.message,
-                    retryable=broker_err.retryable,
-                    exception=broker_error_cause(broker_err),
+                    message=message,
+                    retryable=retryable,
+                    exception=exception,
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -1748,7 +1746,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
         # Only an explicit key is validated here. A key the mapping
         # derives is generated from configuration that was already
@@ -1791,7 +1789,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task send suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
         # Only an explicit key is validated here. A key the mapping
         # derives is generated from configuration that was already
@@ -1960,7 +1958,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
 
         delay_check = _validate_delay(delay)
@@ -2010,7 +2008,7 @@ def create_task_wrapper(
     ) -> TaskSendResult[TaskHandle[T]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
-                message=f'Task schedule suppressed for {task_name} (import/check phase or TASKLIB_SUPPRESS_SENDS=1)',
+                message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
             ))
 
         delay_check = _validate_delay(delay)

@@ -80,14 +80,70 @@ there is no migration contract between pre-1.0 versions.
   `psycopg.Error`, and returns them as `WorkflowStartEnqueueFailed`. Any
   other exception propagates. Before, the start returned every exception
   as `ENQUEUE_FAILED`.
+- **Breaking: `HandleOperationError` is a union of frozen variants, one per
+  `HandleErrorCode` member.** `HandleResult[T]` and the method signatures
+  do not change. Every variant has `code`, `message`, `retryable` and
+  `workflow_id`. Code that reads `err.exception` must match on the variant
+  first; pyright reports each site. `exception` is `BaseException` on
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid`,
+  `HandleResumeRecoveryFailed` and `HandleLoopRunnerFailed`; the other
+  variants have no cause. `HandleEventLoopLimit` carries `loop_limit`.
+  `HandleOperationError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, HandleOperationError)` is not valid on a
+  type alias; match on the variants.
+- **Breaking: `HandleErrorCode.INTERNAL_FAILED` is removed, and a defect in
+  `pause_workflow()` or `resume_workflow()` propagates.** They catch only
+  `sqlalchemy.exc.SQLAlchemyError`. Before, they returned every other
+  exception, also a failed `assert`, as `INTERNAL_FAILED`. Code that names
+  `INTERNAL_FAILED` fails pyright. The web pause and resume routes answer
+  such a defect with HTTP 500, not 503.
+- **New code `HandleErrorCode.STORED_DATA_INVALID`.** `tasks()` returns
+  `HandleStoredDataInvalid` with the parse error for a subworkflow summary
+  that does not parse; before, it returned `DB_OPERATION_FAILED` with
+  `retryable=False` and no cause. `status()` and `cancel()` return it for a
+  stored workflow status that is not a `WorkflowStatus`; before, the
+  `ValueError` propagated. Nothing changed, and the same call returns the
+  same error. `get()` folds it into `BROKER_ERROR`. The web routes answer it
+  with HTTP 500. An exhaustive `match` on `HandleErrorCode` needs a case
+  for it.
+- **New code `HandleErrorCode.RESUME_RECOVERY_FAILED`.** `resume()` returns
+  `HandleResumeRecoveryFailed` when the resume committed and the recovery
+  pass for the workflow tree, which runs after the commit in a second
+  transaction, fails with a database error. The workflow is `RUNNING`; the
+  worker reaper runs the same pass over all workflows. Before, it returned
+  `DB_OPERATION_FAILED`, the code of a failure before the commit. The web
+  resume route answers it as resumed with the `post_resume_recovery_failed`
+  warning and does not read the status again; a `DB_OPERATION_FAILED` from
+  resume is always HTTP 503. An exhaustive `match` on `HandleErrorCode`
+  needs a case for it.
 - **An event loop limit at schema initialization returns
   `EVENT_LOOP_LIMIT`.** Before, a workflow start returned it as
   `ENQUEUE_FAILED`, which `retry_start()` accepted.
 - **`PostgresBroker.ensure_schema_initialized()` returns
   `Result[None, BrokerOperationFailed | BrokerEventLoopLimit]`**, its only
-  failures. The run-time behavior does not change. A `match` on its error
-  with an arm for another broker variant fails strict pyright
-  (`reportUnnecessaryComparison`); remove that arm.
+  failures. The run-time behavior does not change. In a `match` on its
+  error, an arm for another broker variant is dead; remove it. Strict
+  pyright reports such an arm (`reportUnnecessaryComparison`) when it
+  stands alone or in an OR pattern without parentheses, not inside a
+  parenthesized OR pattern.
+- **`PostgresBroker.enqueue_async()` returns
+  `Result[str, BrokerEnqueueError]`, and `enqueue()` returns
+  `Result[str, BrokerEnqueueError | BrokerSyncCallError]`**, their only
+  failures. `BrokerEnqueueError` is `BrokerEnqueueFailed |
+  BrokerPayloadMismatch | BrokerIdempotencyKeyConflict |
+  BrokerInvalidTaskOptions | BrokerInvalidInput | BrokerEventLoopLimit`.
+  `BrokerSyncCallError` is `BrokerAsyncContext | BrokerLoopRunnerFailed`.
+  Both are new names, exported from `horsies` and `horsies.core.brokers`.
+  The run-time behavior does not change. Code that assigns the result to
+  `BrokerResult[str]` still type-checks. In a `match` on the error, an arm
+  for `BrokerOperationFailed`, `BrokerNotAttached`,
+  `BrokerNoTypeAvailable`, `BrokerInvalidJsonPayload` or
+  `BrokerListenerDisabled` is dead; remove it. Strict pyright reports such
+  an arm (`reportUnnecessaryComparison`) when it stands alone or in an OR
+  pattern without parentheses, not inside a parenthesized OR pattern. A
+  send or schedule whose broker returns one of these five variants (only a
+  mock can) fails an assertion that names the variant. Before, it returned
+  `TaskSendEnqueueFailed`.
 - **New broker codes `INVALID_INPUT` and `LISTENER_DISABLED`.** An
   exhaustive `match` on `BrokerErrorCode` needs a case for each. These
   failures move to them:
@@ -226,9 +282,85 @@ there is no migration contract between pre-1.0 versions.
   `ValueError` from the transaction, as `VALIDATION_FAILED`.
 - **An exhaustive `match` on `ErrorCode` needs cases for
   `WORKFLOW_INVALID_PRIORITY` and `WORKFLOW_NAIVE_GOOD_UNTIL`.**
+- **Breaking: `MonitoringQueryError` is a union of three frozen variants,
+  one per `MonitoringQueryErrorCode` member.** Every variant has `code`,
+  `message` and `retryable`. `exception` is `BaseException` on
+  `MonitoringQueryDbOperationFailed` and
+  `MonitoringQueryHistoryContractViolation`. `MonitoringQueryEventLoopLimit`
+  has no `exception` and carries `loop_limit`. Code that reads
+  `err.exception` must match on the variant first; pyright reports each
+  site. `MonitoringQueryError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, MonitoringQueryError)` is not valid on a
+  type alias; match on the variants.
+- **New code `MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION`.** A
+  monitoring query that reads history data that does not decode returns
+  `MonitoringQueryHistoryContractViolation`, with the
+  `HistoryContractError` in `exception`. `list_tasks` returned it before as
+  `DB_OPERATION_FAILED` with `retryable=False`. `get_task_detail` and
+  `get_workflow_node` raised `HistoryContractError` before; now they return
+  the variant. An exhaustive `match` on `MonitoringQueryErrorCode` needs a
+  case for it. The web read routes answer 500 for it, and 503 for the
+  other two codes, as before.
+- **Breaking: `TaskActionError` is a union of six frozen variants, one per
+  `TaskActionErrorCode` member.** Every variant has `code`, `message`,
+  `retryable` and `task_id`. `current_status` is only on
+  `TaskActionNotCancellable` and `TaskActionWorkflowTask`, and it is a
+  `TaskStatus`. Before, every error had `current_status: TaskStatus | None`.
+  `TASK_IS_WORKFLOW_TASK` now carries the status.
+  `TaskActionDbOperationFailed.exception` holds the database error, and
+  `TaskActionEventLoopLimit.loop_limit` holds the limit.
+  `TaskActionError(code=..., ...)` in tests becomes a variant constructor.
+  `isinstance(err, TaskActionError)` is not valid on a type alias; match on
+  the variants.
+- **`TaskActionErrorCode` is a `str` enum.**
+  `TaskActionErrorCode.TASK_NOT_FOUND == 'TASK_NOT_FOUND'` is now true.
+- **New code `TaskActionErrorCode.STORED_DATA_INVALID`.** `cancel_task`
+  returns `TaskActionStoredDataInvalid` when stored data does not parse:
+  `exception` is the `HistoryContractError` of the history read or the
+  `OutcomeDecodeError` of the cancel outcome. Nothing changed. Before, both
+  exceptions propagated. An exhaustive `match` on `TaskActionErrorCode`
+  needs a case for it. `POST /api/tasks/{task_id}/cancel` answers 500 for
+  it.
+- **A history row whose stored status is not a `TaskStatus` member is
+  stored data that does not parse.** The history detail read parses the
+  status one time and raises `HistoryContractError` for such a value.
+  `get_task_detail` and `get_workflow_node` return
+  `HISTORY_CONTRACT_VIOLATION`; before, they returned the text as the
+  status. `cancel_task` returns `STORED_DATA_INVALID`; before, it returned
+  `TASK_NOT_CANCELLABLE` with `current_status=None`. `rerun_task` raises
+  `HistoryContractError`; before, it treated the row as a source that is
+  not `COMPLETED`.
+- **Breaking: `ContractCode.PYDANTIC_HYDRATION_ERROR` is removed.** The
+  library has not returned it since 0.1.2. Code that names it raises
+  `AttributeError`; match on `RESULT_DESERIALIZATION_ERROR`,
+  `BrokerErrorCode.INVALID_JSON_PAYLOAD` or `RETURN_TYPE_MISMATCH`. A stored
+  error code `{"__builtin_task_code__": "PYDANTIC_HYDRATION_ERROR"}` does not
+  decode: `TaskHandle.get()` returns `RESULT_DESERIALIZATION_ERROR` and
+  `app.get_result()` returns `INVALID_JSON_PAYLOAD`, each with `Unknown
+  built-in task code` in the message. A result stored before 0.1.2 already
+  fails to decode, because it has no `__h_task_result__` marker.
+- **The string `PYDANTIC_HYDRATION_ERROR` is no longer reserved.**
+  `TaskError(error_code='PYDANTIC_HYDRATION_ERROR')` makes a user code. An
+  `exception_mapper` or `default_unhandled_error_code` value
+  `PYDANTIC_HYDRATION_ERROR` no longer fails `horsies check` with `HRS-212`.
+  The monitoring API and the web UI put a stored code
+  `PYDANTIC_HYDRATION_ERROR` in the `DOMAIN` category, not `CONTRACT`.
+- **Breaking: the alias `ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS` is
+  removed.** Use `ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; the value
+  `HRS-026` does not change. Code that names the alias raises
+  `AttributeError`.
+- **Breaking: the environment variable `TASKLIB_SUPPRESS_SENDS` is renamed
+  to `HORSIES_SUPPRESS_SENDS`.** The old name has no effect. Set
+  `HORSIES_SUPPRESS_SENDS=1` where the old variable was set. Without it,
+  a send or schedule is no longer a no-op, and it connects to the broker
+  database. The send error messages and the `TaskSendErrorCode`
+  documentation use the new name.
 
 ### Changed
 
+- Three operations guides are new: Atomic Enqueue and Topology, Deploying
+  Code Changes and Testing. The Testing guide documents
+  `HORSIES_SUPPRESS_SENDS`.
 - **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
   whose idempotency key is reserved by another task with a different
   command returns `TaskSendIdempotencyKeyConflict` instead of
@@ -378,9 +510,20 @@ there is no migration contract between pre-1.0 versions.
   code raised it. The number is retired and is not used again. The skill
   rule that `build_with()` must accept `*_args` and `**_kwargs` is removed;
   no such check exists.
+- **Unused history codecs.** `core/history/archive/rerun_input.py`,
+  `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
+  library. SQL functions write the stored bytes, and `decode_input_envelope`
+  reads a stored rerun input.
 
 ### Fixed
 
+- **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
+  reports a version mismatch.** The stored and expected versions are equal in
+  this state. The banner now names the one version, says that the offline
+  task-history cutover is not complete, and tells the operator to run the
+  cutover stages through tighten and validation. The `MISMATCH` banner is
+  unchanged. `GET /api/meta` has a new field `schema_state` (a `SchemaState`
+  value); the UI reads it and no longer derives the state from the versions.
 - **The agent skills in the wheel and the docs state the codes and
   signatures that the code uses.** A raised exception in a task gives
   `UNHANDLED_EXCEPTION`; `TASK_EXCEPTION` means the task returned `None`.
@@ -395,9 +538,8 @@ there is no migration contract between pre-1.0 versions.
   site, the skills files and `llms.txt` now list `OutcomeCode.TASK_EXPIRED`,
   `TASK_TIMEOUT` and `WORKFLOW_EXPIRED`, `ContractCode.NO_TYPE_AVAILABLE`,
   all 21 `BrokerErrorCode` members, and `SchemaState.CUTOVER_REQUIRED` where
-  they were missing. `ContractCode.PYDANTIC_HYDRATION_ERROR` is listed as a
-  legacy reserved code that the library does not return. The errors page
-  adds HRS-105 and HRS-213 to HRS-215, and tables for
+  they were missing. The errors page adds HRS-105 and HRS-213 to HRS-215,
+  and tables for
   `WorkflowStartErrorCode` and `HandleErrorCode`. `llms.txt` adds HRS-016,
   HRS-017, HRS-031, HRS-032, HRS-104, HRS-105 and HRS-213 to HRS-216.
   HRS-104 means a pre-decorated task function (it has a `__wrapped__`
@@ -432,6 +574,16 @@ there is no migration contract between pre-1.0 versions.
   underflows, such as `1e-9999`, still parses to `0.0`.
 - **`decode_input_envelope` returns `InputEnvelopeCorrupt` for an integer
   over the parse limit of 4300 digits.** Before, it raised `ValueError`.
+- **Every JSON parse in the library goes through `codec/json_io.py`.** A
+  history read refuses a stored result or attempt snapshot that is not strict
+  JSON: `NaN`, `Infinity`, a number outside the finite binary64 range, an
+  integer over 4300 digits, an empty payload, or bytes that are not UTF-8.
+  A result read returns `INVALID_JSON_PAYLOAD`, as a read of a live task does,
+  and a task detail read raises `HistoryContractError`. Before, the archive
+  reader accepted `NaN` and `Infinity`, and an oversized integer raised a raw
+  `ValueError`. `CorruptArchiveValue.detail` for these failures is now
+  `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
+  `HistoryContractError` for the same text.
 
 ## 0.5.5 — 2026-10-28
 

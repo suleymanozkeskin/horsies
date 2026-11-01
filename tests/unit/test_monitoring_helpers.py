@@ -164,6 +164,14 @@ class TestCategorizeErrorCode:
     def test_unknown_code_is_domain(self) -> None:
         assert categorize_error_code('MY_BUSINESS_ERROR') is ErrorCategory.DOMAIN
 
+    def test_former_hydration_code_is_domain(self) -> None:
+        """``PYDANTIC_HYDRATION_ERROR`` is not a built-in code, so a
+        stored row with it is a domain error, not a contract error."""
+        assert (
+            categorize_error_code('PYDANTIC_HYDRATION_ERROR')
+            is ErrorCategory.DOMAIN
+        )
+
     def test_whitespace_is_stripped_before_lookup(self) -> None:
         assert categorize_error_code('  TASK_CANCELLED  ') is ErrorCategory.OUTCOME
 

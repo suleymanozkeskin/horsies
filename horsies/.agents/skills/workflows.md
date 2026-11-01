@@ -286,7 +286,7 @@ status = handle.status()       # works — queries DB by workflow_id
 result = handle.get()          # works — polls for completion
 ```
 
-All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or direct construction. If the `workflow_id` does not exist, methods return `Err(HandleOperationError(WORKFLOW_NOT_FOUND))` or `TaskResult(err=TaskError(WORKFLOW_NOT_FOUND))`.
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or direct construction. If the `workflow_id` does not exist, methods return `Err(HandleWorkflowNotFound)` or `TaskResult(err=TaskError(WORKFLOW_NOT_FOUND))`.
 
 ### Two error strategies
 
@@ -354,25 +354,32 @@ Non-blocking single DB query. Returns `RESULT_NOT_READY` if the task hasn't comp
 
 ### HandleOperationError / HandleErrorCode
 
-```python
-@dataclass(slots=True, frozen=True)
-class HandleOperationError:
-    code: HandleErrorCode
-    message: str
-    retryable: bool
-    workflow_id: str
-    exception: BaseException | None = None
-```
+`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
 <!-- members: HandleErrorCode -->
-| Code | Retryable | When |
-|---|---|---|
-| `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
-| `DB_OPERATION_FAILED` | Maybe | DB query/commit failure |
-| `LOOP_RUNNER_FAILED` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `INTERNAL_FAILED` | No | `pause_workflow()` / `resume_workflow()` raised an exception that is not a database error |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+| Code | Variant | Other fields | Retryable | After the failure |
+|---|---|---|---|---|
+| `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
+| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | driver classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
+| `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
+| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+
+```python
+from horsies import Err, HandleResumeRecoveryFailed, Ok
+
+match handle.resume():
+    case Ok(True):
+        ...  # resumed
+    case Ok(False):
+        ...  # not PAUSED; nothing changed
+    case Err(HandleResumeRecoveryFailed()):
+        ...  # resumed; the recovery pass failed and the reaper runs it again
+    case Err(err):
+        print(f"[{err.code}] {err.message}")
+```
 
 ## Enums
 
@@ -645,6 +652,9 @@ from horsies import (
     WorkflowHandle, WorkflowTaskInfo,
     # Handle result types
     HandleResult, HandleOperationError, HandleErrorCode,
+    HandleWorkflowNotFound, HandleDbOperationFailed, HandleStoredDataInvalid,
+    HandleResumeRecoveryFailed, HandleLoopRunnerFailed, HandleEventLoopLimit,
+    HandleAsyncContext,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
