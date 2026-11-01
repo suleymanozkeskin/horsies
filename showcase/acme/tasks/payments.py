@@ -44,10 +44,9 @@ def _stored_authorization(
 ) -> TaskResult[PaymentAuthorization, TaskError] | None:
     """The hold this order already carries, as a replay result. None when absent.
 
-    A task can run twice: the executor pool breaks when a sibling task is
-    killed on timeout, and every task in flight comes back through its retry
-    policy. Reporting the recorded hold keeps that replay from charging the
-    card a second time.
+    A task can run twice: a child can die after its work and before its result,
+    and the task comes back through its retry policy. Reporting the recorded
+    hold keeps that replay from charging the card a second time.
     """
     match store.find_payment(order_id, 'authorization'):
         case Err(error):
