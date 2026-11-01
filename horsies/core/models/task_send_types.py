@@ -30,7 +30,7 @@ class TaskSendErrorCode(str, Enum):
 
     SEND_SUPPRESSED = 'SEND_SUPPRESSED'
     """Send called while suppression is active (worker/scheduler import phase,
-    ``check()``, or ``TASKLIB_SUPPRESS_SENDS=1``). The retry methods refuse
+    ``check()``, or ``HORSIES_SUPPRESS_SENDS=1``). The retry methods refuse
     it."""
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
@@ -111,7 +111,7 @@ class TaskSendSuppressed:
     """Sends are suppressed in this process. Nothing was serialized or written.
 
     Suppression is active during the worker and scheduler import phase,
-    during ``check()``, and under ``TASKLIB_SUPPRESS_SENDS=1``. The retry
+    during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
     methods refuse this error.
     """
 

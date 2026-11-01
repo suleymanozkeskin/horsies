@@ -195,9 +195,18 @@ and there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: the environment variable `TASKLIB_SUPPRESS_SENDS` is renamed
+  to `HORSIES_SUPPRESS_SENDS`.** The old name has no effect. Set
+  `HORSIES_SUPPRESS_SENDS=1` where the old variable was set. Without it,
+  a send or schedule is no longer a no-op, and it connects to the broker
+  database. The send error messages and the `TaskSendErrorCode`
+  documentation use the new name.
 
 ### Changed
 
+- Three operations guides are new: Atomic Enqueue and Topology, Deploying
+  Code Changes and Testing. The Testing guide documents
+  `HORSIES_SUPPRESS_SENDS`.
 - **`TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT` is a new member.** A send
   whose idempotency key is reserved by another task with a different
   command returns `TaskSendIdempotencyKeyConflict` instead of
