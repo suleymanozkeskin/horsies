@@ -404,9 +404,7 @@ class TestStoredWorkflowResult:
         handle = _handle_with_session(session)
         handle.out_type = int
 
-        result = await handle._get_result(  # pyright: ignore[reportPrivateUsage]
-            await resources_of(handle.broker),
-        )
+        result = await handle._get_result(await resources_of(handle.broker))
 
         assert result.err is not None
         assert (
