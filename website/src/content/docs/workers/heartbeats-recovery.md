@@ -52,6 +52,7 @@ CLAIMED                          RUNNING
 
 The reaper periodically checks for stale tasks:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Simplified logic
 for task in tasks.filter(status='CLAIMED'):
@@ -120,6 +121,7 @@ This runs before workflow finalization, so dependents are resolved in the same r
 
 ## Configuration
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.recovery import RecoveryConfig
 
@@ -149,6 +151,7 @@ config = AppConfig(
 
 Stale thresholds must be at least 2x the heartbeat interval:
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Valid
 RecoveryConfig(
@@ -211,12 +214,17 @@ Heartbeats are stored in the `horsies_heartbeats` table:
 Query stale tasks:
 
 ```python
+from horsies import Err, Ok
+
 broker = app.get_broker()
 
-# Find stale RUNNING tasks
-stale = await broker.get_stale_tasks(stale_threshold_minutes=5)
-for task in stale:
-    print(f"Stale: {task['id']} on {task['worker_hostname']}")
+# Find stale RUNNING tasks. get_stale_tasks() returns Ok(list of rows) or Err(BrokerOperationError)
+match await broker.get_stale_tasks(stale_threshold_minutes=5):
+    case Err(query_error):
+        print(f"Query failed: {query_error.message}")
+    case Ok(stale):
+        for task in stale:
+            print(f"Stale: {task['id']} on {task['worker_hostname']}")
 ```
 
 Force recovery:

@@ -141,7 +141,7 @@ Three broker methods return a subset of `BrokerOperationError`, their only failu
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON, or a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields). The message names each failing field. Nothing was written | No |
-| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, an idempotency key that is empty or over 255 bytes, or a scheduled slot whose kwargs fail to encode or exceed `payload.reject_bytes`. Nothing was written | No |
+| `INVALID_INPUT` | An argument was refused before anything ran: a non-positive `timeout_seconds`, `min_responses` or history `limit`, a `target_worker_id` that is not a string, both `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without either, a naive `sent_at`, `enqueued_at` or `good_until`, malformed args or kwargs JSON, args that are not null or an empty array, kwargs that are not an object or null, an empty task or queue name, a priority outside 1..100, a negative `enqueue_delay_seconds`, an empty `retention_class_key`, or an idempotency key that is empty or over 255 bytes. Nothing was written | No |
 | `LISTENER_DISABLED` | The broker was built with `assume_initialized=True` and has no listener, so `ping_workers` cannot run. Nothing ran | No |
 
 #### BrokerOperationError
@@ -327,6 +327,7 @@ The retry methods accept `ENQUEUE_FAILED`, `ASYNC_CONTEXT` and `LOOP_RUNNER_FAIL
 
 Domain-specific errors use string codes:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskResult, TaskError, JsonValue
 
@@ -432,9 +433,11 @@ The library default `UNHANDLED_EXCEPTION` is intentionally a built-in code and i
 Example collision that `horsies check` catches:
 
 ```python
+from pydantic import SecretStr
+
 app = Horsies(
     config=AppConfig(
-        broker=PostgresConfig(database_url='postgresql+psycopg://...'),
+        broker=PostgresConfig(database_url=SecretStr('postgresql+psycopg://...')),
         # HRS-212: 'BROKER_ERROR' collides with OperationalErrorCode.BROKER_ERROR
         exception_mapper={ValueError: 'BROKER_ERROR'},
     ),
@@ -561,6 +564,7 @@ error[HRS-007]: cycle detected in workflow DAG
 
 Access fields programmatically when catching the exception:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies.core.errors import HorsiesError
 

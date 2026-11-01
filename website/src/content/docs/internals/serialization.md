@@ -118,6 +118,7 @@ Values flowing through a task signature must classify as **one** of:
 
 Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Horsies, TaskResult, TaskError, JsonValue
 from pydantic import BaseModel
@@ -151,6 +152,7 @@ def validate_input(
 Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or an `Optional` / `Union` containing it) as the parameter type; the engine decodes the upstream envelope and binds a typed `TaskResult` into the consumer's kwargs.
 
 ```python
+from pydantic import SecretStr
 from datetime import datetime, timezone
 from pydantic import BaseModel
 from horsies import (
@@ -164,7 +166,7 @@ from horsies import (
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
     ),
 )
 app = Horsies(config)
@@ -236,6 +238,7 @@ Primitive entry points for non-`TaskResult` values (workflow kwargs, success pol
 
 ### `JsonValue`
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type JsonValue = (
     None | bool | int | float | str
@@ -254,6 +257,7 @@ Raised by strict codec primitives and the JSON parse guards for strict JSON viol
 
 **Don't use `Any`, `object`, or bare containers in task signatures.** They are rejected at registration time.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong — raises SignatureValidationError
 @app.task("bad")

@@ -42,6 +42,7 @@ The scheduler:
 
 Add a `ScheduleConfig` to your `AppConfig`:
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule, DailySchedule
 from datetime import time
@@ -77,6 +78,7 @@ Run separately from workers. One scheduler per cluster is sufficient.
 
 Each schedule has a unique name used for state tracking:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskSchedule(
     name="daily-report",  # Must be unique
@@ -89,6 +91,7 @@ TaskSchedule(
 
 The `task_name` must match a registered `@app.task()`:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task("generate_report")
 def generate_report() -> TaskResult[str, TaskError]:
@@ -105,6 +108,7 @@ TaskSchedule(
 
 How often the scheduler checks for due schedules:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 ScheduleConfig(
     check_interval_seconds=1,  # Check every second
@@ -187,7 +191,9 @@ Schedules are validated at startup:
 - Task must be registered
 - Queue must be valid (CUSTOM mode)
 - Required arguments must be provided
+- Kwargs must encode against the task's types and fit `payload.reject_bytes`
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # This will fail at scheduler start:
 TaskSchedule(
@@ -196,6 +202,8 @@ TaskSchedule(
     ...
 )
 ```
+
+The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
 
 ## Graceful Shutdown
 

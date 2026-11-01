@@ -11,12 +11,13 @@ Horsies supports PgBouncer transaction pooling only with a second
 session-capable PostgreSQL URL.
 
 ```python
+from pydantic import SecretStr
 from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ["DATABASE_URL_POOLED"],
-        session_database_url=os.environ["DATABASE_URL_DIRECT"],
+        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
+        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
         pgbouncer_transaction_mode=True,
     ),
 )
@@ -86,8 +87,8 @@ flag:
 
 ```python
 PostgresConfig(
-    database_url=os.environ["DATABASE_URL_POOLED"],
-    session_database_url=os.environ["DATABASE_URL_DIRECT"],
+    database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
+    session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
     pgbouncer_transaction_mode=True,
 )
 ```

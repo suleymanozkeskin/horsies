@@ -92,6 +92,7 @@ enqueued without a retained input cannot be rerun later.
 
 Programmatic callers use the same contract:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from datetime import timedelta
 
@@ -168,7 +169,7 @@ reaper runs the same recovery pass over all workflows. A database failure
 before the commit is 503: the resume rolled back, or its commit outcome is
 unknown.
 
-Resume does not clear a stale `error` left on the run by an `on_error='pause'`
+Resume does not clear a stale `error` left on the run by an `on_error=OnError.PAUSE`
 policy.
 
 **Settled when:** the run reads `RUNNING`. All the work happens before the call

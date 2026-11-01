@@ -59,6 +59,7 @@ match divide.send(a=10, b=2):
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
 
+<!-- check: skip elided -- a return statement shown without its function -->
 ```python
 return TaskResult(err=TaskError(
     error_code="VALIDATION_FAILED",
@@ -157,6 +158,7 @@ Both cases result in `TaskResult(err=...)`, but the error codes differ.
 
 Horsies validates that your returned value matches the declared type:
 
+<!-- check: skip elided -- returns a wrong type on purpose, to show the runtime check -->
 ```python
 @app.task("typed_task")
 def typed_task() -> TaskResult[int, TaskError]:
@@ -169,6 +171,7 @@ This validation happens at runtime using Pydantic's `TypeAdapter`.
 
 `TaskResult[None, TaskError]` is valid for tasks that don't return a value:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("fire_and_forget")
 def fire_and_forget() -> TaskResult[None, TaskError]:
@@ -178,6 +181,7 @@ def fire_and_forget() -> TaskResult[None, TaskError]:
 
 ## Convenience Properties
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 result = handle.get()
 

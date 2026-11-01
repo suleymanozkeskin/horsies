@@ -1,8 +1,8 @@
 """Tests for schedule validation shared by scheduler boot and app.check().
 
-Covers ``collect_schedule_errors`` orchestration (failure modes, per-schedule
-first-error, multi-schedule collection, disabled skip) and the ``app.check()``
-integration including the worker-role gate.
+Covers ``prepare_schedules`` and ``collect_schedule_errors`` orchestration
+(failure modes, per-schedule first-error, multi-schedule collection, disabled
+skip) and the ``app.check()`` integration including the worker-role gate.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from horsies.core.app import Horsies
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -20,19 +21,25 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.schedule import (
     IntervalSchedule,
     ScheduleConfig,
     TaskSchedule,
 )
 from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.scheduler.validation import collect_schedule_errors
+from horsies.core.scheduler.validation import (
+    collect_schedule_errors,
+    prepare_schedules,
+)
+from horsies.core.types.result import Err, Ok
 
 
 def _make_mock_app(tasks: dict[str, MagicMock] | None = None) -> MagicMock:
     """Build a minimal mock app for collect_schedule_errors."""
     app = MagicMock()
     app.tasks = tasks or {}
+    app.config.payload = PayloadPolicy()
     app.validate_queue_name = MagicMock(return_value='default')
     return app
 
@@ -63,6 +70,89 @@ def _schedule(
         kwargs=kwargs or {},
         queue_name=queue_name,
     )
+
+
+# =============================================================================
+# prepare_schedules — the one pass
+# =============================================================================
+
+
+@pytest.mark.unit
+class TestPrepareSchedules:
+    """The pass that boot keeps and check reports from."""
+
+    def test_ok_holds_the_text_of_each_enabled_schedule(self) -> None:
+        """A schedule without kwargs has None; a disabled one has no entry."""
+        def fn(x: int = 0) -> str:
+            return str(x)
+
+        config = ScheduleConfig(
+            schedules=[
+                _schedule(name='with_kwargs', kwargs={'x': 1}),
+                _schedule(name='without_kwargs'),
+                _schedule(name='disabled', kwargs={'x': 2}, enabled=False),
+            ],
+        )
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        assert result == Ok(
+            {
+                'with_kwargs': dumps_json({'x': 1}).ok_value,
+                'without_kwargs': None,
+            },
+        )
+
+    def test_the_text_cannot_be_replaced_after_boot(self) -> None:
+        def fn() -> str:
+            return 'ok'
+
+        config = ScheduleConfig(schedules=[_schedule()])
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        encoded_kwargs = prepare_schedules(app, config).ok_value
+
+        with pytest.raises(TypeError):
+            encoded_kwargs['s'] = 'other'  # type: ignore[index]
+
+    def test_err_holds_one_error_per_bad_schedule_in_config_order(self) -> None:
+        def fn() -> str:
+            return 'ok'
+
+        config = ScheduleConfig(
+            schedules=[
+                _schedule(name='bad_timezone', timezone='Not/AZone'),
+                _schedule(name='good'),
+                _schedule(name='bad_task', task_name='missing'),
+            ],
+        )
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        match result:
+            case Err(errors):
+                assert [type(error) for error in errors] == [
+                    ConfigurationError,
+                    RegistryError,
+                ]
+                assert 'invalid timezone' in errors[0].message
+                assert 'not registered' in errors[1].message
+            case Ok(encoded_kwargs):
+                raise AssertionError(f'expected errors, got {encoded_kwargs!r}')
+
+    def test_a_disabled_schedule_over_the_limit_passes(self) -> None:
+        def fn(*, blob: str) -> None:
+            return None
+
+        config = ScheduleConfig(
+            schedules=[_schedule(kwargs={'blob': 'x' * 2048}, enabled=False)],
+        )
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+        app.config.payload = PayloadPolicy(warn_bytes=None, reject_bytes=256)
+
+        assert collect_schedule_errors(app, config) == []
 
 
 # =============================================================================
@@ -253,6 +343,29 @@ class TestCheckValidatesSchedules:
         assert len(errors) == 1
         assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'invalid timezone' in errors[0].message
+
+    def test_schedule_over_the_limit_surfaced_by_check(self) -> None:
+        """check() reports kwargs over payload.reject_bytes before a deploy."""
+        schedule = _schedule(task_name='my_task', kwargs={'blob': 'x' * 2048})
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url='postgresql+psycopg://user:pass@localhost/db',
+                ),
+                schedule=ScheduleConfig(schedules=[schedule]),
+                payload=PayloadPolicy(warn_bytes=None, reject_bytes=256),
+            ),
+        )
+
+        @app.task('my_task')
+        def my_task(*, blob: str) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(blob))
+
+        errors = app.check()
+
+        assert len(errors) == 1
+        assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+        assert 'payload.reject_bytes' in errors[0].message
 
     def test_worker_role_skips_schedule_validation(self) -> None:
         """Workers never act on schedules; check() skips them."""
