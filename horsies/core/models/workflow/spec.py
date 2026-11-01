@@ -14,6 +14,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    Final,
     Generic,
     assert_never,
     cast,
@@ -61,6 +62,58 @@ from .typing_utils import (
     _is_ok_type_compatible,
     _format_type_name,
 )
+
+
+TASK_NODE_PRIORITY_MIN: Final[int] = 1
+"""The highest priority a workflow task node can have."""
+TASK_NODE_PRIORITY_MAX: Final[int] = 100
+"""The lowest priority a workflow task node can have.
+
+The task row stores the priority under ``CHECK (priority BETWEEN 1 AND 100)``.
+"""
+
+
+def _task_node_option_errors(node: TaskNode[Any]) -> list[WorkflowValidationError]:
+    """Return the errors for one task node's priority and good_until.
+
+    ``None`` in either field is accepted: a ``None`` priority takes the queue
+    priority, and a ``None`` good_until sets no deadline. The timezone rule is
+    the rule of the enqueue fingerprint and of ``TaskOptions``: a datetime
+    with ``tzinfo is None`` is naive.
+    """
+    errors: list[WorkflowValidationError] = []
+    priority = node.priority
+    if priority is not None and not (
+        TASK_NODE_PRIORITY_MIN <= priority <= TASK_NODE_PRIORITY_MAX
+    ):
+        errors.append(
+            WorkflowValidationError(
+                message='task node priority is outside 1..100',
+                code=ErrorCode.WORKFLOW_INVALID_PRIORITY,
+                notes=[f"node '{node.name}' sets priority={priority}"],
+                help_text=(
+                    'set a priority from 1 (highest) to 100 (lowest), '
+                    'or omit it to use the queue priority'
+                ),
+            )
+        )
+    good_until = node.good_until
+    if good_until is not None and good_until.tzinfo is None:
+        errors.append(
+            WorkflowValidationError(
+                message='task node good_until is a naive datetime',
+                code=ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
+                notes=[
+                    f"node '{node.name}' sets good_until="
+                    f'{good_until.isoformat()} with no tzinfo',
+                ],
+                help_text=(
+                    'pass a timezone-aware datetime, for example '
+                    'datetime.now(timezone.utc) + timedelta(hours=1)'
+                ),
+            )
+        )
+    return errors
 
 
 def unique_node_refs(
@@ -248,6 +301,8 @@ class WorkflowSpec(Generic[OutT]):
         for error in self._collect_workflow_ctx_from_errors():
             report.add(error)
         for error in self._collect_positional_args_not_supported_errors():
+            report.add(error)
+        for error in self._collect_task_node_option_errors():
             report.add(error)
         for error in self._collect_from_node_marker_kwargs_errors():
             report.add(error)
@@ -856,6 +911,23 @@ class WorkflowSpec(Generic[OutT]):
                     help_text='remove args=... and pass static values via kwargs=...',
                 )
             )
+        return errors
+
+    def _collect_task_node_option_errors(self) -> list[WorkflowValidationError]:
+        """Reject a task node priority outside 1..100 and a naive good_until.
+
+        Checks every ``TaskNode``, root or not. A ``SubWorkflowNode`` has
+        neither field.
+        """
+        errors: list[WorkflowValidationError] = []
+        for node in self.tasks:
+            match node:
+                case SubWorkflowNode():
+                    pass
+                case TaskNode():
+                    errors.extend(_task_node_option_errors(node))
+                case _ as unreachable:
+                    assert_never(unreachable)
         return errors
 
     def _collect_from_node_marker_kwargs_errors(

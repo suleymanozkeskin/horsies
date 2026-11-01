@@ -1113,7 +1113,7 @@ class FinalizeMixin:
         match detail:
             case HistoryTaskDetail():
                 return _PersistedTaskRow(
-                    status=detail.status,
+                    status=detail.status.value,
                     task_name=detail.task_name,
                     queue_name=detail.queue_name,
                     is_workflow_task=detail.is_workflow_task,

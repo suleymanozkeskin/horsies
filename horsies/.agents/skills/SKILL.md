@@ -325,9 +325,11 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`, `LOOP_RUNNER_FAILED`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
+- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
+
+`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleLoopRunnerFailed`, `HandleEventLoopLimit`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
 `EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
 
