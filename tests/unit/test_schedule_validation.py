@@ -213,6 +213,30 @@ class TestPrepareSchedules:
             case Ok(encoded_kwargs):
                 raise AssertionError(f'expected a refusal, got {encoded_kwargs!r}')
 
+    def test_a_value_that_is_too_deep_is_refused_at_boot(self) -> None:
+        def fn(x: _Linked) -> str:
+            return str(x)
+
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+        config = ScheduleConfig(schedules=[_schedule(kwargs={'x': node})])
+        app = _make_mock_app(tasks={'task_a': _make_task_mock(fn)})
+
+        result = prepare_schedules(app, config)
+
+        match result:
+            case Err(errors):
+                assert len(errors) == 1
+                assert isinstance(errors[0], ConfigurationError)
+                assert errors[0].code == ErrorCode.CONFIG_INVALID_SCHEDULE
+                assert (
+                    'Circular reference detected (depth exceeded)'
+                    in ' '.join(errors[0].notes)
+                )
+            case Ok(encoded_kwargs):
+                raise AssertionError(f'expected a refusal, got {encoded_kwargs!r}')
+
     def test_err_holds_one_error_per_bad_schedule_in_config_order(self) -> None:
         def fn() -> str:
             return 'ok'

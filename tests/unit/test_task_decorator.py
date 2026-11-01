@@ -1609,6 +1609,29 @@ class TestCreateTaskWrapperSend:
         )
         app.get_broker.assert_not_called()
 
+    def test_send_value_that_is_too_deep_returns_validation_error(self) -> None:
+        """A long chain of a self-referencing model is finite, and pydantic
+        cannot dump it. Before, the raw `ValueError` left `.send()`."""
+        def good_fn(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+
+        result = wrapper.send(x=node)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert result.err_value.message == (
+            'Failed to encode kwargs for test.good_fn: x: serialization failed: '
+            'Circular reference detected (depth exceeded)'
+        )
+        app.get_broker.assert_not_called()
+
     def test_send_success_returns_ok_with_handle(self) -> None:
         """Successful send returns Ok(TaskHandle) with broker_mode=True."""
         def good_fn(*, x: int) -> TaskResult[int, TaskError]:

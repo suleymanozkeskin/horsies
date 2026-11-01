@@ -1000,10 +1000,27 @@ def _dict_that_holds_itself() -> dict[str, Any]:
 
 
 def _nested_list(depth: int) -> list[Any]:
-    value: list[Any] = []
-    for _ in range(depth):
+    """A finite list with `depth` levels of nesting and a number inside."""
+    value: list[Any] = [1]
+    for _ in range(depth - 1):
         value = [value]
     return value
+
+
+def _nested_dict(depth: int) -> dict[str, Any]:
+    """A finite dict with `depth` levels of nesting and a number inside."""
+    value: dict[str, Any] = {'key': 1}
+    for _ in range(depth - 1):
+        value = {'key': value}
+    return value
+
+
+def _linked_chain(length: int) -> _Linked:
+    """A finite chain of `length` instances of a self-referencing model."""
+    node = _Linked()
+    for _ in range(length - 1):
+        node = _Linked(next=node)
+    return node
 
 
 class _ValueErrorInComputedField(BaseModel):
@@ -1053,18 +1070,67 @@ class TestValueThatHoldsItself:
         assert raised.value.__context__ is None
 
 
+class TestValueThatIsTooDeep:
+    """`dump_python` raises a plain `ValueError` for a value nested too deep.
+
+    The text says circular, but the value is finite.
+    """
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (_nested_list(300), Any),
+            (_nested_dict(300), Any),
+            ({'key': _nested_list(300)}, dict[str, Any]),
+            (_linked_chain(300), _Linked),
+            (_linked_chain(300), Any),
+        ],
+        ids=['list', 'dict', 'in-dict-value', 'typed-model', 'model-at-any'],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: '
+            'Circular reference detected (depth exceeded)'
+        )
+        assert raised.value.__context__ is None
+
+    @pytest.mark.parametrize(
+        ('depth', 'accepted'),
+        [(254, True), (255, False)],
+        ids=['deepest-accepted', 'first-refused'],
+    )
+    def test_the_limit_is_the_limit_of_the_dump(
+        self,
+        depth: int,
+        accepted: bool,
+    ) -> None:
+        match accepted:
+            case True:
+                assert encode_value(_nested_list(depth), Any) is not None
+            case False:
+                with pytest.raises(ValueValidationError):
+                    encode_value(_nested_list(depth), Any)
+
+
 class TestValueErrorThatStaysRaw:
-    """Only the full text of the refusal is in the catalog."""
+    """Only the full text of a refusal is in the catalog."""
 
     @pytest.mark.parametrize(
         'text',
         [
             'defect in a computed field',
             'wrapped: Circular reference detected (id repeated)',
-            'Circular reference detected (id repeated): wrapped',
-            'Circular reference detected (depth exceeded)',
+            'Circular reference detected (depth exceeded): wrapped',
+            'Circular reference detected',
         ],
-        ids=['other-text', 'text-in-front', 'text-behind', 'depth-text'],
+        ids=['other-text', 'text-in-front', 'text-behind', 'shared-prefix'],
     )
     def test_a_value_error_from_a_computed_field_propagates(self, text: str) -> None:
         with pytest.raises(ValueError) as raised:
@@ -1081,15 +1147,6 @@ class TestValueErrorThatStaysRaw:
 
         assert type(raised.value) is ValueError
         assert str(raised.value) == 'defect in a generator'
-
-    def test_a_value_that_is_only_deep_propagates(self) -> None:
-        """Pydantic reports depth with a text that says circular. The value
-        does not hold itself, so it is not this refusal."""
-        with pytest.raises(ValueError) as raised:
-            encode_value(_nested_list(300), Any)
-
-        assert type(raised.value) is ValueError
-        assert str(raised.value) == 'Circular reference detected (depth exceeded)'
 
     def test_a_unicode_decode_error_propagates(self) -> None:
         """It is a `ValueError` subclass with another text."""

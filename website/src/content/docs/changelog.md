@@ -512,8 +512,16 @@ there is no migration contract between pre-1.0 versions.
   - A task that returns such a value, or whose `TaskError.data` holds one,
     ends with `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`.
 
-  Any other `ValueError` from the dump propagates, also the `Circular
-  reference detected (depth exceeded)` of a value that is only deep.
+  Any other `ValueError` from the dump propagates.
+- **Breaking: `encode_value` raises `ValueValidationError` for a value that
+  is nested too deep.** Pydantic refuses a dump at 255 levels of nesting, and
+  it says `Circular reference detected (depth exceeded)` also for a finite
+  value. The text names the kwarg. Before, a raw `ValueError` left
+  `encode_value`. Each caller gets the same outcome as for a value that holds
+  itself: `TaskSendValidationFailed` from `.send()`,
+  `CONFIG_INVALID_SCHEDULE` from `prepare_schedules`,
+  `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`) from `app.workflow()`, and
+  `WORKER_SERIALIZATION_ERROR` for a task, not `TASK_EXCEPTION`.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

@@ -763,6 +763,32 @@ class TestValueThatHoldsItself:
         )
 
 
+class TestValueThatIsTooDeep:
+    def test_a_task_node_kwarg_is_hrs_031(self) -> None:
+        """Before, the raw `ValueError` left `app.workflow()`."""
+        app = _real_app()
+
+        @app.task('deep.linked')
+        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        node = _Linked()
+        for _ in range(299):
+            node = _Linked(next=node)
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='deep-task-node',
+                tasks=[TaskNode(fn=linked, kwargs={'x': node})],
+                definition_key=_key('deep_task_node'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert 'Circular reference detected (depth exceeded)' in ' '.join(
+            raised.value.notes,
+        )
+
+
 class TestChildStartOfALoneSurrogate:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
