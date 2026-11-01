@@ -195,6 +195,25 @@ and there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: `ContractCode.PYDANTIC_HYDRATION_ERROR` is removed.** The
+  library has not returned it since 0.1.2. Code that names it raises
+  `AttributeError`; match on `RESULT_DESERIALIZATION_ERROR`,
+  `BrokerErrorCode.INVALID_JSON_PAYLOAD` or `RETURN_TYPE_MISMATCH`. A stored
+  error code `{"__builtin_task_code__": "PYDANTIC_HYDRATION_ERROR"}` does not
+  decode: `TaskHandle.get()` returns `RESULT_DESERIALIZATION_ERROR` and
+  `app.get_result()` returns `INVALID_JSON_PAYLOAD`, each with `Unknown
+  built-in task code` in the message. A result stored before 0.1.2 already
+  fails to decode, because it has no `__h_task_result__` marker.
+- **The string `PYDANTIC_HYDRATION_ERROR` is no longer reserved.**
+  `TaskError(error_code='PYDANTIC_HYDRATION_ERROR')` makes a user code. An
+  `exception_mapper` or `default_unhandled_error_code` value
+  `PYDANTIC_HYDRATION_ERROR` no longer fails `horsies check` with `HRS-212`.
+  The monitoring API and the web UI put a stored code
+  `PYDANTIC_HYDRATION_ERROR` in the `DOMAIN` category, not `CONTRACT`.
+- **Breaking: the alias `ErrorCode.WORKFLOW_EXCESS_POSITIONAL_ARGS` is
+  removed.** Use `ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED`; the value
+  `HRS-026` does not change. Code that names the alias raises
+  `AttributeError`.
 - **Breaking: the environment variable `TASKLIB_SUPPRESS_SENDS` is renamed
   to `HORSIES_SUPPRESS_SENDS`.** The old name has no effect. Set
   `HORSIES_SUPPRESS_SENDS=1` where the old variable was set. Without it,
@@ -380,9 +399,8 @@ and there is no migration contract between pre-1.0 versions.
   site, the skills files and `llms.txt` now list `OutcomeCode.TASK_EXPIRED`,
   `TASK_TIMEOUT` and `WORKFLOW_EXPIRED`, `ContractCode.NO_TYPE_AVAILABLE`,
   all 21 `BrokerErrorCode` members, and `SchemaState.CUTOVER_REQUIRED` where
-  they were missing. `ContractCode.PYDANTIC_HYDRATION_ERROR` is listed as a
-  legacy reserved code that the library does not return. The errors page
-  adds HRS-105 and HRS-213 to HRS-215, and tables for
+  they were missing. The errors page adds HRS-105 and HRS-213 to HRS-215,
+  and tables for
   `WorkflowStartErrorCode` and `HandleErrorCode`. `llms.txt` adds HRS-016,
   HRS-017, HRS-031, HRS-032, HRS-104, HRS-105 and HRS-213 to HRS-216.
   HRS-104 means a pre-decorated task function (it has a `__wrapped__`

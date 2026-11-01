@@ -61,7 +61,7 @@ class TestTaggedSerialization:
         'code',
         [
             OperationalErrorCode.WORKER_CRASHED,
-            ContractCode.PYDANTIC_HYDRATION_ERROR,
+            ContractCode.WORKFLOW_CTX_MISSING_ID,
             RetrievalCode.WAIT_TIMEOUT,
             OutcomeCode.WORKFLOW_PAUSED,
         ],
@@ -114,7 +114,7 @@ class TestRoundTripCoercion:
         [
             OperationalErrorCode.BROKER_ERROR,
             OperationalErrorCode.TASK_EXCEPTION,
-            ContractCode.PYDANTIC_HYDRATION_ERROR,
+            ContractCode.NO_TYPE_AVAILABLE,
             RetrievalCode.RESULT_NOT_READY,
             OutcomeCode.WORKFLOW_PAUSED,
             OutcomeCode.SUBWORKFLOW_FAILED,
@@ -178,6 +178,17 @@ class TestUserStringPassthrough:
         original = TaskError(error_code=None, message='test')
         restored = TaskError.model_validate_json(original.model_dump_json())
         assert restored.error_code is None
+
+    def test_former_hydration_code_is_a_user_code(self) -> None:
+        """``'PYDANTIC_HYDRATION_ERROR'`` is not reserved: it stays a
+        plain ``str`` on construction and after a JSON round-trip."""
+        original = TaskError(error_code='PYDANTIC_HYDRATION_ERROR', message='user')
+        serialized = original.model_dump_json()
+        restored = TaskError.model_validate_json(serialized)
+
+        assert json.loads(serialized)['error_code'] == 'PYDANTIC_HYDRATION_ERROR'
+        assert restored.error_code == 'PYDANTIC_HYDRATION_ERROR'
+        assert type(restored.error_code) is str
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +526,42 @@ class TestCheckReservedCodeCollision:
             if e.code == ErrorCode.CHECK_RESERVED_CODE_COLLISION
         ]
         assert len(collision_errors) == 0
+
+    def test_former_hydration_code_in_exception_mapper_not_flagged(self) -> None:
+        """An ``exception_mapper`` value ``PYDANTIC_HYDRATION_ERROR`` passes the check."""
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+        from pydantic import SecretStr
+
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                ),
+                exception_mapper={ValueError: 'PYDANTIC_HYDRATION_ERROR'},
+            ),
+        )
+        errors = app._check_runtime_policy_safety()  # pyright: ignore[reportPrivateUsage]
+        assert errors == []
+
+    def test_former_hydration_code_as_default_not_flagged(self) -> None:
+        """A ``default_unhandled_error_code`` of ``PYDANTIC_HYDRATION_ERROR`` passes the check."""
+        from horsies.core.app import Horsies
+        from horsies.core.models.app import AppConfig
+        from horsies.core.models.broker import PostgresConfig
+        from pydantic import SecretStr
+
+        app = Horsies(
+            config=AppConfig(
+                broker=PostgresConfig(
+                    database_url=SecretStr('postgresql+psycopg://x/y'),
+                ),
+                default_unhandled_error_code='PYDANTIC_HYDRATION_ERROR',
+            ),
+        )
+        errors = app._check_runtime_policy_safety()  # pyright: ignore[reportPrivateUsage]
+        assert errors == []
 
     def test_per_task_exception_mapper_collision_detected(self) -> None:
         # The task wrapper freezes exception_mapper as MappingProxyType, so the
