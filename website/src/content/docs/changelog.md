@@ -379,6 +379,11 @@ there is no migration contract between pre-1.0 versions.
   read such a value as no stored error and returned the `OutcomeCode` of
   the status (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or
   `WORKFLOW_EXPIRED`).
+- **Breaking: a defect in the stored-error decode of `WorkflowHandle.get()`
+  propagates.** `get()` returns `RESULT_DESERIALIZATION_ERROR` only for
+  the two refusals of the decode, `StrictJsonError` and
+  `ValueValidationError`. Before, it returned `RESULT_DESERIALIZATION_ERROR`
+  for every exception from the decode.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

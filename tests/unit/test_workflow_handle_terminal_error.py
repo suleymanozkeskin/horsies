@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -168,3 +168,49 @@ class TestStoredErrorThatIsNotAnObject:
             f'Workflow error payload is not a JSON object: got {type_name}'
         )
         assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
+class TestStoredErrorObjectThatDoesNotDecode:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'stored',
+        [
+            # StrictJsonError: an error_code object that is not the
+            # built-in code shape.
+            '{"error_code": {"__builtin_task_code__": "X", "extra": 1}}',
+            # ValueValidationError: message is not a string.
+            '{"message": 5}',
+        ],
+        ids=['strict-json-refusal', 'validation-refusal'],
+    )
+    async def test_a_codec_refusal_is_a_deserialization_error(
+        self,
+        stored: str,
+    ) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert (error.message or '').startswith(
+            'Workflow error payload validation failed: ',
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+    @pytest.mark.asyncio
+    async def test_a_defect_in_the_decode_propagates(self) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED,
+            error_row=SimpleNamespace(error='{"message": "boom"}'),
+        )
+
+        with patch(
+            'horsies.core.models.workflow.handle.decode_task_error',
+            autospec=True,
+            side_effect=RuntimeError('decode defect'),
+        ):
+            with pytest.raises(RuntimeError, match='decode defect'):
+                await handle.get_async(timeout_ms=0)

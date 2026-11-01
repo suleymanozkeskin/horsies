@@ -1024,6 +1024,11 @@ class WorkflowHandle(Generic[OutT]):
               message.
             - No stored error: the ``OutcomeCode`` of ``status``.
             - A database error: ``BROKER_ERROR``.
+
+        Raises:
+            Exception: a defect in the decode. Only ``StrictJsonError`` and
+                ``ValueValidationError``, the refusals of
+                ``decode_task_error``, are folded.
         """
         try:
             async with resources.session_factory() as session:
@@ -1084,7 +1089,10 @@ class WorkflowHandle(Generic[OutT]):
                                 # sub_workflow_summary); TaskError.model_validate
                                 # would silently downcast.
                                 validated_err = decode_task_error(error_object)
-                            except Exception as exc:
+                            except (StrictJsonError, ValueValidationError) as exc:
+                                # The two refusals decode_task_error raises
+                                # for an object that is not a TaskError. Any
+                                # other exception is a defect and propagates.
                                 logger.warning(
                                     'Workflow %s error payload validation failed: %s',
                                     self.workflow_id,
