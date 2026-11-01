@@ -39,6 +39,7 @@ from horsies.core.task_decorator import (
     create_task_wrapper,
     effective_priority,
     from_node,
+    resolve_node_queue,
     resolve_node_queue_and_priority,
 )
 from horsies.core.models.payload import PayloadPolicy
@@ -226,6 +227,31 @@ class TestResolveNodeQueueAndPriority:
             resolve_node_queue_and_priority(app, node)
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
+
+
+@pytest.mark.unit
+class TestResolveNodeQueue:
+    """Tests for resolve_node_queue — an empty string counts as not set."""
+
+    def test_node_queue_comes_first(self) -> None:
+        node = _make_node(queue='normal', fn_queue='scraping')
+
+        assert resolve_node_queue(node) == 'normal'
+
+    def test_an_empty_node_queue_takes_the_task_queue(self) -> None:
+        node = _make_node(queue='', fn_queue='scraping')
+
+        assert resolve_node_queue(node) == 'scraping'
+
+    def test_an_empty_node_queue_and_an_empty_task_queue_give_default(self) -> None:
+        node = _make_node(queue='', fn_queue='')
+
+        assert resolve_node_queue(node) == 'default'
+
+    def test_no_queue_anywhere_gives_default(self) -> None:
+        node = _make_node()
+
+        assert resolve_node_queue(node) == 'default'
 
 
 @pytest.mark.unit
@@ -2483,6 +2509,47 @@ class TestDefinitionLevelGoodUntil:
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
         assert 'good_until must be set when sending a task' in exc_info.value.message
+
+
+def _real_app() -> Any:
+    from pydantic import SecretStr
+
+    from horsies.core.app import Horsies
+    from horsies.core.models.app import AppConfig
+    from horsies.core.models.broker import PostgresConfig
+
+    return Horsies(AppConfig(broker=PostgresConfig(
+        database_url=SecretStr('postgresql+psycopg://u:p@localhost:5432/db'),
+    )))
+
+
+@pytest.mark.unit
+class TestEmptyTaskName:
+    """app.task() refuses an empty task name when the task is defined."""
+
+    def test_an_empty_task_name_is_refused_and_not_registered(self) -> None:
+        app = _real_app()
+
+        def nameless() -> TaskResult[str, TaskError]:
+            return TaskResult(ok='never')
+
+        with pytest.raises(TaskDefinitionError) as exc_info:
+            app.task('')(nameless)
+
+        assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
+        assert exc_info.value.message == 'task name is empty'
+        assert '' not in app.tasks
+
+    def test_a_one_character_task_name_is_registered(self) -> None:
+        app = _real_app()
+
+        def named() -> TaskResult[str, TaskError]:
+            return TaskResult(ok='done')
+
+        task = app.task('a')(named)
+
+        assert task.task_name == 'a'
+        assert 'a' in app.tasks
 
 
 # =============================================================================

@@ -82,7 +82,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -206,11 +206,11 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 | `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
 | `node_id` | `str` | `None` | Stable identifier |
 | `queue` | `str` | `None` | Queue override |
-| `priority` | `int` | `None` | Priority override |
+| `priority` | `int` | `None` | Priority override, from 1 (highest) to 100 (lowest). A value outside 1–100 raises `HRS-034` when the spec is built |
 | `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
-| `good_until` | `datetime` | `None` | Task expiry deadline |
+| `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |
 
 See [Typed Node Builder](typed-node-builder) for usage examples.
 

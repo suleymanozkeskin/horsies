@@ -53,6 +53,7 @@ from horsies.core.history.reads.pages import (
     history_page_statement,
 )
 from horsies.core.history.reads.publisher import StagedLoaderPublisher
+from horsies.core.types.status import TaskStatus
 
 from tests.integration.task_history_harness import (
     HistorySchema,
@@ -149,7 +150,7 @@ class TestDetail:
             detail = await read_task_detail(connection, task_id=task_id)
             assert isinstance(detail, HistoryTaskDetail)
             assert detail.task_id == task_id
-            assert detail.status == 'FAILED'
+            assert detail.status is TaskStatus.FAILED
             assert detail.terminalization_kind == 'FAIL_RUNNING'
             assert detail.retention_class_key == CLASS_KEY
             assert detail.result_payload is not None
