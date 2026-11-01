@@ -181,7 +181,7 @@ Step 1 sets workflow options (keyword-only). Step 2 passes task kwargs with type
 match spec.start():
     case Ok(handle):
         result = handle.get(timeout_ms=30_000)
-    case Err(err) if err.retryable:
+    case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
         match spec.retry_start(err):
             case Ok(handle): ...
             case Err(retry_err): ...  # give up
@@ -191,16 +191,17 @@ match spec.start():
 
 ### WorkflowStartError
 
-```python
-@dataclass(slots=True, frozen=True)
-class WorkflowStartError:
-    code: WorkflowStartErrorCode
-    message: str
-    retryable: bool
-    workflow_name: str
-    workflow_id: str         # always populated
-    exception: BaseException | None = None
-```
+`WorkflowStartError` is a union with one frozen variant per `WorkflowStartErrorCode` member. Every variant has `code`, `message`, `retryable`, `workflow_name` and `workflow_id` (the id that this start used, minted when the caller gave none). Match on the variant.
+
+| Variant | `code` | Other fields | `retryable` |
+|---|---|---|---|
+| `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` |
+| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
+| `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | driver classification |
+| `WorkflowStartLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `exception: BaseException` | `False` |
+| `WorkflowStartEventLoopLimit` | `EVENT_LOOP_LIMIT` | `loop_limit: EventLoopLimit` | `False` |
+| `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
 ### WorkflowStartErrorCode
 
@@ -208,15 +209,16 @@ class WorkflowStartError:
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error |
-| `ENQUEUE_FAILED` | Maybe | Schema init or DB transaction failed |
-| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.start_async()` or use a new broker |
+| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
+| `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
+| `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
 | `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing was written |
-| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.start_async()` |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.retry_start_async(err)` |
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` accept only `ENQUEUE_FAILED` errors. Other codes, `ASYNC_CONTEXT` included, return `Err(VALIDATION_FAILED)`. Best-effort idempotent by `workflow_id` (not payload-verified).
+`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. Best-effort idempotent by `workflow_id` (not payload-verified).
 
 ### Auto-retry
 
@@ -601,6 +603,10 @@ from horsies import (
     HandleResult, HandleOperationError, HandleErrorCode,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
+    WorkflowStartValidationFailed, WorkflowStartIdConflict,
+    WorkflowStartEnqueueFailed, WorkflowStartLoopRunnerFailed,
+    WorkflowStartEventLoopLimit, WorkflowStartAsyncContext,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )

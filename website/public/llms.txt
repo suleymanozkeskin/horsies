@@ -116,7 +116,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - LOOP_RUNNER_FAILED (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable; the send error is accepted by retry_send_async / retry_schedule_async). Any other exception from a sync call propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
-  ensure_schema_initialized -> BrokerResult[None], get_stale_tasks -> BrokerResult[list[dict]],
+  ensure_schema_initialized -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit], get_stale_tasks -> BrokerResult[list[dict]],
   get_expired_tasks -> BrokerResult[list[dict]],
   mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
   close_async -> BrokerResult[None]
@@ -266,9 +266,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .resend_on_transient_err -> bool (auto-retry transient start errors, default False)
 - .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
-- .retry_start(error: WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
-- .retry_start_async(error: WorkflowStartError) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
-- retry_start: best-effort idempotent by workflow_id (not payload-verified); only ENQUEUE_FAILED eligible
+- .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
+- .retry_start_async(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
+- retry_start: best-effort idempotent by workflow_id (not payload-verified); WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext | WorkflowStartLoopRunnerFailed; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
 - Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
@@ -370,9 +370,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - spec.start() / start_async() / start_workflow() / start_workflow_async() return WorkflowStartResult[WorkflowHandle[T]]
 - WorkflowStartResult[T] = Result[T, WorkflowStartError]
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
-- Err(WorkflowStartError): start failed with categorized error
-- WorkflowStartError fields: code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str), exception (BaseException | None)
-- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, ENQUEUE_FAILED, LOOP_RUNNER_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- Err(WorkflowStartError): start failed; match on the variant
+- WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartEnqueueFailed (retryable = driver classification, exception: BaseException); WorkflowStartLoopRunnerFailed (exception: BaseException); WorkflowStartEventLoopLimit (loop_limit: EventLoopLimit); WorkflowStartAsyncContext
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, ENQUEUE_FAILED, LOOP_RUNNER_FAILED, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
+- WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
+- ENQUEUE_FAILED: schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
 - Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
 

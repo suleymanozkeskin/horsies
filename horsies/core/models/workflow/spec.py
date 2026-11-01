@@ -15,6 +15,7 @@ from typing import (
     Any,
     Callable,
     Generic,
+    assert_never,
     cast,
 )
 
@@ -79,7 +80,12 @@ def unique_node_refs(
 if TYPE_CHECKING:
     from horsies.core.brokers.postgres import PostgresBroker
     from horsies.core.models.workflow.handle import WorkflowHandle
-    from horsies.core.workflows.start_types import WorkflowStartError, WorkflowStartResult
+    from horsies.core.types.result import Result
+    from horsies.core.workflows.start_types import (
+        WorkflowStartResult,
+        WorkflowStartRetryable,
+        WorkflowStartValidationFailed,
+    )
 
 
 def _kwargs_target_callable(
@@ -1515,15 +1521,12 @@ class WorkflowSpec(Generic[OutT]):
             import uuid as _uuid
 
             from horsies.core.workflows.start_types import (
-                WorkflowStartError as _WSE,
-                WorkflowStartErrorCode as _WSEC,
+                WorkflowStartBrokerNotConfigured,
             )
             from horsies.core.types.result import Err as _Err
 
-            return _Err(_WSE(
-                code=_WSEC.BROKER_NOT_CONFIGURED,
+            return _Err(WorkflowStartBrokerNotConfigured(
                 message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
-                retryable=False,
                 workflow_name=self.name,
                 workflow_id=workflow_id or str(_uuid.uuid4()),
             ))
@@ -1558,15 +1561,12 @@ class WorkflowSpec(Generic[OutT]):
             import uuid as _uuid
 
             from horsies.core.workflows.start_types import (
-                WorkflowStartError as _WSE,
-                WorkflowStartErrorCode as _WSEC,
+                WorkflowStartBrokerNotConfigured,
             )
             from horsies.core.types.result import Err as _Err
 
-            return _Err(_WSE(
-                code=_WSEC.BROKER_NOT_CONFIGURED,
+            return _Err(WorkflowStartBrokerNotConfigured(
                 message='WorkflowSpec requires a broker. Use app.workflow() or set broker.',
-                retryable=False,
                 workflow_name=self.name,
                 workflow_id=workflow_id or str(_uuid.uuid4()),
             ))
@@ -1592,60 +1592,61 @@ class WorkflowSpec(Generic[OutT]):
         """
         import uuid as _uuid
 
-        from horsies.core.workflows.start_types import (
-            WorkflowStartError as _WSE,
-            WorkflowStartErrorCode as _WSEC,
-        )
+        from horsies.core.workflows.start_types import WorkflowStartAsyncContext
         from horsies.core.types.result import Err as _Err
 
-        return _Err(_WSE(
-            code=_WSEC.ASYNC_CONTEXT,
+        return _Err(WorkflowStartAsyncContext(
             message=async_context_message(
                 f'WorkflowSpec.{operation}() of workflow {self.name!r}',
                 f'spec.{operation}_async(...)',
             ),
-            retryable=False,
             workflow_name=self.name,
             workflow_id=workflow_id or str(_uuid.uuid4()),
         ))
 
     def _validate_start_retry(
-        self, error: 'WorkflowStartError',
-    ) -> 'WorkflowStartResult[str]':
-        """Validate a WorkflowStartError for retry eligibility.
+        self, error: 'WorkflowStartRetryable',
+    ) -> 'Result[str, WorkflowStartValidationFailed]':
+        """Check that a retryable start error belongs to this workflow.
 
-        Returns ``Ok(workflow_id)`` when the error is retryable, or
-        ``Err(WorkflowStartError(VALIDATION_FAILED))`` when it is not.
+        The parameter type admits ``WorkflowStartEnqueueFailed``,
+        ``WorkflowStartAsyncContext`` and ``WorkflowStartLoopRunnerFailed``;
+        each carries the id of its start. Another variant, passed by a caller
+        without a type checker, fails an assertion that names it. Refused: an
+        error of another workflow. Returns ``Ok(workflow_id)``.
         """
+        from horsies.core.types.error_detail import NoCause
         from horsies.core.workflows.start_types import (
-            WorkflowStartError as _WSE,
-            WorkflowStartErrorCode as _WSEC,
+            WorkflowStartAsyncContext,
+            WorkflowStartEnqueueFailed,
+            WorkflowStartLoopRunnerFailed,
+            WorkflowStartValidationFailed,
         )
         from horsies.core.types.result import Ok as _Ok, Err as _Err
 
-        if error.code != _WSEC.ENQUEUE_FAILED:
-            return _Err(_WSE(
-                code=_WSEC.VALIDATION_FAILED,
-                message=f'retry is only valid for ENQUEUE_FAILED errors, got {error.code!r}',
-                retryable=False,
-                workflow_name=self.name,
-                workflow_id=error.workflow_id,
-            ))
+        match error:
+            case (
+                WorkflowStartEnqueueFailed()
+                | WorkflowStartAsyncContext()
+                | WorkflowStartLoopRunnerFailed()
+            ):
+                pass
+            case _ as refused:
+                assert_never(refused)
         if error.workflow_name != self.name:
-            return _Err(_WSE(
-                code=_WSEC.VALIDATION_FAILED,
+            return _Err(WorkflowStartValidationFailed(
                 message=(
                     f'cross-workflow retry: error is for {error.workflow_name!r} '
                     f'but this workflow is {self.name!r}'
                 ),
-                retryable=False,
                 workflow_name=self.name,
                 workflow_id=error.workflow_id,
+                exception=NoCause(),
             ))
         return _Ok(error.workflow_id)
 
     def retry_start(
-        self, error: 'WorkflowStartError',
+        self, error: 'WorkflowStartRetryable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Retry a failed workflow start using the stored workflow_id.
 
@@ -1653,10 +1654,13 @@ class WorkflowSpec(Generic[OutT]):
         Safe for transient DB retries within the same deploy.  Cannot
         detect spec changes on collision.
 
-        Only ``ENQUEUE_FAILED`` errors are eligible for retry.
+        Accepts ``ENQUEUE_FAILED``, ``ASYNC_CONTEXT`` and
+        ``LOOP_RUNNER_FAILED`` errors (``WorkflowStartRetryable``). On a
+        stopped sync runner it returns ``LOOP_RUNNER_FAILED`` again; use
+        ``retry_start_async()``.
 
         Args:
-            error: The ``WorkflowStartError`` from a previous ``start()`` call.
+            error: The retryable error from a previous ``start()`` call.
 
         Returns:
             ``Ok(WorkflowHandle)`` on success,
@@ -1666,18 +1670,22 @@ class WorkflowSpec(Generic[OutT]):
         """
         v = self._validate_start_retry(error)
         if is_err(v):
-            return v  # type: ignore[return-value]
+            return v
         if in_running_event_loop():
             return self._async_context_start_err(v.ok_value, 'retry_start')
         return self.start(workflow_id=v.ok_value)
 
     async def retry_start_async(
-        self, error: 'WorkflowStartError',
+        self, error: 'WorkflowStartRetryable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Async variant of ``retry_start()``.
 
+        It completes the start of an ``ASYNC_CONTEXT`` or ``LOOP_RUNNER_FAILED``
+        error with the error's id.
+
         Args:
-            error: The ``WorkflowStartError`` from a previous ``start_async()`` call.
+            error: The retryable error from a previous ``start()`` or
+                ``start_async()`` call.
 
         Returns:
             ``Ok(WorkflowHandle)`` on success,
@@ -1685,5 +1693,5 @@ class WorkflowSpec(Generic[OutT]):
         """
         v = self._validate_start_retry(error)
         if is_err(v):
-            return v  # type: ignore[return-value]
+            return v
         return await self.start_async(workflow_id=v.ok_value)

@@ -533,8 +533,8 @@ async def enqueue_workflow_task(
 
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
-            recovery: the workflow start path folds them into
-            WorkflowStartError(ENQUEUE_FAILED) with its own retry loop,
+            recovery: the workflow start path folds a database or driver
+            error into WorkflowStartEnqueueFailed with its own retry loop,
             resume/lifecycle operations fold them into
             HandleOperationError, the worker folds them into a phase2
             finalize error with bounded retries, and the reaper contains
@@ -865,8 +865,8 @@ async def enqueue_subworkflow_task(
 
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
-            recovery: the workflow start path folds them into
-            WorkflowStartError(ENQUEUE_FAILED) with its own retry loop,
+            recovery: the workflow start path folds a database or driver
+            error into WorkflowStartEnqueueFailed with its own retry loop,
             resume/lifecycle operations fold them into
             HandleOperationError, the worker folds them into a phase2
             finalize error with bounded retries, and the reaper contains

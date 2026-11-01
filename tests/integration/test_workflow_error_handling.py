@@ -2596,6 +2596,8 @@ class TestWorkflowStartErrors:
         """Mid-insert failure leaves no workflow rows persisted."""
         from unittest.mock import AsyncMock, MagicMock
 
+        from sqlalchemy.exc import OperationalError
+
         session, broker, app = setup
         task_a = make_simple_task(app, 'rollback_test')
 
@@ -2623,7 +2625,9 @@ class TestWorkflowStartErrors:
                         # Let first execute (workflow INSERT) succeed,
                         # fail on second (workflow_task INSERT)
                         if call_count >= 2:
-                            raise RuntimeError('Induced mid-insert failure')
+                            raise OperationalError(
+                                'INSERT', params=None, orig=Exception('Induced mid-insert failure'),
+                            )
                         return await original_execute(*a, **kw)
 
                     sess.execute = patched_execute  # type: ignore[method-assign]

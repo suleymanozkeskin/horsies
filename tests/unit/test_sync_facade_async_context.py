@@ -57,8 +57,10 @@ from horsies.core.workflows.lifecycle import (
     start_workflow,
 )
 from horsies.core.workflows.start_types import (
-    WorkflowStartError,
+    WorkflowStartAsyncContext,
+    WorkflowStartEnqueueFailed,
     WorkflowStartErrorCode,
+    WorkflowStartLoopRunnerFailed,
 )
 from horsies.web.routes.actions import _handle_failed
 
@@ -397,15 +399,8 @@ def test_spec_start_returns_async_context(app: Horsies) -> None:
 
 def test_spec_retry_start_returns_async_context(app: Horsies) -> None:
     spec = _spec(app)
-    failed = WorkflowStartError(
-        code=WorkflowStartErrorCode.ENQUEUE_FAILED,
-        message='connection lost',
-        retryable=True,
-        workflow_name='async_context_wf',
-        workflow_id=WORKFLOW_ID,
-    )
 
-    result = _inside_loop(lambda: spec.retry_start(failed))
+    result = _inside_loop(lambda: spec.retry_start(_failed_start()))
 
     assert is_err(result)
     assert result.err_value.code is WorkflowStartErrorCode.ASYNC_CONTEXT
@@ -413,22 +408,23 @@ def test_spec_retry_start_returns_async_context(app: Horsies) -> None:
     _assert_nothing_ran(app.get_broker())
 
 
-def test_spec_retry_start_refuses_an_async_context_error(app: Horsies) -> None:
-    """ASYNC_CONTEXT is not a retry input; the async start is the remedy."""
+def test_spec_retry_start_accepts_an_async_context_error(app: Horsies) -> None:
+    """Outside a loop, retry_start of an ASYNC_CONTEXT error starts with its id."""
     spec = _spec(app)
-    refused = WorkflowStartError(
-        code=WorkflowStartErrorCode.ASYNC_CONTEXT,
+    refused = WorkflowStartAsyncContext(
         message='refused',
-        retryable=False,
         workflow_name='async_context_wf',
         workflow_id=WORKFLOW_ID,
     )
+    started = MagicMock()
 
-    result = spec.retry_start(refused)
+    # The spec is frozen; patch the method on its class.
+    with patch.object(type(spec), 'start', return_value=Ok(started)) as start:
+        result = spec.retry_start(refused)
 
-    assert is_err(result)
-    assert result.err_value.code is WorkflowStartErrorCode.VALIDATION_FAILED
-    _assert_nothing_ran(app.get_broker())
+    assert is_ok(result)
+    assert result.ok_value is started
+    start.assert_called_once_with(workflow_id=WORKFLOW_ID)
 
 
 def test_start_workflow_returns_async_context(app: Horsies) -> None:
@@ -603,7 +599,7 @@ def _failure_code(result: object) -> object:
         case Err(err_value=(
             BrokerLoopRunnerFailed(code=code)
             | HandleOperationError(code=code)
-            | WorkflowStartError(code=code)
+            | WorkflowStartLoopRunnerFailed(code=code)
         )):
             return code
         case _:
@@ -616,7 +612,7 @@ def _runner_error_fields(result: object) -> tuple[bool, BaseException | None] | 
         case Err(err_value=(
             BrokerLoopRunnerFailed(retryable=retryable, exception=exception)
             | HandleOperationError(retryable=retryable, exception=exception)
-            | WorkflowStartError(retryable=retryable, exception=exception)
+            | WorkflowStartLoopRunnerFailed(retryable=retryable, exception=exception)
         )):
             return (retryable, exception)
         case _:
@@ -669,13 +665,13 @@ def test_run_sync_call_site_returns_the_loop_runner_code(
 # =============================================================================
 
 
-def _failed_start() -> WorkflowStartError:
-    return WorkflowStartError(
-        code=WorkflowStartErrorCode.ENQUEUE_FAILED,
+def _failed_start() -> WorkflowStartEnqueueFailed:
+    return WorkflowStartEnqueueFailed(
         message='connection lost',
         retryable=True,
         workflow_name='async_context_wf',
         workflow_id=WORKFLOW_ID,
+        exception=ConnectionError('connection lost'),
     )
 
 
@@ -748,7 +744,7 @@ def _refusal_message(result: object) -> str:
             assert task_error.error_code is RetrievalCode.ASYNC_CONTEXT
             return task_error.message or ''
         case Err(
-            BrokerAsyncContext() | HandleOperationError() | WorkflowStartError() as error
+            BrokerAsyncContext() | HandleOperationError() | WorkflowStartAsyncContext() as error
         ):
             assert error.code.value == 'ASYNC_CONTEXT'
             return error.message

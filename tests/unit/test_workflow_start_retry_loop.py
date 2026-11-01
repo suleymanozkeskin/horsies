@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import psycopg
 import pytest
 
 from tests.broker_resources_support import attach_resources, fake_resources
@@ -21,12 +22,15 @@ from horsies.core.workflows.lifecycle import (
     _START_RETRY_INITIAL_MS,
     _START_RETRY_MAX_MS,
 )
+from horsies.core.brokers.resources import EventLoopLimit
 from horsies.core.workflows.start_types import (
+    WorkflowStartEnqueueFailed,
     WorkflowStartErrorCode,
+    WorkflowStartEventLoopLimit,
 )
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
-    BrokerListenerDisabled,
+    BrokerEventLoopLimit,
     BrokerOperationFailed,
 )
 
@@ -93,7 +97,7 @@ class TestRetryDisabled:
         broker = _make_broker()
 
         # session_factory raises on first call
-        db_exc = Exception('connection refused')
+        db_exc = psycopg.OperationalError('connection refused')
         session_ctx = AsyncMock()
         session_ctx.__aenter__ = AsyncMock(side_effect=db_exc)
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
@@ -151,7 +155,7 @@ class TestRetryOnTransientErrors:
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise Exception('connection refused')
+                raise psycopg.OperationalError('connection refused')
             return mock_session
 
         session_ctx.__aenter__ = session_enter
@@ -215,7 +219,9 @@ class TestRetryOnTransientErrors:
 
         # All session opens fail
         session_ctx = AsyncMock()
-        session_ctx.__aenter__ = AsyncMock(side_effect=Exception('connection refused'))
+        session_ctx.__aenter__ = AsyncMock(
+            side_effect=psycopg.OperationalError('connection refused'),
+        )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
@@ -246,7 +252,9 @@ class TestNonRetryableErrorsNoRetry:
         broker = _make_broker()
 
         session_ctx = AsyncMock()
-        session_ctx.__aenter__ = AsyncMock(side_effect=Exception('auth failed'))
+        session_ctx.__aenter__ = AsyncMock(
+            side_effect=psycopg.OperationalError('auth failed'),
+        )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=False):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
@@ -285,23 +293,109 @@ class TestNonRetryableErrorsNoRetry:
         result = await start_workflow_async(spec, broker, WORKFLOW_ID)
 
         assert is_err(result)
+        assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
         assert result.err_value.exception is broker_error.exception
 
     @pytest.mark.asyncio
-    async def test_schema_error_without_a_cause_gives_no_exception(self) -> None:
-        """A schema init error with no exception gives a start error with exception None."""
+    async def test_schema_init_loop_limit_gives_the_start_loop_limit(self) -> None:
+        """An event loop limit at schema init is the start's loop limit, not an enqueue failure."""
         spec = _make_spec()
         broker = _make_broker(schema_ok=False, schema_retryable=False)
-        broker.ensure_schema_initialized = AsyncMock(
-            return_value=Err(BrokerListenerDisabled(message='no listener')),
+        loop_limit = EventLoopLimit(
+            limit=5,
+            held_thread_names=('MainThread',),
+            current_thread_name='worker-1',
         )
+        broker.ensure_schema_initialized = AsyncMock(
+            return_value=Err(
+                BrokerEventLoopLimit(message='loop limit', loop_limit=loop_limit),
+            ),
+        )
+
+        result = await start_workflow_async(
+            spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
+        )
+
+        assert is_err(result)
+        assert isinstance(result.err_value, WorkflowStartEventLoopLimit)
+        assert result.err_value.loop_limit is loop_limit
+        assert result.err_value.workflow_id == WORKFLOW_ID
+        assert broker.ensure_schema_initialized.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_schema_init_failure_keeps_the_broker_retryable_flag(self) -> None:
+        """A schema init failure is an enqueue failure with the broker's classification."""
+        spec = _make_spec()
+        broker = _make_broker(schema_ok=False, schema_retryable=True)
 
         result = await start_workflow_async(spec, broker, WORKFLOW_ID)
 
         assert is_err(result)
-        assert result.err_value.code == WorkflowStartErrorCode.ENQUEUE_FAILED
-        assert result.err_value.exception is None
+        assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
+        assert result.err_value.retryable is True
+        assert 'Schema init failed' in result.err_value.message
+
+
+# =============================================================================
+# The transaction catch takes database and driver errors only
+# =============================================================================
+
+
+def _failing_session(error: BaseException) -> Any:
+    session_ctx = AsyncMock()
+    session_ctx.__aenter__ = AsyncMock(side_effect=error)
+    return fake_resources(session_factory=MagicMock(return_value=session_ctx))
+
+
+@pytest.mark.unit
+class TestTransactionCatch:
+    """A driver error is an enqueue failure; any other exception is a defect."""
+
+    @pytest.mark.asyncio
+    async def test_a_driver_error_is_an_enqueue_failure_with_its_classification(
+        self,
+    ) -> None:
+        spec = _make_spec()
+        broker = _make_broker()
+        cause = psycopg.OperationalError('server closed the connection')
+        attach_resources(broker, _failing_session(cause))
+
+        result = await start_workflow_async(spec, broker, WORKFLOW_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
+        assert result.err_value.exception is cause
+        assert result.err_value.retryable is True
+
+    @pytest.mark.asyncio
+    async def test_a_sqlalchemy_error_is_an_enqueue_failure(self) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        spec = _make_spec()
+        broker = _make_broker()
+        cause = IntegrityError('INSERT', None, Exception('duplicate key'))
+        attach_resources(broker, _failing_session(cause))
+
+        result = await start_workflow_async(spec, broker, WORKFLOW_ID)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, WorkflowStartEnqueueFailed)
+        assert result.err_value.exception is cause
         assert result.err_value.retryable is False
+
+    @pytest.mark.asyncio
+    async def test_a_defect_in_the_transaction_propagates(self) -> None:
+        spec = _make_spec()
+        broker = _make_broker()
+        defect = TypeError('unsupported operand type')
+        attach_resources(broker, _failing_session(defect))
+
+        with pytest.raises(TypeError) as exc_info:
+            await start_workflow_async(
+                spec, broker, WORKFLOW_ID, resend_on_transient_err=True,
+            )
+
+        assert exc_info.value is defect
 
     @pytest.mark.asyncio
     async def test_validation_error_never_retried(self) -> None:
@@ -352,7 +446,9 @@ class TestBackoffValues:
         broker = _make_broker()
 
         session_ctx = AsyncMock()
-        session_ctx.__aenter__ = AsyncMock(side_effect=Exception('timeout'))
+        session_ctx.__aenter__ = AsyncMock(
+            side_effect=psycopg.OperationalError('timeout'),
+        )
         attach_resources(broker, fake_resources(session_factory=MagicMock(return_value=session_ctx)))
         with patch('horsies.core.workflows.lifecycle.is_retryable_connection_error', return_value=True):
             with patch('horsies.core.workflows.lifecycle.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
