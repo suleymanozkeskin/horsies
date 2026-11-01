@@ -2,7 +2,7 @@
 
 dumps_json is strict: it rejects non-JSON-native values (tuple, set, non-str
 dict keys, lone surrogates, non-finite floats) rather than coercing them, and
-emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity)
+emits no class tags. loads_json rejects non-RFC-8259 constants (NaN/Infinity),
 numeric literals outside the finite binary64 range, and lone surrogates.
 loads_json_bytes is the stored-payload form: strict UTF-8, and empty is an
 error. dumps_canonical_json is the one canonical form for hashed or stored text.
