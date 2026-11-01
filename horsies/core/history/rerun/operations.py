@@ -400,8 +400,18 @@ async def rerun_task(
 
 
 def _canonical_json(value: Any) -> str:
+    """Serialize a decoded envelope value for the new task row.
+
+    `decode_input_envelope` parsed the value through `loads_json`, so it
+    is finite. A non-finite float is a programmer defect: `allow_nan=False`
+    raises `ValueError` instead of writing a row the worker cannot parse.
+    """
     return json.dumps(
-        value, separators=(',', ':'), sort_keys=True, ensure_ascii=False
+        value,
+        separators=(',', ':'),
+        sort_keys=True,
+        ensure_ascii=False,
+        allow_nan=False,
     )
 
 
