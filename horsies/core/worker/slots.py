@@ -1055,6 +1055,11 @@ class SlotPool:
                     slot.child = child
                     child.notify_on_exit(slot.wake.set)
                     child.on_channel_closed = slot.wake.set
+            if self._stopping:
+                # ``stop`` ran during that await, so it did not see this child.
+                await child.dispose_lost()
+                slot.child = None
+                return Err(PoolStopped())
             ready = await child.await_frame(CHILD_READY_TIMEOUT_S)
             match ready:
                 case ReadyFrame():
