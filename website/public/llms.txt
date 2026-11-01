@@ -14,7 +14,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Skills ship in the wheel, in the package folder: `horsies/.agents/skills/` (a source checkout has the same path)
 - `SKILL.md` -> quick orientation and routing
 - `tasks.md` -> task APIs, send/retry flows, serialization, error handling
-- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-033 validation
+- `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-035 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
 - `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
@@ -530,6 +530,8 @@ Workflow validation (HRS-001-HRS-099):
 - HRS-031 WORKFLOW_KWARGS_NOT_SERIALIZABLE
 - HRS-032 WORKFLOW_INVALID_ID
 - HRS-033 WORKFLOW_INVALID_DEFINITION_CONFIG
+- HRS-034 WORKFLOW_INVALID_PRIORITY
+- HRS-035 WORKFLOW_NAIVE_GOOD_UNTIL
 Task definition (HRS-100-HRS-199):
 <!-- members: ErrorCode part -->
 - HRS-100 TASK_NO_RETURN_TYPE
