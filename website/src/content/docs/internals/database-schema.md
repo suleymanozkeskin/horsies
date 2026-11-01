@@ -144,7 +144,7 @@ Worker monitoring snapshots (timeseries). Each worker inserts one row per
 | `tasks_running` | INT | Current running count |
 | `tasks_claimed` | INT | Current claimed count |
 | `memory_usage_mb` | FLOAT | Parent worker process resident memory |
-| `children_memory_mb` | FLOAT | Summed resident memory of executor child processes |
+| `children_memory_mb` | FLOAT | Summed resident memory of the worker's child processes |
 | `cpu_percent` | FLOAT | CPU usage |
 | `memory_percent` | FLOAT | Memory usage percentage |
 | `max_claim_batch` | INT | Max tasks claimed per batch |

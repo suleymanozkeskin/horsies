@@ -29,8 +29,9 @@ horsies worker <module> [OPTIONS]
 | `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `--max-claim-batch N` | 0 | Max claims per queue per pass (`0` auto-fills available capacity) |
 | `--max-claim-per-worker N` | 0 | Max total claimed tasks (0=auto) |
-| `--max-tasks-per-child N` | 100 | Recycle each worker process after it runs N tasks (`N >= 2`, per-child and staggered). `0` disables recycling. Forces the `spawn` start method. See [worker concurrency](workers/concurrency). |
-| `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child, CPython-only, forces `spawn`). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
+| `--max-tasks-per-child N` | 100 | Recycle each worker child after it runs N tasks (`N >= 1`, per-child and staggered). `0` disables recycling. See [worker concurrency](workers/concurrency). |
+| `--max-memory-per-child-mb N` | _(off)_ | Recycle a child once its own RSS reaches N MB (per-child). Disabled by default. The worker refuses to start if N is at or below the warmed child baseline. See [worker concurrency](workers/concurrency#memory-recycling-max-memory-per-child-mb). |
+| `--drain-timeout SECONDS` | 300 | Seconds to wait for running tasks at shutdown. At this deadline the worker kills their children. Set it below the stop window of your supervisor. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown). |
 
 **Examples:**
 
@@ -51,7 +52,7 @@ horsies worker myapp.instance:app --processes=8 --loglevel=WARNING
 # high-throughput or connection-constrained deployments)
 horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
 
-# Disable recycling (children live for the worker's lifetime, uses fork)
+# Disable recycling (children live for the worker's lifetime)
 horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
 
 # Using file path (also supported)
@@ -302,7 +303,7 @@ Both commands handle graceful shutdown:
 | `SIGTERM` | Graceful shutdown |
 | `SIGINT` (Ctrl+C) | Graceful shutdown |
 
-Workers wait for running tasks to complete before exiting.
+Workers wait up to `--drain-timeout` seconds for running tasks. See [Graceful Shutdown](workers/worker-architecture#graceful-shutdown).
 
 ## Exit Codes
 
@@ -342,10 +343,14 @@ User=app
 WorkingDirectory=/app
 ExecStart=/usr/bin/horsies worker myapp.instance:app --processes=8
 Restart=always
+KillMode=mixed
+TimeoutStopSec=330
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+`KillMode=mixed` sends SIGTERM to the worker only, so subprocesses of running tasks are not stopped by the signal. `TimeoutStopSec` must be above `--drain-timeout`.
 
 ### Docker
 
@@ -358,6 +363,8 @@ RUN pip install horsies
 
 CMD ["horsies", "worker", "myapp.instance:app", "--processes=8"]
 ```
+
+Use this exec form. With the shell form, `sh` receives SIGTERM and the worker does not. Docker waits 10 seconds by default, so set `--drain-timeout` below that or raise `docker stop --time`.
 
 ### Procfile
 
