@@ -448,20 +448,19 @@ class DispatchMixin:
         """Persist TASK_TIMEOUT for an over-deadline task and kill its child.
 
         Ownership-guarded like every finalize path: a row already resolved by
-        another actor (reaper reclaim, cancel) is left alone. A CLAIMED row
-        (child never confirmed RUNNING) is requeued instead of killed — the
-        child's ownership confirm will come back CLAIM_LOST.
+        another actor (reaper reclaim, cancel) is left alone, and a CLAIMED row
+        (child never confirmed RUNNING) is requeued. The child is killed on
+        every path, also after a database error: a child past its deadline may
+        be hung, and only its exit frees the slot and ends the wait for it.
 
         ``claimed_at`` fences the row lookup to this dispatch's claim
         generation (C10); a re-claimed row is left alone entirely.
 
-        The kill happens on both the retry-scheduled and terminal-failure
-        branches: the hung child keeps executing user code either way, and a
+        A hung child keeps executing user code whatever the row says, and a
         zombie attempt racing a re-claimed retry would be a double execution.
         The kill is bound to this task's slot, so it cannot reach the next
         task, and it goes to the child's session, so task subprocesses go too.
         """
-        kill_child = False
         try:
             task_error = TaskError(
                 error_code=OutcomeCode.TASK_TIMEOUT,
@@ -535,7 +534,6 @@ class DispatchMixin:
                     )
                     return
 
-                kill_child = True
                 attempt_num = (ctx_row.retry_count or 0) + 1
                 db_now = ctx_row.db_now or datetime.now(timezone.utc)
                 attempt_started_at = ctx_row.started_at or db_now
@@ -629,8 +627,7 @@ class DispatchMixin:
                 exc,
             )
         finally:
-            if kill_child:
-                self._kill_timed_out_child(handle, task_id, timeout_ms)
+            self._kill_timed_out_child(handle, task_id, timeout_ms)
 
     def _kill_timed_out_child(
         self,

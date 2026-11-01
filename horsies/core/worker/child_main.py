@@ -54,6 +54,9 @@ PARENT_GONE_EXIT_CODE: Final = 71
 BAD_PARENT_FRAME_EXIT_CODE: Final = 72
 BAD_ARGUMENTS_EXIT_CODE: Final = 73
 INIT_FRAME_TIMEOUT_S: Final = 30.0
+# Metadata holds this text as JSON, and one character takes at most 12 bytes
+# there, so the reason stays well under ``MAX_META_BYTES``.
+MAX_FAILED_REASON_CHARS: Final = 64 * 1024
 
 _PR_SET_PDEATHSIG: Final = 1
 
@@ -120,6 +123,9 @@ def _read_parent_frames(
                     assert_never(unreachable)
     except (EOFError, OSError):
         os._exit(PARENT_GONE_EXIT_CODE)
+    except Exception:
+        logger.critical('Control thread failed', exc_info=True)
+        os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
 def bind_to_parent(parent_pid: int) -> None:
@@ -170,18 +176,29 @@ def _read_rss() -> RssReading:
     return RssUnreadable() if rss_mb is None else RssMb(rss_mb)
 
 
+def bounded_text(text: str, limit: int) -> str:
+    """Make free text safe for a metadata field: valid UTF-8, and bounded.
+
+    The text can come from an exception, so it may hold a lone surrogate, which
+    JSON text cannot encode, or it may be any size.
+    """
+    safe = text.encode('utf-8', 'backslashreplace').decode('utf-8')
+    if len(safe) <= limit:
+        return safe
+    return f'{safe[:limit]} [cut from {len(safe)} characters]'
+
+
 def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
     """Make a wire result safe to frame.
 
-    A result too large to ever be stored becomes a typed failure. A failure
-    reason can carry text from an exception, so it may hold a lone surrogate,
-    which JSON text cannot encode.
+    A result too large to ever be stored becomes a typed failure. A long
+    failure reason is cut: the result beside it stays valid.
     """
     ok, result_json, failed_reason = wire
     size = len(result_json.encode('utf-8'))
     if size <= MAX_BODY_BYTES:
         if failed_reason is not None:
-            failed_reason = failed_reason.encode('utf-8', 'backslashreplace').decode('utf-8')
+            failed_reason = bounded_text(failed_reason, MAX_FAILED_REASON_CHARS)
         return ok, result_json, failed_reason
     message = (
         f'result of task {frame.task_name} is {size} bytes, above the '
@@ -198,6 +215,33 @@ def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
     return True, serialize_error_payload(failure), message
 
 
+def _flush_output() -> None:
+    """Flush before ``os._exit``, which skips it. A closed stream is no failure."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            continue
+
+
+def _run_or_exit(run_task: RunTaskFn, frame: RunFrame, init: InitFrame) -> WireResult:
+    """Run one task. Anything that escapes ends this process at once.
+
+    A normal exit would wait for every non-daemon thread that the task started,
+    so the slot would stay busy with no bound. The parent sees this exit and
+    recovers the row by its status.
+    """
+    try:
+        return run_task(frame, init)
+    except SystemExit as exc:
+        _flush_output()
+        os._exit(exc.code if isinstance(exc.code, int) else 1)
+    except BaseException:
+        logger.critical('Task %s escaped the task runner', frame.task_id, exc_info=True)
+        _flush_output()
+        os._exit(1)
+
+
 def serve(
     sock: socket.socket,
     parent_pid: int,
@@ -208,9 +252,9 @@ def serve(
 
     Failure exits: an exception from ``boot`` propagates, so the child exits
     non-zero before it reports ready. A parent that is gone or that sends a
-    bad frame ends the process through ``os._exit``. An exception from
-    ``run_task`` propagates: the parent sees the exit and recovers the row by
-    its status. Does not write to the database itself.
+    bad frame ends the process through ``os._exit``, and so does an exception
+    from ``run_task``: the parent sees the exit and recovers the row by its
+    status. Does not write to the database itself.
     """
     ignore_stop_signals()
     bind_to_parent(parent_pid)
@@ -230,7 +274,7 @@ def serve(
             case RunFrame() as frame:
                 ok, result_json, failed_reason = _bounded_result(
                     frame,
-                    run_task(frame, init),
+                    _run_or_exit(run_task, frame, init),
                 )
                 _send_child_frame(
                     sock,

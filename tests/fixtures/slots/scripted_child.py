@@ -17,6 +17,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 from horsies.core.worker.child_main import WireResult, _send_child_frame, serve
@@ -92,6 +93,15 @@ def _run(frame: RunFrame, init: InitFrame) -> WireResult:
             return True, str(_socket_count()), None
         case 'state':
             return True, f'{sys.argv!r}|{sys.path[:1]!r}|{__debug__}', None
+        case 'zero_header':
+            _sock.sendall(FRAME_HEADER.pack(0, 0))
+            time.sleep(60)
+            return _pid_result()
+        case 'long_reason':
+            return True, 'kept', 'r' * (2 << 20)
+        case 'raise_with_thread':
+            threading.Thread(target=time.sleep, args=(60,)).start()
+            raise RuntimeError('escaped with a live thread')
         case 'sleep':
             time.sleep(float(argument))
             return _pid_result()

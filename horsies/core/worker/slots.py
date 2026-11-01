@@ -75,6 +75,7 @@ CHILD_BOOT_RETRY_DELAY_S: Final = 0.5
 CHILD_READY_TIMEOUT_S: Final = 120.0
 CHILD_STOP_TIMEOUT_S: Final = 10.0
 CHILD_KILL_WAIT_S: Final = 30.0
+SLOT_DEFECT_LIMIT: Final = 3
 CHANNEL_LOST_GRACE_S: Final = 0.2
 DRAIN_QUIET_PASSES: Final = 3
 DRAIN_DEADLINE_S: Final = 5.0
@@ -132,6 +133,7 @@ class LossCause(str, Enum):
     CHANNEL_LOST = 'channel to the child was lost'
     PROTOCOL_VIOLATION = 'child sent a bad frame'
     KILLED_BY_PARENT = 'killed by the worker'
+    SLOT_DEFECT = 'the worker slot failed'
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +238,11 @@ class BootAttemptsExhausted:
 PoolFailure: TypeAlias = (
     SpawnFailed | ChildHookFailed | BootAttemptsExhausted | PreloadRefused
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PoolStopped:
+    """``stop`` ran while the pool was starting. This is no failure."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,6 +422,7 @@ class Child:
         self._exit.add_done_callback(lambda _: wake.set())
         self.channel_closed = False
         self.killed_by_parent = False
+        self.on_channel_closed: Callable[[], None] | None = None
 
     @classmethod
     async def start(
@@ -492,6 +500,8 @@ class Child:
         def on_closed() -> None:
             closed[0].channel_closed = True
             wake.set()
+            if closed[0].on_channel_closed is not None:
+                closed[0].on_channel_closed()
 
         protocol = FrameProtocol(on_frame, on_closed)
         parent_sock.setblocking(False)
@@ -624,15 +634,20 @@ class Child:
                 return await self._verdict_after_exit()
         self.kill_group()
         await self._wait_exit(CHILD_KILL_WAIT_S)
-        return self._lost(cause)
+        return self._lost(LossCause.KILLED_BY_PARENT if self.killed_by_parent else cause)
 
     async def _wait_exit(self, timeout_s: float) -> None:
         await asyncio.wait({self._exit}, timeout=timeout_s)
 
-    def discard_violating_child(self) -> ChildLost:
-        """Kill a child that sent a valid frame at the wrong time."""
+    async def discard_violating_child(self) -> ChildLost:
+        """Kill a child that sent a valid frame at the wrong time, and wait for it."""
         self.kill_group()
+        await self._wait_exit(CHILD_KILL_WAIT_S)
         return self._lost(LossCause.PROTOCOL_VIOLATION)
+
+    def lost_for(self, cause: LossCause) -> ChildLost:
+        """Describe this child's end, for a cause that the caller knows."""
+        return self._lost(cause)
 
     @property
     def has_exited(self) -> bool:
@@ -728,6 +743,7 @@ class _Slot:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     child: Child | None = None
     handle: SlotHandle | None = None
+    defects: int = 0
 
 
 class SlotPool:
@@ -748,15 +764,16 @@ class SlotPool:
         self._stopping = False
         self._failure: PoolFailure | None = None
         self._failed: asyncio.Future[PoolFailure] = self._loop.create_future()
-        self._baselines: list[ChildBaseline] = []
+        self._baselines: dict[int, ChildBaseline] = {}
+        self._stop_requested: asyncio.Future[None] = self._loop.create_future()
         self._first_generation: asyncio.Future[None] = self._loop.create_future()
         self._preload: PreloadParent | None = None
         self._preload_watch: asyncio.Task[None] | None = None
         # Every child that has not exited, from any preload parent or ``exec``.
         self._live_pids: set[int] = set()
 
-    async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure]:
-        """Boot every slot. Returns when all are ready, or on the first failure.
+    async def start(self) -> Result[tuple[ChildBaseline, ...], PoolFailure | PoolStopped]:
+        """Boot every slot. Returns when all are ready, on the first failure, or at a stop.
 
         After a failure, ``stop`` is still required.
         """
@@ -768,12 +785,14 @@ class SlotPool:
             asyncio.ensure_future(self._serve_slot(slot)) for slot in self._slots
         ]
         await asyncio.wait(
-            {self._first_generation, self._failed},
+            {self._first_generation, self._failed, self._stop_requested},
             return_when=asyncio.FIRST_COMPLETED,
         )
         if self._failure is not None:
             return Err(self._failure)
-        return Ok(tuple(self._baselines))
+        if self._stopping:
+            return Err(PoolStopped())
+        return Ok(tuple(self._baselines.values()))
 
     def submit(self, frame: RunFrame) -> SlotHandle:
         """Queue a task. A pool that cannot take it answers ``NotDispatched`` at once."""
@@ -909,28 +928,54 @@ class SlotPool:
     async def _serve_slot(self, slot: _Slot) -> None:
         """Keep one child alive on this slot until the pool stops or fails.
 
-        A slot is a service loop. An unexpected exception here is a defect, so
-        it is recorded as a pool failure: a slot must never stop silently
-        while work waits for it.
+        A slot is a service loop. An unexpected exception here is a defect: it
+        costs that slot's task and child, and the slot goes on. Repeated
+        defects with no finished task between them fail the pool, so a slot
+        cannot stop silently or spin while work waits for it.
         """
-        try:
-            while not self._stopping and self._failure is None:
-                booted = await self._boot_child(slot)
-                match booted:
-                    case Err(failure):
-                        self._record_failure(failure)
-                        return
+        while not self._stopping and self._failure is None:
+            try:
+                match await self._boot_child(slot):
                     case Ok(child):
                         await self._run_generation(slot, child)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.critical('Slot %s stopped on a defect', slot.index, exc_info=True)
-            self._record_failure(
-                BootAttemptsExhausted(0, f'{type(exc).__name__}: {exc}'),
-            )
+                    case Err(error):
+                        self._end_after_boot_error(error)
+                        return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.critical('Slot %s hit a defect', slot.index, exc_info=True)
+                await self._clear_slot(slot)
+                slot.defects += 1
+                if slot.defects >= SLOT_DEFECT_LIMIT:
+                    self._record_failure(
+                        BootAttemptsExhausted(0, f'{type(exc).__name__}: {exc}'),
+                    )
+                    return
 
-    async def _boot_child(self, slot: _Slot) -> Result[Child, PoolFailure]:
+    def _end_after_boot_error(self, error: PoolFailure | PoolStopped) -> None:
+        match error:
+            case PoolStopped():
+                return
+            case SpawnFailed() | ChildHookFailed() | BootAttemptsExhausted():
+                self._record_failure(error)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    async def _clear_slot(self, slot: _Slot) -> None:
+        """End this slot's child, and answer its task, after a defect."""
+        slot.state = Retiring()
+        child, slot.child = slot.child, None
+        handle, slot.handle = slot.handle, None
+        if child is not None:
+            await child.dispose_lost()
+        if handle is not None and child is not None:
+            handle.finish(child.lost_for(LossCause.SLOT_DEFECT))
+
+    async def _boot_child(
+        self,
+        slot: _Slot,
+    ) -> Result[Child, PoolFailure | PoolStopped]:
         """Start one ready child, with the failure classification in the type."""
         slot.state = Starting()
         last_detail = 'no attempt ran'
@@ -939,6 +984,8 @@ class SlotPool:
             process_name=f'{self._config.init.process_name}-{slot.index}',
         )
         for attempt in range(1, CHILD_BOOT_ATTEMPTS + 1):
+            if self._stopping:
+                return Err(PoolStopped())
             match await Child.start(
                 self._config,
                 init,
@@ -950,10 +997,11 @@ class SlotPool:
                 case Ok(child):
                     slot.child = child
                     child.notify_on_exit(slot.wake.set)
+                    child.on_channel_closed = slot.wake.set
             ready = await child.await_frame(CHILD_READY_TIMEOUT_S)
             match ready:
                 case ReadyFrame():
-                    self._note_ready(ChildBaseline(pid=ready.pid, rss=ready.rss))
+                    self._note_ready(slot, ChildBaseline(pid=ready.pid, rss=ready.rss))
                     return Ok(child)
                 case ChildLost(child_exit=ExitedWith(code=code)) if (
                     code == CHILD_HOOK_FAILURE_EXIT_CODE
@@ -971,6 +1019,8 @@ class SlotPool:
                     assert_never(unreachable)
             await child.dispose_lost()
             slot.child = None
+            if self._stopping:
+                return Err(PoolStopped())
             logger.warning(
                 'Child boot attempt %s/%s failed on slot %s: %s',
                 attempt,
@@ -982,10 +1032,10 @@ class SlotPool:
                 await asyncio.sleep(CHILD_BOOT_RETRY_DELAY_S * attempt)
         return Err(BootAttemptsExhausted(CHILD_BOOT_ATTEMPTS, last_detail))
 
-    def _note_ready(self, baseline: ChildBaseline) -> None:
+    def _note_ready(self, slot: _Slot, baseline: ChildBaseline) -> None:
         if self._first_generation.done():
             return
-        self._baselines.append(baseline)
+        self._baselines[slot.index] = baseline
         if len(self._baselines) == self._config.slots:
             self._first_generation.set_result(None)
 
@@ -1001,6 +1051,7 @@ class SlotPool:
             tasks_done += 1
             match outcome:
                 case TaskFinished(rss=rss):
+                    slot.defects = 0
                     reason = self._recycle_reason(tasks_done, rss)
                     if reason is not None:
                         logger.debug('Retiring child pid=%s: %s', child.pid, reason.value)
@@ -1028,14 +1079,22 @@ class SlotPool:
     async def _next_task(self, slot: _Slot, child: Child) -> SlotHandle | None:
         """Wait for work. None means this child must not take any."""
         while True:
-            if self._stopping or self._failure is not None or child.has_exited:
+            if self._child_cannot_serve(child):
                 return None
             if self._pending:
                 return self._pending.popleft()
             slot.wake.clear()
-            if self._pending or child.has_exited:
+            if self._pending or self._child_cannot_serve(child):
                 continue
             await slot.wake.wait()
+
+    def _child_cannot_serve(self, child: Child) -> bool:
+        return (
+            self._stopping
+            or self._failure is not None
+            or child.has_exited
+            or child.channel_closed
+        )
 
     async def _run_task(
         self,
@@ -1060,7 +1119,7 @@ class SlotPool:
                     answer.rss,
                 )
             case ResultFrame() | ReadyFrame():
-                outcome = child.discard_violating_child()
+                outcome = await child.discard_violating_child()
             case ChildLost():
                 outcome = answer
             case WaitExpired():
@@ -1120,7 +1179,13 @@ class SlotPool:
 
     async def _stop_slots(self, drain_timeout_s: float) -> StopReport:
         self._stopping = True
+        if not self._stop_requested.done():
+            self._stop_requested.set_result(None)
         self._release_pending()
+        for slot in self._slots:
+            # A booting child holds no task, so it does not wait for the drain.
+            if slot.child is not None and isinstance(slot.state, Starting):
+                slot.child.kill_group()
         self._wake_slots()
         if not self._tasks:
             return StopReport(())
@@ -1134,6 +1199,8 @@ class SlotPool:
                 task.cancel()
             if stuck:
                 await asyncio.wait(stuck, timeout=CHILD_KILL_WAIT_S)
+            for slot in self._slots:
+                await self._clear_slot(slot)
         for task in self._tasks:
             if task.done() and not task.cancelled() and task.exception() is not None:
                 logger.error('Slot task ended with %r', task.exception())
