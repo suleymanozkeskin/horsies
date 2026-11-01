@@ -198,7 +198,7 @@ def _observed(status: TaskStatus | None) -> ObservedTaskState:
 
 def _locked_row(*, is_workflow_task: bool) -> MagicMock:
     result = MagicMock()
-    result.first.return_value = (is_workflow_task, False)
+    result.first.return_value = (is_workflow_task,)
     return result
 
 

@@ -208,11 +208,9 @@ class TaskCancelled:
 
 # Locks the row for the rest of the transaction. The diagnosis reads
 # ``is_workflow_task`` here; the status it reports comes from the cancel
-# outcome, which decodes it. ``expiry_passed`` is evaluated against NOW(),
-# the transaction timestamp.
+# outcome, which decodes it.
 _LOCK_TASK_SQL = text("""
-    SELECT is_workflow_task,
-           (good_until IS NOT NULL AND good_until <= NOW()) AS expiry_passed
+    SELECT is_workflow_task
     FROM horsies_tasks
     WHERE id = CAST(:id AS uuid)
     FOR UPDATE
@@ -377,7 +375,7 @@ async def cancel_task(
                 return await _diagnose_live_miss(
                     await session.connection(), task_id
                 )
-            is_workflow_task, _expiry_passed = locked
+            (is_workflow_task,) = locked
 
             outcome = await apply_async(
                 await session.connection(),
