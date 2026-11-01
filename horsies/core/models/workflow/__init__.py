@@ -40,9 +40,16 @@ from horsies.core.models.workflow.handle import (
     WorkflowHandle,
 )
 from horsies.core.models.workflow.handle_types import (
+    HandleAsyncContext,
+    HandleDbOperationFailed,
     HandleErrorCode,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
     HandleOperationError,
     HandleResult,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
+    HandleWorkflowNotFound,
 )
 from horsies.core.models.workflow.spec import WorkflowSpec
 from horsies.core.models.workflow.definition import (
@@ -86,9 +93,16 @@ __all__ = [
     'WorkflowTaskInfo',
     'WorkflowHandle',
     # handle types
+    'HandleAsyncContext',
+    'HandleDbOperationFailed',
     'HandleErrorCode',
+    'HandleEventLoopLimit',
+    'HandleLoopRunnerFailed',
     'HandleOperationError',
     'HandleResult',
+    'HandleResumeRecoveryFailed',
+    'HandleStoredDataInvalid',
+    'HandleWorkflowNotFound',
     # spec
     'WorkflowSpec',
     # definition

@@ -21,7 +21,6 @@ contract rather than aliasing its rerun.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -30,6 +29,8 @@ from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
+
+from horsies.core.codec.json_io import dumps_canonical_json
 
 from ..identity.fingerprint import EnqueueCommandV1
 from ..names import RETENTION_CLASSES
@@ -263,10 +264,10 @@ async def rerun_task(
 
     new_task_id = mint_task_id()
     root_task_id = detail.rerun_root_task_id or detail.task_id
-    args_json = _canonical_json(list(decoded.args))
-    kwargs_json = _canonical_json(decoded.kwargs)
+    args_json = dumps_canonical_json(list(decoded.args))
+    kwargs_json = dumps_canonical_json(decoded.kwargs)
     options_json = (
-        _canonical_json(decoded.options)
+        dumps_canonical_json(decoded.options)
         if decoded.options is not None
         else None
     )
@@ -397,22 +398,6 @@ async def rerun_task(
         new_task_id=new_task_id,
         source_task_id=detail.task_id,
         rerun_root_task_id=root_task_id,
-    )
-
-
-def _canonical_json(value: Any) -> str:
-    """Serialize a decoded envelope value for the new task row.
-
-    `decode_input_envelope` parsed the value through `loads_json`, so it
-    is finite. A non-finite float is a programmer defect: `allow_nan=False`
-    raises `ValueError` instead of writing a row the worker cannot parse.
-    """
-    return json.dumps(
-        value,
-        separators=(',', ':'),
-        sort_keys=True,
-        ensure_ascii=False,
-        allow_nan=False,
     )
 
 

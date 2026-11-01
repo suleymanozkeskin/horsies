@@ -12,12 +12,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from horsies.core.history.archive.attempts import encode_attempt_snapshot
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
     _decode_history_detail,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.types.status import TaskStatus
+
+from tests.attempt_snapshot_support import encode_attempt_snapshot
 
 pytestmark = [pytest.mark.unit]
 

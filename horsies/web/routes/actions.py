@@ -6,17 +6,18 @@ Every action's authority is a compare-and-set in the database, so there is no
 optimistic-concurrency field to send: a lost race surfaces as 409 carrying the
 status actually observed, and the client refetches.
 
-Three primitives return an outcome the caller cannot interpret alone, and each
-is resolved by re-reading the run's status server-side rather than pushing the
-ambiguity to the browser:
+Two primitive outcomes cannot be interpreted alone, and each is resolved by
+re-reading the run's status server-side rather than pushing the ambiguity to
+the browser:
 
 * pause/resume answer ``Ok(False)`` when the run existed but was not in the
   expected state — not an error, but not the requested effect either.
 * workflow cancel answers ``Ok(None)`` even when it was a no-op on an already
   finished run.
-* resume can fail *after* committing, because its recovery pass runs in a
-  second transaction. A run found RUNNING after such a failure was resumed;
-  the response says so and carries a warning.
+
+Resume returns ``HandleResumeRecoveryFailed`` when it committed and its
+recovery pass, which runs in a second transaction, failed. The run was
+resumed; the response says so and carries a warning.
 """
 
 from __future__ import annotations
@@ -33,8 +34,14 @@ from horsies.core.logging import get_logger
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
-    HandleErrorCode,
+    HandleAsyncContext,
+    HandleDbOperationFailed,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
     HandleOperationError,
+    HandleResumeRecoveryFailed,
+    HandleStoredDataInvalid,
+    HandleWorkflowNotFound,
 )
 from horsies.core.types.result import is_err
 from horsies.core.workflows.lifecycle import pause_workflow, resume_workflow
@@ -129,24 +136,36 @@ def _task_action_failed(error: TaskActionError) -> _Outcome:
 def _handle_failed(error: HandleOperationError) -> _Outcome:
     """Map a workflow primitive's failure onto its response.
 
-    The routes call only async workflow primitives, so ``ASYNC_CONTEXT``
-    (returned by sync facades only) fails an assertion.
+    Stored data that does not parse answers 500: the request was valid, and
+    a repeat gets the same answer. The routes call only async workflow
+    primitives, so ``HandleAsyncContext`` (returned by sync facades only)
+    fails an assertion. Only resume returns ``HandleResumeRecoveryFailed``,
+    and the resume route answers it before it calls this function, so here
+    it fails an assertion.
     """
-    match error.code:
-        case HandleErrorCode.WORKFLOW_NOT_FOUND:
+    match error:
+        case HandleWorkflowNotFound():
             return _Outcome(status_code=404, content={'detail': error.message})
-        case (
-            HandleErrorCode.DB_OPERATION_FAILED
-            | HandleErrorCode.LOOP_RUNNER_FAILED
-            | HandleErrorCode.INTERNAL_FAILED
-            | HandleErrorCode.EVENT_LOOP_LIMIT
-        ):
+        case HandleDbOperationFailed():
             return _Outcome(status_code=503, content={'detail': error.message})
-        case HandleErrorCode.ASYNC_CONTEXT:
+        case HandleLoopRunnerFailed():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleEventLoopLimit():
+            return _Outcome(status_code=503, content={'detail': error.message})
+        case HandleStoredDataInvalid():
+            return _Outcome(status_code=500, content={'detail': error.message})
+        case HandleResumeRecoveryFailed():
+            raise AssertionError(
+                f'web workflow action for workflow {error.workflow_id} got '
+                'RESUME_RECOVERY_FAILED; the resume route answers it first',
+            )
+        case HandleAsyncContext():
             raise AssertionError(
                 f'web workflow action for workflow {error.workflow_id} got '
                 'ASYNC_CONTEXT; the routes call only async workflow primitives',
             )
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _respond(route: str, entity_id: str, outcome: _Outcome) -> JSONResponse:
@@ -218,29 +237,25 @@ def build_router(broker: PostgresBroker) -> APIRouter:
     async def resume_workflow_route(workflow_id: str) -> JSONResponse:
         """Re-enqueue paused nodes.
 
-        A failure here can still mean the resume committed: the recovery pass
-        runs in its own transaction after the state change. The run's status
-        settles that question.
+        ``HandleResumeRecoveryFailed`` means the resume committed and only
+        the recovery pass, which runs in its own transaction after the state
+        change, failed. The run was resumed, so the response says so and
+        carries a warning.
         """
         result = await resume_workflow(broker, workflow_id)
         if is_err(result):
             error = result.err_value
-            if error.code is HandleErrorCode.WORKFLOW_NOT_FOUND:
-                return _respond('workflows.resume', workflow_id, _handle_failed(error))
-            current = await _current_status(workflow_id)
-            if isinstance(current, _Outcome):
-                return _respond('workflows.resume', workflow_id, current)
-            if current is WorkflowStatus.RUNNING:
-                return _respond(
-                    'workflows.resume',
-                    workflow_id,
-                    _succeeded('resumed', warning=RESUME_RECOVERY_WARNING),
-                )
-            return _respond(
-                'workflows.resume',
-                workflow_id,
-                _Outcome(status_code=503, content={'detail': error.message}),
-            )
+            match error:
+                case HandleResumeRecoveryFailed():
+                    return _respond(
+                        'workflows.resume',
+                        workflow_id,
+                        _succeeded('resumed', warning=RESUME_RECOVERY_WARNING),
+                    )
+                case _:
+                    return _respond(
+                        'workflows.resume', workflow_id, _handle_failed(error),
+                    )
         if result.ok_value:
             return _respond('workflows.resume', workflow_id, _succeeded('resumed'))
 

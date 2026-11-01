@@ -31,7 +31,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from horsies.core.history.archive.attempts import (
     AttemptRecord,
     decode_attempt_snapshot,
-    encode_attempt_snapshot,
 )
 from horsies.core.history.archive.versions import DecodedArchiveValue
 from horsies.core.history.commands import EnsureLeafCoverage
@@ -58,6 +57,7 @@ from horsies.core.history.reads.publisher import StagedLoaderPublisher
 from horsies.core.models.task_pg import TaskAttemptModel, TaskModel
 from horsies.core.models.workflow_pg import WorkflowTaskModel
 from horsies.core.types.status import TaskStatus
+from tests.attempt_snapshot_support import encode_attempt_snapshot
 
 HISTORY_SEED_CLASS_KEY = DEFAULT_RETENTION_CLASS_KEY
 """Seeding uses the ratified default class, so fixture rows, stamped

@@ -753,12 +753,12 @@ class TestWorkflowActionMapping:
 class TestResumeCommittedThenFailed:
     """Resume's recovery pass runs after the state change commits.
 
-    A failure returned by resume therefore does not mean the resume did not
-    happen. The server re-reads the run rather than handing the ambiguity to
-    the browser.
+    Resume returns ``HandleResumeRecoveryFailed`` when it committed and only
+    the recovery pass failed. The server answers from that variant rather
+    than handing the ambiguity to the browser.
     """
 
-    async def test_failure_with_a_running_run_is_success_plus_a_warning(
+    async def test_recovery_failure_is_success_plus_a_warning(
         self,
         api: AsyncClient,
         session: AsyncSession,
@@ -769,16 +769,14 @@ class TestResumeCommittedThenFailed:
 
         async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleResumeRecoveryFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleResumeRecoveryFailed(
                     message='recovery pass failed',
-                    retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 
@@ -790,7 +788,7 @@ class TestResumeCommittedThenFailed:
         assert response.json()['outcome'] == 'resumed'
         assert response.json()['warning'] == 'post_resume_recovery_failed'
 
-    async def test_failure_with_a_still_paused_run_is_service_unavailable(
+    async def test_failure_before_the_commit_is_service_unavailable(
         self,
         api: AsyncClient,
         session: AsyncSession,
@@ -801,16 +799,15 @@ class TestResumeCommittedThenFailed:
 
         async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleDbOperationFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleDbOperationFailed(
                     message='resume failed outright',
                     retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 
@@ -831,16 +828,15 @@ class TestResumeCommittedThenFailed:
 
         async def failing_pause(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleDbOperationFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleDbOperationFailed(
                     message='pause failed',
                     retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 

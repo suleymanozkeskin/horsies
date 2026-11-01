@@ -1,8 +1,8 @@
-"""Archive codecs: canonical encoding, exhaustive fail-closed decoding.
+"""Archive codecs: exhaustive fail-closed decoding.
 
-The attempt payload bytes are pinned exactly because two writers must
-produce them — this module and the SQL terminalization encoder — and the
-digest covers the bytes, so any divergence is a permanent integrity fault.
+The attempt payload bytes are pinned exactly because the digest covers them:
+the test mirror in `tests/attempt_snapshot_support.py` and the SQL
+terminalization encoder must agree, or the fixtures stop matching stored rows.
 Decode tests enumerate every documented corruption, and the discriminant
 tests enumerate the ratified value sets so a drive-by addition has to
 justify itself here.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -20,36 +21,18 @@ import pytest
 from horsies.core.history.archive.attempts import (
     ATTEMPT_FIELD_COUNT,
     AttemptRecord,
-    StoredAttemptSnapshot,
     decode_attempt_snapshot,
-    encode_attempt_snapshot,
 )
 from horsies.core.history.archive.registry import (
     RETAINED_ARCHIVE_VERSIONS,
     is_retained,
     retained_versions,
 )
-from horsies.core.history.archive.rerun_input import (
-    RERUN_INPUT_INLINE_MAX_BYTES,
-    RERUN_INPUT_REFERENCE_MAX_BYTES,
-    AvailableInlineInput,
-    AvailableReferencedInput,
-    RerunInputDisposition,
-    RerunInputUnavailability,
-    RerunInputUnavailableReason,
-    UnavailableRerunInput,
-    decode_rerun_input,
-    disposition_of,
-    store_inline_rerun_input,
-    store_referenced_rerun_input,
-    store_unavailable_rerun_input,
-)
 from horsies.core.history.archive.results import (
     AdministrativePriorResult,
     CanonicalResultPayload,
     NoResultPayload,
     decode_result_envelope,
-    encode_result_envelope,
     select_result_payload,
 )
 from horsies.core.history.archive.versions import (
@@ -63,6 +46,14 @@ from horsies.core.history.archive.versions import (
     UnknownArchiveVersion,
     archive_digest,
     decode_history_row_version,
+)
+from horsies.core.history.errors import HistoryContractError
+from horsies.core.history.reads.detail import (
+    _decode_history_detail,  # pyright: ignore[reportPrivateUsage]
+)
+from tests.attempt_snapshot_support import (
+    StoredAttemptSnapshot,
+    encode_attempt_snapshot,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -111,6 +102,18 @@ def decode_stored(
     }
     values.update(overrides)
     return decode_attempt_snapshot(**values)  # type: ignore[arg-type]
+
+
+def decode_result(payload: bytes, **overrides: object) -> object:
+    values: dict[str, object] = {
+        'version': 1,
+        'codec': 'json-utf8',
+        'content_type': 'application/json',
+        'payload': payload,
+        'digest': archive_digest(payload),
+    }
+    values.update(overrides)
+    return decode_result_envelope(**values)  # type: ignore[arg-type]
 
 
 class TestAttemptRecordConstruction:
@@ -217,8 +220,13 @@ class TestAttemptDecodeFailures:
     @pytest.mark.parametrize(
         ('payload', 'detail'),
         [
-            (b'not json', 'JSONDecodeError'),
-            (b'\xff\xfe', 'JSONDecodeError'),
+            (b'not json', 'invalid_json'),
+            (b'\xff\xfe', 'invalid_json'),
+            (b'', 'invalid_json'),
+            (b'[NaN]', 'invalid_json'),
+            (b'[Infinity]', 'invalid_json'),
+            (b'[1e9999]', 'invalid_json'),
+            (b'[' + b'1' * 5000 + b']', 'invalid_json'),
             (b'{}', 'expected_array'),
             (b'[{}]', 'expected_positional_row'),
             (b'[[1,"OK",true]]', 'wrong_field_count'),
@@ -295,64 +303,61 @@ class TestAttemptDecodeFailures:
 
 class TestResultEnvelope:
     def test_roundtrip(self) -> None:
-        stored = encode_result_envelope('{"answer":42,"text":"später"}')
-        decoded = decode_result_envelope(
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
+        payload = '{"answer":42,"text":"später"}'.encode()
+        assert decode_result(payload) == DecodedArchiveValue(
+            {'answer': 42, 'text': 'später'}
         )
-        assert decoded == DecodedArchiveValue({'answer': 42, 'text': 'später'})
 
-    def test_encode_stores_the_exact_caller_bytes(self) -> None:
-        result_json = '{"b": 1, "a": 2}'
-        stored = encode_result_envelope(result_json)
-        assert stored.payload == result_json.encode()
-
-    def test_encode_rejects_malformed_json(self) -> None:
-        with pytest.raises(ValueError, match='not well-formed JSON'):
-            encode_result_envelope('{"unterminated": ')
+    def test_stored_json_null_is_a_decoded_none(self) -> None:
+        assert decode_result(b'null') == DecodedArchiveValue(None)
 
     def test_digest_mismatch(self) -> None:
-        stored = encode_result_envelope('{}')
-        assert decode_result_envelope(
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=bytes(32),
-        ) == ArchiveDigestMismatch(ArchiveDomain.RESULT)
-
-    def test_corrupt_payload_with_matching_digest(self) -> None:
-        payload = b'not json'
-        result = decode_result_envelope(
-            version=1,
-            codec='json-utf8',
-            content_type='application/json',
-            payload=payload,
-            digest=archive_digest(payload),
+        assert decode_result(b'{}', digest=bytes(32)) == ArchiveDigestMismatch(
+            ArchiveDomain.RESULT
         )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RESULT, 'JSONDecodeError'
+
+    @pytest.mark.parametrize(
+        'payload',
+        [
+            b'not json',
+            b'\xff\xfe',
+            b'',
+            b'{"x":NaN}',
+            b'{"x":Infinity}',
+            b'{"x":1e9999}',
+            b'{"x":' + b'1' * 5000 + b'}',
+        ],
+    )
+    def test_corrupt_payload_with_matching_digest(self, payload: bytes) -> None:
+        assert decode_result(payload) == CorruptArchiveValue(
+            ArchiveDomain.RESULT, 'invalid_json'
         )
 
     def test_unknown_discriminants(self) -> None:
-        stored = encode_result_envelope('{}')
-        assert decode_result_envelope(
-            version=5,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
-        ) == UnknownArchiveVersion(ArchiveDomain.RESULT, 5)
-        assert decode_result_envelope(
-            version=1,
-            codec='pickle',
-            content_type=stored.content_type,
-            payload=stored.payload,
-            digest=stored.digest,
-        ) == UnknownArchiveCodec(ArchiveDomain.RESULT, 'pickle')
+        assert decode_result(b'{}', version=5) == UnknownArchiveVersion(
+            ArchiveDomain.RESULT, 5
+        )
+        assert decode_result(b'{}', codec='pickle') == UnknownArchiveCodec(
+            ArchiveDomain.RESULT, 'pickle'
+        )
+
+
+class TestAttemptSnapshotReadEntry:
+    """A strict-parse failure reaches the read surface as a contract error."""
+
+    @pytest.mark.parametrize('payload', [b'[NaN]', b'[' + b'1' * 5000 + b']'])
+    def test_detail_read_refuses_the_snapshot(self, payload: bytes) -> None:
+        row = SimpleNamespace(
+            task_id='4a5b6c7d-8e9f-4a0b-9c1d-2e3f4a5b6c7d',
+            status='COMPLETED',
+            attempt_archive_version=1,
+            attempt_snapshot_codec='json-utf8',
+            attempt_snapshot_content_type='application/json',
+            attempt_snapshot=payload,
+            attempt_snapshot_digest=archive_digest(payload),
+        )
+        with pytest.raises(HistoryContractError, match='invalid_json'):
+            _decode_history_detail(row)
 
 
 class TestResultPayloadSelection:
@@ -377,256 +382,8 @@ class TestResultPayloadSelection:
         )
 
 
-class TestRerunInputStorage:
-    def test_inline_accepts_the_inclusive_bound(self) -> None:
-        stored = store_inline_rerun_input(b'x' * RERUN_INPUT_INLINE_MAX_BYTES)
-        assert len(stored.payload) == 65_536
-
-    def test_inline_rejects_one_byte_over(self) -> None:
-        with pytest.raises(ValueError, match='inclusive'):
-            store_inline_rerun_input(b'x' * (RERUN_INPUT_INLINE_MAX_BYTES + 1))
-
-    def test_reference_rejects_empty(self) -> None:
-        with pytest.raises(ValueError, match='non-empty'):
-            store_referenced_rerun_input(reference='', digest=bytes(32))
-
-    def test_reference_rejects_overlong_utf8(self) -> None:
-        reference = 'ü' * (RERUN_INPUT_REFERENCE_MAX_BYTES // 2 + 1)
-        with pytest.raises(ValueError, match='UTF-8 bytes'):
-            store_referenced_rerun_input(reference=reference, digest=bytes(32))
-
-    def test_reference_rejects_short_digest(self) -> None:
-        with pytest.raises(ValueError, match='32 bytes'):
-            store_referenced_rerun_input(reference='sha256:abc', digest=b'short')
-
-    @pytest.mark.parametrize(
-        ('stored', 'expected'),
-        [
-            (store_inline_rerun_input(b'{}'), RerunInputDisposition.INLINE),
-            (
-                store_referenced_rerun_input(
-                    reference='sha256:abc', digest=bytes(32)
-                ),
-                RerunInputDisposition.REFERENCE,
-            ),
-            (
-                store_unavailable_rerun_input(
-                    RerunInputUnavailability.DECLINED_BY_POLICY
-                ),
-                RerunInputDisposition.DECLINED_BY_POLICY,
-            ),
-            (
-                store_unavailable_rerun_input(RerunInputUnavailability.OVER_BOUND),
-                RerunInputDisposition.OVER_BOUND,
-            ),
-            (
-                store_unavailable_rerun_input(
-                    RerunInputUnavailability.NEVER_ELIGIBLE
-                ),
-                RerunInputDisposition.NEVER_ELIGIBLE,
-            ),
-        ],
-    )
-    def test_disposition_of_every_variant(
-        self, stored: object, expected: RerunInputDisposition
-    ) -> None:
-        assert disposition_of(stored) == expected  # type: ignore[arg-type]
-
-
-class TestRerunInputDecode:
-    def test_inline_roundtrip(self) -> None:
-        stored = store_inline_rerun_input(b'{"input":1}')
-        decoded = decode_rerun_input(
-            disposition='INLINE',
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=stored.digest,
-            inline_payload=stored.payload,
-            reference=None,
-        )
-        assert decoded == DecodedArchiveValue(
-            AvailableInlineInput(payload=b'{"input":1}', digest=stored.digest)
-        )
-
-    def test_reference_roundtrip(self) -> None:
-        stored = store_referenced_rerun_input(
-            reference='sha256:abc', digest=bytes(32)
-        )
-        decoded = decode_rerun_input(
-            disposition='REFERENCE',
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=stored.digest,
-            inline_payload=None,
-            reference=stored.reference,
-        )
-        assert decoded == DecodedArchiveValue(
-            AvailableReferencedInput(reference='sha256:abc', digest=bytes(32))
-        )
-
-    @pytest.mark.parametrize(
-        'disposition',
-        ['DECLINED_BY_POLICY', 'OVER_BOUND', 'NEVER_ELIGIBLE'],
-    )
-    def test_unavailable_roundtrip(self, disposition: str) -> None:
-        decoded = decode_rerun_input(
-            disposition=disposition,
-            version=None,
-            codec=None,
-            content_type=None,
-            digest=None,
-            inline_payload=None,
-            reference=None,
-        )
-        assert decoded == DecodedArchiveValue(
-            UnavailableRerunInput(
-                reason=RerunInputUnavailableReason(disposition)
-            )
-        )
-
-    def test_unknown_disposition_is_corruption_not_unavailable(self) -> None:
-        result = decode_rerun_input(
-            disposition='EXPIRED',
-            version=None,
-            codec=None,
-            content_type=None,
-            digest=None,
-            inline_payload=None,
-            reference=None,
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'unknown_disposition'
-        )
-
-    def test_unavailable_with_envelope_field_is_corruption(self) -> None:
-        result = decode_rerun_input(
-            disposition='DECLINED_BY_POLICY',
-            version=1,
-            codec=None,
-            content_type=None,
-            digest=None,
-            inline_payload=None,
-            reference=None,
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'unavailable_with_envelope_fields'
-        )
-
-    def test_inline_missing_envelope_field_is_corruption(self) -> None:
-        stored = store_inline_rerun_input(b'{}')
-        result = decode_rerun_input(
-            disposition='INLINE',
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=None,
-            inline_payload=stored.payload,
-            reference=None,
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'invalid_inline_envelope'
-        )
-
-    def test_inline_with_reference_is_corruption(self) -> None:
-        stored = store_inline_rerun_input(b'{}')
-        result = decode_rerun_input(
-            disposition='INLINE',
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=stored.digest,
-            inline_payload=stored.payload,
-            reference='sha256:abc',
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'invalid_inline_envelope'
-        )
-
-    def test_inline_digest_mismatch(self) -> None:
-        stored = store_inline_rerun_input(b'{}')
-        result = decode_rerun_input(
-            disposition='INLINE',
-            version=stored.version,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=bytes(32),
-            inline_payload=stored.payload,
-            reference=None,
-        )
-        assert result == ArchiveDigestMismatch(ArchiveDomain.RERUN_INPUT)
-
-    def test_inline_over_bound_stored_value_is_corruption(self) -> None:
-        payload = b'x' * (RERUN_INPUT_INLINE_MAX_BYTES + 1)
-        result = decode_rerun_input(
-            disposition='INLINE',
-            version=1,
-            codec='json-utf8',
-            content_type='application/json',
-            digest=archive_digest(payload),
-            inline_payload=payload,
-            reference=None,
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'inline_over_bound'
-        )
-
-    def test_reference_with_short_digest_is_corruption(self) -> None:
-        result = decode_rerun_input(
-            disposition='REFERENCE',
-            version=1,
-            codec='json-utf8',
-            content_type='application/json',
-            digest=b'short',
-            inline_payload=None,
-            reference='sha256:abc',
-        )
-        assert result == CorruptArchiveValue(
-            ArchiveDomain.RERUN_INPUT, 'invalid_reference_digest'
-        )
-
-    def test_available_with_unknown_version_is_unknown_version(self) -> None:
-        stored = store_inline_rerun_input(b'{}')
-        result = decode_rerun_input(
-            disposition='INLINE',
-            version=3,
-            codec=stored.codec,
-            content_type=stored.content_type,
-            digest=stored.digest,
-            inline_payload=stored.payload,
-            reference=None,
-        )
-        assert result == UnknownArchiveVersion(ArchiveDomain.RERUN_INPUT, 3)
-
-
 class TestDiscriminantSets:
     """The ratified value sets, pinned."""
-
-    def test_stored_dispositions_are_the_ratified_five(self) -> None:
-        assert {member.value for member in RerunInputDisposition} == {
-            'INLINE',
-            'REFERENCE',
-            'DECLINED_BY_POLICY',
-            'OVER_BOUND',
-            'NEVER_ELIGIBLE',
-        }
-
-    def test_unavailable_reasons_are_the_ratified_four(self) -> None:
-        assert {member.value for member in RerunInputUnavailableReason} == {
-            'DECLINED_BY_POLICY',
-            'OVER_BOUND',
-            'NEVER_ELIGIBLE',
-            'MISSING_OBJECT',
-        }
-
-    def test_missing_object_is_never_a_stored_disposition(self) -> None:
-        assert 'MISSING_OBJECT' not in {
-            member.value for member in RerunInputDisposition
-        }
-        assert {member.value for member in RerunInputUnavailability} <= {
-            member.value for member in RerunInputUnavailableReason
-        }
 
     def test_decode_failure_union_membership(self) -> None:
         assert set(get_args(ArchiveDecodeFailure.__value__)) == {

@@ -17,10 +17,11 @@ byte-for-byte forever.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
+
+from horsies.core.codec.json_io import dumps_canonical_json
 
 
 COMMAND_FINGERPRINT_VERSION: Final = 1
@@ -67,7 +68,7 @@ class EnqueueCommandV1:
     @property
     def fingerprint(self) -> bytes:
         """The 32-byte version-1 command fingerprint."""
-        canonical = json.dumps(
+        canonical = dumps_canonical_json(
             [
                 COMMAND_FINGERPRINT_VERSION,
                 self.task_name,
@@ -82,9 +83,7 @@ class EnqueueCommandV1:
                 self.retain_rerun_input,
                 self.rerun_of_task_id,
                 self.rerun_root_task_id,
-            ],
-            ensure_ascii=False,
-            separators=(',', ':'),
+            ]
         ).encode()
         return hashlib.sha256(canonical).digest()
 
