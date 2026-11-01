@@ -23,13 +23,6 @@ const CANCELLABLE_TASK_STATUSES: ReadonlySet<string> = new Set([
   'RUNNING',
 ]);
 
-/** A manual retry resets the row; only settled-without-success rows qualify. */
-const RETRYABLE_TASK_STATUSES: ReadonlySet<string> = new Set([
-  'FAILED',
-  'EXPIRED',
-  'CANCELLED',
-]);
-
 const PAUSABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['RUNNING']);
 const RESUMABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['PAUSED']);
 const CANCELLABLE_RUN_STATUSES: ReadonlySet<string> = new Set([
@@ -38,25 +31,9 @@ const CANCELLABLE_RUN_STATUSES: ReadonlySet<string> = new Set([
   'PAUSED',
 ]);
 
-export const EXPIRY_PASSED_REASON =
-  'Cannot retry: task expiry (good_until) has passed.';
-
 export interface TaskEligibilityInput {
   isWorkflowTask: boolean;
   status: string;
-  /** ISO timestamp, or null when the task never expires. */
-  goodUntil: string | null;
-}
-
-/** True when `good_until` is set and already in the past. An unparseable value
- * is treated as "not expired" so a bad timestamp cannot silently disable the
- * only recovery affordance; the server still refuses with TASK_EXPIRY_PASSED. */
-function expiryPassed(goodUntil: string | null, nowMs: number): boolean {
-  if (goodUntil === null) {
-    return false;
-  }
-  const parsed = Date.parse(goodUntil);
-  return !Number.isNaN(parsed) && parsed <= nowMs;
 }
 
 export function taskCancelAvailability(
@@ -66,21 +43,6 @@ export function taskCancelAvailability(
     return HIDDEN;
   }
   return CANCELLABLE_TASK_STATUSES.has(task.status) ? ENABLED : HIDDEN;
-}
-
-export function taskRetryAvailability(
-  task: TaskEligibilityInput,
-  nowMs: number
-): ActionAvailability {
-  if (task.isWorkflowTask) {
-    return HIDDEN;
-  }
-  if (!RETRYABLE_TASK_STATUSES.has(task.status)) {
-    return HIDDEN;
-  }
-  return expiryPassed(task.goodUntil, nowMs)
-    ? { shown: true, enabled: false, disabledReason: EXPIRY_PASSED_REASON }
-    : ENABLED;
 }
 
 /** Workflow-level actions. There is no restart primitive, so no restart action
@@ -97,7 +59,6 @@ export function workflowActionAvailability(
     case 'workflow-cancel':
       return CANCELLABLE_RUN_STATUSES.has(runStatus) ? ENABLED : HIDDEN;
     case 'task-cancel':
-    case 'task-retry':
       return HIDDEN;
   }
 }

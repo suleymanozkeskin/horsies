@@ -3,7 +3,8 @@
 Covers phase 2 of the strict-serde redesign:
 
 - `encode_value` / `decode_value` round-trip for every allowed type.
-- `_scan_wire_json` rejects non-finite floats anywhere in dump output.
+- `_scan_wire_json` rejects non-finite floats and lone surrogates anywhere in
+  dump output, and `encode_value` refuses each string that `dumps_json` refuses.
 - `_scan_reserved_keys` rejects `__h_*` / `__builtin_task_code__` at any depth.
 - JsonValue producer-side fence (`_validate_json_native`) rejects bytes,
   Decimal, etc. even though `TypeAdapter(JsonValue)` would coerce them.
@@ -12,15 +13,18 @@ Covers phase 2 of the strict-serde redesign:
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime
 import decimal
 import enum
 import uuid
+from collections.abc import Iterable, Iterator
 from typing import (
     Annotated,
     Any,
     Literal,
+    NamedTuple,
     Optional,
     TypeAlias,
     Union,
@@ -28,8 +32,10 @@ from typing import (
 )
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, computed_field
+from pydantic_core import PydanticCustomError
 
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import (
     JsonValue,
     StrictJsonError,
@@ -52,6 +58,9 @@ from horsies.core.codec.typed import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+LONE_SURROGATE_TEXT = f'keep-out{chr(0xd800)}'
 
 
 class _User(BaseModel):
@@ -654,9 +663,530 @@ class TestTaskErrorRoundTrip:
 # ---------------------------------------------------------------------------
 
 
+class _Labelled(BaseModel):
+    name: str
+    labels: dict[str, int]
+
+
+class _Pair(NamedTuple):
+    labels: dict[str, int]
+
+
+class TestEncodeValueRefusesALoneSurrogate:
+    """`encode_value` refuses each string that `dumps_json` refuses."""
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type', 'subject'),
+        [
+            (LONE_SURROGATE_TEXT, str, 'a string'),
+            (['ok', LONE_SURROGATE_TEXT], list[str], 'a string'),
+            ({'key': LONE_SURROGATE_TEXT}, dict[str, str], 'a string'),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, int], 'a dict key'),
+            (
+                _Labelled(name=LONE_SURROGATE_TEXT, labels={}),
+                _Labelled,
+                'a string',
+            ),
+        ],
+        ids=['top-level-str', 'str-in-list', 'str-in-dict-value', 'dict-key', 'model-field'],
+    )
+    def test_each_position_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+        subject: str,
+    ) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type)
+
+        assert str(raised.value) == (
+            f'{subject} holds a lone surrogate, which UTF-8 cannot encode'
+        )
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            ({'x': {LONE_SURROGATE_TEXT: 1}}, dict[str, dict[str, int]]),
+            ({LONE_SURROGATE_TEXT: 1}, JsonValue),
+            ([{'x': {LONE_SURROGATE_TEXT: 1}}], JsonValue),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, JsonValue]),
+            (_Labelled(name='n', labels={LONE_SURROGATE_TEXT: 1}), _Labelled),
+            ([{LONE_SURROGATE_TEXT: 1}], list[dict[str, int]]),
+            (({LONE_SURROGATE_TEXT: 1},), tuple[dict[str, int], ...]),
+            (
+                collections.deque([{LONE_SURROGATE_TEXT: 1}]),
+                collections.deque[dict[str, int]],
+            ),
+        ],
+        ids=[
+            'nested-dict', 'json-value', 'nested-json-value', 'json-value-slot',
+            'model-field', 'in-list', 'in-tuple', 'in-deque',
+        ],
+    )
+    def test_a_key_that_the_dump_replaces_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """`mode='json'` writes U+FFFD in place of the surrogate of these keys."""
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value(value, expected_type)
+
+    def test_two_keys_that_the_dump_makes_equal_are_refused(self) -> None:
+        """The dump alone loses one entry: both keys become the same text."""
+        value = {f'a{chr(0xd800)}': 1, f'a{chr(0xd801)}': 2}
+
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value(value, dict[str, int])
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            ({LONE_SURROGATE_TEXT: 1}, Any),
+            ({LONE_SURROGATE_TEXT: 1}, dict),
+            ({'x': {LONE_SURROGATE_TEXT: 1}}, dict[str, Any]),
+            (_Pair(labels={LONE_SURROGATE_TEXT: 1}), _Pair),
+        ],
+        ids=['any', 'bare-dict', 'any-value', 'named-tuple'],
+    )
+    def test_a_key_that_the_dump_raises_for_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """The dump raises `UnicodeEncodeError` for a key without a declared
+        type. That is not in the `encode_value` catalog, so it is refused."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: a dict key holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        assert raised.value.__context__ is None
+
+    def test_a_python_surrogate_pair_is_refused_as_dumps_json_refuses_it(self) -> None:
+        """Only JSON text joins a pair: a `str` keeps two code points."""
+        pair = chr(0xd83d) + chr(0xde00)
+
+        assert dumps_json(pair).is_err()
+        with pytest.raises(StrictJsonError, match='a string holds a lone surrogate'):
+            encode_value(pair, str)
+
+    def test_the_location_names_the_kwarg(self) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(LONE_SURROGATE_TEXT, str, location=('note',))
+
+        assert str(raised.value) == (
+            'note: a string holds a lone surrogate, which UTF-8 cannot encode'
+        )
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (LONE_SURROGATE_TEXT, str),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, int]),
+        ],
+        ids=['string', 'key'],
+    )
+    def test_the_refusal_holds_no_input_value(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """The `UnicodeEncodeError` holds the input, so it is not chained."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type)
+
+        assert 'keep-out' not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+
+def _echo_in_value_error(value: str) -> str:
+    raise ValueError(f'bad name {value}')
+
+
+def _echo_in_assertion_error(value: str) -> str:
+    raise AssertionError(f'bad name {value}')
+
+
+def _echo_in_custom_error_context(value: str) -> str:
+    raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
+def _refuse_with_constant_lone_surrogate(value: str) -> str:
+    raise ValueError(f'bad name {value}{chr(0xd800)}')
+
+
+_VALIDATORS_THAT_ECHO = [
+    _echo_in_value_error,
+    _echo_in_assertion_error,
+    _echo_in_custom_error_context,
+]
+_VALIDATOR_IDS = ['value-error', 'assertion-error', 'custom-error-context']
+
+
+class TestValidatorTextWithALoneSurrogate:
+    """Pydantic cannot build the error text, and raises `UnicodeEncodeError`."""
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_encode_value_refuses_it(self, validator: Any) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT,
+                Annotated[str, AfterValidator(validator)],
+                location=('note',),
+            )
+
+        assert str(raised.value) == (
+            'note: a validation error holds a lone surrogate, which UTF-8 '
+            'cannot encode'
+        )
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_the_refusal_holds_no_input_value(self, validator: Any) -> None:
+        """The `UnicodeEncodeError` holds the text, so it is not chained."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(
+                LONE_SURROGATE_TEXT, Annotated[str, AfterValidator(validator)],
+            )
+
+        assert 'keep-out' not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+    def test_decode_value_refuses_a_lone_surrogate_in_the_validator_text(self) -> None:
+        """A stored value cannot hold a lone surrogate: `loads_json` refuses
+        it. The validator text can, because the validator writes that text."""
+        with pytest.raises(StrictJsonError) as raised:
+            decode_value(
+                'plain',
+                Annotated[str, AfterValidator(_refuse_with_constant_lone_surrogate)],
+            )
+
+        assert str(raised.value) == (
+            'a validation error holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        assert raised.value.__context__ is None
+
+    @pytest.mark.parametrize('validator', _VALIDATORS_THAT_ECHO, ids=_VALIDATOR_IDS)
+    def test_a_validator_refusal_without_a_surrogate_is_unchanged(
+        self, validator: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError, match='bad name plain'):
+            encode_value('plain', Annotated[str, AfterValidator(validator)])
+
+
+class _ListValued(enum.Enum):
+    MEMBER = [1]
+
+
+class _DictValued(enum.Enum):
+    MEMBER = {'k': 1}
+
+
+class _SetValued(enum.Enum):
+    MEMBER = {1}
+
+
+class _FrozensetValued(enum.Enum):
+    MEMBER = frozenset({1})
+
+
+class TestDictKeyWithoutAJsonForm:
+    """`dump_python` raises a plain `TypeError` for these keys."""
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type', 'type_name'),
+        [
+            ({_ListValued.MEMBER: 1}, dict[_ListValued, int], 'list'),
+            ({_DictValued.MEMBER: 1}, dict[_DictValued, int], 'dict'),
+            ({_SetValued.MEMBER: 1}, dict[_SetValued, int], 'set'),
+            ({_FrozensetValued.MEMBER: 1}, dict[_FrozensetValued, int], 'frozenset'),
+            ({frozenset({1}): 1}, dict[frozenset[int], int], 'frozenset'),
+            ({(frozenset({1}),): 1}, dict[tuple[frozenset[int]], int], 'frozenset'),
+            ({frozenset({1}): 1}, Any, 'frozenset'),
+            ({'k': {_ListValued.MEMBER: 1}}, dict[str, dict[_ListValued, int]], 'list'),
+        ],
+        ids=[
+            'enum-list-value', 'enum-dict-value', 'enum-set-value',
+            'enum-frozenset-value', 'frozenset', 'tuple-with-frozenset',
+            'frozenset-at-any', 'nested',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+        type_name: str,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('labels',))
+
+        assert str(raised.value) == (
+            f'labels: serialization failed: `{type_name}` not valid as object key'
+        )
+        assert raised.value.__context__ is None
+
+    def test_the_text_has_no_location_part_without_a_location(self) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value({frozenset({1}): 1}, dict[frozenset[int], int])
+
+        assert str(raised.value) == (
+            'serialization failed: `frozenset` not valid as object key'
+        )
+
+
+class _TypeErrorInComputedField(BaseModel):
+    text: str
+
+    @computed_field
+    @property
+    def derived(self) -> int:
+        raise TypeError(self.text)
+
+
+def _yield_then_raise_type_error() -> Iterator[int]:
+    yield 1
+    raise TypeError('defect in a generator')
+
+
+class TestTypeErrorThatIsADefect:
+    """Only the full text of the key refusal is a catalog refusal."""
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'defect in a computed field',
+            'wrapped: `list` not valid as object key',
+            '`list` not valid as object key: wrapped',
+            'list not valid as object key',
+        ],
+        ids=['other-text', 'text-in-front', 'text-behind', 'no-backticks'],
+    )
+    def test_a_type_error_from_a_computed_field_propagates(self, text: str) -> None:
+        with pytest.raises(TypeError) as raised:
+            encode_value(_TypeErrorInComputedField(text=text), _TypeErrorInComputedField)
+
+        assert str(raised.value) == text
+
+    def test_a_type_error_from_a_generator_propagates(self) -> None:
+        with pytest.raises(TypeError, match='defect in a generator'):
+            encode_value(_yield_then_raise_type_error(), Iterable[int])
+
+
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: Optional['_Linked'] = None
+
+
+def _linked_to_itself() -> _Linked:
+    node = _Linked()
+    node.next = node
+    return node
+
+
+def _list_that_holds_itself() -> list[Any]:
+    value: list[Any] = []
+    value.append(value)
+    return value
+
+
+def _dict_that_holds_itself() -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    value['self'] = value
+    return value
+
+
+def _nested_list(depth: int) -> list[Any]:
+    value: list[Any] = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+class _ValueErrorInComputedField(BaseModel):
+    text: str
+
+    @computed_field
+    @property
+    def derived(self) -> int:
+        raise ValueError(self.text)
+
+
+def _yield_then_raise_value_error() -> Iterator[int]:
+    yield 1
+    raise ValueError('defect in a generator')
+
+
+class TestValueThatHoldsItself:
+    """`dump_python` raises a plain `ValueError` for these values."""
+
+    @pytest.mark.parametrize(
+        ('make_value', 'expected_type'),
+        [
+            (_list_that_holds_itself, Any),
+            (_dict_that_holds_itself, Any),
+            (lambda: {'key': _list_that_holds_itself()}, dict[str, Any]),
+            (lambda: [_list_that_holds_itself()], list[Any]),
+            (_linked_to_itself, _Linked),
+            (_linked_to_itself, Any),
+        ],
+        ids=[
+            'list', 'dict', 'in-dict-value', 'in-list',
+            'typed-model', 'model-at-any',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        make_value: Any,
+        expected_type: Any,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(make_value(), expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: serialization failed: '
+            'Circular reference detected (id repeated)'
+        )
+        assert raised.value.__context__ is None
+
+
+class TestValueErrorThatStaysRaw:
+    """Only the full text of the refusal is in the catalog."""
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'defect in a computed field',
+            'wrapped: Circular reference detected (id repeated)',
+            'Circular reference detected (id repeated): wrapped',
+            'Circular reference detected (depth exceeded)',
+        ],
+        ids=['other-text', 'text-in-front', 'text-behind', 'depth-text'],
+    )
+    def test_a_value_error_from_a_computed_field_propagates(self, text: str) -> None:
+        with pytest.raises(ValueError) as raised:
+            encode_value(
+                _ValueErrorInComputedField(text=text), _ValueErrorInComputedField,
+            )
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == text
+
+    def test_a_value_error_from_a_generator_propagates(self) -> None:
+        with pytest.raises(ValueError) as raised:
+            encode_value(_yield_then_raise_value_error(), Iterable[int])
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == 'defect in a generator'
+
+    def test_a_value_that_is_only_deep_propagates(self) -> None:
+        """Pydantic reports depth with a text that says circular. The value
+        does not hold itself, so it is not this refusal."""
+        with pytest.raises(ValueError) as raised:
+            encode_value(_nested_list(300), Any)
+
+        assert type(raised.value) is ValueError
+        assert str(raised.value) == 'Circular reference detected (depth exceeded)'
+
+    def test_a_unicode_decode_error_propagates(self) -> None:
+        """It is a `ValueError` subclass with another text."""
+        with pytest.raises(UnicodeDecodeError):
+            encode_value(b'\xff', Any)
+
+    def test_the_subclass_refusals_keep_their_own_arms(self) -> None:
+        """`PydanticSerializationError` and `UnicodeEncodeError` are a
+        `ValueError` too. Their arms must come first."""
+        with pytest.raises(ValueValidationError, match='Unable to serialize unknown type'):
+            encode_value(object(), Any)
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value({LONE_SURROGATE_TEXT: 1}, Any)
+
+
+class TestEncodeValueKeepsValidText:
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (chr(0x1f600), str),
+            ('caf\u00e9', str),
+            ('a\ufffdb', str),
+            ({'caf\u00e9': 1}, dict[str, int]),
+            ({'a\ufffdb': 1}, dict[str, int]),
+            ({'a\ufffdb': 1}, JsonValue),
+            ([{'a\ufffdb': {'b\ufffdc': 1}}], JsonValue),
+        ],
+        ids=[
+            'astral', 'non-ascii', 'replacement-char', 'non-ascii-key',
+            'replacement-char-key', 'replacement-char-json-value', 'nested',
+        ],
+    )
+    def test_text_that_utf8_can_encode_is_kept(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """U+FFFD in a key is only a sign: a key that truly holds it is kept."""
+        encoded = encode_value(value, expected_type)
+
+        assert encoded == value
+        assert dumps_json(encoded).is_ok()
+
+
 class TestScanWireJsonDirect:
     def test_accepts_valid_shape(self) -> None:
         _scan_wire_json({'a': 1, 'b': [2.5, None, 'x', True]})
+
+    def test_a_key_without_the_replacement_char_gives_no_sign(self) -> None:
+        assert _scan_wire_json({'caf\u00e9': [{'b': 'c\ufffd'}]}) is False
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            {'a\ufffd': 1},
+            {'x': {'a\ufffd': 1}},
+            [{'a\ufffd': 1}],
+            ({'a\ufffd': 1},),
+            collections.deque([{'a\ufffd': 1}]),
+        ],
+        ids=['dict', 'nested-dict', 'list', 'tuple', 'deque'],
+    )
+    def test_a_key_with_the_replacement_char_gives_the_sign(
+        self, dumped: object,
+    ) -> None:
+        assert _scan_wire_json(dumped) is True
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            {'a\ufffd': 1, 'b': float('nan')},
+            [{'a\ufffd': 1}, float('nan')],
+        ],
+        ids=['dict', 'list'],
+    )
+    def test_the_sign_does_not_stop_the_scan(self, dumped: object) -> None:
+        with pytest.raises(StrictJsonError, match='non-RFC-8259 float'):
+            _scan_wire_json(dumped)
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            (LONE_SURROGATE_TEXT,),
+            {LONE_SURROGATE_TEXT},
+            frozenset({LONE_SURROGATE_TEXT}),
+            collections.deque([LONE_SURROGATE_TEXT]),
+        ],
+        ids=['tuple', 'set', 'frozenset', 'deque'],
+    )
+    def test_each_container_of_a_python_mode_dump_is_walked(
+        self, dumped: object,
+    ) -> None:
+        with pytest.raises(StrictJsonError, match='a string holds a lone surrogate'):
+            _scan_wire_json(dumped)
+
+    def test_a_leaf_of_a_python_mode_dump_gives_no_sign(self) -> None:
+        assert _scan_wire_json({'at': datetime.date(2026, 1, 1)}) is False
 
     def test_rejects_nan_at_top_level(self) -> None:
         with pytest.raises(StrictJsonError, match='non-RFC-8259 float'):

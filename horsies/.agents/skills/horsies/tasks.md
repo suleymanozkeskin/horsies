@@ -5,6 +5,7 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
 
 ## `@app.task` Decorator
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task(
     task_name: str,
@@ -47,6 +48,7 @@ The only valid return type for task functions.
 
 ### Construction
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 TaskResult(ok=value)              # success (value can be None)
 TaskResult(err=TaskError(...))    # failure
@@ -72,6 +74,7 @@ The task wrapper validates the returned value against declared `T` using Pydanti
 
 ## `TaskError`
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class TaskError(BaseModel):
     error_code: BuiltInTaskCode | str | None = None
@@ -84,6 +87,7 @@ All fields optional. Domain errors typically set `error_code` + `message`. `data
 
 **Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
 
+<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
 TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # OK
 TaskError(error_code="MY_CUSTOM_CODE")                   # OK
@@ -98,6 +102,7 @@ TaskError(error_code="BROKER_ERROR")                     # ValueError — reserv
 
 Extends `TaskError` with `sub_workflow_id: str` and `sub_workflow_summary: SubWorkflowSummary[Any]`. Distinguish via pattern matching:
 
+<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
 match result.err:
     case SubWorkflowError() as e:
@@ -121,7 +126,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `BROKER_ERROR` — DB/broker failure during result retrieval
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
-- `RESULT_DESERIALIZATION_ERROR` — stored result JSON is corrupt
+- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 
@@ -162,6 +167,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 - `UPSTREAM_SKIPPED` — upstream task was skipped
 - `SUBWORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
+- `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node
 
 ### Reserved Built-In Codes
 
@@ -176,6 +182,7 @@ All built-in code string values are globally reserved. User-defined error codes 
 
 All methods available after `@app.task(...)`:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_name: str
 
@@ -227,6 +234,7 @@ def node(
 
 Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with overridden options applied to this specific send.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Set a per-send start deadline: a task not started by then becomes EXPIRED and never runs
 deadline = datetime.now(timezone.utc) + timedelta(minutes=5)
@@ -277,6 +285,7 @@ and decides which history partition the record moves to when the task
 terminalizes — so a later edit to `queue_retention` governs later sends and
 leaves records already enqueued under the promise they were given.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Keep this task's terminal record forever
 await my_task.with_options(retention_class_key=None).send_async(**kwargs)
@@ -298,6 +307,7 @@ When `good_until` is set on a send:
 
 ## `from_node()` — Ergonomic Data Flow for `.node()()`
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 from horsies import from_node
 
@@ -308,6 +318,7 @@ When used as a kwarg value in the second call of `.node()()`, the `NodeFactory` 
 1. Add the upstream node to `args_from` under this kwarg's key.
 2. Auto-add the upstream node to `waits_for` if not already present.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 producer = produce.node()(value=42)
 consumer = consume.node()(data=from_node(producer))
@@ -321,6 +332,7 @@ Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `Su
 
 Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()`.
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: str  # UUID, stable across retries of the same send
 
@@ -338,6 +350,7 @@ async def info_async(*, include_result: bool = False, include_failed_reason: boo
 
 ### `TaskInfo` fields
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: str, task_name: str, status: TaskStatus
 queue_name: str, priority: int
@@ -354,6 +367,7 @@ attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (No
 
 ### `TaskAttemptInfo` fields
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: str, attempt: int
 outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE
@@ -369,6 +383,7 @@ worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, work
 
 ## `TaskSendResult` / `TaskSendError`
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendResult[T] = Result[T, TaskSendError]
 ```
@@ -377,6 +392,7 @@ type TaskSendResult[T] = Result[T, TaskSendError]
 
 One frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure; `err.code` (a class variable) names its member. `payload`, `message` and `exception` are not in the repr.
 
+<!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 type TaskSendError = (
     TaskSendSuppressed               # message
@@ -418,6 +434,7 @@ Validation failure text never contains the refused value: each failure is `<loc>
 
 ### `TaskSendPayload`
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:
@@ -432,6 +449,7 @@ Pre-serialized at send time. Never construct manually — created by the library
 
 ### Retry guard pattern
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 match my_task.send(**kwargs):
     case Ok(handle):
@@ -452,6 +470,7 @@ Cross-method retry is blocked: `retry_send` on a scheduled-task error returns `V
 
 Always use the class methods:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # Fixed backoff — intervals length defines max_retries
 RetryPolicy.fixed(
@@ -494,6 +513,7 @@ Retries only trigger when the error code on the stored result matches and `retry
 
 ### Examples
 
+<!-- check: skip partial -- uses a name before the page defines it -->
 ```python
 # 3 fixed retries: 1min, 5min, 15min
 RetryPolicy.fixed([60, 300, 900], auto_retry_for=["RATE_LIMITED"])
@@ -564,6 +584,7 @@ Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above 
 - Objects defined in `__main__` or inside functions (`<locals>` in qualname)
 - `dict` keys that collide after `str()` coercion
 - Non-finite floats (`nan`, `inf`)
+- A lone surrogate in a string or a dict key, for example a file name that `os.listdir()` decoded with `surrogateescape`
 
 ### Return type serialization
 
@@ -592,6 +613,7 @@ caller uses:
 
 ### `.send()` at module level → `SEND_SUPPRESSED`
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — runs during worker import
 result = my_task.send(value="test")  # Err(SEND_SUPPRESSED)
@@ -605,6 +627,7 @@ def process():
 
 ### Non-serializable arguments → `VALIDATION_FAILED`
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG
 my_task.send(conn=db_connection)
@@ -615,6 +638,7 @@ my_task.send(conn_url=str(db_connection.url))
 
 ### Classes defined in `__main__` or inside functions
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — worker cannot import this
 class Config:
@@ -628,6 +652,7 @@ my_task.send(cfg=Config(value=42))
 
 ### Forgetting `TaskResult` wrapper
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — returns raw value, fails with UNHANDLED_EXCEPTION (AttributeError) at runtime
 @app.task("bad")
@@ -642,6 +667,7 @@ def good(*, x: int) -> TaskResult[dict[str, int], TaskError]:
 
 ### `auto_retry_for` at top level
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — rejected at definition time
 @app.task("t", auto_retry_for=["TIMEOUT"])
@@ -654,6 +680,7 @@ def t() -> TaskResult[str, TaskError]: ...
 
 ### Decorator ordering — `HRS-104`
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — @app.task sees already-wrapped function
 @app.task("t")
@@ -667,6 +694,7 @@ def t() -> TaskResult[str, TaskError]: ...
 
 ### Open event loops that are never closed → `EVENT_LOOP_LIMIT`
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — every call leaves one more open loop; the sixth gets EVENT_LOOP_LIMIT
 loop = asyncio.new_event_loop()
@@ -678,6 +706,7 @@ asyncio.run(my_task.send_async(value="test"))
 
 ### Sync calls inside a coroutine or a Jupyter cell → `ASYNC_CONTEXT`
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — on a thread that runs an event loop, each sync call returns ASYNC_CONTEXT
 async def report(handle: TaskHandle[str]) -> None:
@@ -692,6 +721,7 @@ async def report() -> None:
 
 ### `WAIT_TIMEOUT` is not a terminal failure
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 result = handle.get(timeout_ms=5000)
 if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT:
@@ -701,6 +731,7 @@ if result.is_err() and result.err_value.error_code == RetrievalCode.WAIT_TIMEOUT
 
 ### `queue_name` in DEFAULT mode
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — raises HRS-200 at definition time if app uses QueueMode.DEFAULT
 @app.task("t", queue_name="critical")
@@ -709,6 +740,7 @@ def t() -> TaskResult[str, TaskError]: ...
 
 ### `good_until` is a per-send concern, not a decorator option
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 # WRONG — rejected at definition time (raises HRS-102)
 @app.task("t", good_until=datetime.now(timezone.utc) + timedelta(hours=1))
@@ -725,6 +757,7 @@ node = my_task.node(good_until=deadline)(arg=value)
 
 ## All Public Imports
 
+<!-- check: alone -->
 ```python
 from horsies import (
     # App and config

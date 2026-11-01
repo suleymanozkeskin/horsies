@@ -5,6 +5,7 @@
     "tests/typing/task_function_attributes_pin.py",
     "tests/typing/async_task_refused_pin.py",
     "tests/typing/workflow_definition_config_pin.py",
+    "tests/typing/success_case_node_pin.py",
     "horsies/core/models/task_send_types.py",
     "horsies/core/types/error_detail.py",
     "tests/unit/test_task_send_variants.py",
@@ -26,7 +27,9 @@
     "horsies/monitoring/task_actions.py",
     "tests/unit/test_monitoring_query_variants.py",
     "tests/unit/test_task_action_variants.py",
-    "tests/unit/test_history_detail_status_parse.py"
+    "tests/unit/test_history_detail_status_parse.py",
+    "tests/docs_examples/extract.py",
+    "tests/unit/test_docs_examples_extract.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

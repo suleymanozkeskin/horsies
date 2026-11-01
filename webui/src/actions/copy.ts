@@ -18,11 +18,7 @@ export interface ConfirmCopy {
 
 export interface TaskConfirmContext {
   status: string;
-  queueName: string;
   workerHostname: string | null;
-  /** Attempt number this run will record — a client-side estimate; the server
-   * response is authoritative. */
-  nextAttempt: number;
 }
 
 const DISMISS = 'Keep';
@@ -50,18 +46,6 @@ export function taskCancelConfirm(context: TaskConfirmContext): ConfirmCopy {
       'The task will be marked CANCELLED and will not run. Waiting result ' +
       'handles receive TASK_CANCELLED.',
     confirmLabel: 'Cancel task',
-    dismissLabel: DISMISS,
-  };
-}
-
-export function taskRetryConfirm(context: TaskConfirmContext): ConfirmCopy {
-  return {
-    title: 'Retry task?',
-    body:
-      `The task row is reset and re-enqueued on queue '${context.queueName}' ` +
-      'with the same payload. Attempt history is preserved; this run will be ' +
-      `attempt ${context.nextAttempt}.`,
-    confirmLabel: 'Retry task',
     dismissLabel: DISMISS,
   };
 }
@@ -98,7 +82,6 @@ export const WORKFLOW_CONFIRM: Record<
 /** Short verb used in failure copy: "Cancel failed: …". */
 export const ACTION_LABEL: Record<ActionKind, string> = {
   'task-cancel': 'Cancel',
-  'task-retry': 'Retry',
   'workflow-pause': 'Pause',
   'workflow-resume': 'Resume',
   'workflow-cancel': 'Cancel',
@@ -133,8 +116,6 @@ export function successMessage(
         `${host} will keep executing until it finishes.`
       );
     }
-    case 'task-retry':
-      return `Task re-enqueued (attempt ${response.next_attempt_number ?? '?'}).`;
     case 'workflow-pause':
       return 'Workflow paused. Executing nodes will finish.';
     case 'workflow-resume':

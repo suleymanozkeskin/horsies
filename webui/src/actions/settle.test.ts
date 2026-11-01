@@ -5,7 +5,6 @@ import {
   executingNodeCount,
   isTaskActionSettled,
   isWorkflowActionSettled,
-  type SettleContext,
 } from '@/actions/settle';
 import type { TaskDetail } from '@/types/tasks';
 import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
@@ -73,56 +72,16 @@ const runDetail = (
   failed_indices: [],
 });
 
-const context = (overrides: Partial<SettleContext> = {}): SettleContext => ({
-  wasStatus: null,
-  retryCountBefore: null,
-  ...overrides,
-});
-
 describe('task cancel settling', () => {
   it('settles as soon as the row reads CANCELLED', () => {
     expect(
-      isTaskActionSettled('task-cancel', taskDetail('CANCELLED'), context())
+      isTaskActionSettled('task-cancel', taskDetail('CANCELLED'))
     ).toBe(true);
   });
 
   it('does not settle while the row still reads RUNNING', () => {
     expect(
-      isTaskActionSettled('task-cancel', taskDetail('RUNNING'), context())
-    ).toBe(false);
-  });
-});
-
-describe('task retry settling', () => {
-  it('settles when the status moved away from the pre-action one', () => {
-    expect(
-      isTaskActionSettled(
-        'task-retry',
-        taskDetail('PENDING'),
-        context({ wasStatus: 'FAILED', retryCountBefore: 0 })
-      )
-    ).toBe(true);
-  });
-
-  it('settles on a retry_count jump even when the status came back the same', () => {
-    // A fast task can fail again into FAILED between two refetches; the reset
-    // moved retry_count to MAX(attempt), which is what proves the retry landed.
-    expect(
-      isTaskActionSettled(
-        'task-retry',
-        taskDetail('FAILED', 2),
-        context({ wasStatus: 'FAILED', retryCountBefore: 1 })
-      )
-    ).toBe(true);
-  });
-
-  it('does not settle when nothing observable changed', () => {
-    expect(
-      isTaskActionSettled(
-        'task-retry',
-        taskDetail('FAILED', 1),
-        context({ wasStatus: 'FAILED', retryCountBefore: 1 })
-      )
+      isTaskActionSettled('task-cancel', taskDetail('RUNNING'))
     ).toBe(false);
   });
 });
@@ -194,7 +153,6 @@ describe('draining count', () => {
 describe('entity routing', () => {
   it('routes each action to the surface that owns it', () => {
     expect(entityOf('task-cancel')).toBe('task');
-    expect(entityOf('task-retry')).toBe('task');
     expect(entityOf('workflow-pause')).toBe('workflow');
     expect(entityOf('workflow-resume')).toBe('workflow');
     expect(entityOf('workflow-cancel')).toBe('workflow');

@@ -42,11 +42,12 @@ import FeatureCard from '../../components/FeatureCard.astro';
 ## Quick Example
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, Ok, Err
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
-        database_url="postgresql+psycopg://user:pass@localhost:5432/mydb",
+        database_url=SecretStr("postgresql+psycopg://user:pass@localhost:5432/mydb"),
     ),
 ))
 

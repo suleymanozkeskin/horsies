@@ -219,6 +219,12 @@ returns `CutoverValidated` and the transaction commits.
   ceiling as first-class fields.
 - Preparation and relocation run in bounded committing batches and
   resume where they stopped; batch times do not grow with progress.
+- A row that breaks an enqueue rule (an empty task or queue name, or a priority
+  outside 1..100) cannot be prepared. `prepare_legacy_batch` names it in
+  `PreparationBatch.refused_rows` and prepares the rows around it, and the walk
+  ends in `PreparationBlocked` and not `PreparationComplete`. Repair those rows
+  and run preparation again from `PreparationCursor.start()`: the tighten
+  refuses while any row is unprepared.
 - Rows whose terminalization operation predates 0.4.6's recording carry
   a legacy marker in history rather than invented provenance.
 - The tighten is entered only past typed refusals (backfill state,

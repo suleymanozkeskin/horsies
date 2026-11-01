@@ -359,9 +359,10 @@ class SuccessCase:
         ])
     """
 
-    required: Sequence[TaskNode[Any]]
+    required: Sequence[AnyNode]
     """
-    - All tasks in this list must be COMPLETED for the case to be satisfied
+    - All nodes in this list must be COMPLETED for the case to be satisfied
+    - A node is a TaskNode or a SubWorkflowNode
     """
 
     _frozen: bool = field(default=False, init=False, repr=False, compare=False)
@@ -406,9 +407,9 @@ class SuccessPolicy:
     - Workflow succeeds if ANY case is fully satisfied (all required COMPLETED)
     """
 
-    optional: Sequence[TaskNode[Any]] | None = None
+    optional: Sequence[AnyNode] | None = None
     """
-    - Tasks that may fail without affecting success evaluation
+    - Nodes (TaskNode or SubWorkflowNode) that may fail without affecting success evaluation
     - These failures don't block success cases from being satisfied
     """
 

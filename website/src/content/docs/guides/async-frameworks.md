@@ -97,6 +97,7 @@ An ASGI server such as uvicorn runs one loop for each process, so a server stays
 
 **Don't call sync `close()` in a coroutine.** It returns `ASYNC_CONTEXT` and closes nothing.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 broker.close()
@@ -107,6 +108,7 @@ await broker.close_async()
 
 **Don't create an event loop for each call.** Each open loop keeps its resource set. The sixth open loop gets `EVENT_LOOP_LIMIT`.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()

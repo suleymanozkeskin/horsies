@@ -193,7 +193,7 @@ async def test_timeout_respects_ownership(
     row = await _get_row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.claimed_by_worker_id == OTHER_WORKER_ID
-    child.kill_for_caller.assert_not_called()
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -213,7 +213,7 @@ async def test_timeout_requeues_claimed_task(
     row = await _get_row(session, task_id)
     assert row.status == 'PENDING'
     assert row.claimed_by_worker_id is None
-    child.kill_for_caller.assert_not_called()
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')

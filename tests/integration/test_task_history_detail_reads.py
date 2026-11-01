@@ -41,6 +41,7 @@ from horsies.core.history.reads.aggregates import (
 from horsies.core.history.reads.detail import (
     HistoryTaskDetail,
     LiveTaskLocation,
+    TaskAbsenceReason,
     TaskDetailAbsent,
     read_task_detail,
 )
@@ -210,7 +211,7 @@ class TestDetail:
             ghost = v7_with_birth(datetime.now(UTC))
             detail = await read_task_detail(connection, task_id=ghost)
             assert detail == TaskDetailAbsent(
-                task_id=ghost, predates_retained_floor=None
+                task_id=ghost, reason=TaskAbsenceReason.NOT_CLASSIFIED
             )
 
     @pytest.mark.asyncio
@@ -303,7 +304,8 @@ class TestDetail:
             await publisher.republish(connection)
             absent = await read_task_detail(connection, task_id=old_task)
             assert absent == TaskDetailAbsent(
-                task_id=old_task, predates_retained_floor=True
+                task_id=old_task,
+                reason=TaskAbsenceReason.PREDATES_RETAINED_HISTORY,
             )
         assert detached is not None
 

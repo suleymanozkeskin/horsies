@@ -55,7 +55,7 @@ Each child holds one task, so a failure stays with that task.
 | ---- | ------ |
 | A task exceeds `timeout_ms` | Its child and the subprocesses in its session are killed, and the task fails with `TASK_TIMEOUT`. Other tasks continue |
 | A child crashes (segfault, out-of-memory kill, `os._exit()`) | The worker sees the exit at once and recovers that task. Other tasks continue |
-| The worker dies | Each child stops at once, also while C code holds the GIL |
+| The worker dies | Each child stops at once, also while C code holds the GIL. A subprocess that a task started keeps running, because the child cannot act after a SIGKILL |
 | A supervisor sends SIGTERM to every process | Running tasks continue, and the worker drains them |
 | A task forks a helper, then its child dies | The worker sees the death at once. The helper does not hide it |
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task |
@@ -78,6 +78,7 @@ horsies worker myapp.instance:app --processes=8
 
 ### 2. Main Loop
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 while not stopped:
     await claim_and_dispatch_all()
@@ -144,6 +145,7 @@ Each child process:
 4. Populates local task registry
 5. Suppresses sends during import (prevents side effects)
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 def _child_initializer(app_locator, imports):
     app = _locate_app(app_locator)

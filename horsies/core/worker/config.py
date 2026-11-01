@@ -113,6 +113,8 @@ class WorkerConfig:
     drain_timeout_s: float = 300.0
 
     def __post_init__(self) -> None:
+        if self.processes < 1:
+            raise ValueError(f'processes must be >= 1; got {self.processes}')
         if not math.isfinite(self.drain_timeout_s) or self.drain_timeout_s <= 0:
             raise ValueError(
                 'drain_timeout_s must be a finite number of seconds above 0; '

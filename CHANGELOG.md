@@ -38,6 +38,27 @@ and there is no migration contract between pre-1.0 versions.
 - **`ExecutorRestartFailedError` is renamed `ChildStartFailedError`.** There is
   no alias.
 
+- **Breaking: a schedule whose kwargs exceed `payload.reject_bytes` fails at
+  scheduler start.** `Scheduler.start()` raises `ConfigurationError`
+  (`HRS-205`, `CONFIG_INVALID_SCHEDULE`), and `horsies check` reports the
+  schedule. The notes give the size and the limit. Disabled schedules are not
+  checked. Before, the scheduler started and skipped every slot of that
+  schedule.
+- **Breaking: schedule kwargs are encoded once, at scheduler start.** Every
+  slot sends that text until the next start. A kwargs model field with a
+  `default_factory`, or a validator that reads the clock, runs once per start
+  and not once per fire, so the task receives the same value on every fire.
+  If such a validator refuses the value after the start, the scheduler still
+  enqueues the task, and the task fails at the worker with
+  `WORKER_SERIALIZATION_ERROR`. Before, the scheduler logged an error and
+  skipped the slot.
+- **Breaking: `RerunSourceAbsent.predates_retained_floor` is now
+  `RerunSourceAbsent.reason`, a `TaskAbsenceReason`.** `True` is
+  `PREDATES_RETAINED_HISTORY`, `False` is `WITHIN_RETAINED_HISTORY` and `None`
+  is `NOT_CLASSIFIED`. `TaskAbsenceReason` is the enum that
+  `TaskDetailNotFound.reason` uses; import it from `horsies` or
+  `horsies.monitoring`.
+  Code that reads `predates_retained_floor` must match on `reason`.
 - **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
   whitespace at the start or the end, or is longer than 100 characters (the
   length of the database `queue_name` column).** The config raises
@@ -182,9 +203,8 @@ and there is no migration contract between pre-1.0 versions.
     `WORKER_PING_FAILED`); a non-positive `limit` of
     `get_worker_state_history` (before: `MONITORING_QUERY_FAILED`); both
     `enqueued_at` and `enqueue_delay_seconds`, a future `sent_at` without
-    either, or malformed args or kwargs JSON passed to `enqueue()`, and a
-    scheduled slot whose kwargs fail to encode or exceed
-    `payload.reject_bytes` (before: `ENQUEUE_FAILED`).
+    either, or malformed args or kwargs JSON passed to `enqueue()` (before:
+    `ENQUEUE_FAILED`).
   - `LISTENER_DISABLED`: `ping_workers` on a broker built with
     `assume_initialized=True` (before: `WORKER_PING_FAILED`).
 - **Malformed `task_options` JSON passed to `enqueue()` returns
@@ -383,6 +403,23 @@ and there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **`enqueue_async` refuses bad input before the database, with its own code.**
+  A refused input used to fall into the `except Exception` of the write, so a
+  direct call got `ENQUEUE_FAILED`, whose contract says the write may have
+  happened, and a send got an error that the retry methods accepted. These now
+  give `INVALID_INPUT` and write nothing, and a send gets `VALIDATION_FAILED`:
+  an empty task or queue name, a priority outside 1..100, a naive `good_until`,
+  a negative `enqueue_delay_seconds`, an empty `retention_class_key`, an empty
+  idempotency key or one over 255 bytes, a naive `sent_at`, and a naive
+  `enqueued_at`. A naive `sent_at` raised a raw `TypeError` before, and a naive
+  `enqueued_at` was stored under the session time zone with no error.
+  `args_json` must be null or an empty array, because the worker refuses every
+  other row, and `kwargs_json` must be an object or null. An empty string is
+  refused for both, and a falsy value no longer turns into an empty container.
+- **Breaking: a code defect in the enqueue write crashes loud.** The write now
+  catches database, network and history-contract errors only, so any other
+  exception leaves `enqueue_async`, and so leaves `send()`. Schema init keeps its
+  catch: an incomplete cutover is still `ENQUEUE_FAILED`.
 - **Breaking: `WorkflowHandle.results()` and `tasks()` return
   `HandleWorkflowNotFound` for an id that has no workflow.** The same is
   true for `results_async()` and `tasks_async()`. Each method reads the
@@ -390,6 +427,117 @@ and there is no migration contract between pre-1.0 versions.
   `Ok({})` and `Ok([])`, the same values as an existing workflow without
   results or nodes. An existing workflow before its first stored result
   still gives `Ok({})`.
+- **Breaking: `WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND`
+  when the row of a completed workflow is removed after its status was
+  read.** Retention can delete a terminal workflow between the status read
+  and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
+  success, for that case.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a stored workflow error that is JSON but not an object.** This is
+  true for a failed, cancelled or expired workflow. The message names the
+  Python type of the decoded value, for example `got list`. Before, `get()`
+  read such a value as no stored error and returned the `OutcomeCode` of
+  the status (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or
+  `WORKFLOW_EXPIRED`).
+- **Breaking: a defect in the stored-error decode of `WorkflowHandle.get()`
+  propagates.** `get()` returns `RESULT_DESERIALIZATION_ERROR` only for
+  the two refusals of the decode, `StrictJsonError` and
+  `ValueValidationError`. Before, it returned `RESULT_DESERIALIZATION_ERROR`
+  for every exception from the decode.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a `COMPLETED` workflow whose stored result is NULL or empty, and for
+  an empty stored workflow error.** The library stores a result in the
+  statement that sets `COMPLETED`, and it does not store an empty error. So
+  these values are stored data that does not parse. The message names the
+  case, and `data` holds the workflow id. Before, the result case returned
+  `TaskResult(ok=None)`, a success, and an empty error returned the
+  `OutcomeCode` of the status. A NULL error still gives the `OutcomeCode` of
+  the status: a cancel does not write the error.
+- **Breaking: `WorkflowHandle.get()` returns
+  `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` for a `COMPLETED` workflow whose
+  output node is `SKIPPED`.** A success case that does not require the output
+  node lets this state occur. The workflow stores an error envelope with the
+  new code, and `data` names the workflow and the output node. A
+  `SubWorkflowNode` of such a child stays `COMPLETED` and holds that error, so
+  a downstream node, `result_for()` and the `get()` of a parent see the same
+  code. Before, the workflow stored the text `null`, `get()` returned
+  `RESULT_DESERIALIZATION_ERROR`, and a downstream node received
+  `RESULT_DESERIALIZATION_ERROR` with `Stored TaskResult JSON corrupt`. Code
+  that reads this state through `RESULT_DESERIALIZATION_ERROR` must match
+  on the new code. A workflow that already stored the text `null` keeps it, and
+  `get()` returns `RESULT_DESERIALIZATION_ERROR` for it. A `FAILED` output
+  node does not change: the workflow stores that node's error.
+- **Breaking: `encode_value` refuses a lone surrogate in a string or in a
+  dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
+  `dumps_json`. The text names the kwarg and holds no input value. A dict
+  key is the larger change. Before, `dump_python(mode='json')` wrote U+FFFD
+  in place of the surrogate of a key with a declared type: the send and the
+  task succeeded with a changed key, and two keys could become one. For a
+  key without a declared type, a raw `UnicodeEncodeError` left `encode_value`.
+  What each caller gets now:
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A child node in
+    `build_with()` fails the `SubWorkflowNode` with
+    `WORKFLOW_ENQUEUE_FAILED`. Before, for a string, `spec.start()` returned
+    `VALIDATION_FAILED`, and a child start failed the `SubWorkflowNode` with
+    `WORKER_SERIALIZATION_ERROR`.
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `StrictJsonError` as `exception`.
+  - `prepare_schedules` refuses the schedule at boot with
+    `CONFIG_INVALID_SCHEDULE`.
+  - A task that returns such a value ends with
+    `WORKER_SERIALIZATION_ERROR`.
+- **Breaking: a lone surrogate in the error text of a validator raises
+  `StrictJsonError` from `encode_value` and `decode_value`.** A validator
+  that writes the refused value in its text, such as `raise
+  ValueError(f'bad name {value}')`, is the usual cause. Pydantic cannot
+  build such a text. The new text names the kwarg and holds no input value.
+  Before, a raw `UnicodeEncodeError` left both functions. What each caller
+  gets now:
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `StrictJsonError` as `exception`. Before, it raised.
+  - `prepare_schedules` refuses the schedule with `CONFIG_INVALID_SCHEDULE`.
+    Before, it raised.
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+    raised.
+  - A task whose return value hits this ends with `RETURN_TYPE_MISMATCH`, in
+    a direct call and in a worker. The task wrapper refuses the value, as it
+    refuses any other value that does not validate, and the value is not
+    stored. Before, the task ended with `UNHANDLED_EXCEPTION`, or in a worker
+    with `TASK_EXCEPTION` for the context of a `PydanticCustomError`.
+  - A decode of the kwargs of a task ends with `WORKER_SERIALIZATION_ERROR`,
+    not `TASK_EXCEPTION`.
+  - A decode of a stored result gives `RESULT_DESERIALIZATION_ERROR`. Before,
+    the raw error left the read.
+- **Breaking: `encode_value` raises `ValueValidationError` for a dict key
+  without a JSON form.** Such a key is a `frozenset`, or an Enum member whose
+  value is a list, a dict or a set. The text names the kwarg and the type.
+  Before, a raw `TypeError` left `encode_value`. Registration refuses these
+  types in a task signature (`HRS-105`), so `.send()` and a schedule do not
+  reach this. A `SubWorkflowNode` kwarg fails spec construction with
+  `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+  raised. A task whose `TaskError.data` holds such a key ends with
+  `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`. Any other `TypeError`
+  from the dump is a defect and propagates, for example from a computed
+  field.
+- **Breaking: `encode_value` raises `ValueValidationError` for a value that
+  holds itself.** Such a value is a list or a dict that contains itself, or
+  an instance of a self-referencing model that links to itself. The text
+  names the kwarg. Before, a raw `ValueError` left `encode_value`. What each
+  caller gets now:
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `ValueValidationError` as `exception`. Before, it raised.
+  - `prepare_schedules` refuses the schedule with `CONFIG_INVALID_SCHEDULE`.
+    Before, it raised.
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+    raised.
+  - A task that returns such a value, or whose `TaskError.data` holds one,
+    ends with `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`.
+
+  Any other `ValueError` from the dump propagates, also the `Circular
+  reference detected (depth exceeded)` of a value that is only deep.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -415,6 +563,21 @@ and there is no migration contract between pre-1.0 versions.
   that was changed after registration. Before, the start returned it as
   `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
   is written.
+- **Breaking: task options that do not parse in a child workflow start
+  propagate.** When the engine starts the child workflow of a
+  `SubWorkflowNode`, it parses the task options of each child root and of
+  each child task with `good_until`. It reads them from the task function,
+  as the workflow start transaction does. Options that do not parse to a
+  JSON object are a defect, for example `task_options_json` that was
+  changed after registration. The child start raises
+  `SerializationError` with the node name before it writes a row. The
+  caller rolls back its transaction: `start_workflow()` and `resume()`
+  raise the error, the worker's workflow finalize phase returns a
+  finalize error, and the reaper logs the recovery candidate as failed.
+  Before, a child root with such options ended `FAILED` inside the child
+  workflow, and a child task with `good_until` failed the
+  `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. The promotion of a
+  node whose stored options do not parse still fails only that node.
 - **Breaking: the agent skill files moved into one skill folder.** The
   five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
   `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
@@ -453,6 +616,14 @@ and there is no migration contract between pre-1.0 versions.
   kills the children that still run a task, and each task takes the crash path,
   so its row does not wait for the reaper. Set it below the stop window of your
   supervisor.
+- **`SuccessCase.required` and `SuccessPolicy.optional` accept any node.**
+  The element type is `AnyNode` (`TaskNode[Any] | SubWorkflowNode[Any]`).
+  Before, it was `TaskNode[Any]`, but spec validation already accepted a
+  `SubWorkflowNode` there, so the call needed a cast. The change widens a
+  public type. A caller that passes `TaskNode` values is not affected.
+- **Action responses no longer carry `next_attempt_number`.** The field was
+  always `null` after the manual retry was removed. The web UI action
+  responses keep `outcome`, `was_status` and `warning`.
 - New command `horsies skills install --target DIR [--force]`. It copies
   the skill folder from the installed package to `DIR/horsies/`. `--target`
   is required, because each agent tool reads a different skills directory.
@@ -614,6 +785,34 @@ and there is no migration contract between pre-1.0 versions.
   without a stored error gets the `OutcomeCode` of the status that `get()`
   read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
   `get()` no longer makes a free-text `WORKFLOW_<status>` code.
+- **A value that the workflow engine built and that does not serialize
+  raises `SerializationError`.** This is true for the kwargs of a promoted
+  node, for each value that a child workflow start writes, for the result
+  of a completed node, for the parent node result and the summary of a
+  finished child workflow, and for the workflow error. The engine builds
+  these values in the process, some of them from values that it parsed from
+  stored rows, so a failure is a defect. The message names the value. The
+  caller rolls back its transaction: the worker's workflow finalize phase
+  returns a finalize error, the reaper logs the recovery candidate as
+  failed, and `start_workflow()` and `resume()` raise the error. Before, the
+  engine logged the failure and stored the text `null` or NULL in the result
+  or error column, or failed the node with `WORKER_SERIALIZATION_ERROR`. The
+  outputless workflow result keeps its fallback.
+- **A child workflow start raises `SerializationError` when the kwargs of a
+  child node do not encode.** Spec construction in `build_with()` encodes and
+  decodes every child kwarg, so a refusal at the child start is a defect. The
+  message names the child node. Before, the child start failed the
+  `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. Stored kwargs of the
+  parent node that do not decode still fail only that node.
+- **The workflow start transaction raises `SerializationError` for task
+  options that are JSON but not an object when it merges the `good_until`
+  of a node.** The options are the task decorator's serialization of a
+  validated `TaskOptions`, so such a value is a defect, for example
+  `task_options_json` that was changed after registration. The message names
+  the node and the type of the value. The transaction rolls back, and
+  nothing is written. Before, the start replaced the options with `{}` and
+  stored only `good_until`. The child workflow start already raises for the
+  same value.
 
 ### Removed
 
@@ -651,6 +850,30 @@ and there is no migration contract between pre-1.0 versions.
 - **A forked helper cannot hide a dead child.** The worker takes a child's death
   from the process exit, not from the socket. (#415)
 
+- **Phase-2 recovery progresses a failed node whose stored error does not
+  decode as a `TaskError`.** The recovery records the error that the
+  terminal status names, as it does for a stored result envelope that does
+  not validate. The log names the refusal. Before, the
+  `ValueValidationError` of the decode rolled back the recovery of that row
+  on each pass, and the node did not progress.
+- **A lone surrogate in the text of a node failure no longer loses the
+  text.** The text of an exception from `build_with()` can hold one, for
+  example a file name. The node now fails with the text, with the surrogate
+  written as a `\udXXX` escape. Before, the node stored the fixed text
+  `secondary serialization failure`. A node whose completion result does not
+  encode keeps its failure text in the same way. Before, that node stored
+  the text `null`.
+- **The `VALIDATION_FAILED` row of the workflow start codes on the errors
+  page states that a `SerializationError` in the start transaction
+  propagates.** The row said that a serialization error refused the start,
+  which is not true since #421. It now has the same text as the Workflow API
+  page and the skill.
+- **The web UI no longer shows a Retry action that the server cannot run.**
+  The server removed the manual task retry route, so the Retry button on a
+  task detail panel could only fail. The button, its confirm text, the
+  `TASK_NOT_RETRYABLE` and `TASK_EXPIRY_PASSED` conflict codes in the UI
+  types, and the `--enable-actions` help text for retry are removed. To run
+  a terminal task again, use the rerun API.
 - **A task cancel accepts every form of a task id that Python reads as a
   UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
   cancel now uses the canonical id text, and the result carries it.
@@ -733,6 +956,14 @@ and there is no migration contract between pre-1.0 versions.
   decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
   refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
   character and stays accepted.
+- **`prepare_legacy_batch` no longer aborts on a row that breaks an enqueue
+  rule.** An empty task or queue name, or a priority outside 1..100, raised a
+  raw `ValueError` out of the batch, so one row stopped every row around it and
+  the error did not name it. The row now stays unprepared, and
+  `PreparationBatch.refused_rows` names it with the rule. The walk ends in the
+  new `PreparationBlocked`, which counts the rows that remain, not in
+  `PreparationComplete`. Repair the rows and run preparation again; the tighten
+  refuses while any remain.
 
 ## [0.5.5] - 2026-10-28
 

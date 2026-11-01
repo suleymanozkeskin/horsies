@@ -9,6 +9,7 @@ tags: [scheduling, configuration, TaskSchedule]
 
 Top-level scheduler configuration added to `AppConfig`.
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 from horsies.core.models.schedule import ScheduleConfig, TaskSchedule
 
@@ -68,6 +69,7 @@ TaskSchedule(
 
 Must be unique across all schedules. Used for state tracking:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 TaskSchedule(name="hourly-sync", ...)
 TaskSchedule(name="daily-cleanup", ...)
@@ -77,6 +79,7 @@ TaskSchedule(name="daily-cleanup", ...)
 
 Must match a registered `@app.task()`:
 
+<!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task("send_notification")
 def send_notification(*, user_id: int) -> TaskResult[None, TaskError]:
@@ -106,10 +109,13 @@ TaskSchedule(
 )
 ```
 
+The scheduler encodes the kwargs of each schedule once at startup and sends that text for every slot until the next start. A kwargs model field with a `default_factory`, or a validator that reads the clock, runs once per start, not once per fire. If such a validator refuses the value later, the task is enqueued and fails at the worker with `WORKER_SERIALIZATION_ERROR`.
+
 ### Queue Override
 
 In CUSTOM mode, override the task's default queue:
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 @app.task("background_job", queue_name="normal")
 def background_job() -> TaskResult[None, TaskError]:
@@ -180,6 +186,7 @@ future slot.
 
 Disable individual schedules:
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 TaskSchedule(
     name="deprecated-job",
@@ -191,6 +198,7 @@ TaskSchedule(
 
 Disable entire scheduler:
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 ScheduleConfig(
     enabled=False,  # No schedules run
@@ -219,7 +227,9 @@ At scheduler startup, validates:
 1. **Task exists**: `task_name` must be registered
 2. **Queue valid**: `queue_name` must match configured queue (CUSTOM mode)
 3. **Arguments complete**: Required task parameters must be provided
+4. **Arguments encodable**: `kwargs` must encode against the task's types and fit `payload.reject_bytes`
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 # Will fail at startup:
 TaskSchedule(

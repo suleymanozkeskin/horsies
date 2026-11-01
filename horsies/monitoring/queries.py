@@ -1571,8 +1571,8 @@ async def _history_detail(
     match detail:
         case HistoryTaskDetail():
             return detail
-        case TaskDetailAbsent(predates_retained_floor=predates):
-            return _absence_reason(predates)
+        case TaskDetailAbsent(reason=reason):
+            return reason
         case LiveTaskLocation():
             raise HistoryContractError(
                 f'staged detail reports task {task_id} live in the snapshot '
@@ -1580,17 +1580,6 @@ async def _history_detail(
             )
         case _ as unreachable:
             assert_never(unreachable)
-
-
-def _absence_reason(predates_retained_floor: bool | None) -> TaskAbsenceReason:
-    """Name the absence classification of the staged detail read."""
-    match predates_retained_floor:
-        case True:
-            return TaskAbsenceReason.PREDATES_RETAINED_HISTORY
-        case False:
-            return TaskAbsenceReason.WITHIN_RETAINED_HISTORY
-        case None:
-            return TaskAbsenceReason.NOT_CLASSIFIED
 
 
 # --------------------------------------------------------------------------- #
