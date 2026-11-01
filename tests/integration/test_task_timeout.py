@@ -21,6 +21,7 @@ from horsies.core.codec.task_options import serialize_task_options
 from horsies.core.models.tasks import OutcomeCode, TaskOptions
 from horsies.core.types.result import Ok, is_ok
 from horsies.core.worker.config import WorkerConfig
+from horsies.core.worker.slots import SlotHandle
 from horsies.core.worker.worker import Worker, _parse_timeout_ms
 from tests.fixtures.slots.handles import unbound_handle
 from tests.integration.conftest import compute_test_enqueue_sha
@@ -35,6 +36,13 @@ OTHER_WORKER_ID = 'w-timeout-other'
 
 # A pid that cannot exist: pid_max is far below this on macOS and Linux.
 FAKE_DEAD_PID = 2**22 - 1
+
+
+def _handle_with_child() -> tuple[SlotHandle, MagicMock]:
+    handle = unbound_handle()
+    child = MagicMock()
+    handle.bind_child(child)
+    return handle, child
 
 
 def _make_worker(engine: AsyncEngine) -> Worker:
@@ -123,7 +131,8 @@ async def test_timeout_marks_running_task_failed(
     task_id = await _insert_task(session)
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -138,6 +147,7 @@ async def test_timeout_marks_running_task_failed(
     assert attempts[0].outcome == 'FAILED'
     assert attempts[0].will_retry is False
     assert attempts[0].error_code == OutcomeCode.TASK_TIMEOUT.value
+    child.kill_for_caller.assert_called_once_with()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -176,12 +186,14 @@ async def test_timeout_respects_ownership(
     task_id = await _insert_task(session, owner=OTHER_WORKER_ID)
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.claimed_by_worker_id == OTHER_WORKER_ID
+    child.kill_for_caller.assert_not_called()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -194,12 +206,14 @@ async def test_timeout_requeues_claimed_task(
     task_id = await _insert_task(session, status='CLAIMED')
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
     assert row.status == 'PENDING'
     assert row.claimed_by_worker_id is None
+    child.kill_for_caller.assert_not_called()
 
 
 @pytest.mark.asyncio(loop_scope='function')
@@ -228,7 +242,8 @@ async def test_timeout_retries_when_opted_in(
     )
     worker = _make_worker(engine)
 
-    await worker._handle_task_timeout(unbound_handle(), task_id, 5_000)
+    handle, child = _handle_with_child()
+    await worker._handle_task_timeout(handle, task_id, 5_000)
     session.expire_all()
 
     row = await _get_row(session, task_id)
@@ -247,7 +262,7 @@ async def test_timeout_retries_when_opted_in(
     assert attempt is not None
     assert attempt.will_retry is True
     assert attempt.error_code == OutcomeCode.TASK_TIMEOUT.value
-
+    child.kill_for_caller.assert_called_once_with()
 
 class TestTimeoutWireRoundTrip:
     """serialize_task_options must carry timeout_ms to the claim-side parser.

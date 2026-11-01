@@ -33,6 +33,7 @@ from horsies.core.worker.child_protocol import (
     RunFrame,
     encode_child_frame,
 )
+from horsies.core.worker import slots
 from horsies.core.worker.slots import (
     Assigned,
     BootAttemptsExhausted,
@@ -431,6 +432,16 @@ class TestTaskRuns:
                 assert result_json.endswith('|True')
             case other:
                 raise AssertionError(other)
+
+    async def test_optimize_reaches_a_real_child(
+        self,
+        pool_factory: PoolFactory,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(slots, 'interpreter_flags', lambda: ('-O',))
+        pool = await pool_factory()
+        state = await _result_json(pool.submit(_frame('state')))
+        assert state.endswith('|False')
 
     async def test_terminate_works_on_a_task_subprocess(
         self,

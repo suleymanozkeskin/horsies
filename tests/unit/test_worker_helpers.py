@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1199,14 +1200,18 @@ class TestFinalizeAfterSlotOutcome:
             return_value=_RequeueOutcome.REQUEUED,
         )
 
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
         await worker._finalize_after(
             _finished_handle(_LOST),
             'task-11',
             task_name='helper_task',
+            claimed_at=claimed_at,
         )
 
-        reason = worker._recover_worker_future_failure.await_args.args[1]
-        assert 'signal 9 (SIGKILL)' in reason
+        await_args = worker._recover_worker_future_failure.await_args
+        assert 'signal 9 (SIGKILL)' in await_args.args[1]
+        assert await_args.kwargs['claimed_at'] == claimed_at
 
     @pytest.mark.asyncio
     async def test_task_that_never_reached_a_child_is_requeued(self) -> None:
@@ -1216,14 +1221,21 @@ class TestFinalizeAfterSlotOutcome:
         )
         worker._recover_worker_future_failure = AsyncMock()  # type: ignore[method-assign]
 
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
         result = await worker._finalize_after(
             _finished_handle(NotDispatched(NotRunCause.POOL_STOPPING)),
             'task-12',
             task_name='helper_task',
+            claimed_at=claimed_at,
         )
 
         assert isinstance(result, Ok)
-        worker._requeue_claimed_task.assert_awaited_once()
+        worker._requeue_claimed_task.assert_awaited_once_with(
+            'task-12',
+            NotRunCause.POOL_STOPPING.value,
+            claimed_at=claimed_at,
+        )
         worker._recover_worker_future_failure.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1385,20 +1397,58 @@ class TestDispatchOne:
         )
         assert worker._spawn_background.call_args.kwargs['finalizer'] is True
 
+    @pytest.mark.asyncio
+    async def test_finalizer_gets_the_handle_and_the_claim_fields(self) -> None:
+        worker = _make_worker()
+        worker._slots = MagicMock()
+        worker._spawn_background = MagicMock()  # type: ignore[method-assign]
+        worker._finalize_after = MagicMock()  # type: ignore[method-assign]
+        claimed_at = datetime(2026, 11, 1, tzinfo=timezone.utc)
+
+        await worker._dispatch_one(
+            'task-31',
+            'app.add',
+            None,
+            None,
+            'other',
+            False,
+            timeout_ms=1000,
+            claimed_at=claimed_at,
+        )
+
+        worker._finalize_after.assert_called_once_with(
+            worker._slots.submit.return_value,
+            'task-31',
+            'other',
+            False,
+            timeout_ms=1000,
+            task_name='app.add',
+            claimed_at=claimed_at,
+        )
+
 
 @pytest.mark.unit
 class TestSlotPoolSetup:
-    def test_config_carries_what_a_child_needs(self) -> None:
+    def test_config_carries_what_a_child_needs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         worker = _make_worker()
         worker.cfg.app_locator = 'app.module:app'
         worker.cfg.processes = 3
+        worker.cfg.max_tasks_per_child = 7
+        worker.cfg.max_memory_per_child_mb = 300
+        monkeypatch.setattr(sys, 'path', ['', '/srv/app'])
 
         config = worker._slot_pool_config()
 
+        monkeypatch.undo()
         assert config.slots == 3
+        assert config.max_tasks_per_child == 7
+        assert config.max_memory_per_child_mb == 300
         assert config.init.app_locator == 'app.module:app'
         assert config.init.database_url == 'postgresql://u:p@localhost/db'
-        assert '' not in config.init.parent_sys_path
+        assert config.init.parent_sys_path == (os.getcwd(), '/srv/app')
 
     def test_pending_limit_covers_the_claim_budget(self) -> None:
         worker = _make_worker()
@@ -1499,6 +1549,17 @@ class TestMemoryBaselineGuard:
 
 @pytest.mark.unit
 class TestTimedOutChildKill:
+    @pytest.mark.asyncio
+    async def test_the_child_that_holds_the_task_is_killed(self) -> None:
+        worker = _make_worker()
+        handle = SlotHandle(_run_frame(), asyncio.get_running_loop())
+        child = MagicMock()
+        handle.bind_child(child)
+
+        worker._kill_timed_out_child(handle, 'task-1', 1000)
+
+        child.kill_for_caller.assert_called_once_with()
+
     def test_a_child_that_no_longer_holds_the_task_is_not_killed(
         self,
         caplog: pytest.LogCaptureFixture,
@@ -3056,6 +3117,50 @@ class TestWorkerStartupCoverageOutcome:
         await worker.start()
 
         worker.listener.start.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_start_arms_the_slot_failure_watch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without this service loop, a slot that cannot restart goes unseen."""
+        from horsies.core.history.maintenance import coverage as coverage_module
+
+        worker = _make_worker()
+        monkeypatch.setattr(
+            coverage_module,
+            'ensure_startup_coverage_in_database',
+            AsyncMock(
+                return_value=coverage_module.CoverageEnsureFailed(
+                    stage='ensure_leaf_coverage',
+                    class_key='custom_7d',
+                    refusal='current class leaf is missing',
+                    heartbeat_covered_now=True,
+                    absent_leaves=(),
+                ),
+            ),
+        )
+        worker.broker = MagicMock()
+        attach_resources(worker.broker, fake_resources())
+        worker.broker.validate_worker_database_paths = AsyncMock()
+        worker._preload_modules_main = MagicMock()  # type: ignore[assignment]
+        _stub_slot_start(worker)
+        worker.listener.start = AsyncMock(return_value=Ok(None))
+        worker.listener.listen_many = AsyncMock(
+            return_value=Ok([asyncio.Queue(), asyncio.Queue()])
+        )
+        worker.listener.listen = AsyncMock(return_value=Ok(asyncio.Queue()))
+        spawned: list[tuple[str, bool]] = []
+
+        def _record(coro: Any, **kwargs: Any) -> MagicMock:
+            spawned.append((coro.cr_code.co_name, kwargs.get('service', False)))
+            coro.close()
+            return MagicMock()
+
+        worker._spawn_background = MagicMock(side_effect=_record)  # type: ignore[method-assign]
+
+        await worker.start()
+
+        assert ('_slot_failure_loop', True) in spawned
 
 
 class TestWorkerStartConnectionOrdering:

@@ -320,3 +320,23 @@ async def test_forked_helper_does_not_hide_a_dead_child(
         )
         await _assert_error(isolation_broker, handle.task_id, 'WORKER_CRASHED')
 
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+@pytest.mark.parametrize('start_method', ['spawn', 'forkserver'])
+async def test_multiprocessing_works_inside_a_task(
+    isolation_broker: PostgresBroker,
+    start_method: str,
+) -> None:
+    """A task may start its own processes from the child program."""
+    with run_worker(
+        INSTANCE,
+        processes=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+    ):
+        handle = unwrap_send(
+            await isolation.run_multiprocessing.send_async(start_method=start_method),
+        )
+        result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
+        assert result.ok_value == '3'

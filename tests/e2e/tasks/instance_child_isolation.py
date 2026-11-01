@@ -5,6 +5,7 @@ Short heartbeat and stale settings, so recovery paths finish inside a test.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 import subprocess
 import time
@@ -72,3 +73,16 @@ def fork_helper_then_hang(*, helper_seconds: float) -> TaskResult[str, TaskError
         os._exit(0)
     time.sleep(120)
     return TaskResult(ok='unreachable')
+
+
+def _exit_with_three() -> None:
+    os._exit(3)
+
+
+@app.task(task_name='e2e_isolation_multiprocessing')
+def run_multiprocessing(*, start_method: str) -> TaskResult[str, TaskError]:
+    context = multiprocessing.get_context(start_method)
+    process = context.Process(target=_exit_with_three)
+    process.start()
+    process.join(30)
+    return TaskResult(ok=str(process.exitcode))
