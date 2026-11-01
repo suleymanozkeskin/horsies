@@ -455,6 +455,43 @@ class TestTypedRefusals:
             assert isinstance(outcome, RerunInputCorrupt)
             assert 'digest' in outcome.detail
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('payload', 'detail'),
+        [
+            (
+                b'{"args":[],"kwargs":{"x":Infinity},"options":null}',
+                'Non-standard JSON constant',
+            ),
+            (
+                b'{"args":[],"kwargs":{"x":1e9999},"options":null}',
+                'finite binary64',
+            ),
+        ],
+    )
+    async def test_non_finite_number_in_a_stored_envelope_fails_closed(
+        self,
+        terminalization_schema: HistorySchema,
+        payload: bytes,
+        detail: str,
+    ) -> None:
+        async with terminalization_schema.engine.begin() as connection:
+            await prepare_move_storage(connection, CLASS_KEY)
+            source = await seed_failed_source(
+                connection, prepared_inline=payload
+            )
+            count_tasks = text('SELECT count(*) FROM horsies_tasks')
+            tasks_before = (await connection.execute(count_tasks)).scalar_one()
+            outcome = await rerun_task(
+                connection,
+                RerunTask(source_task_id=source, deadline=None),
+                policy(),
+            )
+            assert isinstance(outcome, RerunInputCorrupt)
+            assert detail in outcome.detail
+            tasks_after = (await connection.execute(count_tasks)).scalar_one()
+            assert tasks_after == tasks_before
+
 
 class TestKeyedRerun:
     @pytest.mark.asyncio

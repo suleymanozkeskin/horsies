@@ -94,6 +94,13 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Guides',
+					items: [
+						{ label: 'Start a Workflow Once', slug: 'guides/start-workflow-once' },
+						{ label: 'Async Frameworks', slug: 'guides/async-frameworks' },
+					],
+				},
+				{
 					label: 'Configuration',
 					items: [
 						{ label: 'Queue Modes', slug: 'concepts/queue-modes' },
