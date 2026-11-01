@@ -155,6 +155,11 @@ class TestChildFrames:
 
 
 class TestHeader:
+    def test_empty_metadata_is_refused(self) -> None:
+        """The reader waits for a frame that a zero-length header never completes."""
+        raw = FRAME_HEADER.pack(0, 0)
+        assert parse_header(raw) == Err(FrameOverBound(0, 0))
+
     def test_sizes_at_the_bounds_pass(self) -> None:
         raw = FRAME_HEADER.pack(MAX_META_BYTES, MAX_BODY_BYTES)
         match parse_header(raw):
@@ -280,7 +285,19 @@ class TestFieldCoverage:
         assert names == wire - {'kind'}
 
 
+class TestInitFrameRepr:
+    def test_the_database_password_stays_out_of_the_repr(self) -> None:
+        assert 'secret' not in repr(_init_frame())
+
+
 class TestFailureReasonText:
+    def test_a_long_reason_is_cut_and_framed(self) -> None:
+        wire = _bounded_result(_run_frame(), (True, 'kept', '\x00' * (2 << 20)))
+        assert wire[:2] == (True, 'kept')
+        frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable())
+        meta, body = _split(encode_child_frame(frame))
+        assert decode_child_frame(meta, body) == Ok(frame)
+
     def test_lone_surrogate_in_a_reason_can_be_framed(self) -> None:
         wire = _bounded_result(_run_frame(), (False, '', 'bad \ud800 text'))
         frame = ResultFrame('task-1', wire[0], wire[1], wire[2], RssUnreadable())
