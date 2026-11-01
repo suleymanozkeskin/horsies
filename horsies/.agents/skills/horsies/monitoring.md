@@ -1,8 +1,3 @@
----
-name: horsies-monitoring
-description: Monitoring guidance for horsies, including the horsies.monitoring query API, the task cancel action, the horsies[web] dashboard, create_monitoring_app, the horsies web CLI, authorization policies, and schema-compatibility states. Use when embedding the dashboard, operating it, or building on the monitoring API.
----
-
 # horsies — Monitoring
 
 Detailed reference for the typed monitoring query API, task actions, and the

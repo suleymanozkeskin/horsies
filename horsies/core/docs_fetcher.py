@@ -4,25 +4,33 @@ Fetch horsies documentation locally for AI agents.
 Two strategies: git sparse checkout (primary, fast) with
 urllib tarball fallback (no git required). Idempotent —
 run once to download, run again to update.
+
+The docs match the installed version: the download uses the release tag
+``v{version}``. The ``main`` branch is used only when the caller asks for it.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Final, assert_never
+
+from horsies.core.types.result import Err, Ok, Result
 
 
 REPO_URL = 'https://github.com/suleymanozkeskin/horsies'
 DEFAULT_OUTPUT_DIR = '.horsies-docs'
 DOCS_REPO_PATH = 'website/src/content/docs'
 LLMS_REPO_PATH = 'website/public/llms.txt'
-DEFAULT_BRANCH = 'main'
-TARBALL_URL = f'{REPO_URL}/archive/refs/heads/{DEFAULT_BRANCH}.tar.gz'
+MAIN_BRANCH = 'main'
+RELEASE_VERSION_PATTERN: Final = re.compile(r'\d+\.\d+\.\d+')
 
 _GIT_TIMEOUT_SECONDS = 60
 _TARBALL_TIMEOUT_SECONDS = 60
@@ -32,8 +40,80 @@ class DocsFetchError(Exception):
     """Raised when documentation fetching fails."""
 
 
-def fetch_docs(*, output_dir: str = DEFAULT_OUTPUT_DIR) -> int:
-    """Fetch horsies docs into output_dir. Returns file count.
+@dataclass(frozen=True, slots=True)
+class ReleaseTag:
+    """The docs of one release. ``name`` is the git tag, for example ``v0.5.5``."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class MainBranch:
+    """The docs of the ``main`` branch. They can be ahead of the installed version."""
+
+
+DocsRef = ReleaseTag | MainBranch
+
+
+@dataclass(frozen=True, slots=True)
+class VersionHasNoTag:
+    """The installed version is not a plain release number, so no tag matches it.
+
+    Examples: ``0.5.6.dev0``, ``0.5.5+local``, ``0.6.0rc1``.
+    """
+
+    installed_version: str
+
+    def message(self) -> str:
+        return (
+            f'installed version {self.installed_version!r} is not a release '
+            'version, so no release tag matches it. '
+            f'Run get-docs with --ref {MAIN_BRANCH} to fetch the {MAIN_BRANCH} '
+            'branch docs, which can differ from this version.'
+        )
+
+
+def resolve_docs_ref(
+    *,
+    installed_version: str,
+    use_main_branch: bool,
+) -> Result[DocsRef, VersionHasNoTag]:
+    """Choose the git ref to download. Pure: it does no I/O.
+
+    ``use_main_branch`` selects ``main`` for any version. Otherwise a version
+    of the form ``N.N.N`` selects the tag ``vN.N.N``, and any other version
+    returns ``VersionHasNoTag``. The tag is not checked here: a release number
+    with no published tag fails later, in the download.
+    """
+    if use_main_branch:
+        return Ok(MainBranch())
+    if RELEASE_VERSION_PATTERN.fullmatch(installed_version) is None:
+        return Err(VersionHasNoTag(installed_version=installed_version))
+    return Ok(ReleaseTag(name=f'v{installed_version}'))
+
+
+def _git_ref_name(ref: DocsRef) -> str:
+    match ref:
+        case ReleaseTag(name=name):
+            return name
+        case MainBranch():
+            return MAIN_BRANCH
+        case _:
+            assert_never(ref)
+
+
+def _tarball_url(ref: DocsRef) -> str:
+    match ref:
+        case ReleaseTag(name=name):
+            return f'{REPO_URL}/archive/refs/tags/{name}.tar.gz'
+        case MainBranch():
+            return f'{REPO_URL}/archive/refs/heads/{MAIN_BRANCH}.tar.gz'
+        case _:
+            assert_never(ref)
+
+
+def fetch_docs(*, ref: DocsRef, output_dir: str = DEFAULT_OUTPUT_DIR) -> int:
+    """Fetch horsies docs of ``ref`` into output_dir. Returns file count.
 
     Strategy: git sparse checkout, falling back to tarball on
     DocsFetchError (the one type-branching seam in this module).
@@ -49,14 +129,14 @@ def fetch_docs(*, output_dir: str = DEFAULT_OUTPUT_DIR) -> int:
     if _has_git():
         _print_status('Fetching docs via git sparse checkout...')
         try:
-            count = _fetch_via_sparse_checkout(output_path)
+            count = _fetch_via_sparse_checkout(output_path, ref)
             _print_status(f'Done. {count} files written to {output_dir}/')
             return count
         except DocsFetchError as exc:
             _print_status(f'Git sparse checkout failed ({exc}), falling back to tarball...')
 
     _print_status('Fetching docs via tarball download...')
-    count = _fetch_via_tarball(output_path)
+    count = _fetch_via_tarball(output_path, ref)
     _print_status(f'Done. {count} files written to {output_dir}/')
     return count
 
@@ -100,7 +180,7 @@ def _run_git(args: list[str], cwd: Path) -> None:
         )
 
 
-def _fetch_via_sparse_checkout(output_dir: Path) -> int:
+def _fetch_via_sparse_checkout(output_dir: Path, ref: DocsRef) -> int:
     """Clone with sparse checkout and copy docs to output_dir."""
     with tempfile.TemporaryDirectory(prefix='horsies-docs-') as tmpdir:
         tmp = Path(tmpdir)
@@ -109,7 +189,8 @@ def _fetch_via_sparse_checkout(output_dir: Path) -> int:
         _run_git(
             [
                 'clone', '--filter=blob:none', '--no-checkout',
-                '--depth=1', f'{REPO_URL}.git', str(clone_dir),
+                '--depth=1', '--branch', _git_ref_name(ref),
+                f'{REPO_URL}.git', str(clone_dir),
             ],
             cwd=tmp,
         )
@@ -122,7 +203,7 @@ def _fetch_via_sparse_checkout(output_dir: Path) -> int:
             cwd=clone_dir,
         )
         _run_git(
-            ['checkout', DEFAULT_BRANCH],
+            ['checkout', _git_ref_name(ref)],
             cwd=clone_dir,
         )
 
@@ -131,8 +212,9 @@ def _fetch_via_sparse_checkout(output_dir: Path) -> int:
         return _assemble_output(docs_src, llms_src, output_dir)
 
 
-def _fetch_via_tarball(output_dir: Path) -> int:
+def _fetch_via_tarball(output_dir: Path, ref: DocsRef) -> int:
     """Download tarball via urllib and extract docs to output_dir."""
+    tarball_url = _tarball_url(ref)
     with tempfile.TemporaryDirectory(prefix='horsies-docs-') as tmpdir:
         tmp = Path(tmpdir)
         tarball_path = tmp / 'repo.tar.gz'
@@ -142,13 +224,13 @@ def _fetch_via_tarball(output_dir: Path) -> int:
         # stalled server could hang the fetch forever.
         try:
             with urllib.request.urlopen(
-                TARBALL_URL,
+                tarball_url,
                 timeout=_TARBALL_TIMEOUT_SECONDS,
             ) as response, open(tarball_path, 'wb') as out:
                 shutil.copyfileobj(response, out)
         except Exception as exc:
             raise DocsFetchError(
-                f'failed to download tarball from {TARBALL_URL}: {exc}',
+                f'failed to download tarball from {tarball_url}: {exc}',
             ) from exc
 
         try:
