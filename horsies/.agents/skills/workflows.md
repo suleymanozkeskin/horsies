@@ -1,6 +1,6 @@
 ---
 name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-033. Use when building, validating, or troubleshooting workflows.
+description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-035. Use when building, validating, or troubleshooting workflows.
 ---
 
 # horsies — Workflows
@@ -119,11 +119,11 @@ class TaskNode(Generic[OkT]):
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}  # inject upstream TaskResult
     workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
     queue: str | None = None                  # override @task decorator queue
-    priority: int | None = None               # override @task decorator priority
+    priority: int | None = None               # 1 (highest)..100 (lowest); outside raises HRS-034 at build
     allow_failed_deps: bool = False
     join: Literal['all', 'any', 'quorum'] = 'all'
     min_success: int | None = None            # required when join='quorum'
-    good_until: datetime | None = None        # task expiry deadline
+    good_until: datetime | None = None        # task expiry deadline; naive raises HRS-035 at build
     node_id: str | None = None                # auto-assigned if None
     # Assigned by WorkflowSpec:
     index: int | None = None                  # position in DAG (0-based)
@@ -255,7 +255,7 @@ match spec.start():
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) or a serialization error refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -589,7 +589,7 @@ def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-033)
+## Validation Errors (HRS-001–HRS-035)
 
 <!-- members: ErrorCode subset -->
 | Code | Name | Trigger |
@@ -626,6 +626,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
+| HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |
+| HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` `good_until` is a naive `datetime` (no `tzinfo`) |
 
 ## Known Constraints
 

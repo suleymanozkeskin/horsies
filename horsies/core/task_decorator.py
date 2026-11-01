@@ -271,6 +271,17 @@ def effective_priority(
     return config.priority
 
 
+def resolve_node_queue(node: 'TaskNode[Any]') -> str:
+    """Return the queue name of a workflow ``TaskNode``.
+
+    Rule: ``node.queue``, else the task's declared ``task_queue_name``, else
+    ``'default'``. An empty string counts as not set at each step, so the
+    result is never ``''``. It does not check the name against the app's
+    queue config: ``resolve_node_queue_and_priority`` does that.
+    """
+    return node.queue or node.fn.task_queue_name or 'default'
+
+
 def resolve_node_queue_and_priority(
     app: 'Horsies',
     node: 'TaskNode[Any]',
@@ -285,7 +296,7 @@ def resolve_node_queue_and_priority(
     a hardcoded ``100`` instead of their queue priority.
 
     Resolution:
-        queue    = node.queue or fn.task_queue_name or 'default'
+        queue    = resolve_node_queue(node)
         priority = node.priority if set, else effective_priority(app, queue)
 
     Raises:
@@ -293,7 +304,7 @@ def resolve_node_queue_and_priority(
             mode and queue not in custom_queues (TASK_INVALID_QUEUE), or
             DEFAULT mode and queue is not 'default' (CONFIG_INVALID_QUEUE_MODE).
     """
-    queue = node.queue or node.fn.task_queue_name or 'default'
+    queue = resolve_node_queue(node)
     if app.config.queue_mode.name == 'CUSTOM':
         valid_queues = app.get_valid_queue_names()
         if queue not in valid_queues:

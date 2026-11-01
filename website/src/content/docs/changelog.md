@@ -261,6 +261,81 @@ there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: a workflow task node with a `priority` outside 1–100 or a
+  naive `good_until` is refused when the spec is built.**
+  `app.workflow()`, `WorkflowDefinition.build()` and `WorkflowSpec(...)`
+  raise `WorkflowValidationError` with `WORKFLOW_INVALID_PRIORITY`
+  (`HRS-034`) or `WORKFLOW_NAIVE_GOOD_UNTIL` (`HRS-035`). The check covers
+  every task node, root or not, and `horsies check` reports it. A child
+  spec with such a node fails its build, and the engine marks the
+  subworkflow node `WORKFLOW_ENQUEUE_FAILED`. Before, a root node made the
+  start return `VALIDATION_FAILED`, and a node that is not a root started
+  and failed later, when the engine enqueued it.
+- **Breaking: `@app.task('')` raises `TaskDefinitionError` with
+  `TASK_INVALID_OPTIONS` (`HRS-102`).** Before, the task registered: a send
+  returned `ENQUEUE_FAILED` with `retryable=False`, and a workflow start
+  with the task as a root returned `VALIDATION_FAILED`.
+- **Breaking: a defect in the workflow start checks propagates.** The
+  checks before the start transaction return only a
+  `WorkflowValidationError` as `WorkflowStartValidationFailed`, and the
+  start transaction returns only a `SerializationError` as
+  `WorkflowStartValidationFailed`. Any other exception propagates, a
+  `ValueError` included. A node that has positional args or
+  `priority=None` when it reaches the start transaction (only possible
+  through `object.__setattr__` after construction) fails an `assert` that
+  names the node. Before, the start returned a `ValueError`,
+  `MultipleValidationErrors` or `SerializationError` from the checks, and a
+  `ValueError` from the transaction, as `VALIDATION_FAILED`.
+- **An exhaustive `match` on `ErrorCode` needs cases for
+  `WORKFLOW_INVALID_PRIORITY` and `WORKFLOW_NAIVE_GOOD_UNTIL`.**
+- **Breaking: `MonitoringQueryError` is a union of three frozen variants,
+  one per `MonitoringQueryErrorCode` member.** Every variant has `code`,
+  `message` and `retryable`. `exception` is `BaseException` on
+  `MonitoringQueryDbOperationFailed` and
+  `MonitoringQueryHistoryContractViolation`. `MonitoringQueryEventLoopLimit`
+  has no `exception` and carries `loop_limit`. Code that reads
+  `err.exception` must match on the variant first; pyright reports each
+  site. `MonitoringQueryError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, MonitoringQueryError)` is not valid on a
+  type alias; match on the variants.
+- **New code `MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION`.** A
+  monitoring query that reads history data that does not decode returns
+  `MonitoringQueryHistoryContractViolation`, with the
+  `HistoryContractError` in `exception`. `list_tasks` returned it before as
+  `DB_OPERATION_FAILED` with `retryable=False`. `get_task_detail` and
+  `get_workflow_node` raised `HistoryContractError` before; now they return
+  the variant. An exhaustive `match` on `MonitoringQueryErrorCode` needs a
+  case for it. The web read routes answer 500 for it, and 503 for the
+  other two codes, as before.
+- **Breaking: `TaskActionError` is a union of six frozen variants, one per
+  `TaskActionErrorCode` member.** Every variant has `code`, `message`,
+  `retryable` and `task_id`. `current_status` is only on
+  `TaskActionNotCancellable` and `TaskActionWorkflowTask`, and it is a
+  `TaskStatus`. Before, every error had `current_status: TaskStatus | None`.
+  `TASK_IS_WORKFLOW_TASK` now carries the status.
+  `TaskActionDbOperationFailed.exception` holds the database error, and
+  `TaskActionEventLoopLimit.loop_limit` holds the limit.
+  `TaskActionError(code=..., ...)` in tests becomes a variant constructor.
+  `isinstance(err, TaskActionError)` is not valid on a type alias; match on
+  the variants.
+- **`TaskActionErrorCode` is a `str` enum.**
+  `TaskActionErrorCode.TASK_NOT_FOUND == 'TASK_NOT_FOUND'` is now true.
+- **New code `TaskActionErrorCode.STORED_DATA_INVALID`.** `cancel_task`
+  returns `TaskActionStoredDataInvalid` when stored data does not parse:
+  `exception` is the `HistoryContractError` of the history read or the
+  `OutcomeDecodeError` of the cancel outcome. Nothing changed. Before, both
+  exceptions propagated. An exhaustive `match` on `TaskActionErrorCode`
+  needs a case for it. `POST /api/tasks/{task_id}/cancel` answers 500 for
+  it.
+- **A history row whose stored status is not a `TaskStatus` member is
+  stored data that does not parse.** The history detail read parses the
+  status one time and raises `HistoryContractError` for such a value.
+  `get_task_detail` and `get_workflow_node` return
+  `HISTORY_CONTRACT_VIOLATION`; before, they returned the text as the
+  status. `cancel_task` returns `STORED_DATA_INVALID`; before, it returned
+  `TASK_NOT_CANCELLABLE` with `current_status=None`. `rerun_task` raises
+  `HistoryContractError`; before, it treated the row as a source that is
+  not `COMPLETED`.
 - **Breaking: `ContractCode.PYDANTIC_HYDRATION_ERROR` is removed.** The
   library has not returned it since 0.1.2. Code that names it raises
   `AttributeError`; match on `RESULT_DESERIALIZATION_ERROR`,
