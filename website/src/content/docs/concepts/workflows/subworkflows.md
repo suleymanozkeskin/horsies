@@ -370,6 +370,124 @@ class MultiSourceAggregation(WorkflowDefinition[Report]):
     config = WorkflowDefinitionConfig(output=aggregate)
 ```
 
+#### Dynamic Fan-Out with `args_from`
+
+`build_with()` runs when the `SubWorkflowNode` becomes ready, not when the parent starts.
+A node becomes ready when its `waits_for` dependencies are terminal (see [Join Semantics](#8-join-semantics)).
+The child graph can therefore depend on the result of an upstream node, for example one child node per element of a list.
+
+Each `args_from` entry arrives in `build_with()` as the upstream `TaskResult[T, TaskError]`, not as the plain value.
+The key of an `args_from` entry must be a parameter of `build_with()`.
+A key that is also a static `kwargs` key fails the node.
+
+The example builds one `count_shard_rows` node for each shard that `list_shards` returns.
+A fan-in task reads the shard results by `NodeKey`, because the child nodes do not exist at import time.
+
+```python
+from typing import Any
+
+from horsies import (
+    Horsies,
+    NodeKey,
+    SubWorkflowNode,
+    TaskError,
+    TaskNode,
+    TaskResult,
+    WorkflowContext,
+    WorkflowDefinition,
+    WorkflowDefinitionConfig,
+    WorkflowSpec,
+)
+from instance import app
+
+
+@app.task("list_shards")
+def list_shards(*, tenant_id: str) -> TaskResult[list[str], TaskError]:
+    return TaskResult(ok=[f"{tenant_id}-a", f"{tenant_id}-b", f"{tenant_id}-c"])
+
+
+@app.task("count_shard_rows")
+def count_shard_rows(*, shard: str) -> TaskResult[int, TaskError]:
+    return TaskResult(ok=len(shard))
+
+
+@app.task("sum_shard_rows")
+def sum_shard_rows(
+    *,
+    shard_count: int,
+    workflow_ctx: WorkflowContext | None = None,
+) -> TaskResult[int, TaskError]:
+    if workflow_ctx is None:
+        return TaskResult(
+            err=TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"),
+        )
+    total = 0
+    for position in range(shard_count):
+        shard_result = workflow_ctx.result_for(NodeKey[int](f"shard_{position}"))
+        if shard_result.is_err():
+            return TaskResult(err=shard_result.err_value)
+        total += shard_result.ok_value
+    return TaskResult(ok=total)
+
+
+class ShardReport(WorkflowDefinition[int]):
+    """Child workflow. Its shape depends on the result of list_shards."""
+
+    name = "shard_report"
+    definition_key = "myapp.shard_report.v1"
+
+    @classmethod
+    def build_with(
+        cls,
+        app: Horsies,
+        shards: TaskResult[list[str], TaskError],
+        *_args: Any,
+        **_kwargs: Any,
+    ) -> WorkflowSpec[int]:
+        if shards.is_err():
+            raise ValueError("shard_report needs the shard list")
+        shard_names = shards.ok_value
+
+        count_nodes: list[TaskNode[int]] = [
+            count_shard_rows.node(node_id=f"shard_{position}")(shard=shard_name)
+            for position, shard_name in enumerate(shard_names)
+        ]
+        total = sum_shard_rows.node(
+            waits_for=list(count_nodes),
+            workflow_ctx_from=list(count_nodes),
+            node_id="total",
+        )(shard_count=len(count_nodes))
+        return app.workflow(
+            name=cls.name,
+            tasks=[*count_nodes, total],
+            output=total,
+        )
+
+
+class TenantReport(WorkflowDefinition[int]):
+    name = "tenant_report"
+    definition_key = "myapp.tenant_report.v1"
+
+    shards = list_shards.node(node_id="shards")(tenant_id="tenant-1")
+    report = SubWorkflowNode(
+        workflow_def=ShardReport,
+        waits_for=[shards],
+        args_from={"shards": shards},
+        node_id="report",
+    )
+
+    config = WorkflowDefinitionConfig(output=report)
+```
+
+Rules for this pattern:
+
+- Define the tasks at module level. A worker resolves a task by name from the modules it imported.
+- Import the child module in the worker (`app.discover_tasks`). See [Subworkflow Not Found in Worker](#subworkflow-not-found-in-worker).
+- With the default `allow_failed_deps=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
+  With `allow_failed_deps=True`, `build_with()` receives `TaskResult(err=...)` and must handle it.
+- An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
+- `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.workflow_builder`.
+
 ### 6.4 Accessing Subworkflow Health: SubWorkflowSummary
 
 When you need visibility into child workflow internals:

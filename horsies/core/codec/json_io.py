@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Union
 
 from horsies.core.codec.json_value import (
     StrictJsonError,
+    _parse_finite_float,
     _reject_nonstandard_json_constant,
     _validate_json_native,
 )
@@ -76,12 +77,19 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     Routes through ``parse_constant=_reject_nonstandard_json_constant`` so
     Python's lenient acceptance of ``NaN`` / ``Infinity`` / ``-Infinity``
     (not RFC 8259) fails closed at every raw-load site instead of smuggling
-    non-finite floats past the producer-side strict fence.
+    non-finite floats past the producer-side strict fence. Routes through
+    ``parse_float=_parse_finite_float`` for the same reason: a numeric literal
+    such as ``1e9999`` never reaches ``parse_constant``, and ``float()`` would
+    turn it into ``inf``.
     """
     if not s:
         return Ok(None)
     try:
-        return Ok(json.loads(s, parse_constant=_reject_nonstandard_json_constant))
+        return Ok(json.loads(
+            s,
+            parse_constant=_reject_nonstandard_json_constant,
+            parse_float=_parse_finite_float,
+        ))
     except StrictJsonError as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
     except (json.JSONDecodeError, ValueError) as exc:

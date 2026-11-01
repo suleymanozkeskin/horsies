@@ -14,7 +14,8 @@ determinism here silently breaks input-identity carry-over at rerun.
 `options: null` means the request ran on defaults;
 options ABSENT means an unknown or foreign content shape and fails
 closed — absence is never guessed as defaults. Decode verifies the
-digest before parsing anything.
+digest before parsing anything, and parses through `loads_json`, so
+stored bytes obey the same strict JSON rules as every other read.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ import json
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Final, cast
+
+from horsies.core.codec.json_io import loads_json
+from horsies.core.types.result import is_err
 
 INPUT_ENVELOPE_VERSION: Final = 1
 INPUT_ENVELOPE_CODEC: Final = 'json-utf8'
@@ -68,12 +72,17 @@ def encode_input_envelope_v1(
 
     The same content always produces the same bytes; the digest the
     caller stores is `sha256` over exactly these bytes.
+
+    Every caller passes values that `loads_json` parsed, and those are
+    finite. A non-finite float is a programmer defect: `allow_nan=False`
+    raises `ValueError` instead of storing bytes that are not JSON.
     """
     return json.dumps(
         {'args': list(args), 'kwargs': kwargs, 'options': options},
         separators=(',', ':'),
         sort_keys=True,
         ensure_ascii=False,
+        allow_nan=False,
     ).encode('utf-8')
 
 
@@ -91,9 +100,15 @@ def decode_input_envelope(
             detail='payload digest disagrees with the stored digest'
         )
     try:
-        parsed: Any = json.loads(payload.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        payload_text = payload.decode('utf-8')
+    except UnicodeDecodeError as error:
         return InputEnvelopeCorrupt(detail=f'payload is not JSON: {error}')
+    loaded = loads_json(payload_text)
+    if is_err(loaded):
+        return InputEnvelopeCorrupt(
+            detail=f'payload is not JSON: {loaded.err_value}'
+        )
+    parsed: Any = loaded.ok_value
     if not isinstance(parsed, dict):
         return InputEnvelopeCorrupt(detail='content is not an object')
     content = cast(dict[str, Any], parsed)

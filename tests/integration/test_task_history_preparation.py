@@ -188,6 +188,63 @@ class TestPreparation:
             await engine.dispose()
 
     @pytest.mark.asyncio
+    async def test_overflowing_number_is_a_decode_failure_of_its_row_only(
+        self, make_database: MakeDatabase
+    ) -> None:
+        url = await make_database()
+        await _prepare_db(url)
+        engine = create_async_engine(url)
+        try:
+            async with engine.begin() as connection:
+                await install_program_state(connection)
+                overflowing = await insert_legacy_task(
+                    connection,
+                    status='FAILED',
+                    kind=None,
+                    disposition=None,
+                    retain=None,
+                    kwargs_json='{"x": 1e9999}',
+                )
+                valid = await insert_legacy_task(
+                    connection,
+                    status='FAILED',
+                    kind=None,
+                    disposition=None,
+                    retain=None,
+                    kwargs_json='{"x": 1.5}',
+                )
+
+                batches, complete = await run_preparation_to_complete(
+                    connection, retain_default=True
+                )
+                assert complete.rows_prepared == 2
+                assert sum(b.decode_failed_rows for b in batches) == 1
+                assert sum(b.inline_rows for b in batches) == 1
+
+                rows = {
+                    str(row.id): row
+                    for row in (
+                        await connection.execute(
+                            text(
+                                'SELECT id, input_digest, '
+                                'prepared_rerun_input_disposition, '
+                                'prepared_rerun_input_inline '
+                                'FROM horsies_tasks'
+                            )
+                        )
+                    ).all()
+                }
+                assert (
+                    rows[overflowing].prepared_rerun_input_disposition
+                    == 'DECLINED_BY_POLICY'
+                )
+                assert rows[overflowing].input_digest is None
+                assert rows[overflowing].prepared_rerun_input_inline is None
+                assert rows[valid].prepared_rerun_input_disposition == 'INLINE'
+        finally:
+            await engine.dispose()
+
+    @pytest.mark.asyncio
     async def test_declining_default_reports_the_policy_split(
         self, make_database: MakeDatabase
     ) -> None:
