@@ -89,7 +89,7 @@ migrations; instead the stored schema version is probed (cached 60 s):
 | `UNKNOWN` | the probe has never succeeded (unreachable DB) | — | refused (`SCHEMA_UNKNOWN`); never conflated with ABSENT |
 
 `GET /api/meta` reports `schema_version`, `expected_schema_version`,
-`schema_compatible`, `actions_enabled`, `can_act`, `actions_disabled_reason`.
+`schema_compatible`, `schema_state` (the `SchemaState` value), `actions_enabled`, `can_act`, `actions_disabled_reason`.
 
 ## Query API — `horsies.monitoring`
 
