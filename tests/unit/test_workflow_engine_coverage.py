@@ -1644,6 +1644,7 @@ class TestGetWorkflowFinalResult:
                     SimpleNamespace(
                         node_id='node-0', task_index=0,
                         task_name='task_a',
+                        status='COMPLETED',
                         result='{"valid": "but_not_taskresult"}',
                         sub_definition_key=None,
                     ),
@@ -1992,7 +1993,7 @@ class TestOnChildWorkflowComplete:
     async def test_parent_paused_stops_propagation(self) -> None:
         row = SimpleNamespace(
             status='COMPLETED',
-            result=None,
+            result='{"__h_task_result__":true,"ok":1,"err":null}',
             error=None,
             parent_workflow_id='wf-parent',
             parent_task_index=0,
