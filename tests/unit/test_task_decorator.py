@@ -11,7 +11,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import BaseModel, field_validator
+from pydantic_core import PydanticCustomError
 
+from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
+from horsies.core.codec.json_value import StrictJsonError
+from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
@@ -61,6 +66,64 @@ from horsies.core.utils.loop_runner import LoopRunnerError
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+class _EchoingModel(BaseModel):
+    """A validator that writes the refused value in its error text."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise ValueError(f'bad name {value}')
+
+
+class _Linked(BaseModel):
+    """A self-referencing model: registration accepts it in a task signature."""
+
+    next: _Linked | None = None
+
+
+class _AssertingModel(BaseModel):
+    """A validator that writes the refused value in an assertion."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise AssertionError(f'bad name {value}')
+
+
+class _CustomErrorModel(BaseModel):
+    """A validator that writes the refused value in the error context."""
+
+    name: str
+
+    @field_validator('name')
+    @classmethod
+    def refuse(cls, value: str) -> str:
+        raise PydanticCustomError('bad_name', 'bad name {name}', {'name': value})
+
+
+_LONE_SURROGATE_NAME: Any = {'name': f'keep-out{chr(0xd800)}'}
+
+
+def _returns_echoing_model() -> TaskResult[_EchoingModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _returns_asserting_model() -> TaskResult[_AssertingModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _returns_custom_error_model() -> TaskResult[_CustomErrorModel, TaskError]:
+    return TaskResult(ok=_LONE_SURROGATE_NAME)
+
+
+def _raises_unicode_encode_error_in_the_body() -> TaskResult[int, TaskError]:
+    return TaskResult(ok=len(chr(0xd800).encode('utf-8')))
 
 
 def _make_app(
@@ -1363,6 +1426,78 @@ class TestCreateTaskWrapperIntrospection:
 
 
 @pytest.mark.unit
+class TestReturnedValueWithALoneSurrogateInTheValidatorText:
+    """The direct call validates the returned value in the wrapper.
+
+    Pydantic cannot build the error text, so it raises `UnicodeEncodeError`
+    in place of a `ValidationError`. It is the same refusal as any other
+    value that does not validate, not an unhandled exception.
+    """
+
+    @pytest.mark.parametrize(
+        'fn',
+        [
+            _returns_echoing_model,
+            _returns_asserting_model,
+            _returns_custom_error_model,
+        ],
+        ids=['value-error', 'assertion-error', 'custom-error-context'],
+    )
+    def test_it_is_a_return_type_mismatch(self, fn: Any) -> None:
+        wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
+
+        result = wrapper()
+
+        error = result.unwrap_err()
+        text = 'a validation error holds a lone surrogate, which UTF-8 cannot encode'
+        assert error.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert (error.message or '').endswith(text)
+        assert 'TaskResult(ok=<dict>)' in (error.message or '')
+        assert error.exception is None
+        data: Any = error.data
+        assert sorted(data) == [
+            'actual_type',
+            'expected_type',
+            'validation_error_count',
+            'validation_errors',
+            'variant',
+        ]
+        assert data['variant'] == 'ok'
+        assert data['actual_type'] == 'dict'
+        assert 'Model' in data['expected_type']
+        assert data['validation_errors'] == [
+            {'loc': [], 'msg': text, 'type': 'lone_surrogate'},
+        ]
+        assert data['validation_error_count'] == 1
+
+    @pytest.mark.parametrize(
+        'fn',
+        [
+            _returns_echoing_model,
+            _returns_asserting_model,
+            _returns_custom_error_model,
+        ],
+        ids=['value-error', 'assertion-error', 'custom-error-context'],
+    )
+    def test_the_returned_value_is_not_stored(self, fn: Any) -> None:
+        wrapper = create_task_wrapper(fn, _make_app(), 'test.returns_refused')
+
+        stored = serialize_error_payload(wrapper())
+
+        assert stored != FALLBACK_ERROR_JSON
+        assert 'keep-out' not in stored
+
+    def test_a_unicode_encode_error_from_the_task_body_stays_unhandled(self) -> None:
+        wrapper = create_task_wrapper(
+            _raises_unicode_encode_error_in_the_body, _make_app(), 'test.body',
+        )
+
+        result = wrapper()
+
+        assert result.unwrap_err().error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+
+
+@pytest.mark.unit
 class TestCreateTaskWrapperSend:
     """Tests for wrapper.send() method."""
 
@@ -1396,6 +1531,83 @@ class TestCreateTaskWrapperSend:
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
         assert isinstance(result.err_value.exception, ConfigurationError)
+
+    @pytest.mark.parametrize(
+        ('value', 'subject'),
+        [
+            ({'key': f'text{chr(0xd800)}'}, 'a string'),
+            ({f'key{chr(0xd800)}': 'text'}, 'a dict key'),
+        ],
+        ids=['string', 'key'],
+    )
+    def test_send_lone_surrogate_returns_validation_error(
+        self,
+        value: dict[str, str],
+        subject: str,
+    ) -> None:
+        """A lone surrogate is refused at the encode, before the broker."""
+        def good_fn(*, x: dict[str, str]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x))
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=value)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert result.err_value.message == (
+            f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
+            'lone surrogate, which UTF-8 cannot encode'
+        )
+        app.get_broker.assert_not_called()
+
+    def test_send_validator_echoing_a_lone_surrogate_returns_validation_error(
+        self,
+    ) -> None:
+        """Pydantic cannot build the error text; the send stays in its catalog."""
+        def good_fn(*, x: _EchoingModel) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x.name))
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        # The validator refuses the value, so no `_EchoingModel` can hold it.
+        refused_value: Any = {'name': f'text{chr(0xd800)}'}
+
+        result = wrapper.send(x=refused_value)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert result.err_value.message == (
+            'Failed to encode kwargs for test.good_fn: x: a validation error '
+            'holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        app.get_broker.assert_not_called()
+
+    def test_send_value_that_holds_itself_returns_validation_error(self) -> None:
+        """A self-referencing model can hold itself; the send stays in its
+        catalog. Before, the raw `ValueError` left `.send()`."""
+        def good_fn(*, x: _Linked) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=1)
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+        node = _Linked()
+        node.next = node
+
+        result = wrapper.send(x=node)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert result.err_value.message == (
+            'Failed to encode kwargs for test.good_fn: x: serialization failed: '
+            'Circular reference detected (id repeated)'
+        )
+        app.get_broker.assert_not_called()
 
     def test_send_success_returns_ok_with_handle(self) -> None:
         """Successful send returns Ok(TaskHandle) with broker_mode=True."""

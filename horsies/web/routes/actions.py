@@ -73,7 +73,6 @@ class ActionResponse(BaseModel):
 
     outcome: str
     was_status: str | None = None
-    next_attempt_number: int | None = None
     warning: str | None = None
 
 
@@ -89,7 +88,6 @@ def _succeeded(
     outcome: str,
     *,
     was_status: str | None = None,
-    next_attempt_number: int | None = None,
     warning: str | None = None,
 ) -> _Outcome:
     return _Outcome(
@@ -97,7 +95,6 @@ def _succeeded(
         content=ActionResponse(
             outcome=outcome,
             was_status=was_status,
-            next_attempt_number=next_attempt_number,
             warning=warning,
         ).model_dump(),
     )

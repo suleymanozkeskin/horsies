@@ -33,6 +33,14 @@ jobs:
       - name: Typecheck clean paths
         run: uv run pyright -p pyrightconfig.clean.json
 
+      # Type-check the python blocks of the docs and the skill files. The
+      # extractor writes one file per page; blocks marked "check: skip" are
+      # left out. See tests/docs_examples/extract.py.
+      - name: Typecheck doc examples
+        run: |
+          uv run python tests/docs_examples/extract.py build/doc_examples
+          uv run pyright -p pyrightconfig.docs.json
+
       - name: Run unit tests
         run: uv run pytest tests/unit/ -v --tb=short
 

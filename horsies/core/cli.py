@@ -1282,7 +1282,7 @@ Examples:
             '--enable-actions',
             action='store_true',
             default=False,
-            help='Allow cancel/retry/pause/resume (default: view-only)',
+            help='Allow cancel/pause/resume (default: view-only)',
         )
         web_parser.add_argument(
             '--loglevel',

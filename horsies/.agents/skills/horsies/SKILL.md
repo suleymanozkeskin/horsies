@@ -89,6 +89,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 `TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`, `TaskSendLoopRunnerFailed`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 match my_task.send(**kwargs):
     case Ok(handle):
@@ -114,6 +115,7 @@ Workflows are DAGs of tasks. Two approaches:
 `.node()` returns a `NodeFactory`; the second `()` call passes task kwargs.
 First call sets workflow options, second call sets task arguments:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import OnError, from_node
 
@@ -137,6 +139,7 @@ Best for dynamic workflows where node kwargs depend on runtime inputs.
 
 Nodes are class attributes; `node_id` is auto-assigned from the attribute name:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
@@ -211,6 +214,7 @@ task sends and workflow starts.
 
 ## WorkflowHandle
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
 handle.get(timeout_ms=N) # TaskResult (blocks for output node)
@@ -237,6 +241,7 @@ result = handle.get(timeout_ms=30_000)
 Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints). Use
 the app-level typed API — `broker.get_result(_async)` was removed in 0.1.2.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 from horsies.core.types.result import is_err
 
@@ -269,6 +274,7 @@ See `configs.md` for all broker methods. See website docs `monitoring/broker-met
 A terminal record is immutable. Manual in-place retry is removed — re-execution
 is a **new request** with a new id and recorded lineage:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from datetime import timedelta
 
@@ -311,6 +317,8 @@ match outcome:
 checking one variant. Eligibility is decided **at enqueue** by
 `retain_rerun_input_default` (per-task override available): a task whose input
 was not retained cannot be rerun. A `COMPLETED` source is not eligible.
+`RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
+retention can explain that no record has the id (see `monitoring.md`).
 
 ## Result Types
 

@@ -17,9 +17,10 @@ This page demonstrates common workflow patterns for production scenarios. Each p
 
 Build workflows conditionally based on runtime flags. Useful when workflow structure depends on input data or feature flags.
 
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from typing import Any
-from horsies import TaskNode, SubWorkflowNode, OnError
+from horsies import Err, Ok, TaskNode, SubWorkflowNode, OnError
 from .config import app
 from .tasks import (
     validate_order,
@@ -77,8 +78,11 @@ def start_order_workflow(
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    start_result = workflow.start()
-    handle = start_result.ok_value
+    match workflow.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion
@@ -93,8 +97,9 @@ def start_order_workflow(
 
 Run many independent tasks in parallel. Queue `max_concurrency` controls parallelism.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import TaskResult, TaskError
+from horsies import Err, Ok, TaskResult, TaskError
 from horsies import TaskNode, AnyNode
 
 # List of warehouse sync tasks
@@ -132,8 +137,11 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    start_result = workflow.start()
-    handle = start_result.ok_value
+    match workflow.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
@@ -151,6 +159,7 @@ Sequential execution where each task waits for the previous.
 
 Key is to use `waits_for` with one of the target previous nodes.
 
+<!-- check: skip partial -- imports a placeholder module -->
 ```python
 from .tasks import (
     validate_order,
@@ -224,7 +233,10 @@ def fulfillment_workflow(order: Order) -> None:
 
 Start a workflow without waiting for completion. Useful for background processing.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 def trigger_shipment_tracking(shipment_id: str) -> bool:
     node_fetch: TaskNode[CarrierStatus] = TaskNode(
         fn=fetch_carrier_status,
@@ -256,8 +268,11 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
     reveal_type(workflow)  # WorkflowSpec
 
     # Start and return immediately
-    start_result = workflow.start()
-    handle = start_result.ok_value
+    match workflow.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle
 
     return True  # Workflow runs in background
@@ -267,7 +282,10 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
 
 A task that orchestrates a workflow internally. Useful for composing complex operations as a single schedulable unit.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 @app.task('process_returns', queue_name='standard')
 def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
     # Define parallel nodes - process returns from multiple channels
@@ -306,8 +324,11 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
     )
     reveal_type(workflow)  # WorkflowSpec
 
-    start_result = workflow.start()
-    handle = start_result.ok_value
+    match workflow.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()

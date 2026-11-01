@@ -14,12 +14,13 @@ Horsies supports two queue modes: DEFAULT for simple single-queue setups, and CU
 The simplest configuration - all tasks go to a single "default" queue.
 
 ```python
+from pydantic import SecretStr
 from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
 from horsies import QueueMode
 
 config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 )
 app = Horsies(config)
 
@@ -51,7 +52,7 @@ config = AppConfig(
         CustomQueueConfig(name="normal", priority=50, max_concurrency=5),
         CustomQueueConfig(name="low", priority=100, max_concurrency=2),
     ],
-    broker=PostgresConfig(database_url="postgresql+psycopg://..."),
+    broker=PostgresConfig(database_url=SecretStr("postgresql+psycopg://...")),
 )
 app = Horsies(config)
 
@@ -145,6 +146,7 @@ error[HRS-103]: invalid queue_name 'nonexistent'
 
 In addition to per-queue concurrency, you can limit total RUNNING tasks across all queues:
 
+<!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,

@@ -405,7 +405,9 @@ class TestStartPauseGate:
         """A child that synchronously fails/finalizes during start queues
         parent propagation. That propagation must be drained before the
         parent's fast-root task rows land, so on_error=PAUSE still leaves
-        zero runnable rows under the paused parent."""
+        zero runnable rows under the paused parent. The child fails during
+        its start because its only root is a SubWorkflowNode whose
+        build_with raises."""
         from horsies.core.models.workflow import (
             OnError,
             SubWorkflowNode,
@@ -416,11 +418,14 @@ class TestStartPauseGate:
         def fast_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
-        @app.task(task_name=f'pause_prop_bad_child_{uuid.uuid4().hex[:8]}')
-        def bad_child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        class BrokenGrandchild(WorkflowDefinition[int]):
+            name = f'pause_prop_grandchild_wf_{uuid.uuid4().hex[:8]}'
+            definition_key = f'pause-prop-grandchild-{uuid.uuid4().hex[:8]}'
 
-        bad_child_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
+            @classmethod
+            def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
+                _ = app, args, params
+                raise RuntimeError('build_with refused')
 
         class BadChild(WorkflowDefinition[int]):
             name = f'pause_prop_child_wf_{uuid.uuid4().hex[:8]}'
@@ -428,7 +433,7 @@ class TestStartPauseGate:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = TaskNode(fn=bad_child_task)
+                node = SubWorkflowNode(workflow_def=BrokenGrandchild)
                 return app.workflow(name=cls.name, tasks=[node], output=node)
 
         fast = TaskNode(fn=fast_task, kwargs={'value': 1})

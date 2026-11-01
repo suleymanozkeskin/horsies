@@ -22,7 +22,6 @@ type WorkflowAction = 'workflow-pause' | 'workflow-resume' | 'workflow-cancel';
 
 const runSnapshot = (detail: WorkflowRunDetail | undefined): SettleContext => ({
   wasStatus: detail?.run.status ?? null,
-  retryCountBefore: null,
 });
 
 const hasSettled = (

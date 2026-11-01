@@ -6,7 +6,7 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { TaskActionBar } from '@/actions/action-bar';
@@ -72,15 +72,16 @@ function workflowBoundTask(
 }
 
 /** `Link` needs router context, so the bar is mounted as a route component. */
-async function renderBar(detail: TaskDetail): Promise<void> {
+async function renderBar(
+  detail: TaskDetail,
+  cancel: TaskActionsView['cancel'] = { shown: false }
+): Promise<void> {
   const view: TaskActionsView = {
     detail,
     isLoading: false,
     isError: false,
     controls: IDLE_CONTROLS,
-    cancel: { shown: false },
-    retry: { shown: false },
-    nextAttempt: 1,
+    cancel,
   };
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
   const indexRoute = createRoute({
@@ -103,7 +104,13 @@ async function renderBar(detail: TaskDetail): Promise<void> {
     history: createMemoryHistory({ initialEntries: ['/'] }),
   });
   render(<RouterProvider router={router} />);
-  await screen.findByText(/Managed by workflow/);
+  if (detail.is_workflow_task) {
+    await screen.findByText(/Managed by workflow/);
+    return;
+  }
+  await waitFor(() => {
+    expect(document.querySelector('.flex-wrap')).not.toBeNull();
+  });
 }
 
 describe('workflow-bound task note', () => {
@@ -151,5 +158,29 @@ describe('workflow-bound task note', () => {
 
     expect(screen.queryByRole('button', { name: /cancel/i })).toBeNull();
     expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+  });
+});
+
+describe('task actions on a standalone row', () => {
+  it('offers Cancel and no Retry for a pending task', async () => {
+    const detail = workflowBoundTask({});
+    await renderBar(
+      {
+        ...detail,
+        is_workflow_task: false,
+        leaf: { ...detail.leaf, status: 'PENDING' },
+      },
+      { shown: true, enabled: true }
+    );
+
+    expect(screen.getByRole('button', { name: /cancel/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /retry/i })).toBeNull();
+  });
+
+  it('offers no button for a failed task', async () => {
+    const detail = workflowBoundTask({});
+    await renderBar({ ...detail, is_workflow_task: false });
+
+    expect(screen.queryByRole('button')).toBeNull();
   });
 });

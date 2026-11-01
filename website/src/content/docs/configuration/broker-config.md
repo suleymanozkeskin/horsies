@@ -8,10 +8,11 @@ tags: [configuration, PostgresConfig, database]
 ## Basic Usage
 
 ```python
+from pydantic import SecretStr
 from horsies import PostgresConfig
 
 broker = PostgresConfig(
-    database_url="postgresql+psycopg://user:password@localhost:5432/mydb",
+    database_url=SecretStr("postgresql+psycopg://user:password@localhost:5432/mydb"),
 )
 ```
 
@@ -58,7 +59,7 @@ Components:
 
 ```python
 PostgresConfig(
-    database_url="postgresql+psycopg://postgres:postgres@localhost:5432/horsies_dev",
+    database_url=SecretStr("postgresql+psycopg://postgres:postgres@localhost:5432/horsies_dev"),
 )
 ```
 
@@ -66,7 +67,7 @@ PostgresConfig(
 
 ```python
 PostgresConfig(
-    database_url="postgresql+psycopg://app:secret@db.example.com:5432/production",
+    database_url=SecretStr("postgresql+psycopg://app:secret@db.example.com:5432/production"),
     pool_size=10,
     max_overflow=20,
     pool_timeout=30,
@@ -80,7 +81,7 @@ PostgresConfig(
 import os
 
 PostgresConfig(
-    database_url=os.environ["DATABASE_URL"],
+    database_url=SecretStr(os.environ["DATABASE_URL"]),
 )
 ```
 
@@ -96,8 +97,8 @@ from horsies import AppConfig, PostgresConfig
 
 config = AppConfig(
     broker=PostgresConfig(
-        database_url=os.environ["DATABASE_URL_POOLED"],
-        session_database_url=os.environ["DATABASE_URL_DIRECT"],
+        database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
+        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
         pgbouncer_transaction_mode=True,
     ),
 )
@@ -258,6 +259,7 @@ A process can open this once per set:
 keeps its set and its idle connections, and the sixth open loop gets
 `EVENT_LOOP_LIMIT`.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong: each call leaves one more open loop
 loop = asyncio.new_event_loop()

@@ -132,6 +132,7 @@ A workflow start has no `idempotency_key`. `spec.start(workflow_id=...)` with a 
 
 **Don't send before the commit.** A rollback leaves a task for a write that does not exist.
 
+<!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong
 with engine.begin() as connection:

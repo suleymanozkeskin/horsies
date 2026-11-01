@@ -62,6 +62,7 @@ Each `TaskNode` requires a `node_id` for identification within the workflow.
 - **Stable observability:** Index-based IDs shift when you reorder tasks
 - **Meaningful tracing:** `validate_order` is clearer than `order_processing:0` in logs
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # Recommended: explicit node_id
 TaskNode(fn=validate_order, node_id="validate_order")
@@ -76,6 +77,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 Define nodes at module level with explicit `node_id`, then assign to class attributes:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import TaskNode, WorkflowDefinition, WorkflowDefinitionConfig, OnError
 
@@ -161,37 +163,44 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
 
 ## Starting a Workflow
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 spec = OrderProcessingWorkflow.build(app)
-reveal_type(spec)  # WorkflowSpec
+reveal_type(spec)  # WorkflowSpec[NotificationResult]
 
-result = spec.start()
-reveal_type(result)  # WorkflowStartResult[WorkflowHandle[NotificationResult]]
+# start() returns Ok(handle) or Err(WorkflowStartError)
+match spec.start():
+    case Err(start_error):
+        print(f"Start failed: {start_error.code} - {start_error.message}")
+    case Ok(handle):
+        reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
-handle = result.ok_value
-reveal_type(handle)  # WorkflowHandle[NotificationResult]
+        handle.get(timeout_ms=30000)  # Wait for completion
 
-handle.get(timeout_ms=30000)  # Wait for completion
+        # Type-safe result: TaskResult[NotificationResult, TaskError]
+        result = handle.result_for(OrderProcessingWorkflow.notify)
+        reveal_type(result)  # TaskResult[NotificationResult, TaskError]
 
-# Type-safe result: TaskResult[NotificationResult, TaskError]
-result = handle.result_for(OrderProcessingWorkflow.notify)
-reveal_type(result)  # TaskResult[NotificationResult, TaskError]
-
-if result.is_err():
-    error = result.err_value
-    reveal_type(error)  # TaskError
-    print(f"Failed: {error.error_code} - {error.message}")
-else:
-    notification = result.ok_value
-    reveal_type(notification)  # NotificationResult
-    print(f"Order {notification.order_id} processed")
+        if result.is_err():
+            error = result.err_value
+            reveal_type(error)  # TaskError
+            print(f"Failed: {error.error_code} - {error.message}")
+        else:
+            notification = result.ok_value
+            reveal_type(notification)  # NotificationResult
+            print(f"Order {notification.order_id} processed")
 ```
 
 ## Imperative Workflow
 
 Define nodes within a function scope, then pass to `app.workflow()`:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
     validate_node: TaskNode[ValidatedOrder] = TaskNode(
@@ -265,8 +274,11 @@ def start_order_processing(order: Order) -> None:
     )
     reveal_type(spec)  # WorkflowSpec
 
-    result = spec.start()
-    handle = result.ok_value
+    match spec.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
     handle.get(timeout_ms=30000)
@@ -292,6 +304,7 @@ def start_order_processing(order: Order) -> None:
 
 **Note:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("check_inventory", queue_name="standard")
 def check_inventory(
@@ -316,6 +329,7 @@ def check_inventory(
 
 When multiple nodes converge into a single task (fan-in), each upstream result arrives as a separate keyword argument:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("reserve_inventory", queue_name="urgent")
 def reserve_inventory(

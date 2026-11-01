@@ -90,7 +90,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED
 - ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CTX_MISSING_ID, NO_TYPE_AVAILABLE
 - RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, EVENT_LOOP_LIMIT, ASYNC_CONTEXT
-- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET
+- OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
@@ -615,8 +615,8 @@ Registry (HRS-300-HRS-399):
 - allow_failed_deps=True: downstream runs, receives failed TaskResult
 - join="any"/"quorum": downstream can still run if success threshold met
 - SKIPPED cascades for join="all" with allow_failed_deps=False
-- on_error="fail" (default): store error, continue DAG, mark FAILED when all terminal
-- on_error="pause": immediately pause, block new enqueues, await resume
+- OnError.FAIL (default): store error, continue DAG, mark FAILED when all terminal
+- OnError.PAUSE: immediately pause, block new enqueues, await resume
 
 ### Utilities
 - slugify(value: str) -> str: convert string to valid node_id ([A-Za-z0-9_\-:.]+)
@@ -638,7 +638,7 @@ Registry (HRS-300-HRS-399):
   - Pass either `<module>` or `--database-url`, not both
   - Defaults: `--host 127.0.0.1`, `--port 8600`, `--auth none`, `--trusted-header X-Forwarded-User`, actions off (view-only)
   - `--auth none` is allowed only on a loopback host; a non-loopback host requires `--auth trusted-header`
-  - `--enable-actions` allows cancel/retry/pause/resume
+  - `--enable-actions` allows cancel/pause/resume
 - `horsies get-docs [--output DIR] [--ref main]` — fetch the docs of the installed version's release tag for AI agents (default: .horsies-docs/); a development version has no tag and fails unless `--ref main` is given
 - `horsies skills install --target DIR [--force]` — copy the packaged skill folder to `DIR/horsies/`; refuses to replace a changed copy without `--force`
 - Module format: `myapp.config:app` (dotted:attr) or `app/config.py:app` (file:attr)

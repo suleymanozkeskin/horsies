@@ -346,14 +346,14 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
             for case in raw_policy.cases:
                 new_cases.append(SuccessCase(
                     required=[
-                        cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                        old_to_new.get(id(t), t)
                         for t in case.required
                     ],
                 ))
-            new_optional: list[TaskNode[Any]] | None = None
+            new_optional: list[AnyNode] | None = None
             if raw_policy.optional is not None:
                 new_optional = [
-                    cast('TaskNode[Any]', old_to_new.get(id(t), t))
+                    old_to_new.get(id(t), t)
                     for t in raw_policy.optional
                 ]
             success_policy = SuccessPolicy(
