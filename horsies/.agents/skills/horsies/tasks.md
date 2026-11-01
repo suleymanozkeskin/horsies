@@ -77,26 +77,29 @@ The task wrapper validates the returned value against declared `T` using Pydanti
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class TaskError(BaseModel):
-    error_code: BuiltInTaskCode | str | None = None
+    error_code: BuiltInTaskCode | str
     message: str | None = None
     data: Any | None = None
     exception: dict[str, Any] | BaseException | None = None
 ```
 
-All fields optional. Domain errors typically set `error_code` + `message`. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+`error_code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
 **Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR)  # OK
-TaskError(error_code="MY_CUSTOM_CODE")                   # OK
-TaskError(error_code="BROKER_ERROR")                     # ValueError — reserved
+TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
+TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # OK
+TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
+TaskError(message="card declined")                                          # ValueError — no code
 ```
 
 **Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
 
 **Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
+
+**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()` and `WorkflowHandle.get()` return `RESULT_DESERIALIZATION_ERROR` with the cause, and `app.get_result()` returns `Err(BrokerInvalidJsonPayload)`.
 
 ### `SubWorkflowError`
 
@@ -129,6 +132,7 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
+- `WORKFLOW_RECOVERY_LIMIT_REACHED` — workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed
 
 ### `ContractCode`
 
@@ -167,7 +171,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 - `UPSTREAM_SKIPPED` — upstream task was skipped
 - `SUBWORKFLOW_FAILED` — sub-workflow has failed
 - `WORKFLOW_SUCCESS_CASE_NOT_MET` — success condition not satisfied
-- `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node
+- `WORKFLOW_OUTPUT_SKIPPED` — a `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node
 
 ### Reserved Built-In Codes
 
@@ -585,6 +589,7 @@ Serialized size is checked against `AppConfig.payload` (`PayloadPolicy`): above 
 - `dict` keys that collide after `str()` coercion
 - Non-finite floats (`nan`, `inf`)
 - A lone surrogate in a string or a dict key, for example a file name that `os.listdir()` decoded with `surrogateescape`
+- A value that holds itself, or a value nested too deep: pydantic refuses at 255 levels of lists and dicts, and `loads_json` refuses text past 300 levels
 
 ### Return type serialization
 

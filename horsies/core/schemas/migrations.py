@@ -354,8 +354,10 @@ from sqlalchemy import text
 # v51: stx_horsies_tasks_retention is dropped. Its expression has no reader
 #      since the task retention indexes and DELETEs left (v43); fresh
 #      databases no longer build it.
+# v52: horsies_workflow_recovery_failures, the stored count of the workflow
+#      recovery limit.
 
-SCHEMA_VERSION = 51
+SCHEMA_VERSION = 52
 
 from horsies.core.history.terminalization.live_cutover import (  # noqa: E402
     transitional_cutover_columns_ddl,

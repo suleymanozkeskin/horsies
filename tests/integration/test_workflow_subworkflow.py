@@ -1889,7 +1889,7 @@ class TestSubworkflowRecovery:
                 UPDATE horsies_workflows SET status = 'COMPLETED', result = :result
                 WHERE id = :child_id
             """),
-            {'child_id': child_id, 'result': '{"ok": 99}'},
+            {'child_id': child_id, 'result': _strict_result_json(TaskResult(ok=99))},
         )
         # Parent node stays RUNNING (simulating interrupted callback)
         await session.commit()

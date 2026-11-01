@@ -86,6 +86,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | `RESULT_DESERIALIZATION_ERROR` | A stored result or a stored workflow error is corrupt or could not be deserialized |
 | `WORKFLOW_ENQUEUE_FAILED` | Workflow node failed during enqueue/build |
 | `SUBWORKFLOW_LOAD_FAILED` | Subworkflow definition could not be loaded |
+| `WORKFLOW_RECOVERY_LIMIT_REACHED` | Workflow recovery raised a persistent error in too many reaper passes |
 
 ### ContractCode
 
@@ -126,7 +127,7 @@ Returned by `handle.get()` for issues retrieving results:
 | `UPSTREAM_SKIPPED` | Upstream task in workflow was skipped |
 | `SUBWORKFLOW_FAILED` | Subworkflow failed |
 | `WORKFLOW_SUCCESS_CASE_NOT_MET` | Workflow success condition was not satisfied |
-| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node is SKIPPED, and a success case does not require that node |
+| `WORKFLOW_OUTPUT_SKIPPED` | A `COMPLETED` workflow has no output: its output node, or a terminal node of an outputless workflow, is SKIPPED, and a success case does not require that node |
 
 ## Domain Errors vs Library Errors
 

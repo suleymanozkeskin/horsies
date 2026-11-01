@@ -237,15 +237,15 @@ class TestShouldRetryTask:
         assert result == Ok(False)
 
     @pytest.mark.asyncio
-    async def test_none_error_code_returns_false(self) -> None:
-        """TaskError with error_code=None returns False (code is falsy)."""
+    async def test_empty_error_code_returns_false(self) -> None:
+        """TaskError with an empty error_code returns False (code is falsy)."""
         row = _make_row(
             retry_count=0,
             max_retries=3,
             task_options=_task_options_json(["RATE_LIMITED"]),
         )
         session = _mock_session(row)
-        error = TaskError(error_code=None)
+        error = TaskError(error_code="")
 
         result = await Worker._should_retry_task(MagicMock(), "task-1", error, session)
 

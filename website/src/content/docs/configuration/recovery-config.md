@@ -49,6 +49,7 @@ config = AppConfig(
 | `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–5min) |
 | `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
 | `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
+| `workflow_recovery_failure_limit` | `int` | 25 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails closed (3–1,000) |
 
 All time values for thresholds and intervals are in milliseconds. Retention windows are in hours; the sweep interval is in seconds.
 
@@ -100,6 +101,59 @@ a transient an order of magnitude more passes than it needs while capping a
 structural row's error-log noise. Quarantined counts, rows over the attempt
 bound, and the quarantine function's refusals are published on the worker
 health surface beside the phase-2 pass summary.
+
+A progression that raises a persistent error (see the next section) counts
+toward the same bound. At the bound the record moves to the quarantine table,
+and the workflow fails closed with `WORKFLOW_RECOVERY_LIMIT_REACHED`, because
+discovery stops and no other path ends it. A transient raise does not count.
+
+### Workflow recovery limit
+
+The reaper repairs a stuck workflow by running the repair again. A repair that
+raises rolls back, so the next pass selects it again. Without a bound, a raise
+that repeats would repeat on every pass, and the workflow would stay `RUNNING`.
+
+A workflow fails closed after `workflow_recovery_failure_limit` reaper passes in
+which its recovery raised a persistent error (default 25, bounds 3–1,000). At
+the default `check_interval_ms`, 25 passes give 750 seconds to deploy a fix.
+
+- **A transient raise does not count.** A connection, lock, deadlock or timeout
+  error clears by itself, so a database outage cannot fail a workflow. The rule
+  is the type of the error: `OperationalError`, `InterfaceError`, a pool
+  timeout, a disconnect, and the error that follows a lost connection in the
+  same session. A transient raise that repeats stays in the log and in the
+  health `errors` count.
+- **A persistent raise counts once per pass.** This covers a defect, stored data
+  that the engine cannot use, and a SQL error outside `OperationalError`. Many
+  poison nodes in one workflow add one count per pass.
+- **The count is stored.** It is in `horsies_workflow_recovery_failures`, so a
+  worker restart keeps it, and all workers share it. A pass that is lost also
+  loses its count, so the bound moves later, never sooner.
+- **The count has no reset, so a later unrelated raise after a repair reaches
+  the limit sooner.** Delete the row of a workflow to start its count again. The
+  retention sweep deletes a row after its workflow is gone.
+- **The resume pass does not count.** It logs the raise, and the reaper counts
+  the same candidate.
+
+At the limit, the write runs SQL only, because engine code is what raised:
+
+- The node that raised goes `FAILED` with `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+- Other `PENDING` and `READY` nodes go `SKIPPED`.
+- The workflow keeps a stored first error. If it has none, the limit error is
+  stored.
+- With no `ENQUEUED` or `RUNNING` node, the workflow goes `FAILED` at once.
+- With a live node, the workflow stays `RUNNING` until the last live node ends,
+  as for `on_error=OnError.FAIL`. If a `success_policy` is then met by nodes
+  that completed, the workflow can end `COMPLETED`.
+- The write at once does not evaluate `success_policy`, because that evaluation
+  is one of the paths that raise.
+- `on_error=OnError.PAUSE` does not apply. A limit must end the workflow, and a
+  `PAUSED` workflow does not end by default.
+
+If the limit write fails, the count stays, the workflow stays `RUNNING`, and a
+`CRITICAL` line names the workflow and the cause. The next raise tries the write
+again. `over_failure_limit` on the worker health surface counts such workflows
+and the ones with live nodes.
 
 ## Heartbeat System
 
