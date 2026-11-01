@@ -16,6 +16,7 @@ Retention is about work that went right and is now history. A knob that
 decides when a record is deleted was never a recovery knob, so as of
 this release it no longer lives on `RecoveryConfig`.
 
+<!-- check: skip elided -- broker=... stands for the broker config shown on other pages -->
 ```python
 from datetime import timedelta
 from horsies import AppConfig, RetentionConfig, RetentionClassConfig
@@ -74,6 +75,7 @@ resolves from the scheduler process's own configuration, and a workflow
 node from the queue its node runs on. The class is chosen at enqueue in
 every case.
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 # On the mapped 'emails' queue: kept 7 days
 await send_email.send_async(to=...)

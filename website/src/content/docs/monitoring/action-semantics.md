@@ -81,7 +81,7 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, `RerunSourceLive` — its own lifecycle owns retry |
 | Input not retained or undecodable | Refused, `RerunInputUnavailable` or `RerunInputCorrupt` |
 | History row does not decode (for example a stored status that is not a `TaskStatus` member) | Refused, `RerunSourceCorrupt` with the `HistoryContractError` as `exception`; nothing is written |
-| Not found in live or history | Refused, `RerunSourceAbsent` |
+| Not found in live or history | Refused, `RerunSourceAbsent`; its `reason` is a `TaskAbsenceReason`; it says whether retention can explain the absence |
 | Row is a workflow node | Refused, `RerunNotEligible(WORKFLOW_TASK)` |
 | Caller key already used | `RerunKeyReplay` (same request) or `RerunKeyConflict` (different request under that key) |
 
@@ -92,6 +92,7 @@ enqueued without a retained input cannot be rerun later.
 
 Programmatic callers use the same contract:
 
+<!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from datetime import timedelta
 
@@ -168,7 +169,7 @@ reaper runs the same recovery pass over all workflows. A database failure
 before the commit is 503: the resume rolled back, or its commit outcome is
 unknown.
 
-Resume does not clear a stale `error` left on the run by an `on_error='pause'`
+Resume does not clear a stale `error` left on the run by an `on_error=OnError.PAUSE`
 policy.
 
 **Settled when:** the run reads `RUNNING`. All the work happens before the call

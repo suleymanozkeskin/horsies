@@ -540,7 +540,7 @@ GET_FIRST_FAILED_REQUIRED_TASK_SQL = text("""
 # -- SQL constants for get_workflow_final_result --
 
 GET_OUTPUT_TASK_RESULT_SQL = text("""
-    SELECT task_name, result FROM horsies_workflow_tasks
+    SELECT node_id, task_name, status, result FROM horsies_workflow_tasks
     WHERE workflow_id = :wf_id AND task_index = :idx
 """)
 # Terminal-node resolution is two-step (payload-free edge read, then a

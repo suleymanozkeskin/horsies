@@ -1,25 +1,31 @@
-"""``get()`` of a workflow whose terminal status reads as an error.
+"""``get()`` of a workflow whose status reads as terminal.
 
-``get_async`` reads the status, and for ``FAILED``, ``CANCELLED`` or
-``EXPIRED`` it reads the stored error in a second statement. The second read
-uses the status of the first read: a terminal status does not change.
-Retention can delete the row between the two reads; that is
-``WORKFLOW_NOT_FOUND``, not a guessed status.
+``get_async`` reads the status, and for a terminal status it reads the
+stored result (``COMPLETED``) or the stored error (``FAILED``,
+``CANCELLED``, ``EXPIRED``) in a second statement. The second read uses the
+status of the first read: a terminal status does not change. Retention can
+delete the row between the two reads; that is ``WORKFLOW_NOT_FOUND``, not a
+guessed status and not a success.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from horsies.core.brokers.resources import ListenerDisabled
-from horsies.core.models.tasks import OutcomeCode, RetrievalCode
+from horsies.core.models.tasks import (
+    OperationalErrorCode,
+    OutcomeCode,
+    RetrievalCode,
+)
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import (
     GET_WORKFLOW_ERROR_SQL,
+    GET_WORKFLOW_RESULT_SQL,
     GET_WORKFLOW_STATUS_SQL,
     WorkflowHandle,
 )
@@ -36,20 +42,28 @@ TERMINAL_ERROR_STATUSES = [
     WorkflowStatus.EXPIRED,
 ]
 
+TERMINAL_STATUSES = [WorkflowStatus.COMPLETED, *TERMINAL_ERROR_STATUSES]
+
 
 def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
-    """A handle whose status read gives ``status`` and whose error read gives
+    """A handle whose status read gives ``status`` and whose second read
+    (the result read for ``COMPLETED``, else the error read) gives
     ``error_row`` (``None`` is a missing row)."""
     status_result = MagicMock()
     status_result.fetchone.return_value = SimpleNamespace(status=status.value)
-    error_result = MagicMock()
-    error_result.fetchone.return_value = error_row
+    second_result = MagicMock()
+    second_result.fetchone.return_value = error_row
+    second_statement = (
+        GET_WORKFLOW_RESULT_SQL
+        if status is WorkflowStatus.COMPLETED
+        else GET_WORKFLOW_ERROR_SQL
+    )
 
     def execute(statement: Any, *_args: Any, **_kwargs: Any) -> MagicMock:
         if statement is GET_WORKFLOW_STATUS_SQL:
             return status_result
-        if statement is GET_WORKFLOW_ERROR_SQL:
-            return error_result
+        if statement is second_statement:
+            return second_result
         raise AssertionError(f'unexpected statement: {statement}')
 
     session = AsyncMock()
@@ -70,7 +84,7 @@ def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
 
 class TestRowRemovedAfterTheStatusRead:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize('status', TERMINAL_ERROR_STATUSES, ids=str)
+    @pytest.mark.parametrize('status', TERMINAL_STATUSES, ids=str)
     async def test_it_is_workflow_not_found(self, status: WorkflowStatus) -> None:
         handle = _handle(status, error_row=None)
 
@@ -109,6 +123,53 @@ class TestNoStoredError:
         assert error.message == f'Workflow {status.value.lower()}'
 
 
+class TestCompletedWithoutStoredResult:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'stored_form'),
+        [(None, 'NULL'), ('', 'empty')],
+        ids=['null', 'empty'],
+    )
+    async def test_it_is_a_deserialization_error(
+        self,
+        stored: str | None,
+        stored_form: str,
+    ) -> None:
+        # The library stores a result in the statement that sets COMPLETED,
+        # so a NULL or empty result is stored data that does not parse.
+        handle = _handle(
+            WorkflowStatus.COMPLETED, error_row=SimpleNamespace(result=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == (
+            f'Workflow {WORKFLOW_ID} is COMPLETED and its stored result is '
+            f'{stored_form}'
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
+class TestEmptyStoredError:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize('status', TERMINAL_ERROR_STATUSES, ids=str)
+    async def test_it_is_a_deserialization_error(
+        self, status: WorkflowStatus,
+    ) -> None:
+        # No library writer stores an empty error. Only NULL is "no stored
+        # error" (TestNoStoredError).
+        handle = _handle(status, error_row=SimpleNamespace(error=''))
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == 'Workflow error payload is empty'
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
 class TestLegacyExpiryText:
     @pytest.mark.asyncio
     async def test_the_read_status_decides_the_legacy_expiry_text(self) -> None:
@@ -122,3 +183,81 @@ class TestLegacyExpiryText:
         error = result.unwrap_err()
         assert error.error_code is OutcomeCode.WORKFLOW_EXPIRED
         assert error.message == LEGACY_EXPIRY_TEXT
+
+
+class TestStoredErrorThatIsNotAnObject:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ('stored', 'type_name'),
+        [
+            ('"workflow failed"', 'str'),
+            ('[1, 2]', 'list'),
+            ('5', 'int'),
+            ('true', 'bool'),
+            ('null', 'NoneType'),
+        ],
+        ids=['string', 'array', 'number', 'boolean', 'null'],
+    )
+    async def test_it_is_a_deserialization_error_with_the_cause(
+        self,
+        stored: str,
+        type_name: str,
+    ) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.message == (
+            f'Workflow error payload is not a JSON object: got {type_name}'
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+
+class TestStoredErrorObjectThatDoesNotDecode:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        'stored',
+        [
+            # StrictJsonError: an error_code object that is not the
+            # built-in code shape.
+            '{"error_code": {"__builtin_task_code__": "X", "extra": 1}}',
+            # ValueValidationError: message is not a string.
+            '{"message": 5}',
+        ],
+        ids=['strict-json-refusal', 'validation-refusal'],
+    )
+    async def test_a_codec_refusal_is_a_deserialization_error(
+        self,
+        stored: str,
+    ) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED, error_row=SimpleNamespace(error=stored),
+        )
+
+        result = await handle.get_async(timeout_ms=0)
+
+        error = result.unwrap_err()
+        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert (error.message or '').startswith(
+            'Workflow error payload validation failed: ',
+        )
+        assert error.data == {'workflow_id': WORKFLOW_ID}
+
+    @pytest.mark.asyncio
+    async def test_a_defect_in_the_decode_propagates(self) -> None:
+        handle = _handle(
+            WorkflowStatus.FAILED,
+            error_row=SimpleNamespace(error='{"message": "boom"}'),
+        )
+
+        with patch(
+            'horsies.core.models.workflow.handle.decode_task_error',
+            autospec=True,
+            side_effect=RuntimeError('decode defect'),
+        ):
+            with pytest.raises(RuntimeError, match='decode defect'):
+                await handle.get_async(timeout_ms=0)

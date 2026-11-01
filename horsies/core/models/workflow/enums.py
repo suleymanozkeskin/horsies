@@ -92,7 +92,9 @@ class WorkflowTaskStatus(str, Enum):
     """Worker is executing the task (or child workflow is running)"""
 
     COMPLETED = 'COMPLETED'
-    """Task succeeded (TaskResult.is_ok())"""
+    """Task succeeded (TaskResult.is_ok()), or the child workflow of a
+    SubWorkflowNode is COMPLETED. The result of that node is the child's
+    output result, which can be an err under a success policy."""
 
     FAILED = 'FAILED'
     """Task failed (TaskResult.is_err())"""
@@ -115,6 +117,30 @@ WORKFLOW_TASK_TERMINAL_STATES: frozenset[WorkflowTaskStatus] = frozenset(
 )
 
 WF_TASK_TERMINAL_VALUES: list[str] = [s.value for s in WORKFLOW_TASK_TERMINAL_STATES]
+
+_NODE_STATUS_BY_STORED_VALUE: dict[str, WorkflowTaskStatus] = {
+    status.value: status for status in WorkflowTaskStatus
+}
+
+
+def stored_node_status(
+    *, workflow_id: str, node_id: str, stored: str,
+) -> WorkflowTaskStatus:
+    """Return the node status that the database row stores.
+
+    The CHECK ``horsies_workflow_tasks_status_check`` allows only the
+    ``WorkflowTaskStatus`` values, so another value means the CHECK is
+    missing or broken. Raises ``AssertionError`` that names the workflow,
+    the node and the stored value.
+    """
+    status = _NODE_STATUS_BY_STORED_VALUE.get(stored)
+    if status is None:
+        raise AssertionError(
+            f'workflow {workflow_id} node {node_id} stores status {stored!r}, '
+            'which is not a WorkflowTaskStatus member; the CHECK '
+            'horsies_workflow_tasks_status_check must forbid it'
+        )
+    return status
 
 
 class OnError(str, Enum):

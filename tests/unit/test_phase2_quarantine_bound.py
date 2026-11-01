@@ -11,6 +11,7 @@ forever key — the same authority the relocation coalesce imports.
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +21,8 @@ import pytest
 from pydantic import ValidationError
 
 from horsies.core.history.cutover.preparation import (
+    RefusedRow,
+    _PreparedRow,
     _prepare_one,
     prepare_legacy_batch,
 )
@@ -105,8 +108,30 @@ class TestClassResolution:
         forever key, imported from the same authority the relocation
         projection coalesces with, so the two stages cannot disagree."""
         prepared = _prepare_one(_row(None), retain_default=False)
+        assert isinstance(prepared, _PreparedRow)
         assert prepared.retention_class_key == FOREVER_CLASS_KEY
 
     def test_a_classed_row_keeps_its_class(self) -> None:
         prepared = _prepare_one(_row('standard_30d'), retain_default=False)
+        assert isinstance(prepared, _PreparedRow)
         assert prepared.retention_class_key == 'standard_30d'
+
+
+class TestRefusedRow:
+    @pytest.mark.parametrize(
+        ('changes', 'reason'),
+        [
+            ({'task_name': ''}, 'task_name must be non-empty'),
+            ({'queue_name': ''}, 'queue_name must be non-empty'),
+            ({'priority': 0}, 'priority must be between 1 and 100'),
+            ({'priority': 101}, 'priority must be between 1 and 100'),
+        ],
+    )
+    def test_a_row_that_breaks_a_command_rule_is_refused_by_name(
+        self, changes: dict[str, Any], reason: str,
+    ) -> None:
+        row = dataclasses.replace(_row('standard_30d'), **changes)
+
+        outcome = _prepare_one(row, retain_default=False)
+
+        assert outcome == RefusedRow(task_id=row.id, reason=reason)
