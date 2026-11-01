@@ -53,6 +53,8 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     """Mock TaskWrapper for unit tests."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
@@ -119,6 +121,8 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts workflow_ctx."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
@@ -190,6 +194,8 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required parameters for signature validation."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
@@ -261,6 +267,8 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
     """Mock TaskWrapper whose args_from target has a default value."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
@@ -330,6 +338,8 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     """Mock TaskWrapper that accepts **kwargs (validation should allow any key)."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(self, **kwargs: Any) -> TaskResult[Any, TaskError]:
@@ -397,6 +407,8 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     """Mock TaskWrapper with required workflow_meta for signature validation."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
@@ -467,6 +479,8 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     """Mock producer wrapper with concrete ok-type int."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = int
 
     def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[int, TaskError]:
@@ -535,6 +549,8 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
     """Mock consumer expecting TaskResult[str, TaskError] for args_from."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(
@@ -608,6 +624,8 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
     """Mock consumer with non-TaskResult annotation for args_from validation."""
 
     task_name: str
+    task_queue_name: str | None = None
+    task_options_json: str | None = None
     task_ok_type: Any = Any
 
     def __call__(

@@ -2,6 +2,7 @@
   "extends": "./pyproject.toml",
   "include": [
     "tests/typing/retry_variant_pin.py",
+    "tests/typing/task_function_attributes_pin.py",
     "tests/typing/async_task_refused_pin.py",
     "tests/typing/workflow_definition_config_pin.py",
     "horsies/core/models/task_send_types.py",

@@ -293,7 +293,7 @@ def resolve_node_queue_and_priority(
             mode and queue not in custom_queues (TASK_INVALID_QUEUE), or
             DEFAULT mode and queue is not 'default' (CONFIG_INVALID_QUEUE_MODE).
     """
-    queue = node.queue or getattr(node.fn, 'task_queue_name', None) or 'default'
+    queue = node.queue or node.fn.task_queue_name or 'default'
     if app.config.queue_mode.name == 'CUSTOM':
         valid_queues = app.get_valid_queue_names()
         if queue not in valid_queues:
@@ -923,6 +923,8 @@ class TaskFunction(Protocol[P, T]):
     """
 
     task_name: str
+    task_queue_name: str | None
+    task_options_json: str | None
 
     @abstractmethod
     def __call__(

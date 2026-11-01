@@ -542,9 +542,7 @@ async def start_workflow_async(
 
                     # Get task_options_json from the task function (set by @task decorator)
                     # and merge in TaskNode.good_until if set
-                    task_options_json: str | None = getattr(
-                        task.fn, 'task_options_json', None
-                    )
+                    task_options_json: str | None = task.fn.task_options_json
                     if task.good_until is not None:
                         # Merge good_until from TaskNode into task_options
                         base_options: dict[str, Any] = {}
@@ -566,7 +564,7 @@ async def start_workflow_async(
                     # Queue: use override, else task's declared queue, else "default"
                     resolved_queue = (
                         task.queue
-                        or getattr(task.fn, 'task_queue_name', None)
+                        or task.fn.task_queue_name
                         or 'default'
                     )
                     # Priority is bound before persist: app.workflow() binds it,
