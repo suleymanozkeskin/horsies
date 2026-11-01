@@ -183,8 +183,9 @@ def root_retry_and_deadline(
     difference: the promotion path folds corrupt options into a FAILED task
     (it re-reads rows written by another transaction); here the JSON is the
     task decorator's own serialization of a validated ``TaskOptions``, so
-    corruption is a defect. The start transaction does not catch the
-    ``SerializationError``: it propagates, and the transaction rolls back.
+    corruption is a defect. The start transaction and the engine's child
+    workflow start do not catch the ``SerializationError``: it propagates,
+    and the caller's transaction rolls back.
 
     Raises:
         SerializationError: task_options_json does not parse to an object,

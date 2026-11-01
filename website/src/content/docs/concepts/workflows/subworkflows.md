@@ -506,6 +506,7 @@ Rules for this pattern:
 - With the default `allow_failed_deps=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
   With `allow_failed_deps=True`, `build_with()` receives `TaskResult(err=...)` and must handle it.
 - An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
+- The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - `horsies check` does not expand a `SubWorkflowNode` that has `args_from`. See the note above on `@app.workflow_builder`.
 
 ### 6.4 Accessing Subworkflow Health: SubWorkflowSummary
