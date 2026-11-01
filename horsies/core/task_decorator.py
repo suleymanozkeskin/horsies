@@ -1050,6 +1050,72 @@ class TaskSendOptions(Protocol[P, T]):
     ) -> TaskSendResult['TaskHandle[T]']: ...
 
 
+# ---- Broker-to-TaskSendError mapping ----
+
+def _map_broker_err(
+    broker_err: BrokerEnqueueError | BrokerSyncCallError,
+    task_id: str,
+    payload: TaskSendPayload,
+) -> _BrokerSendError:
+    """Map a broker error variant to its send variant."""
+    match broker_err:
+        case BrokerPayloadMismatch(message=message):
+            return TaskSendPayloadMismatch(
+                task_id=task_id,
+                payload=payload,
+                message=message,
+            )
+        case BrokerEventLoopLimit(message=message):
+            return TaskSendEventLoopLimit(message=message)
+        case BrokerIdempotencyKeyConflict(
+            message=message,
+            owner_task_id=owner_task_id,
+        ):
+            return TaskSendIdempotencyKeyConflict(
+                task_id=task_id,
+                payload=payload,
+                message=message,
+                owner_task_id=owner_task_id,
+            )
+        case BrokerAsyncContext(message=message):
+            return TaskSendAsyncContext(
+                task_id=task_id,
+                payload=payload,
+                message=message,
+            )
+        case BrokerLoopRunnerFailed(message=message, exception=exception):
+            return TaskSendLoopRunnerFailed(
+                task_id=task_id,
+                payload=payload,
+                message=message,
+                exception=exception,
+            )
+        case (
+            BrokerInvalidTaskOptions(message=message, exception=exception)
+            | BrokerInvalidInput(message=message, exception=exception)
+        ):
+            # Refused before the write: resending the same payload is
+            # refused again, so the retry methods must not accept it.
+            return TaskSendValidationFailed(
+                message=message,
+                exception=exception,
+            )
+        case BrokerEnqueueFailed(
+            message=message,
+            retryable=retryable,
+            exception=exception,
+        ):
+            return TaskSendEnqueueFailed(
+                task_id=task_id,
+                payload=payload,
+                message=message,
+                retryable=retryable,
+                exception=exception,
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def create_task_wrapper(
     fn: Callable[P, TaskResult[T, TaskError]],
     app: 'Horsies',
@@ -1298,71 +1364,6 @@ def create_task_wrapper(
                 exception=err,
             ))
         return Ok((good_until, opts_result.ok_value))
-
-    # ---- Broker-to-TaskSendError mapping ----
-
-    def _map_broker_err(
-        broker_err: BrokerEnqueueError | BrokerSyncCallError,
-        task_id: str,
-        payload: TaskSendPayload,
-    ) -> _BrokerSendError:
-        """Map a broker error variant to its send variant."""
-        match broker_err:
-            case BrokerPayloadMismatch(message=message):
-                return TaskSendPayloadMismatch(
-                    task_id=task_id,
-                    payload=payload,
-                    message=message,
-                )
-            case BrokerEventLoopLimit(message=message):
-                return TaskSendEventLoopLimit(message=message)
-            case BrokerIdempotencyKeyConflict(
-                message=message,
-                owner_task_id=owner_task_id,
-            ):
-                return TaskSendIdempotencyKeyConflict(
-                    task_id=task_id,
-                    payload=payload,
-                    message=message,
-                    owner_task_id=owner_task_id,
-                )
-            case BrokerAsyncContext(message=message):
-                return TaskSendAsyncContext(
-                    task_id=task_id,
-                    payload=payload,
-                    message=message,
-                )
-            case BrokerLoopRunnerFailed(message=message, exception=exception):
-                return TaskSendLoopRunnerFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=message,
-                    exception=exception,
-                )
-            case (
-                BrokerInvalidTaskOptions(message=message, exception=exception)
-                | BrokerInvalidInput(message=message, exception=exception)
-            ):
-                # Refused before the write: resending the same payload is
-                # refused again, so the retry methods must not accept it.
-                return TaskSendValidationFailed(
-                    message=message,
-                    exception=exception,
-                )
-            case BrokerEnqueueFailed(
-                message=message,
-                retryable=retryable,
-                exception=exception,
-            ):
-                return TaskSendEnqueueFailed(
-                    task_id=task_id,
-                    payload=payload,
-                    message=message,
-                    retryable=retryable,
-                    exception=exception,
-                )
-            case _ as unreachable:
-                assert_never(unreachable)
 
     # ---- Core send/schedule helpers ----
 
