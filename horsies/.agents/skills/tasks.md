@@ -792,9 +792,9 @@ from horsies import (
     from_node,
     # Rerun (re-execute a terminal task as a new request)
     rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome,
-    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
-    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
-    NotEligibleReason,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay, NotEligibleReason,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )

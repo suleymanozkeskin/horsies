@@ -346,6 +346,12 @@ there is no migration contract between pre-1.0 versions.
   `get_task_detail` and `get_workflow_node` now read in one REPEATABLE READ
   snapshot. Before, a task row that was committed between the live read and
   the history read gave `Ok(None)`.
+- **New rerun outcome `RerunSourceCorrupt`.** `rerun_task` returns it, with
+  the `HistoryContractError` as `exception`, when the source history row
+  does not decode: for example a stored status that is not a `TaskStatus`
+  member. Nothing is written. Before, `rerun_task` raised the error into
+  the caller's transaction. It is exported from `horsies`. An exhaustive
+  `match` on `RerunOutcome` needs a case for it.
 
 ### Changed
 
