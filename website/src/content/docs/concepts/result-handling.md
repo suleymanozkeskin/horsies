@@ -105,7 +105,7 @@ Returned by `handle.get()` for issues retrieving results:
 | ---- | ---- |
 | `WAIT_TIMEOUT` | Timeout elapsed while waiting for result (task may still be running) |
 | `TASK_NOT_FOUND` | Task ID doesn't exist in database |
-| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database |
+| `WORKFLOW_NOT_FOUND` | Workflow ID doesn't exist in database, or retention removed the workflow after `get()` read its terminal status |
 | `RESULT_NOT_AVAILABLE` | Result cache is empty for an immediate/sync handle |
 | `RESULT_NOT_READY` | Result not yet available; task is still running |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes |

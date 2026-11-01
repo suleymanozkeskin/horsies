@@ -21,8 +21,10 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncConnection
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 
+from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.identity.keys import ScopedIdempotencyKey
 from horsies.core.history.identity.reservations import (
     ReservationApplied,
@@ -41,11 +43,19 @@ from horsies.core.history.rerun.operations import (
     RerunKeyReplay,
     RerunNotEligible,
     RerunSourceAbsent,
+    RerunSourceCorrupt,
     RerunSourceLive,
     RerunTask,
     rerun_task,
 )
+from horsies.core.types.status import TaskStatus
 
+from tests.broker_resources_support import current_resources
+from tests.integration.history_seeding import (
+    HISTORY_SEED_CLASS_KEY,
+    route_rows,
+    stored_history_status,
+)
 from tests.integration.task_history_harness import (
     HistorySchema,
     create_workflow,
@@ -54,6 +64,8 @@ from tests.integration.task_history_harness import (
     prepare_move_storage,
     terminalization_schema_fixture,
 )
+
+from tests.integration.test_monitoring_queries import make_task
 
 pytestmark = [pytest.mark.integration]
 
@@ -582,3 +594,40 @@ class TestKeyedRerun:
                 )
             ).scalar_one()
             assert new_rows == 0
+
+
+class TestStoredSourceDoesNotDecode:
+    """Stored data that does not parse is an outcome with its cause.
+
+    Schema v49 has no status CHECK on the history parent, so this runs on
+    the broker database, where an out-of-band write can store a status that
+    is not a ``TaskStatus`` member.
+    """
+
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_an_unknown_stored_status_is_source_corrupt(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        source = make_task(status=TaskStatus.FAILED)
+        await route_rows(session, (source,))
+        count_tasks = text('SELECT count(*) FROM horsies_tasks')
+
+        async with stored_history_status(session, source.id, 'NOT_A_STATUS'):
+            async with current_resources(broker).engine.begin() as connection:
+                tasks_before = (await connection.execute(count_tasks)).scalar_one()
+                outcome = await rerun_task(
+                    connection,
+                    RerunTask(source_task_id=source.id, deadline=None),
+                    RerunEnqueuePolicy(
+                        retention_class_key=HISTORY_SEED_CLASS_KEY,
+                        retain_rerun_input=True,
+                        reservation_window=timedelta(hours=24),
+                    ),
+                )
+                tasks_after = (await connection.execute(count_tasks)).scalar_one()
+
+        assert isinstance(outcome, RerunSourceCorrupt)
+        assert outcome.task_id == source.id
+        assert isinstance(outcome.exception, HistoryContractError)
+        assert "'NOT_A_STATUS'" in str(outcome.exception)
+        assert tasks_after == tasks_before

@@ -280,8 +280,9 @@ from datetime import timedelta
 
 from horsies import (
     rerun_task, RerunTask, RerunEnqueuePolicy,
-    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
-    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay,
 )
 
 outcome = await rerun_task(
@@ -306,6 +307,8 @@ match outcome:
         ...
     case RerunInputUnavailable() | RerunInputCorrupt():
         ...
+    case RerunSourceCorrupt(exception=cause):
+        ...  # the source history row does not decode; nothing was written
     case RerunKeyConflict() | RerunKeyReplay():
         ...
 ```
