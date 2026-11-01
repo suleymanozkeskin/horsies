@@ -60,14 +60,17 @@ its memory to the OS. **Default: 100.**
 # Default is 100; raise it for high-throughput / connection-constrained apps
 horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=500
 
-# Disable recycling entirely
+# Disable recycling entirely (uses fork on Linux)
 horsies worker myapp.instance:app --processes=8 --max-tasks-per-child=0
 ```
 
 - **Default `100`.** Tune it for your deployment — there is no universal value
   (see [Choosing N](#choosing-n)).
-- `0` disables recycling: children live for the worker's lifetime.
-- `N` must be `>= 1`. With `N=1`, each task runs in a new child.
+- `0` disables recycling: children live for the worker's lifetime and the
+  worker uses `fork` on Linux.
+- `N` must be `>= 2`. Child warmup consumes one executor call, so `N=1` would
+  exhaust a child before it runs a task; the CLI rejects values below 2
+  (except `0`).
 
 ### Per-child and staggered
 
@@ -76,11 +79,18 @@ and is replaced individually when it reaches N — the other children keep
 running. Children rotate independently, never in lockstep, so throughput stays
 smooth (no synchronized restart).
 
-### Child startup
+### Start method: recycling forces spawn
 
-Each child is a new Python interpreter that imports the app. Children share no
-imported modules with the worker. This cost is the same with recycling on or
-off.
+Any non-zero value forces the `spawn` multiprocessing start method (the stdlib
+budget is incompatible with `fork`), at initial startup **and** for every
+recycle replacement. On Linux this replaces the default `fork`:
+
+- Under `fork`, children are copy-on-write clones of the parent and share its
+  imported modules in memory.
+- Under `spawn`, each child starts fresh and **re-imports** the app. This raises
+  baseline memory (no shared pages) and slows child startup.
+
+Set `--max-tasks-per-child=0` to keep `fork` when recycling is not needed.
 
 ### Choosing N
 
@@ -88,7 +98,7 @@ Recycling cost scales as ~1/N: each recycle pays one child cold start (re-import
 app, rebuild the child connection pool). Pick the **highest N whose peak memory
 stays under the platform quota**. Use the `children_memory_mb` column in
 [worker health](../monitoring/worker-health) snapshots to size it — it reports
-the summed RSS of the worker's children, which the parent-only `memory_usage_mb`
+the summed RSS of the executor children, which the parent-only `memory_usage_mb`
 metric does not capture.
 
 - Low N (e.g. 3): tight memory bound, high cold-start and connection churn.
@@ -103,9 +113,10 @@ keeps RSS under quota depends on a child's RSS, not its task count, so a fixed
 count under heterogeneous tasks recycles either too early or too late.
 
 `--max-memory-per-child-mb` recycles a child by its **own resident memory**: each
-child reports its RSS with every result. When that value is at or above the
-threshold, the worker stops the child and starts a new one in that slot. Other
-children and their in-flight tasks are untouched. **Disabled by default.**
+child samples its RSS after every real task and, when at or above the threshold,
+finishes the task, sends its result, and exits cleanly. The pool replaces only
+that child — siblings and their in-flight tasks are untouched. **Disabled by
+default.**
 
 ```bash
 # Recycle any child once its RSS reaches 200 MB
@@ -117,6 +128,10 @@ horsies worker myapp.instance:app --processes=6 \
 ```
 
 - **Disabled by default** (`None`). Any positive value enables it.
+- **CPython-only.** It is built on private `ProcessPoolExecutor` internals; the
+  worker refuses to start (loudly) on other interpreters or untested CPython
+  minor versions.
+- Forces the `spawn` start method, exactly like `--max-tasks-per-child`.
 - It is a **retention guardrail, not a hard memory sandbox.** A task whose
   working set exceeds the threshold *while it is still running* is not
   interrupted; the recycle happens after it returns. Per-task peak memory is

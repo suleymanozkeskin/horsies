@@ -16,7 +16,7 @@ The system consists of four main components:
 
 1. **Producer**: Application code that sends tasks via `.send()` or `.send_async()`
 2. **PostgreSQL Broker**: Stores tasks, results, and coordinates via LISTEN/NOTIFY
-3. **Worker**: Claims tasks and executes them in child processes
+3. **Worker**: Claims and executes tasks in a process pool
 4. **Scheduler**: (Optional) Enqueues tasks on a schedule
 
 ## Component Relationships
@@ -50,13 +50,13 @@ Unlike Celery (which typically uses Redis or RabbitMQ), horsies uses PostgreSQL 
 - **Coordination**: Advisory locks prevent race conditions
 - **State tracking**: Heartbeats and worker states are database tables
 
-### Child Process Execution
+### Process Pool Execution
 
-Workers run tasks in child processes that they own, rather than threads:
+Workers use Python's `ProcessPoolExecutor` rather than threads:
 
 - Each task runs in an isolated child process
 - GIL contention is avoided for CPU-bound tasks
-- A crashed task takes down only its own child
+- Crashed tasks don't take down the worker
 - Child processes send their own heartbeats
 
 ### Type-Safe Results

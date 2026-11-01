@@ -143,7 +143,7 @@ def urgent_task() -> TaskResult[str, TaskError]:
 
 ### Set an Execution Timeout
 
-`timeout_ms` bounds task execution time, measured from the moment a worker gives the task to a child process. Time that a task waits for a free child does not count. Minimum 1000 (1 second).
+`timeout_ms` bounds task execution time, measured from the moment a worker dispatches the task to a child process. Minimum 1000 (1 second).
 
 ```python
 @app.task("resize_video", timeout_ms=120_000)
@@ -163,7 +163,7 @@ def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
     ...
 ```
 
-The kill goes to the child and to the subprocesses in its session. Other tasks on the same worker continue. A subprocess that calls `setsid` itself leaves the session, and the kill does not reach it. The worker starts a new child in that slot, so size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
+Killing the child breaks the worker's process pool, which interrupts every other task on the same worker. A task that has not started returns to PENDING. A started task fails with `WORKER_CRASHED` and is retried only if `WORKER_CRASHED` is in its `auto_retry_for`; otherwise it is marked FAILED. See [Child Process Crash](/horsies/workers/heartbeats-recovery/#child-process-crash). Size `timeout_ms` as a hang backstop well above normal runtime, not as routine control flow.
 
 ### Register Tasks for Workers
 
@@ -216,7 +216,7 @@ def task_two() -> TaskResult[str, TaskError]:
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |
-| `timeout_ms` | `int` | No | Execution time limit in milliseconds (>= 1000), measured from the moment a child takes the task. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
+| `timeout_ms` | `int` | No | Execution time limit in milliseconds (>= 1000), measured from dispatch. On expiry the child process is killed and the task fails with `TASK_TIMEOUT` |
 
 **Returns:** Decorated function that can be called directly or via `.send()` / `.send_async()`.
 

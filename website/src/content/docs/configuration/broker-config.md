@@ -173,8 +173,8 @@ lifecycle work and one for heartbeat overlap.
 
 When using PgBouncer transaction pooling, those client-side pool slots are
 multiplexed onto fewer server backends. Connections are still not safe to share
-between OS processes; Horsies creates child pools inside each child process, and
-a child inherits no database socket from the worker.
+between OS processes; Horsies creates child pools after worker processes start
+and uses a non-inheriting start method for replacement executors after startup.
 
 ## Event Loops
 
