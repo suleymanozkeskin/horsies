@@ -19,6 +19,7 @@ import datetime
 import decimal
 import enum
 import uuid
+from collections.abc import Iterable, Iterator
 from typing import (
     Annotated,
     Any,
@@ -31,7 +32,7 @@ from typing import (
 )
 
 import pytest
-from pydantic import AfterValidator, BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field, computed_field
 from pydantic_core import PydanticCustomError
 
 from horsies.core.codec.json_io import dumps_json
@@ -874,6 +875,104 @@ class TestValidatorTextWithALoneSurrogate:
     ) -> None:
         with pytest.raises(ValueValidationError, match='bad name plain'):
             encode_value('plain', Annotated[str, AfterValidator(validator)])
+
+
+class _ListValued(enum.Enum):
+    MEMBER = [1]
+
+
+class _DictValued(enum.Enum):
+    MEMBER = {'k': 1}
+
+
+class _SetValued(enum.Enum):
+    MEMBER = {1}
+
+
+class _FrozensetValued(enum.Enum):
+    MEMBER = frozenset({1})
+
+
+class TestDictKeyWithoutAJsonForm:
+    """`dump_python` raises a plain `TypeError` for these keys."""
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type', 'type_name'),
+        [
+            ({_ListValued.MEMBER: 1}, dict[_ListValued, int], 'list'),
+            ({_DictValued.MEMBER: 1}, dict[_DictValued, int], 'dict'),
+            ({_SetValued.MEMBER: 1}, dict[_SetValued, int], 'set'),
+            ({_FrozensetValued.MEMBER: 1}, dict[_FrozensetValued, int], 'frozenset'),
+            ({frozenset({1}): 1}, dict[frozenset[int], int], 'frozenset'),
+            ({(frozenset({1}),): 1}, dict[tuple[frozenset[int]], int], 'frozenset'),
+            ({frozenset({1}): 1}, Any, 'frozenset'),
+            ({'k': {_ListValued.MEMBER: 1}}, dict[str, dict[_ListValued, int]], 'list'),
+        ],
+        ids=[
+            'enum-list-value', 'enum-dict-value', 'enum-set-value',
+            'enum-frozenset-value', 'frozenset', 'tuple-with-frozenset',
+            'frozenset-at-any', 'nested',
+        ],
+    )
+    def test_it_is_a_catalog_refusal(
+        self,
+        value: object,
+        expected_type: Any,
+        type_name: str,
+    ) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value(value, expected_type, location=('labels',))
+
+        assert str(raised.value) == (
+            f'labels: serialization failed: `{type_name}` not valid as object key'
+        )
+        assert raised.value.__context__ is None
+
+    def test_the_text_has_no_location_part_without_a_location(self) -> None:
+        with pytest.raises(ValueValidationError) as raised:
+            encode_value({frozenset({1}): 1}, dict[frozenset[int], int])
+
+        assert str(raised.value) == (
+            'serialization failed: `frozenset` not valid as object key'
+        )
+
+
+class _TypeErrorInComputedField(BaseModel):
+    text: str
+
+    @computed_field
+    @property
+    def derived(self) -> int:
+        raise TypeError(self.text)
+
+
+def _yield_then_raise_type_error() -> Iterator[int]:
+    yield 1
+    raise TypeError('defect in a generator')
+
+
+class TestTypeErrorThatIsADefect:
+    """Only the full text of the key refusal is a catalog refusal."""
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'defect in a computed field',
+            'wrapped: `list` not valid as object key',
+            '`list` not valid as object key: wrapped',
+            'list not valid as object key',
+        ],
+        ids=['other-text', 'text-in-front', 'text-behind', 'no-backticks'],
+    )
+    def test_a_type_error_from_a_computed_field_propagates(self, text: str) -> None:
+        with pytest.raises(TypeError) as raised:
+            encode_value(_TypeErrorInComputedField(text=text), _TypeErrorInComputedField)
+
+        assert str(raised.value) == text
+
+    def test_a_type_error_from_a_generator_propagates(self) -> None:
+        with pytest.raises(TypeError, match='defect in a generator'):
+            encode_value(_yield_then_raise_type_error(), Iterable[int])
 
 
 class TestEncodeValueKeepsValidText:

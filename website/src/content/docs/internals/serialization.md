@@ -236,6 +236,8 @@ Cheap shape check before per-slot decode. Returns the envelope as `dict[str, Jso
 
 Primitive entry points for non-`TaskResult` values (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
 
+**Raises:** `encode_value` raises `ValueValidationError` for a dict key without a JSON form: a `frozenset`, or an Enum member whose value is a list, a dict or a set. Any other `TypeError` from the dump is a defect and propagates, for example from a computed field.
+
 ### `JsonValue`
 
 <!-- check: skip elided -- shows the library definition, not user code -->

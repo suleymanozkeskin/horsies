@@ -467,6 +467,17 @@ there is no migration contract between pre-1.0 versions.
     `TASK_EXCEPTION`, and so does a decode of the kwargs of a task.
   - A decode of a stored result gives `RESULT_DESERIALIZATION_ERROR`. Before,
     the raw error left the read.
+- **Breaking: `encode_value` raises `ValueValidationError` for a dict key
+  without a JSON form.** Such a key is a `frozenset`, or an Enum member whose
+  value is a list, a dict or a set. The text names the kwarg and the type.
+  Before, a raw `TypeError` left `encode_value`. Registration refuses these
+  types in a task signature (`HRS-105`), so `.send()` and a schedule do not
+  reach this. A `SubWorkflowNode` kwarg fails spec construction with
+  `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). Before, `app.workflow()`
+  raised. A task whose `TaskError.data` holds such a key ends with
+  `WORKER_SERIALIZATION_ERROR`, not `TASK_EXCEPTION`. Any other `TypeError`
+  from the dump is a defect and propagates, for example from a computed
+  field.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),

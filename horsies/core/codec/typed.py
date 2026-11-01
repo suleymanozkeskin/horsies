@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import re
 import types
 from collections import deque
 from collections.abc import Iterable
@@ -131,6 +132,11 @@ _RESERVED_DISCRIMINATOR = '__builtin_task_code__'
 _REPLACEMENT_CHAR: Final = '\ufffd'
 """What `dump_python(mode='json')` writes in a dict key for a lone surrogate."""
 
+_NO_JSON_KEY_TEXT: Final = re.compile(r'`\w+` not valid as object key')
+"""The text of the plain `TypeError` from `dump_python(mode='json')` for a dict
+key without a JSON form. Its one placeholder is a type name, so it holds no
+input value. `_dump` matches all of it: any other `TypeError` is a defect."""
+
 
 # ---------------------------------------------------------------------------
 # TypeAdapter cache
@@ -188,7 +194,9 @@ def encode_value(
        fail closed, symmetric with `decode_value` on the consumer.
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
        A dict key with a lone surrogate raises at a position without a
-       declared key type; `_dump` makes that a `StrictJsonError`.
+       declared key type; `_dump` makes that a `StrictJsonError`. A dict key
+       without a JSON form raises too; `_dump` makes that a
+       `ValueValidationError`.
     4. `_scan_wire_json` rejects non-finite floats and strings with a lone
        surrogate at any depth, so `encode_value` refuses each string that
        `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
@@ -326,6 +334,13 @@ def _dump(
     at a position without a declared key type (`Any`, a bare `dict`). That is
     a `StrictJsonError`, raised outside the `except` block, because the
     `UnicodeEncodeError` holds the input.
+
+    Pydantic raises a plain `TypeError` for a dict key without a JSON form:
+    a `frozenset`, or an Enum member whose value is a list, a dict or a set.
+    Only the text tells that from a defect, for example a `TypeError` from a
+    computed field or a generator, so the text must match in full. Any other
+    `TypeError` propagates. A pydantic that changes the text gives the raw
+    `TypeError` again, not a wrong refusal.
     """
     failure: StrictJsonError | ValueValidationError
     try:
@@ -334,6 +349,12 @@ def _dump(
         failure = ValueValidationError(f'serialization failed: {error}')
     except UnicodeEncodeError:
         failure = StrictJsonError(_lone_surrogate_text('a dict key', location))
+    except TypeError as error:
+        if _NO_JSON_KEY_TEXT.fullmatch(str(error)) is None:
+            raise
+        failure = ValueValidationError(
+            _with_location(f'serialization failed: {error}', location),
+        )
     raise failure
 
 
@@ -841,17 +862,24 @@ def _dataclass_hints(dc: type) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-def _lone_surrogate_text(
-    subject: Literal['a string', 'a dict key', 'a validation error'],
-    location: tuple[str, ...],
-) -> str:
-    """The refusal text for a lone surrogate. It holds no input value."""
-    text = f'{subject} holds a lone surrogate, which UTF-8 cannot encode'
+def _with_location(text: str, location: tuple[str, ...]) -> str:
+    """`text` with `location` in front of it, for example the kwarg name."""
     match location:
         case ():
             return text
         case _:
             return f'{".".join(location)}: {text}'
+
+
+def _lone_surrogate_text(
+    subject: Literal['a string', 'a dict key', 'a validation error'],
+    location: tuple[str, ...],
+) -> str:
+    """The refusal text for a lone surrogate. It holds no input value."""
+    return _with_location(
+        f'{subject} holds a lone surrogate, which UTF-8 cannot encode',
+        location,
+    )
 
 
 def _scan_text(

@@ -1216,6 +1216,34 @@ class TestRunTaskEntryErrorPaths:
             'a lone surrogate, which UTF-8 cannot encode'
         )
 
+    def test_a_dict_key_without_a_json_form_in_error_data_ends_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """`TaskError.data` is the one task value that registration does not
+        type. The encode refuses the key through its catalog, so the code is
+        WORKER_SERIALIZATION_ERROR and not TASK_EXCEPTION for a raw exception."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = int
+        mock_task.return_value = TaskResult(
+            err=TaskError(
+                error_code='MY_ERROR', message='m', data={frozenset({1}): 1},
+            ),
+        )
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert '`frozenset` not valid as object key' in parsed['err']['message']
+
     def test_a_lone_surrogate_in_a_raised_exception_ends_the_task(
         self,
         _run_entry_defaults: dict[str, Any],

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Callable
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -647,6 +648,55 @@ class TestValidatorTextWithALoneSurrogate:
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert 'a validation error holds a lone surrogate' in (error.message or '')
         assert error.data == {'stage': 'decode'}
+
+
+class _ListValued(Enum):
+    MEMBER = [1]
+
+
+class TestDictKeyWithoutAJsonForm:
+    """Registration refuses these types in a task signature, so `.send()` and
+    a schedule cannot reach this. It does not check a `build_with()` parameter."""
+
+    @pytest.mark.parametrize(
+        ('value', 'type_name'),
+        [
+            ({_ListValued.MEMBER: 1}, 'list'),
+            ({frozenset({1}): 1}, 'frozenset'),
+        ],
+        ids=['enum-list-value', 'frozenset'],
+    )
+    def test_a_subworkflow_node_kwarg_is_hrs_031(
+        self,
+        value: dict[Any, int],
+        type_name: str,
+    ) -> None:
+        """Before, the raw `TypeError` left `app.workflow()`."""
+        app = _real_app()
+
+        class ChildWorkflow(WorkflowDefinition[int]):
+            name = 'no-json-key-child'
+            definition_key = _key('no_json_key_child')
+
+            @classmethod
+            def build_with(
+                cls, app: Horsies, *args: Any, labels: Any = None, **params: Any,
+            ) -> Any:
+                raise AssertionError('spec construction refuses before this')
+
+        with pytest.raises(WorkflowValidationError) as raised:
+            _ = app.workflow(
+                name='no-json-key',
+                tasks=[SubWorkflowNode(
+                    workflow_def=ChildWorkflow, kwargs={'labels': value},
+                )],
+                definition_key=_key('no_json_key'),
+            )
+
+        assert raised.value.code is ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE
+        assert f'`{type_name}` not valid as object key' in ' '.join(
+            raised.value.notes,
+        )
 
 
 class TestChildStartOfALoneSurrogate:
