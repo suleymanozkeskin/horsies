@@ -38,9 +38,10 @@ from horsies.core.worker.preload import (
     preload_support,
     reap_landed_orphans,
 )
-from horsies.core.worker.preload_main import parse_arguments
+from horsies.core.worker.preload_main import REPARENT_FAILED_EXIT_CODE, parse_arguments
 from horsies.core.worker.slots import (
     PRELOAD_ENTRY,
+    Child,
     SlotPool,
     SlotPoolConfig,
     SpawnFailed,
@@ -293,6 +294,31 @@ class TestForkReplies:
         assert live_pids == {4321}
         assert 4321 in swept[0]
 
+    @pytest.mark.asyncio(loop_scope='function')
+    async def test_a_failed_request_ends_the_parent_and_clears_the_flag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The channel may hold half a frame, so this parent serves no other."""
+        parent = self._parent()
+        parent._lock = asyncio.Lock()
+        parent._sock = MagicMock()
+        flags: list[bool] = []
+
+        def record(enabled: bool) -> bool:
+            flags.append(enabled)
+            return True
+
+        monkeypatch.setattr(preload, '_set_subreaper', record)
+        monkeypatch.setattr(preload.socket, 'send_fds', MagicMock())
+        monkeypatch.setattr(parent, '_read_frame', AsyncMock(side_effect=EOFError))
+
+        result = await parent.fork_child(MagicMock(), set())
+
+        assert isinstance(result, Err)
+        assert flags == [True, False]
+        cast(MagicMock, parent.process).kill.assert_called_once_with()
+
     def test_a_failed_fork_leaves_the_parent_up(self) -> None:
         parent = self._parent()
         assert parent._child_from(ForkFailedFrame('EAGAIN')) == Err(PreloadDown('EAGAIN'))
@@ -342,6 +368,42 @@ class TestForkedChild:
         libc = ctypes.CDLL(None, use_errno=True)
         assert libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(value), 0, 0, 0) == 0
         assert value.value == 0
+
+    async def test_the_child_shares_the_frozen_heap(
+        self,
+        started_pools: list[SlotPool],
+    ) -> None:
+        pool = await _started(started_pools, _config())
+        assert int(await _result(pool, 'freeze_count')) > 0
+
+    async def test_the_child_holds_only_its_own_socket(
+        self,
+        started_pools: list[SlotPool],
+    ) -> None:
+        pool = await _started(started_pools, _config())
+        assert await _result(pool, 'socket_count') == '1'
+
+    async def test_an_exited_child_leaves_the_registry(
+        self,
+        started_pools: list[SlotPool],
+    ) -> None:
+        pool = await _started(started_pools, _config(max_tasks_per_child=1))
+        first = int(await _result(pool, 'pid'))
+        for _ in range(500):
+            if first not in pool._live_pids:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(f'pid {first} stayed registered')
+
+    async def test_stop_ends_the_preload_parent(self) -> None:
+        pool = SlotPool(_config(), pending_limit=10)
+        assert isinstance(await pool.start(), Ok)
+        parent = await _running_preload(pool)
+
+        await pool.stop(0)
+
+        assert parent.process.returncode is not None
+        assert pool._preload is None
 
     async def test_exit_status_comes_from_the_real_exit(
         self,
@@ -432,6 +494,26 @@ class TestPreloadParentDeath:
         failure = await asyncio.wait_for(pool.wait_failed(), OUTCOME_TIMEOUT_S)
 
         assert isinstance(failure, SpawnFailed)
+
+    async def test_a_refused_fork_uses_exec_and_keeps_the_parent(
+        self,
+        started_pools: list[SlotPool],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def refuse(*_args: object) -> Err[PreloadDown]:
+            return Err(PreloadDown('EAGAIN'))
+
+        pool = await _started(started_pools, _config(max_tasks_per_child=1))
+        parent = await _running_preload(pool)
+        monkeypatch.setattr(PreloadParent, 'fork_child', refuse)
+
+        await _result(pool, 'echo', 'one')
+        assert await _result(pool, 'echo', 'two') == 'two'
+
+        child = pool._slots[0].child
+        assert child is not None
+        assert isinstance(child.process, asyncio.subprocess.Process)
+        assert pool._preload is parent and parent.is_running
 
     async def test_restarts_are_bounded(
         self,
@@ -547,6 +629,103 @@ class TestAppGuard:
                 assert 'bad app' in reason
             case other:
                 raise AssertionError(other)
+
+
+@linux_only
+@pytest.mark.asyncio(loop_scope='function')
+class TestRealChildren:
+    """The real child program, booted through the real preload parent."""
+
+    @staticmethod
+    async def _counts(
+        tmp_path: Path,
+        pools: list[SlotPool],
+        mode: ChildPreload,
+    ) -> tuple[int, int]:
+        imports = tmp_path / 'imports'
+        hooks = tmp_path / 'hooks'
+        path = tmp_path / 'counted_app.py'
+        path.write_text(
+            APP_HEAD
+            + textwrap.dedent(f"""
+                with open({str(imports)!r}, 'a') as out:
+                    out.write('x')
+
+                @app.on_child_process_start
+                def count_child() -> None:
+                    with open({str(hooks)!r}, 'a') as out:
+                        out.write('x')
+            """),
+        )
+        config = SlotPoolConfig(
+            slots=2,
+            init=_init(f'{path}:app'),
+            max_tasks_per_child=0,
+            max_memory_per_child_mb=None,
+            child_preload=mode,
+        )
+        await _started(pools, config)
+        return len(imports.read_text()), len(hooks.read_text())
+
+    async def test_app_preload_imports_once_and_runs_hooks_per_child(
+        self,
+        tmp_path: Path,
+        started_pools: list[SlotPool],
+    ) -> None:
+        assert await self._counts(tmp_path, started_pools, ChildPreload.APP) == (1, 2)
+
+    async def test_library_preload_imports_the_app_per_child(
+        self,
+        tmp_path: Path,
+        started_pools: list[SlotPool],
+    ) -> None:
+        counts = await self._counts(tmp_path, started_pools, ChildPreload.LIBRARY)
+        assert counts == (2, 2)
+
+
+@linux_only
+class TestReparentWait:
+    def test_a_child_that_never_reparents_exits(self) -> None:
+        code = (
+            'from horsies.core.worker import preload_main as main\n'
+            'main.REPARENT_TIMEOUT_S = 0.05\n'
+            'main._wait_for_reparent(1 << 30)\n'
+        )
+        result = subprocess.run([sys.executable, '-c', code], check=False)
+        assert result.returncode == REPARENT_FAILED_EXIT_CODE
+
+
+class TestKillBeforeSession:
+    """A forked child is not its own group until it calls ``setsid``."""
+
+    @staticmethod
+    def _child(returncode: int | None) -> Child:
+        child = Child.__new__(Child)
+        child.pid = 4321
+        child.process = MagicMock(returncode=returncode)
+        return child
+
+    @pytest.fixture
+    def killed(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        calls: list[int] = []
+
+        def no_group(_pid: int, _signal: int) -> None:
+            raise ProcessLookupError
+
+        def record(pid: int, _signal: int) -> None:
+            calls.append(pid)
+
+        monkeypatch.setattr(slots.os, 'killpg', no_group)
+        monkeypatch.setattr(slots.os, 'kill', record)
+        return calls
+
+    def test_a_child_with_no_group_is_killed_alone(self, killed: list[int]) -> None:
+        self._child(None).kill_group()
+        assert killed == [4321]
+
+    def test_a_reaped_child_is_left_alone(self, killed: list[int]) -> None:
+        self._child(0).kill_group()
+        assert killed == []
 
 
 @linux_only

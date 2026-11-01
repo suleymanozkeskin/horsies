@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from horsies.core.worker.config import ChildPreload
 from horsies.core.app import Horsies
 from horsies.core.brokers.resources import ListenerDisabled, ListenerEnabled
 from horsies.core.cli import (
@@ -469,6 +470,8 @@ def _make_worker_namespace(
     max_claim_per_worker: int = 0,
     max_tasks_per_child: int = 100,
     max_memory_per_child_mb: int | None = None,
+    drain_timeout: float = 300.0,
+    child_preload: str = 'library',
 ) -> argparse.Namespace:
     """Build a valid argparse.Namespace for worker_command."""
     return argparse.Namespace(
@@ -480,7 +483,8 @@ def _make_worker_namespace(
         max_claim_per_worker=max_claim_per_worker,
         max_tasks_per_child=max_tasks_per_child,
         max_memory_per_child_mb=max_memory_per_child_mb,
-        drain_timeout=300.0,
+        drain_timeout=drain_timeout,
+        child_preload=child_preload,
     )
 
 
@@ -1858,7 +1862,7 @@ class TestRunWorkerCoroutine:
         schema_broker = _make_mock_broker()
         broker = _make_mock_broker()
         mock_discover.return_value = (app, 'app', 'my.mod', '/project')
-        args = _make_worker_namespace()
+        args = _make_worker_namespace(drain_timeout=7.5, child_preload='app')
 
         # Mock Worker instance
         mock_worker = MagicMock()
@@ -1891,6 +1895,8 @@ class TestRunWorkerCoroutine:
         schema_broker.close_async.assert_awaited_once()
         mock_worker_cls.assert_called_once()
         worker_cfg = mock_worker_cls.call_args.args[2]
+        assert worker_cfg.drain_timeout_s == 7.5
+        assert worker_cfg.child_preload is ChildPreload.APP
         assert worker_cfg.parent_pool_size == 3
         assert worker_cfg.parent_max_overflow == 2
         assert worker_cfg.child_pool_min_size == 0
