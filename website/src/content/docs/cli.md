@@ -1,6 +1,6 @@
 ---
 title: CLI Reference
-summary: Command-line interface for running workers and the scheduler.
+summary: Command-line interface for running workers, the scheduler, and the monitoring web UI.
 related: [../workers/worker-architecture, ../scheduling/scheduler-overview]
 tags: [cli, worker, scheduler, commands]
 ---
@@ -121,6 +121,50 @@ horsies check myapp.instance:app
 horsies check myapp.instance:app --live
 ```
 
+### horsies web
+
+Serve the monitoring web UI. Requires the `horsies[web]` extra. For the UI itself, see the [web UI overview](../monitoring/web-ui-overview).
+
+```bash
+horsies web [app_path] [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Description |
+| -------- | ----------- |
+| `app_path` | App locator (for example `myapp.tasks:app`). Omit it when you use `--database-url` |
+
+Pass either `app_path` or `--database-url`, not both. With `--database-url` the UI has no task registry and does not run schema migrations.
+
+**Options:**
+
+| Option | Default | Description |
+| ------ | ------- | ----------- |
+| `--database-url URL` | none | Monitor a database without importing an app module |
+| `--session-database-url URL` | none | Direct or session-capable URL when the main URL is pooled |
+| `--pgbouncer-transaction-mode` | false | Disable prepared statements for a transaction-pooled URL |
+| `--host HOST` | 127.0.0.1 | Bind address |
+| `--port N` | 8600 | Bind port |
+| `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
+| `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
+| `--enable-actions` | false | Allow cancel, retry, pause, and resume (default is view-only) |
+| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+
+**Examples:**
+
+```bash
+# From your app module
+horsies web myapp.tasks:app
+
+# Monitor a database directly
+horsies web --database-url postgresql+psycopg://user:pw@host/db
+
+# Behind a proxy that authenticates callers and sets the header
+horsies web myapp.tasks:app --host 0.0.0.0 \
+    --auth trusted-header --trusted-header X-Forwarded-User --enable-actions
+```
+
 ### horsies get-docs
 
 Fetch the full documentation locally as markdown files. Useful for AI agents (Claude Code, Cursor, Copilot, etc.) that need to read docs without web requests.
@@ -152,10 +196,9 @@ Uses git sparse checkout when git is available, falls back to tarball download o
 
 ## Agent Skills (Repository)
 
-If you are using an AI coding agent from a source checkout, Horsies also ships
-guidance-oriented skill files in:
-
-`horsies/.agents/skills/`
+Horsies ships guidance-oriented skill files in the package folder
+`horsies/.agents/skills/`. The wheel contains them, and a source checkout has
+them at the same path.
 
 Available files:
 
@@ -163,6 +206,7 @@ Available files:
 - `tasks.md` — task authoring, send/retry, serialization, error handling
 - `workflows.md` — DAG construction, handles, failure semantics, validation
 - `configs.md` — configuration, scheduling, CLI checks, environment variables
+- `monitoring.md` — monitoring query API, the `horsies[web]` dashboard, `horsies web`, authorization policies
 
 These files are documentation-focused (no bundled scripts) and are intended for
 on-demand loading by agents that support markdown skill files.
