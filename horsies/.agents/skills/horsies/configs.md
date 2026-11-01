@@ -235,6 +235,9 @@ Failures stay with one task:
 - SIGTERM to every process (Heroku, systemd `KillMode=control-group`) does not
   stop a running task. The worker drains it. Task subprocesses do get the signal.
 - A dead preload parent stops no task. New children use `exec` until it is back.
+- A child that cannot boot gets 3 attempts, then the worker exits non-zero. An
+  outside SIGKILL of a booting replacement child uses no attempt while another
+  child is serving. It does count at first start, and when no other child serves.
 
 A child differs from a `multiprocessing` process: `parent_process()` returns
 `None`, `current_process().name` is `horsies-child-<slot>`, and a `__main__:app`
