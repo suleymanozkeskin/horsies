@@ -509,6 +509,11 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **`SuccessCase.required` and `SuccessPolicy.optional` accept any node.**
+  The element type is `AnyNode` (`TaskNode[Any] | SubWorkflowNode[Any]`).
+  Before, it was `TaskNode[Any]`, but spec validation already accepted a
+  `SubWorkflowNode` there, so the call needed a cast. The change widens a
+  public type. A caller that passes `TaskNode` values is not affected.
 - **Action responses no longer carry `next_attempt_number`.** The field was
   always `null` after the manual retry was removed. The web UI action
   responses keep `outcome`, `was_status` and `warning`.

@@ -604,7 +604,7 @@ workflow = app.workflow(
 
 ### Semantics
 
-1. **Case evaluation**: A `SuccessCase` is **satisfied** if ALL its `required` tasks are COMPLETED.
+1. **Case evaluation**: A `SuccessCase` is **satisfied** if ALL its `required` nodes are COMPLETED. A node is a `TaskNode` or a `SubWorkflowNode`.
 2. **Workflow success**: Workflow is **COMPLETED** if **any** SuccessCase is satisfied.
 3. **SKIPPED counts as not satisfied**: A SKIPPED task does not satisfy a required condition.
 4. **Optional tasks**: Tasks in `optional` can fail without affecting success evaluation.
