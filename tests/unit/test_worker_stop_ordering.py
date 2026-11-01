@@ -75,6 +75,19 @@ async def test_stop_persists_results_of_late_finishing_tasks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_drains_for_the_configured_time() -> None:
+    worker = _make_worker()
+    worker.cfg.drain_timeout_s = 7.5
+    pool = MagicMock()
+    pool.stop = AsyncMock(return_value=StopReport(()))
+    worker._slots = pool
+
+    await worker.stop()
+
+    pool.stop.assert_awaited_once_with(7.5)
+
+
+@pytest.mark.asyncio
 async def test_stop_force_cancels_finalizers_without_waiting() -> None:
     """force=True cancels finalizers immediately (results may be dropped)."""
     worker = _make_worker()

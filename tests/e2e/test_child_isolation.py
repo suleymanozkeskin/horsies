@@ -340,3 +340,29 @@ async def test_multiprocessing_works_inside_a_task(
         )
         result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
         assert result.ok_value == '3'
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio(loop_scope='function')
+async def test_drain_deadline_records_the_crash_at_once(
+    isolation_broker: PostgresBroker,
+) -> None:
+    """A task past --drain-timeout fails now, with no wait for the reaper."""
+    with run_worker(
+        INSTANCE,
+        processes=1,
+        ready_check=_ready_check(isolation.healthcheck),
+        timeout=SLOW_START_S,
+        extra_args=['--drain-timeout=1'],
+    ):
+        handle = unwrap_send(await isolation.sleep_task.send_async(seconds=60.0))
+        child = await _running_child(isolation_broker, handle.task_id)
+        psutil.Process(psutil.Process(child).ppid()).send_signal(signal.SIGTERM)
+
+        await wait_for_status(
+            current_resources(isolation_broker).session_factory,
+            handle.task_id,
+            'FAILED',
+            timeout_s=4.0,
+        )
+        await _assert_error(isolation_broker, handle.task_id, 'WORKER_CRASHED')

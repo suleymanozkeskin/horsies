@@ -480,6 +480,7 @@ def _make_worker_namespace(
         max_claim_per_worker=max_claim_per_worker,
         max_tasks_per_child=max_tasks_per_child,
         max_memory_per_child_mb=max_memory_per_child_mb,
+        drain_timeout=300.0,
     )
 
 
@@ -2320,6 +2321,18 @@ class TestCliNumericValidation:
         from horsies.core.cli import _non_negative_int
 
         assert _non_negative_int('0') == 0
+
+    def test_drain_timeout_accepts_seconds(self) -> None:
+        from horsies.core.cli import _drain_timeout_s
+
+        assert _drain_timeout_s('2.5') == 2.5
+
+    @pytest.mark.parametrize('value', ['0', '-1', 'nan', 'inf'])
+    def test_drain_timeout_refuses_a_value_with_no_deadline(self, value: str) -> None:
+        from horsies.core.cli import _drain_timeout_s
+
+        with pytest.raises(Exception, match='finite number of seconds'):
+            _drain_timeout_s(value)
 
     def test_max_tasks_per_child_negative_rejected(self) -> None:
         from horsies.core.cli import _max_tasks_per_child

@@ -4042,6 +4042,18 @@ class TestWorkerConfigRecycleValidation:
                 max_tasks_per_child=-1,
             )
 
+    @pytest.mark.parametrize('value', [0.0, -1.0, float('nan'), float('inf')])
+    def test_drain_timeout_without_a_deadline_rejected(self, value: float) -> None:
+        from horsies.core.worker.config import WorkerConfig
+
+        with pytest.raises(ValueError, match='drain_timeout_s'):
+            WorkerConfig(
+                dsn='postgresql+psycopg://u:p@localhost/db',
+                psycopg_dsn='postgresql://u:p@localhost/db',
+                queues=['default'],
+                drain_timeout_s=value,
+            )
+
     def test_no_children_rejected(self) -> None:
         from horsies.core.worker.config import WorkerConfig
 
