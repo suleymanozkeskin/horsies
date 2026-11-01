@@ -62,7 +62,7 @@ from horsies.core.models.workflow import (
     WF_TASK_TERMINAL_VALUES,
     validate_workflow_generic_output_match,
 )
-from horsies.core.models.workflow.handle import stored_node_status
+from horsies.core.models.workflow.enums import stored_node_status
 from horsies.core.errors import WorkflowValidationError, ErrorCode, ConfigurationError
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
