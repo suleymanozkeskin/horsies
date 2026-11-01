@@ -105,11 +105,11 @@ error changes stored data. HTTP is the status of the web read routes.
 ```python
 task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
 task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
-task_breakdown(broker, *, group_by, ..., limit)         # group_by: 'worker' | 'task_name' | 'queue'
-list_tasks(broker, *, statuses, ..., sort_by, sort_dir, offset, limit)
+task_breakdown(broker, *, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
+list_tasks(broker, *, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
 get_task_detail(broker, task_id)                        # Ok(None) when absent
 list_workflow_names(broker)
-list_workflow_runs(broker, *, name, status, limit)
+list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
 get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)

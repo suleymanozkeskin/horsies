@@ -365,6 +365,17 @@ there is no migration contract between pre-1.0 versions.
   `v{installed version}`, not the `main` branch.** A development version
   (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
   exits with code 1. Pass `--ref main` to download the `main` branch docs.
+- **Breaking: `list_tasks`, `task_breakdown` and `list_workflow_runs` take a
+  page value.** `list_tasks` takes `page: TaskPage` in place of `offset` and
+  `limit`, `task_breakdown` takes `limit: BreakdownLimit`, and
+  `list_workflow_runs` takes `limit: WorkflowRunsLimit`. Build each with
+  `parse`, which returns `Err(PageRefused)` for a value outside its bounds:
+  `offset` 0 or more, `limit` 1 to 200 and `offset + limit` at most 500 for
+  `list_tasks`, `limit` 1 to 500 for `task_breakdown`, and `limit` 1 to 200 for
+  `list_workflow_runs`. `list_tasks` no longer raises `ValueError`. Before, a
+  negative `limit` gave a different result in each read, and a direct
+  `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
+  answers do not change.
 
 ### Changed
 
@@ -532,6 +543,10 @@ there is no migration contract between pre-1.0 versions.
   `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
   library. SQL functions write the stored bytes, and `decode_input_envelope`
   reads a stored rerun input.
+- **Unused archive helpers.** `select_result_payload`, its result types,
+  `decode_history_row_version`, and the registry accessors `is_retained` and
+  `retained_versions` had no caller in the library. `RETAINED_ARCHIVE_VERSIONS`
+  stays: the transcode decoder set reads it.
 
 ### Fixed
 

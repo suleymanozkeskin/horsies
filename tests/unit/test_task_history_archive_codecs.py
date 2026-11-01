@@ -23,18 +23,8 @@ from horsies.core.history.archive.attempts import (
     AttemptRecord,
     decode_attempt_snapshot,
 )
-from horsies.core.history.archive.registry import (
-    RETAINED_ARCHIVE_VERSIONS,
-    is_retained,
-    retained_versions,
-)
-from horsies.core.history.archive.results import (
-    AdministrativePriorResult,
-    CanonicalResultPayload,
-    NoResultPayload,
-    decode_result_envelope,
-    select_result_payload,
-)
+from horsies.core.history.archive.registry import RETAINED_ARCHIVE_VERSIONS
+from horsies.core.history.archive.results import decode_result_envelope
 from horsies.core.history.archive.versions import (
     ArchiveDecodeFailure,
     ArchiveDigestMismatch,
@@ -45,7 +35,6 @@ from horsies.core.history.archive.versions import (
     UnknownArchiveContentType,
     UnknownArchiveVersion,
     archive_digest,
-    decode_history_row_version,
 )
 from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.reads.detail import (
@@ -362,28 +351,6 @@ class TestAttemptSnapshotReadEntry:
             _decode_history_detail(row)
 
 
-class TestResultPayloadSelection:
-    def test_canonical_only(self) -> None:
-        assert select_result_payload(
-            canonical=b'{}', prior=None
-        ) == CanonicalResultPayload(payload=b'{}')
-
-    def test_prior_only(self) -> None:
-        assert select_result_payload(
-            canonical=None, prior=b'{}'
-        ) == AdministrativePriorResult(payload=b'{}')
-
-    def test_neither(self) -> None:
-        assert select_result_payload(canonical=None, prior=None) == NoResultPayload()
-
-    def test_both_is_corruption(self) -> None:
-        assert select_result_payload(
-            canonical=b'{}', prior=b'{}'
-        ) == CorruptArchiveValue(
-            ArchiveDomain.RESULT, 'canonical_and_prior_both_present'
-        )
-
-
 class TestDiscriminantSets:
     """The ratified value sets, pinned."""
 
@@ -401,14 +368,4 @@ class TestRegistry:
     def test_every_domain_retains_exactly_version_one(self) -> None:
         assert set(RETAINED_ARCHIVE_VERSIONS) == set(ArchiveDomain)
         for domain in ArchiveDomain:
-            assert retained_versions(domain) == frozenset({1})
-
-    def test_is_retained(self) -> None:
-        assert is_retained(ArchiveDomain.ATTEMPTS, 1)
-        assert not is_retained(ArchiveDomain.ATTEMPTS, 2)
-
-    def test_history_row_version_decode_matches_registry(self) -> None:
-        assert decode_history_row_version(1) == DecodedArchiveValue(1)
-        assert decode_history_row_version(2) == UnknownArchiveVersion(
-            ArchiveDomain.HISTORY_ROW, 2
-        )
+            assert RETAINED_ARCHIVE_VERSIONS[domain] == frozenset({1})
