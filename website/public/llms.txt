@@ -113,7 +113,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, EVENT_LOOP_LIMIT, ASYNC_CONTEXT, LOOP_RUNNER_FAILED, INVALID_INPUT, LISTENER_DISABLED
 - ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran and the sync runner did not start; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
 - EVENT_LOOP_LIMIT (in every result catalog): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop; the next open loop gets this error, nothing runs, and it clears when one of those loops closes
-- LOOP_RUNNER_FAILED (BrokerErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable). Any other exception from a sync call propagates, as from the *_async form
+- LOOP_RUNNER_FAILED (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode): a sync call could not run on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing ran; close()/close_async() stop the runner and it does not start again; call the *_async form (not retryable; the send error is accepted by retry_send_async / retry_schedule_async). Any other exception from a sync call propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> BrokerResult[str], get_task_info_async -> BrokerResult[TaskInfo | None],
   ensure_schema_initialized -> Result[None, BrokerOperationFailed | BrokerEventLoopLimit], get_stale_tasks -> BrokerResult[list[dict]],
@@ -187,9 +187,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
 - TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
 - TaskSendEventLoopLimit: message
-- exception: BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
+- TaskSendLoopRunnerFailed: task_id, payload, message, exception (BaseException, the LoopRunnerError)
+- exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
-- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
+- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
 
 ### TaskSendErrorCode (enum)
 <!-- members: TaskSendErrorCode -->
@@ -201,6 +202,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - PAYLOAD_TOO_LARGE: serialized kwargs exceed payload.reject_bytes; nothing was enqueued
 - EVENT_LOOP_LIMIT: the broker serves its limit of open event loops and this send ran on a new one (not retryable on this loop)
 - ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
+- LOOP_RUNNER_FAILED: sync send/schedule (or sync retry) could not run the enqueue on the broker's sync runner; nothing was enqueued; a stopped runner does not start again, so a sync retry returns the same error; the error keeps the payload for retry_send_async / retry_schedule_async
 
 ### TaskSendPayload (frozen dataclass)
 - task_name: str, queue_name: str, priority: int

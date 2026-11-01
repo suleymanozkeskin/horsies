@@ -213,6 +213,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
 | `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` |
 | `TaskSendEventLoopLimit` | `EVENT_LOOP_LIMIT` | `message` |
+| `TaskSendLoopRunnerFailed` | `LOOP_RUNNER_FAILED` | `task_id`, `payload`, `message`, `exception` |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
@@ -220,7 +221,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `task_id` | `str` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
 | `retryable` | `bool` | Driver classification of the cause: `True` when the condition may clear, for example a lost connection |
-| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception. On `TaskSendLoopRunnerFailed` it is `BaseException`: always the `LoopRunnerError` |
 | `owner_task_id` | `str` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Length of the serialized kwargs |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
@@ -255,13 +256,14 @@ For a validation failure, the cause names the field, the message and the type, n
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
 | `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
-| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist. A sync send whose broker runner is stopped also returns this code with `retryable=False`; nothing was written, and the sync retry methods return the same error, so use `retry_*_async(err)` | Accepted |
+| `ENQUEUE_FAILED` | Broker/database failure during enqueue; the row may or may not exist | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized kwargs exceed `payload.reject_bytes`; nothing was enqueued | Refused |
 | `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
 | `EVENT_LOOP_LIMIT` | The broker serves its limit of open event loops (5) and this send ran on a new one; nothing was enqueued; clears when one of those loops closes | Refused |
+| `LOOP_RUNNER_FAILED` | Sync send/schedule (or sync retry variant) could not run the enqueue on the broker's sync runner: the runner is stopped, its thread did not start, or scheduling failed. Nothing ran and nothing was written. A stopped runner does not start again, so a sync retry returns the same error; `retry_*_async(err)` completes the same dispatch | Accepted |
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload` with an `enqueue_sha` field, and the retry methods send that exact payload again. The SHA guarantees same-payload idempotency.
+`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict | TaskSendLoopRunnerFailed`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These four variants carry a `TaskSendPayload` with an `enqueue_sha` field, and the retry methods send that exact payload again. The SHA guarantees same-payload idempotency.
 
 #### Workflow Errors
 

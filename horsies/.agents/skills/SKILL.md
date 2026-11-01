@@ -102,7 +102,7 @@ Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires
 
 ### Retry a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. Only `TaskSendEnqueueFailed` has `retryable` (`True` for a transient cause). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`, `TaskSendLoopRunnerFailed`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
 
 ```python
 match my_task.send(**kwargs):
@@ -338,7 +338,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 ### Error Code Enums
 
-- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`
+- `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`, `LOOP_RUNNER_FAILED`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 

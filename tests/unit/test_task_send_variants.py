@@ -2,8 +2,10 @@
 
 ``TaskSendError`` is a union with one frozen variant per
 ``TaskSendErrorCode`` member. A variant's repr hides the payload, the
-message and the cause. The two variants with a cause field hold the
-exception, or ``NoCause()`` when a check found the failure.
+message and the cause. ``TaskSendValidationFailed`` and
+``TaskSendEnqueueFailed`` hold the exception, or ``NoCause()`` when a check
+found the failure. ``TaskSendLoopRunnerFailed`` always holds the
+``LoopRunnerError``.
 """
 
 from __future__ import annotations
@@ -11,11 +13,15 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, get_args
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerEnqueueFailed, BrokerOperationError
+from horsies.core.brokers.result_types import (
+    BrokerEnqueueFailed,
+    BrokerLoopRunnerFailed,
+    BrokerOperationError,
+)
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import ErrorCode, HorsiesError
 from horsies.core.models.payload import PayloadPolicy
@@ -26,6 +32,7 @@ from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
+    TaskSendLoopRunnerFailed,
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
@@ -36,7 +43,8 @@ from horsies.core.models.task_send_types import (
 from horsies.core.models.tasks import TaskError, TaskResult
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, is_err
+from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.utils.loop_runner import LoopRunnerError
 
 PAYLOAD_MARKER = 'kwargs-marker-41c2'
 MESSAGE_MARKER = 'message-marker-41c2'
@@ -82,6 +90,12 @@ def _every_variant() -> list[TaskSendError]:
             owner_task_id='owner-1',
         ),
         TaskSendEventLoopLimit(message=message),
+        TaskSendLoopRunnerFailed(
+            task_id='t-1',
+            payload=payload,
+            message=message,
+            exception=cause,
+        ),
     ]
 
 
@@ -132,6 +146,7 @@ class TestVariantCatalog:
             TaskSendEnqueueFailed,
             TaskSendAsyncContext,
             TaskSendIdempotencyKeyConflict,
+            TaskSendLoopRunnerFailed,
         }
 
     @pytest.mark.parametrize(
@@ -267,3 +282,83 @@ class TestRetryRefusesOtherVariants:
         assert PAYLOAD_MARKER not in text
         assert MESSAGE_MARKER not in text
         app.get_broker.assert_not_called()
+
+
+def _runner_failure() -> BrokerLoopRunnerFailed:
+    return BrokerLoopRunnerFailed(
+        message='Loop runner failed for PostgresBroker.enqueue()',
+        exception=LoopRunnerError('runner stopped'),
+    )
+
+
+def _loop_runner_err(result: Any) -> TaskSendLoopRunnerFailed:
+    assert is_err(result)
+    err = result.err_value
+    assert isinstance(err, TaskSendLoopRunnerFailed)
+    return err
+
+
+@pytest.mark.unit
+class TestLoopRunnerFailed:
+    """A sync send on a stopped runner: nothing ran, and the async retry completes it."""
+
+    @pytest.mark.parametrize('form', ['send', 'schedule'])
+    def test_a_sync_send_keeps_the_task_id_payload_and_cause(self, form: str) -> None:
+        app = _make_app()
+        failure = _runner_failure()
+        broker = _broker_returning(app, failure)
+        wrapper = _wrapper(app)
+
+        match form:
+            case 'send':
+                result = wrapper.send(x=1)
+            case 'schedule':
+                result = wrapper.schedule(5, x=1)
+            case _:
+                raise AssertionError(f'unknown form: {form}')
+
+        err = _loop_runner_err(result)
+        assert err.exception is failure.exception
+        assert err.message == failure.message
+        assert err.task_id == broker.enqueue.call_args.kwargs['task_id']
+        assert err.payload.kwargs_json == broker.enqueue.call_args.kwargs['kwargs_json']
+
+    def test_a_sync_retry_on_a_stopped_runner_returns_the_same_error(self) -> None:
+        app = _make_app()
+        broker = _broker_returning(app, _runner_failure())
+        wrapper = _wrapper(app)
+        err = _loop_runner_err(wrapper.send(x=1))
+
+        again = _loop_runner_err(wrapper.retry_send(err))
+
+        assert again.task_id == err.task_id
+        assert broker.enqueue.call_count == 2
+
+    @pytest.mark.parametrize('form', ['send', 'schedule'])
+    def test_the_async_retry_completes_the_same_dispatch(self, form: str) -> None:
+        app = _make_app()
+        broker = _broker_returning(app, _runner_failure())
+        wrapper = _wrapper(app)
+        match form:
+            case 'send':
+                err = _loop_runner_err(wrapper.send(x=1))
+            case 'schedule':
+                err = _loop_runner_err(wrapper.schedule(5, x=1))
+            case _:
+                raise AssertionError(f'unknown form: {form}')
+        broker.enqueue_async = AsyncMock(return_value=Ok(err.task_id))
+
+        match form:
+            case 'send':
+                result = asyncio.run(wrapper.retry_send_async(err))
+            case 'schedule':
+                result = asyncio.run(wrapper.retry_schedule_async(err))
+            case _:
+                raise AssertionError(f'unknown form: {form}')
+
+        assert not is_err(result)
+        assert result.ok_value.task_id == err.task_id
+        sent = broker.enqueue_async.call_args.kwargs
+        assert sent['task_id'] == err.task_id
+        assert sent['enqueue_sha'] == err.payload.enqueue_sha
+        assert sent['kwargs_json'] == err.payload.kwargs_json

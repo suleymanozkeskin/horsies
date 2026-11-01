@@ -41,6 +41,7 @@ from horsies.core.models.task_send_types import (
     TaskSendError,
     TaskSendEventLoopLimit,
     TaskSendIdempotencyKeyConflict,
+    TaskSendLoopRunnerFailed,
     TaskSendPayloadMismatch,
     TaskSendValidationFailed,
 )
@@ -214,6 +215,7 @@ SEND_VARIANT_OF: dict[type[Any], type[Any]] = {
     BrokerAsyncContext: TaskSendAsyncContext,
     BrokerInvalidTaskOptions: TaskSendValidationFailed,
     BrokerInvalidInput: TaskSendValidationFailed,
+    BrokerLoopRunnerFailed: TaskSendLoopRunnerFailed,
 }
 
 
