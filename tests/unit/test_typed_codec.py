@@ -3,7 +3,8 @@
 Covers phase 2 of the strict-serde redesign:
 
 - `encode_value` / `decode_value` round-trip for every allowed type.
-- `_scan_wire_json` rejects non-finite floats anywhere in dump output.
+- `_scan_wire_json` rejects non-finite floats and lone surrogates anywhere in
+  dump output, and `encode_value` refuses each string that `dumps_json` refuses.
 - `_scan_reserved_keys` rejects `__h_*` / `__builtin_task_code__` at any depth.
 - JsonValue producer-side fence (`_validate_json_native`) rejects bytes,
   Decimal, etc. even though `TypeAdapter(JsonValue)` would coerce them.
@@ -12,6 +13,7 @@ Covers phase 2 of the strict-serde redesign:
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import datetime
 import decimal
@@ -21,6 +23,7 @@ from typing import (
     Annotated,
     Any,
     Literal,
+    NamedTuple,
     Optional,
     TypeAlias,
     Union,
@@ -30,6 +33,7 @@ from typing import (
 import pytest
 from pydantic import BaseModel, Field
 
+from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.json_value import (
     JsonValue,
     StrictJsonError,
@@ -52,6 +56,9 @@ from horsies.core.codec.typed import (
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+LONE_SURROGATE_TEXT = f'keep-out{chr(0xd800)}'
 
 
 class _User(BaseModel):
@@ -654,9 +661,227 @@ class TestTaskErrorRoundTrip:
 # ---------------------------------------------------------------------------
 
 
+class _Labelled(BaseModel):
+    name: str
+    labels: dict[str, int]
+
+
+class _Pair(NamedTuple):
+    labels: dict[str, int]
+
+
+class TestEncodeValueRefusesALoneSurrogate:
+    """`encode_value` refuses each string that `dumps_json` refuses."""
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type', 'subject'),
+        [
+            (LONE_SURROGATE_TEXT, str, 'a string'),
+            (['ok', LONE_SURROGATE_TEXT], list[str], 'a string'),
+            ({'key': LONE_SURROGATE_TEXT}, dict[str, str], 'a string'),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, int], 'a dict key'),
+            (
+                _Labelled(name=LONE_SURROGATE_TEXT, labels={}),
+                _Labelled,
+                'a string',
+            ),
+        ],
+        ids=['top-level-str', 'str-in-list', 'str-in-dict-value', 'dict-key', 'model-field'],
+    )
+    def test_each_position_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+        subject: str,
+    ) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type)
+
+        assert str(raised.value) == (
+            f'{subject} holds a lone surrogate, which UTF-8 cannot encode'
+        )
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            ({'x': {LONE_SURROGATE_TEXT: 1}}, dict[str, dict[str, int]]),
+            ({LONE_SURROGATE_TEXT: 1}, JsonValue),
+            ([{'x': {LONE_SURROGATE_TEXT: 1}}], JsonValue),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, JsonValue]),
+            (_Labelled(name='n', labels={LONE_SURROGATE_TEXT: 1}), _Labelled),
+            ([{LONE_SURROGATE_TEXT: 1}], list[dict[str, int]]),
+            (({LONE_SURROGATE_TEXT: 1},), tuple[dict[str, int], ...]),
+            (
+                collections.deque([{LONE_SURROGATE_TEXT: 1}]),
+                collections.deque[dict[str, int]],
+            ),
+        ],
+        ids=[
+            'nested-dict', 'json-value', 'nested-json-value', 'json-value-slot',
+            'model-field', 'in-list', 'in-tuple', 'in-deque',
+        ],
+    )
+    def test_a_key_that_the_dump_replaces_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """`mode='json'` writes U+FFFD in place of the surrogate of these keys."""
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value(value, expected_type)
+
+    def test_two_keys_that_the_dump_makes_equal_are_refused(self) -> None:
+        """The dump alone loses one entry: both keys become the same text."""
+        value = {f'a{chr(0xd800)}': 1, f'a{chr(0xd801)}': 2}
+
+        with pytest.raises(StrictJsonError, match='a dict key holds a lone surrogate'):
+            encode_value(value, dict[str, int])
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            ({LONE_SURROGATE_TEXT: 1}, Any),
+            ({LONE_SURROGATE_TEXT: 1}, dict),
+            ({'x': {LONE_SURROGATE_TEXT: 1}}, dict[str, Any]),
+            (_Pair(labels={LONE_SURROGATE_TEXT: 1}), _Pair),
+        ],
+        ids=['any', 'bare-dict', 'any-value', 'named-tuple'],
+    )
+    def test_a_key_that_the_dump_raises_for_is_refused(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """The dump raises `UnicodeEncodeError` for a key without a declared
+        type. That is not in the `encode_value` catalog, so it is refused."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type, location=('payload',))
+
+        assert str(raised.value) == (
+            'payload: a dict key holds a lone surrogate, which UTF-8 cannot encode'
+        )
+        assert raised.value.__context__ is None
+
+    def test_a_python_surrogate_pair_is_refused_as_dumps_json_refuses_it(self) -> None:
+        """Only JSON text joins a pair: a `str` keeps two code points."""
+        pair = chr(0xd83d) + chr(0xde00)
+
+        assert dumps_json(pair).is_err()
+        with pytest.raises(StrictJsonError, match='a string holds a lone surrogate'):
+            encode_value(pair, str)
+
+    def test_the_location_names_the_kwarg(self) -> None:
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(LONE_SURROGATE_TEXT, str, location=('note',))
+
+        assert str(raised.value) == (
+            'note: a string holds a lone surrogate, which UTF-8 cannot encode'
+        )
+
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (LONE_SURROGATE_TEXT, str),
+            ({LONE_SURROGATE_TEXT: 1}, dict[str, int]),
+        ],
+        ids=['string', 'key'],
+    )
+    def test_the_refusal_holds_no_input_value(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """The `UnicodeEncodeError` holds the input, so it is not chained."""
+        with pytest.raises(StrictJsonError) as raised:
+            encode_value(value, expected_type)
+
+        assert 'keep-out' not in str(raised.value)
+        assert raised.value.__context__ is None
+        assert raised.value.__cause__ is None
+
+
+class TestEncodeValueKeepsValidText:
+    @pytest.mark.parametrize(
+        ('value', 'expected_type'),
+        [
+            (chr(0x1f600), str),
+            ('caf\u00e9', str),
+            ('a\ufffdb', str),
+            ({'caf\u00e9': 1}, dict[str, int]),
+            ({'a\ufffdb': 1}, dict[str, int]),
+            ({'a\ufffdb': 1}, JsonValue),
+            ([{'a\ufffdb': {'b\ufffdc': 1}}], JsonValue),
+        ],
+        ids=[
+            'astral', 'non-ascii', 'replacement-char', 'non-ascii-key',
+            'replacement-char-key', 'replacement-char-json-value', 'nested',
+        ],
+    )
+    def test_text_that_utf8_can_encode_is_kept(
+        self,
+        value: object,
+        expected_type: Any,
+    ) -> None:
+        """U+FFFD in a key is only a sign: a key that truly holds it is kept."""
+        encoded = encode_value(value, expected_type)
+
+        assert encoded == value
+        assert dumps_json(encoded).is_ok()
+
+
 class TestScanWireJsonDirect:
     def test_accepts_valid_shape(self) -> None:
         _scan_wire_json({'a': 1, 'b': [2.5, None, 'x', True]})
+
+    def test_a_key_without_the_replacement_char_gives_no_sign(self) -> None:
+        assert _scan_wire_json({'caf\u00e9': [{'b': 'c\ufffd'}]}) is False
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            {'a\ufffd': 1},
+            {'x': {'a\ufffd': 1}},
+            [{'a\ufffd': 1}],
+            ({'a\ufffd': 1},),
+            collections.deque([{'a\ufffd': 1}]),
+        ],
+        ids=['dict', 'nested-dict', 'list', 'tuple', 'deque'],
+    )
+    def test_a_key_with_the_replacement_char_gives_the_sign(
+        self, dumped: object,
+    ) -> None:
+        assert _scan_wire_json(dumped) is True
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            {'a\ufffd': 1, 'b': float('nan')},
+            [{'a\ufffd': 1}, float('nan')],
+        ],
+        ids=['dict', 'list'],
+    )
+    def test_the_sign_does_not_stop_the_scan(self, dumped: object) -> None:
+        with pytest.raises(StrictJsonError, match='non-RFC-8259 float'):
+            _scan_wire_json(dumped)
+
+    @pytest.mark.parametrize(
+        'dumped',
+        [
+            (LONE_SURROGATE_TEXT,),
+            {LONE_SURROGATE_TEXT},
+            frozenset({LONE_SURROGATE_TEXT}),
+            collections.deque([LONE_SURROGATE_TEXT]),
+        ],
+        ids=['tuple', 'set', 'frozenset', 'deque'],
+    )
+    def test_each_container_of_a_python_mode_dump_is_walked(
+        self, dumped: object,
+    ) -> None:
+        with pytest.raises(StrictJsonError, match='a string holds a lone surrogate'):
+            _scan_wire_json(dumped)
+
+    def test_a_leaf_of_a_python_mode_dump_gives_no_sign(self) -> None:
+        assert _scan_wire_json({'at': datetime.date(2026, 1, 1)}) is False
 
     def test_rejects_nan_at_top_level(self) -> None:
         with pytest.raises(StrictJsonError, match='non-RFC-8259 float'):

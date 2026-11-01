@@ -251,7 +251,7 @@ PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 
 ### `StrictJsonError`
 
-Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair is one valid character and stays accepted. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
+Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair in JSON text is one valid character and stays accepted. `encode_value` refuses each string that `dumps_json` refuses: a lone surrogate in a string or in a dict key raises `StrictJsonError` at any depth. In a Python `str`, a surrogate pair is two code points, so it is refused too. The text names the kwarg and holds no input value. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
 
 ## Things to Avoid
 

@@ -407,8 +407,7 @@ there is no migration contract between pre-1.0 versions.
   when the row of a completed workflow is removed after its status was
   read.** Retention can delete a terminal workflow between the status read
   and the result read. Before, `get()` returned `TaskResult(ok=None)`, a
-  success, for that case. A `COMPLETED` row without a stored result still
-  gives `TaskResult(ok=None)`.
+  success, for that case.
 - **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
   for a stored workflow error that is JSON but not an object.** This is
   true for a failed, cancelled or expired workflow. The message names the
@@ -421,6 +420,35 @@ there is no migration contract between pre-1.0 versions.
   the two refusals of the decode, `StrictJsonError` and
   `ValueValidationError`. Before, it returned `RESULT_DESERIALIZATION_ERROR`
   for every exception from the decode.
+- **Breaking: `WorkflowHandle.get()` returns `RESULT_DESERIALIZATION_ERROR`
+  for a `COMPLETED` workflow whose stored result is NULL or empty, and for
+  an empty stored workflow error.** The library stores a result in the
+  statement that sets `COMPLETED`, and it does not store an empty error. So
+  these values are stored data that does not parse. The message names the
+  case, and `data` holds the workflow id. Before, the result case returned
+  `TaskResult(ok=None)`, a success, and an empty error returned the
+  `OutcomeCode` of the status. A NULL error still gives the `OutcomeCode` of
+  the status: a cancel does not write the error.
+- **Breaking: `encode_value` refuses a lone surrogate in a string or in a
+  dict key, at any depth.** It raises `StrictJsonError`, so it agrees with
+  `dumps_json`. The text names the kwarg and holds no input value. A dict
+  key is the larger change. Before, `dump_python(mode='json')` wrote U+FFFD
+  in place of the surrogate of a key with a declared type: the send and the
+  task succeeded with a changed key, and two keys could become one. For a
+  key without a declared type, a raw `UnicodeEncodeError` left `encode_value`.
+  What each caller gets now:
+  - A workflow node kwarg fails spec construction with
+    `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (`HRS-031`). A child node in
+    `build_with()` fails the `SubWorkflowNode` with
+    `WORKFLOW_ENQUEUE_FAILED`. Before, for a string, `spec.start()` returned
+    `VALIDATION_FAILED`, and a child start failed the `SubWorkflowNode` with
+    `WORKER_SERIALIZATION_ERROR`.
+  - `.send()` returns `TaskSendValidationFailed`, with the
+    `StrictJsonError` as `exception`.
+  - `prepare_schedules` refuses the schedule at boot with
+    `CONFIG_INVALID_SCHEDULE`.
+  - A task that returns such a value ends with
+    `WORKER_SERIALIZATION_ERROR`.
 - **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
   does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
   `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
@@ -649,6 +677,34 @@ there is no migration contract between pre-1.0 versions.
   without a stored error gets the `OutcomeCode` of the status that `get()`
   read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
   `get()` no longer makes a free-text `WORKFLOW_<status>` code.
+- **A value that the workflow engine built and that does not serialize
+  raises `SerializationError`.** This is true for the kwargs of a promoted
+  node, for each value that a child workflow start writes, for the result
+  of a completed node, for the parent node result and the summary of a
+  finished child workflow, and for the workflow error. The engine builds
+  these values in the process, some of them from values that it parsed from
+  stored rows, so a failure is a defect. The message names the value. The
+  caller rolls back its transaction: the worker's workflow finalize phase
+  returns a finalize error, the reaper logs the recovery candidate as
+  failed, and `start_workflow()` and `resume()` raise the error. Before, the
+  engine logged the failure and stored the text `null` or NULL in the result
+  or error column, or failed the node with `WORKER_SERIALIZATION_ERROR`. The
+  outputless workflow result keeps its fallback.
+- **A child workflow start raises `SerializationError` when the kwargs of a
+  child node do not encode.** Spec construction in `build_with()` encodes and
+  decodes every child kwarg, so a refusal at the child start is a defect. The
+  message names the child node. Before, the child start failed the
+  `SubWorkflowNode` with `WORKER_SERIALIZATION_ERROR`. Stored kwargs of the
+  parent node that do not decode still fail only that node.
+- **The workflow start transaction raises `SerializationError` for task
+  options that are JSON but not an object when it merges the `good_until`
+  of a node.** The options are the task decorator's serialization of a
+  validated `TaskOptions`, so such a value is a defect, for example
+  `task_options_json` that was changed after registration. The message names
+  the node and the type of the value. The transaction rolls back, and
+  nothing is written. Before, the start replaced the options with `{}` and
+  stored only `good_until`. The child workflow start already raises for the
+  same value.
 
 ### Removed
 
@@ -667,6 +723,24 @@ there is no migration contract between pre-1.0 versions.
 
 ### Fixed
 
+- **Phase-2 recovery progresses a failed node whose stored error does not
+  decode as a `TaskError`.** The recovery records the error that the
+  terminal status names, as it does for a stored result envelope that does
+  not validate. The log names the refusal. Before, the
+  `ValueValidationError` of the decode rolled back the recovery of that row
+  on each pass, and the node did not progress.
+- **A lone surrogate in the text of a node failure no longer loses the
+  text.** The text of an exception from `build_with()` can hold one, for
+  example a file name. The node now fails with the text, with the surrogate
+  written as a `\udXXX` escape. Before, the node stored the fixed text
+  `secondary serialization failure`. A node whose completion result does not
+  encode keeps its failure text in the same way. Before, that node stored
+  the text `null`.
+- **The `VALIDATION_FAILED` row of the workflow start codes on the errors
+  page states that a `SerializationError` in the start transaction
+  propagates.** The row said that a serialization error refused the start,
+  which is not true since #421. It now has the same text as the Workflow API
+  page and the skill.
 - **The web UI no longer shows a Retry action that the server cannot run.**
   The server removed the manual task retry route, so the Retry button on a
   task detail panel could only fail. The button, its confirm text, the

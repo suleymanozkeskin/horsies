@@ -31,7 +31,7 @@ from horsies.core.codec.kwargs import (
     encode_subworkflow_kwargs,
     underlying_task_fn,
 )
-from horsies.core.codec.json_io import dumps_json, loads_json, SerializationError, SerdeResult
+from horsies.core.codec.json_io import Json, dumps_json, loads_json, SerializationError, SerdeResult
 from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.typed import encode_task_error
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -554,19 +554,28 @@ async def start_workflow_async(
                     )
 
                     # Get task_options_json from the task function (set by @task decorator)
-                    # and merge in TaskNode.good_until if set
+                    # and merge in TaskNode.good_until if set. The options are
+                    # the decorator's serialization of a validated TaskOptions,
+                    # so options that are not a JSON object are a defect.
                     task_options_json: str | None = task.fn.task_options_json
                     if task.good_until is not None:
                         # Merge good_until from TaskNode into task_options
-                        base_options: dict[str, Any] = {}
+                        base_options: dict[str, Json] = {}
                         if task_options_json:
-                            parsed_r = loads_json(task_options_json)
-                            if _is_err(parsed_r):
-                                raise SerializationError(
-                                    f'Corrupt task_options_json for node {task.name}: {parsed_r.err_value}',
-                                )
-                            if isinstance(parsed_r.ok_value, dict):
-                                base_options = parsed_r.ok_value
+                            match loads_json(task_options_json):
+                                case Ok(dict() as parsed_options):
+                                    base_options = parsed_options
+                                case Ok(not_an_object):
+                                    raise SerializationError(
+                                        f'Task options for node {task.name} are not '
+                                        f'a JSON object: got {type(not_an_object).__name__}',
+                                    )
+                                case Err(parse_error):
+                                    raise SerializationError(
+                                        f'Corrupt task_options_json for node {task.name}: {parse_error}',
+                                    )
+                                case _ as unreachable:
+                                    assert_never(unreachable)
                         base_options['good_until'] = task.good_until.isoformat()
                         task_options_json = _ser_or_raise(
                             dumps_json(base_options),

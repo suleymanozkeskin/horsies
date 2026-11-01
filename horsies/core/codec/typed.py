@@ -16,7 +16,9 @@ from __future__ import annotations
 import dataclasses
 import math
 import types
-from typing import Any, Union, cast, get_args, get_origin
+from collections import deque
+from collections.abc import Iterable
+from typing import Any, Final, Literal, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
@@ -126,6 +128,9 @@ design-doc §0.
 _RESERVED_KEY_PREFIXES: tuple[str, ...] = ('__h_', '__horsies_')
 _RESERVED_DISCRIMINATOR = '__builtin_task_code__'
 
+_REPLACEMENT_CHAR: Final = '\ufffd'
+"""What `dump_python(mode='json')` writes in a dict key for a lone surrogate."""
+
 
 # ---------------------------------------------------------------------------
 # TypeAdapter cache
@@ -182,9 +187,21 @@ def encode_value(
        warning instead of raising. Validating first makes the producer
        fail closed, symmetric with `decode_value` on the consumer.
     3. `TypeAdapter(expected_type).dump_python(validated, mode='json')`.
-    4. `_scan_wire_json` rejects non-finite floats at any depth — TypeAdapter
-       preserves NaN/Inf even with `mode='json'`.
-    5. `_scan_reserved_keys` rejects user-originated reserved-namespace keys
+       A dict key with a lone surrogate raises at a position without a
+       declared key type; `_dump` makes that a `StrictJsonError`.
+    4. `_scan_wire_json` rejects non-finite floats and strings with a lone
+       surrogate at any depth, so `encode_value` refuses each string that
+       `dumps_json` refuses. TypeAdapter preserves NaN/Inf and lone
+       surrogates even with `mode='json'`.
+    5. When a dumped dict key holds U+FFFD, `_scan_wire_json` runs again on
+       the `mode='python'` dump. `mode='json'` writes U+FFFD in place of a
+       lone surrogate in a key with a declared type, so the first scan
+       cannot see that surrogate. `mode='python'` keeps the key. U+FFFD is
+       a valid character, so a key that truly holds it is accepted. A key
+       text that only the `mode='json'` dump produces, for example from a
+       `field_serializer(when_used='json')`, stays accepted with U+FFFD:
+       the surrogate is in code, not in runtime data.
+    6. `_scan_reserved_keys` rejects user-originated reserved-namespace keys
        (`__h_*` and `__builtin_task_code__`) at any depth.
 
     Args:
@@ -198,7 +215,8 @@ def encode_value(
 
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
-            or reserved-key smuggling.
+            a lone surrogate in a string or a dict key, or reserved-key
+            smuggling.
         ValueValidationError: when `value` doesn't satisfy `expected_type`,
             or pydantic cannot serialize the validated value. The text holds
             no input value.
@@ -206,8 +224,11 @@ def encode_value(
     _apply_json_value_fence(value, expected_type)
     adapter = _get_adapter(expected_type)
     validated = _validate(adapter, value, location)
-    dumped_json = _dump(adapter, validated)
-    _scan_wire_json(dumped_json)
+    dumped_json = cast(Json, _dump(adapter, validated, 'json', location))
+    if _scan_wire_json(dumped_json, location):
+        _ = _scan_wire_json(
+            _dump(adapter, validated, 'python', location), location,
+        )
     if _is_task_error_type(expected_type):
         # TaskError's own `error_code` field legitimately emits
         # `{"__builtin_task_code__": "..."}` for built-in codes.
@@ -276,14 +297,28 @@ def _validate(
     raise failure
 
 
-def _dump(adapter: TypeAdapter[Any], validated: object) -> Json:
-    """`adapter.dump_python(validated, mode='json')`; a failure raises
+def _dump(
+    adapter: TypeAdapter[Any],
+    validated: object,
+    mode: Literal['json', 'python'],
+    location: tuple[str, ...],
+) -> object:
+    """`adapter.dump_python(validated, mode=mode)`; a failure raises
     `ValueValidationError` with the pydantic text. That text names types;
-    text that a custom serializer raises is kept as written."""
+    text that a custom serializer raises is kept as written.
+
+    Pydantic raises `UnicodeEncodeError` for a dict key with a lone surrogate
+    at a position without a declared key type (`Any`, a bare `dict`). That is
+    a `StrictJsonError`, raised outside the `except` block, because the
+    `UnicodeEncodeError` holds the input.
+    """
+    failure: StrictJsonError | ValueValidationError
     try:
-        return cast(Json, adapter.dump_python(validated, mode='json'))
+        return adapter.dump_python(validated, mode=mode)
     except PydanticSerializationError as error:
         failure = ValueValidationError(f'serialization failed: {error}')
+    except UnicodeEncodeError:
+        failure = StrictJsonError(_lone_surrogate_text('a dict key', location))
     raise failure
 
 
@@ -330,7 +365,8 @@ def encode_task_result(
 
     Raises:
         StrictJsonError: on JsonValue fence rejection, non-finite floats,
-            or reserved-key smuggling inside ok / err payloads.
+            a lone surrogate, or reserved-key smuggling inside ok / err
+            payloads.
         ValueValidationError: when the carried value doesn't satisfy
             its declared shape.
     """
@@ -790,36 +826,108 @@ def _dataclass_hints(dc: type) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 
 
-def _scan_wire_json(dumped_json: Json) -> None:
-    """Reject non-finite floats anywhere in dumped JSON.
+def _lone_surrogate_text(
+    subject: Literal['a string', 'a dict key'],
+    location: tuple[str, ...],
+) -> str:
+    """The refusal text for a lone surrogate. It holds no input value."""
+    text = f'{subject} holds a lone surrogate, which UTF-8 cannot encode'
+    match location:
+        case ():
+            return text
+        case _:
+            return f'{".".join(location)}: {text}'
+
+
+def _scan_text(
+    text: str,
+    subject: Literal['a string', 'a dict key'],
+    location: tuple[str, ...],
+) -> None:
+    """Refuse `text` when UTF-8 cannot encode it, as `dumps_json` does.
+
+    The refusal is raised outside the `except` block, because the
+    `UnicodeEncodeError` holds the input.
+
+    Raises:
+        StrictJsonError: `text` holds a lone surrogate.
+    """
+    try:
+        text.encode('utf-8')
+    except UnicodeEncodeError:
+        failure = StrictJsonError(_lone_surrogate_text(subject, location))
+    else:
+        return
+    raise failure
+
+
+def _scan_wire_json(
+    dumped: object,
+    location: tuple[str, ...] = (),
+) -> bool:
+    """Reject non-finite floats and lone surrogates anywhere in a dump.
 
     `TypeAdapter(float).dump_python(float('nan'), mode='json')` preserves
     `nan`; we walk every dump output and reject `math.isnan()` /
     `math.isinf()` floats before the final `json.dumps(...,
-    allow_nan=False)` guard.
+    allow_nan=False)` guard. A string with a lone surrogate also stays in the
+    dump. `dumps_json` refuses it, so this refuses it first, with a
+    `StrictJsonError` that encode callers already handle.
+
+    `str.isascii()` comes first: it reads a flag, and ASCII text cannot hold
+    a surrogate.
+
+    A dict key with a lone surrogate does not stay in a `mode='json'` dump:
+    pydantic writes U+FFFD in place of each byte of the surrogate, so
+    `{'a\\ud800': 1}` becomes `{'a\\ufffd\\ufffd\\ufffd': 1}`, and two keys
+    can become one. So a dumped key that holds U+FFFD is the only sign, and
+    U+FFFD is also a valid character. The caller then runs this scan on the
+    `mode='python'` dump, which keeps each key. That dump can also hold
+    tuples, sets, deques and other leaf types.
+
+    Args:
+        dumped: A `mode='json'` or a `mode='python'` dump.
+        location: Written in front of the lone surrogate refusal text.
+
+    Returns:
+        True when a dict key holds U+FFFD. Each container in `dumped` was
+        scanned to its end.
 
     Raises:
-        StrictJsonError: on the first non-finite float encountered.
+        StrictJsonError: on the first non-finite float, or the first string
+            or dict key with a lone surrogate. The text holds no input value.
     """
     # bool BEFORE int — bool is a subclass of int, and we don't want True
     # to fall into the float-checking branch via the int matcher.
-    match dumped_json:
-        case None | bool() | int() | str():
-            return
+    match dumped:
+        case None | bool() | int():
+            return False
+        case str() as text:
+            if not text.isascii():
+                _scan_text(text, 'a string', location)
+            return False
         case float() as fval:
             if math.isnan(fval) or math.isinf(fval):
                 raise StrictJsonError(
                     f'non-RFC-8259 float in encoded wire value: {fval!r}',
                 )
-            return
-        case list() as items:
-            for item in cast('list[Json]', items):
-                _scan_wire_json(item)
-            return
-        case dict() as mapping:
-            for sub_value in cast('dict[str, Json]', mapping).values():
-                _scan_wire_json(sub_value)
-            return
+            return False
+        case dict():
+            key_holds_replacement_char = False
+            for key, sub_value in cast('dict[object, object]', dumped).items():
+                if isinstance(key, str) and not key.isascii():
+                    _scan_text(key, 'a dict key', location)
+                    key_holds_replacement_char |= _REPLACEMENT_CHAR in key
+                key_holds_replacement_char |= _scan_wire_json(sub_value, location)
+            return key_holds_replacement_char
+        case list() | tuple() | set() | frozenset() | deque():
+            key_holds_replacement_char = False
+            for item in cast('Iterable[object]', dumped):
+                key_holds_replacement_char |= _scan_wire_json(item, location)
+            return key_holds_replacement_char
+        case _:
+            # A leaf of a `mode='python'` dump, for example a datetime.
+            return False
 
 
 def _scan_reserved_keys(dumped_json: Json) -> None:

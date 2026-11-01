@@ -24,6 +24,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
 from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -836,6 +837,30 @@ def _run_entry_defaults() -> dict[str, Any]:
     }
 
 
+_LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
+    (str, TaskResult(ok=f'text{chr(0xd800)}')),
+    (str, f'text{chr(0xd800)}'),
+    (dict[str, int], TaskResult(ok={f'key{chr(0xd800)}': 1})),
+    (dict[str, int], {f'key{chr(0xd800)}': 1}),
+    (
+        str,
+        TaskResult(
+            err=TaskError(error_code='MY_ERROR', message=f'text{chr(0xd800)}'),
+        ),
+    ),
+    (
+        str,
+        TaskResult(
+            err=TaskError(
+                error_code='MY_ERROR',
+                message='m',
+                data={f'key{chr(0xd800)}': 1},
+            ),
+        ),
+    ),
+]
+
+
 @pytest.mark.unit
 class TestRunTaskEntryErrorPaths:
     """Error paths in _run_task_entry."""
@@ -1075,6 +1100,62 @@ class TestRunTaskEntryErrorPaths:
         # Phase 5 wire format: ``__h_task_result__`` envelope.
         assert parsed.get('__h_task_result__') is True
         assert parsed.get('ok') == 42
+
+    @pytest.mark.parametrize(
+        ('ok_type', 'returned'),
+        _LONE_SURROGATE_RETURNS,
+        ids=[
+            'ok-string', 'plain-string', 'ok-key', 'plain-key',
+            'error-message', 'error-data-key',
+        ],
+    )
+    def test_a_lone_surrogate_in_a_return_value_ends_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+        ok_type: Any,
+        returned: Any,
+    ) -> None:
+        """The encode refuses the value, and the task ends with a stored
+        WORKER_SERIALIZATION_ERROR: the worker writes it and does not retry
+        the encode. The payload itself must encode. The text is the text of
+        the encode refusal, not of the `dumps_json` guard after it."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = ok_type
+        mock_task.return_value = returned
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with _apply_patches(patches):
+            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert reason is not None and 'holds a lone surrogate' in reason
+        _ = payload.encode('utf-8')
+        parsed = _parse_task_result(payload)
+        assert parsed['err']['error_code'] == {
+            '__builtin_task_code__': 'WORKER_SERIALIZATION_ERROR',
+        }
+        assert 'holds a lone surrogate' in parsed['err']['message']
+
+    def test_a_lone_surrogate_in_a_raised_exception_ends_the_task(
+        self,
+        _run_entry_defaults: dict[str, Any],
+    ) -> None:
+        """An exception text from the task cannot be encoded either, so the
+        task ends with the fixed fallback payload."""
+        patches = _make_run_task_patches()
+        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
+        mock_task = MagicMock()
+        mock_task.task_ok_type = str
+        mock_task.side_effect = ValueError(f'text{chr(0xd800)}')
+        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
+
+        with _apply_patches(patches):
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
+
+        assert ok is True
+        assert payload == FALLBACK_ERROR_JSON
 
     def test_unserializable_value_surfaces_as_serialization_error(
         self,

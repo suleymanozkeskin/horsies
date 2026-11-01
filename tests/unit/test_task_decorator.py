@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerErrorCode,
@@ -1396,6 +1397,37 @@ class TestCreateTaskWrapperSend:
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
         assert isinstance(result.err_value.exception, ConfigurationError)
+
+    @pytest.mark.parametrize(
+        ('value', 'subject'),
+        [
+            ({'key': f'text{chr(0xd800)}'}, 'a string'),
+            ({f'key{chr(0xd800)}': 'text'}, 'a dict key'),
+        ],
+        ids=['string', 'key'],
+    )
+    def test_send_lone_surrogate_returns_validation_error(
+        self,
+        value: dict[str, str],
+        subject: str,
+    ) -> None:
+        """A lone surrogate is refused at the encode, before the broker."""
+        def good_fn(*, x: dict[str, str]) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=len(x))
+
+        app = _make_app()
+        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
+
+        result = wrapper.send(x=value)
+
+        assert is_err(result)
+        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert result.err_value.message == (
+            f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
+            'lone surrogate, which UTF-8 cannot encode'
+        )
+        app.get_broker.assert_not_called()
 
     def test_send_success_returns_ok_with_handle(self) -> None:
         """Successful send returns Ok(TaskHandle) with broker_mode=True."""
