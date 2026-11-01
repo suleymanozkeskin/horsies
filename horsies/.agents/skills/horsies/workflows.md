@@ -196,6 +196,7 @@ Differences from `TaskNode`:
 - `args_from` injects upstream `TaskResult` into `build_with()`.
 - Child status mirrors parent node: child COMPLETED → node COMPLETED with output; child FAILED → node FAILED with `SubWorkflowError`.
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `TaskResult[None, TaskError]` (`ok=None`). The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
+- An exception in `build_with()` fails the node with `WORKFLOW_ENQUEUE_FAILED`. The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse (the `task_options_json` of the task function changed after registration) are a defect: the child start raises `SerializationError` and its transaction rolls back, as in the workflow start transaction.
 
 ## NodeFactory / `.node()` — Two-Step Builder
 
@@ -345,7 +346,8 @@ appearing during a pause are expected, not a fault.
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
 - `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when no error is stored.
 - `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
-- The workflow row is removed after `get()` read its terminal status (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
+- A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `TaskResult(err=TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
+- The workflow row is removed after `get()` read its terminal status, also `COMPLETED` (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 

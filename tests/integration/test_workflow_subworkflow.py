@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from typing import Any
 
 import pytest
@@ -1105,14 +1104,23 @@ class TestSubworkflowIntegration:
     async def test_child_task_prepare_failure_does_not_commit_partial_child(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A later child task prep failure must not leave a partial child workflow."""
+        """A later child task prep failure must not leave a partial child workflow.
+
+        The TaskNode branch of the prepare loop in `enqueue_subworkflow_task`
+        fails the parent node when the kwargs of a child node do not
+        serialize. Spec construction already encodes every kwarg, so the
+        test patches the engine's `_ser` helper to fail only for the second
+        `'child task kwargs'` call: the later node. The first node's params
+        are then built, and the load-bearing assertion is `child_count == 0`.
+        """
         session, broker, app = setup
         parent_task = make_simple_task(app, 'partial_child_parent_task')
 
-        class CorruptOptionsChildWorkflow(WorkflowDefinition[int]):
-            name = 'corrupt_options_child_workflow'
-            definition_key = 'tests.corrupt_options_child_workflow.v1'
+        class LaterNodePrepFailureChildWorkflow(WorkflowDefinition[int]):
+            name = 'later_node_prep_failure_child_workflow'
+            definition_key = 'tests.later_node_prep_failure_child_workflow.v1'
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
@@ -1127,12 +1135,7 @@ class TestSubworkflowIntegration:
                     return TaskResult(ok=2)
 
                 node_first = TaskNode(fn=child_first)
-                node_later = TaskNode(
-                    fn=child_later,
-                    waits_for=[node_first],
-                    good_until=datetime(2030, 1, 1, tzinfo=timezone.utc),
-                )
-                child_later.task_options_json = '{broken'
+                node_later = TaskNode(fn=child_later, waits_for=[node_first])
                 return app.workflow(
                     name=cls.name,
                     tasks=[node_first, node_later],
@@ -1141,9 +1144,25 @@ class TestSubworkflowIntegration:
                     definition_key=cls.definition_key,
                 )
 
+        import horsies.core.workflows.engine as engine_mod
+        real_ser = engine_mod._ser  # pyright: ignore[reportPrivateUsage]
+        child_task_kwargs_calls = 0
+
+        def _ser_fail_later_child_task_kwargs(
+            result: Any, context: str, fallback: str | None = None,
+        ) -> str | None:
+            nonlocal child_task_kwargs_calls
+            if context == 'child task kwargs':
+                child_task_kwargs_calls += 1
+                if child_task_kwargs_calls == 2:
+                    return None
+            return real_ser(result, context, fallback)
+
+        monkeypatch.setattr(engine_mod, '_ser', _ser_fail_later_child_task_kwargs)
+
         node_a: TaskNode[int] = TaskNode(fn=parent_task, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=CorruptOptionsChildWorkflow,
+            workflow_def=LaterNodePrepFailureChildWorkflow,
             waits_for=[node_a],
         )
         spec = _workflow(
@@ -1181,7 +1200,7 @@ class TestSubworkflowIntegration:
             )
             assert child_count == 0
         finally:
-            unregister_workflow_definition(CorruptOptionsChildWorkflow.definition_key)
+            unregister_workflow_definition(LaterNodePrepFailureChildWorkflow.definition_key)
 
     async def test_nested_subworkflow_prepare_failure_does_not_commit_partial_child(
         self,
