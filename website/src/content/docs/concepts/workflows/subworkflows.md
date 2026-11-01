@@ -117,6 +117,8 @@ For simple DAGs without conditions or subworkflows:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 node_a = TaskNode(fn=task_a, kwargs={'value': 1})
 node_b = TaskNode(fn=task_b, waits_for=[node_a])
 
@@ -126,8 +128,11 @@ spec = app.workflow(
     definition_key="myapp.simple_workflow.v1",
     output=node_b,
 )
-start_result = await spec.start_async()
-handle = start_result.ok_value
+match await spec.start_async():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 ```
 
 **Warning**: Inline workflows are not portable for subworkflows.

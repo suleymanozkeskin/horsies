@@ -283,13 +283,18 @@ A paused workflow can be resumed via `WorkflowHandle.resume()` or `WorkflowHandl
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-start_result = await spec.start_async()
-handle = start_result.ok_value
+from horsies import Err, Ok
+
+match await spec.start_async():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # ... workflow pauses due to task failure ...
 
 # Resume the workflow
-resumed = await handle.resume_async()  # Returns HandleResult[bool] — unwrap with .ok_value
+resumed = await handle.resume_async()  # Ok(bool) or Err(HandleOperationError): match on it
 ```
 
 **Resume behavior:**
@@ -981,8 +986,13 @@ match spec.start():
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-start_result = spec.start()
-handle = start_result.ok_value
+from horsies import Err, Ok
+
+match spec.start():
+    case Err(start_error):
+        raise RuntimeError(start_error.message)
+    case Ok(handle):
+        pass
 
 # Option 1: Wait for workflow completion first
 handle.get(timeout_ms=30000)

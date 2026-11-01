@@ -199,6 +199,8 @@ Define nodes within a function scope, then pass to `app.workflow()`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
+from horsies import Err, Ok
+
 def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
     validate_node: TaskNode[ValidatedOrder] = TaskNode(
@@ -272,8 +274,11 @@ def start_order_processing(order: Order) -> None:
     )
     reveal_type(spec)  # WorkflowSpec
 
-    result = spec.start()
-    handle = result.ok_value
+    match spec.start():
+        case Err(start_error):
+            raise RuntimeError(start_error.message)
+        case Ok(handle):
+            pass
     reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
     handle.get(timeout_ms=30000)
