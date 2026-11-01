@@ -215,6 +215,7 @@ class TestAttemptDecodeFailures:
             (b'[NaN]', 'invalid_json'),
             (b'[Infinity]', 'invalid_json'),
             (b'[1e9999]', 'invalid_json'),
+            (rb'["\ud800"]', 'invalid_json'),
             (b'[' + b'1' * 5000 + b']', 'invalid_json'),
             (b'{}', 'expected_array'),
             (b'[{}]', 'expected_positional_row'),
@@ -314,6 +315,7 @@ class TestResultEnvelope:
             b'{"x":NaN}',
             b'{"x":Infinity}',
             b'{"x":1e9999}',
+            rb'{"x":"\ud800"}',
             b'{"x":' + b'1' * 5000 + b'}',
         ],
     )
@@ -337,6 +339,8 @@ class TestAttemptSnapshotReadEntry:
     @pytest.mark.parametrize('payload', [b'[NaN]', b'[' + b'1' * 5000 + b']'])
     def test_detail_read_refuses_the_snapshot(self, payload: bytes) -> None:
         row = SimpleNamespace(
+            task_id='4a5b6c7d-8e9f-4a0b-9c1d-2e3f4a5b6c7d',
+            status='COMPLETED',
             attempt_archive_version=1,
             attempt_snapshot_codec='json-utf8',
             attempt_snapshot_content_type='application/json',

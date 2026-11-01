@@ -47,6 +47,7 @@ from ..identity.reservations import (
 )
 from ..identity.uuid7 import mint_task_id
 from ..names import LIVE_TASKS
+from horsies.core.types.status import TaskStatus
 from horsies.core.utils.fingerprint import enqueue_fingerprint
 from ..reads.detail import (
     HistoryTaskDetail,
@@ -222,7 +223,7 @@ async def rerun_task(
             task_id=command.source_task_id,
             reason=NotEligibleReason.WORKFLOW_TASK,
         )
-    if detail.status == 'COMPLETED':
+    if detail.status is TaskStatus.COMPLETED:
         return RerunNotEligible(
             task_id=command.source_task_id,
             reason=NotEligibleReason.COMPLETED_SOURCE,

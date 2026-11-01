@@ -45,7 +45,7 @@ from horsies.web.routes import events as events_route_module
 from horsies.core.utils.url import to_psycopg_url
 from horsies.web import schema as schema_module
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows
+from tests.integration.history_seeding import route_rows, stored_history_status
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
@@ -639,6 +639,23 @@ class TestTaskActionMapping:
         assert allowed.status_code == 200
         assert allowed.json()['was_status'] == 'RUNNING'
 
+    async def test_stored_data_that_does_not_parse_is_a_server_error(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        """The request was valid, and a repeat gives the same answer: not 503."""
+        task = make_task(status=TaskStatus.FAILED)
+        await persist(session, task)
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            cancel = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
+            detail = await api.get(f'/api/tasks/{task.id}')
+
+        assert cancel.status_code == 500
+        assert "'NOT_A_STATUS'" in cancel.json()['detail']
+        assert detail.status_code == 500
+        assert detail.json()['detail'].startswith('Task detail query failed:')
+        assert "'NOT_A_STATUS'" in detail.json()['detail']
+
 
 @pytest.mark.usefixtures('clean_tables')
 class TestWorkflowActionMapping:
@@ -736,12 +753,12 @@ class TestWorkflowActionMapping:
 class TestResumeCommittedThenFailed:
     """Resume's recovery pass runs after the state change commits.
 
-    A failure returned by resume therefore does not mean the resume did not
-    happen. The server re-reads the run rather than handing the ambiguity to
-    the browser.
+    Resume returns ``HandleResumeRecoveryFailed`` when it committed and only
+    the recovery pass failed. The server answers from that variant rather
+    than handing the ambiguity to the browser.
     """
 
-    async def test_failure_with_a_running_run_is_success_plus_a_warning(
+    async def test_recovery_failure_is_success_plus_a_warning(
         self,
         api: AsyncClient,
         session: AsyncSession,
@@ -752,16 +769,14 @@ class TestResumeCommittedThenFailed:
 
         async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleResumeRecoveryFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleResumeRecoveryFailed(
                     message='recovery pass failed',
-                    retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 
@@ -773,7 +788,7 @@ class TestResumeCommittedThenFailed:
         assert response.json()['outcome'] == 'resumed'
         assert response.json()['warning'] == 'post_resume_recovery_failed'
 
-    async def test_failure_with_a_still_paused_run_is_service_unavailable(
+    async def test_failure_before_the_commit_is_service_unavailable(
         self,
         api: AsyncClient,
         session: AsyncSession,
@@ -784,16 +799,15 @@ class TestResumeCommittedThenFailed:
 
         async def failing_resume(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleDbOperationFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleDbOperationFailed(
                     message='resume failed outright',
                     retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 
@@ -814,16 +828,15 @@ class TestResumeCommittedThenFailed:
 
         async def failing_pause(*_args: Any, **_kwargs: Any) -> Any:
             from horsies.core.models.workflow.handle_types import (
-                HandleErrorCode,
-                HandleOperationError,
+                HandleDbOperationFailed,
             )
 
             return Err(
-                HandleOperationError(
-                    code=HandleErrorCode.DB_OPERATION_FAILED,
+                HandleDbOperationFailed(
                     message='pause failed',
                     retryable=True,
                     workflow_id=run.id,
+                    exception=ConnectionError('lost'),
                 )
             )
 

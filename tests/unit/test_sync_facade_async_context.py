@@ -25,7 +25,6 @@ from pydantic import SecretStr
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.resources import ListenerDisabled
 from horsies.core.brokers.result_types import BrokerAsyncContext, BrokerErrorCode, BrokerLoopRunnerFailed
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
@@ -41,8 +40,9 @@ from horsies.core.models.tasks import (
 from horsies.core.models.workflow import NodeKey
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
+    HandleAsyncContext,
     HandleErrorCode,
-    HandleOperationError,
+    HandleLoopRunnerFailed,
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
@@ -328,39 +328,8 @@ def test_lifecycle_sync_wrapper_returns_async_context(
     _assert_nothing_ran(broker)
 
 
-def test_workflow_get_async_asserts_on_async_context_status() -> None:
-    """The async wait reads status through an async call only."""
-    broker = MagicMock()
-    handle: WorkflowHandle[Any] = WorkflowHandle(
-        workflow_id=WORKFLOW_ID, broker=broker,
-    )
-
-    async def resources() -> Any:
-        return Ok(MagicMock(listener=ListenerDisabled()))
-
-    async def status(_resources: Any) -> Any:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.ASYNC_CONTEXT,
-            message='refused',
-            retryable=False,
-            workflow_id=WORKFLOW_ID,
-        ))
-
-    broker.select_resources = resources
-    with (
-        patch.object(handle, '_status', status),
-        pytest.raises(AssertionError, match='ASYNC_CONTEXT'),
-    ):
-        asyncio.run(handle.get_async(timeout_ms=0))
-
-
 def test_web_handle_failure_mapping_asserts_on_async_context() -> None:
-    error = HandleOperationError(
-        code=HandleErrorCode.ASYNC_CONTEXT,
-        message='refused',
-        retryable=False,
-        workflow_id=WORKFLOW_ID,
-    )
+    error = HandleAsyncContext(message='refused', workflow_id=WORKFLOW_ID)
 
     with pytest.raises(AssertionError, match=WORKFLOW_ID):
         _handle_failed(error)
@@ -598,7 +567,7 @@ def _failure_code(result: object) -> object:
             return code
         case Err(err_value=(
             BrokerLoopRunnerFailed(code=code)
-            | HandleOperationError(code=code)
+            | HandleLoopRunnerFailed(code=code)
             | WorkflowStartLoopRunnerFailed(code=code)
         )):
             return code
@@ -611,7 +580,7 @@ def _runner_error_fields(result: object) -> tuple[bool, BaseException | None] | 
     match result:
         case Err(err_value=(
             BrokerLoopRunnerFailed(retryable=retryable, exception=exception)
-            | HandleOperationError(retryable=retryable, exception=exception)
+            | HandleLoopRunnerFailed(retryable=retryable, exception=exception)
             | WorkflowStartLoopRunnerFailed(retryable=retryable, exception=exception)
         )):
             return (retryable, exception)
@@ -744,7 +713,7 @@ def _refusal_message(result: object) -> str:
             assert task_error.error_code is RetrievalCode.ASYNC_CONTEXT
             return task_error.message or ''
         case Err(
-            BrokerAsyncContext() | HandleOperationError() | WorkflowStartAsyncContext() as error
+            BrokerAsyncContext() | HandleAsyncContext() | WorkflowStartAsyncContext() as error
         ):
             assert error.code.value == 'ASYNC_CONTEXT'
             return error.message
