@@ -692,6 +692,24 @@ async def test_subworkflow_build_with_args_from_receives_typed_task_result(
         assert_ok(await asyncio.to_thread(handle.get, timeout_ms=2000), expected_value=37)
 
 
+FANOUT_INSTANCE = 'tests.e2e.tasks.instance_dynamic_fanout:app'
+
+
+def _fanout_ready_check() -> Callable[[], bool]:
+    """Send the fan-out app's own probe, so the check waits for that worker."""
+    from horsies.core.task_decorator import TaskHandle
+
+    handle: TaskHandle[str] | None = None
+
+    def _check() -> bool:
+        nonlocal handle
+        if handle is None:
+            handle = unwrap_send(fanout_tasks.ready_task.send())
+        return handle.get(timeout_ms=2000).is_ok()
+
+    return _check
+
+
 async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
     broker: PostgresBroker,
 ) -> None:
@@ -701,8 +719,8 @@ async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
     the child's fan-in node reads each count node by ``NodeKey`` through
     ``workflow_ctx``. Three shards of ten characters give a total of 30.
     """
-    spec = fanout_tasks.TenantReport.build(app)
-    with run_worker(DEFAULT_INSTANCE, ready_check=_make_ready_check()):
+    spec = fanout_tasks.TenantReport.build(fanout_tasks.app)
+    with run_worker(FANOUT_INSTANCE, ready_check=_fanout_ready_check()):
         handle = await start_ok_in_thread(spec)
 
         status = await wait_for_workflow_completion(

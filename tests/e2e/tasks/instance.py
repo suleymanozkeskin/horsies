@@ -32,7 +32,6 @@ broker.app = app
 from tests.e2e.tasks import basic  # noqa: F401
 from tests.e2e.tasks import retry  # noqa: F401
 from tests.e2e.tasks import workflows  # noqa: F401
-from tests.e2e.tasks import dynamic_fanout  # noqa: F401
 
 # Also register for worker subprocess discovery
 app.discover_tasks(
@@ -40,6 +39,5 @@ app.discover_tasks(
         'tests.e2e.tasks.basic',
         'tests.e2e.tasks.retry',
         'tests.e2e.tasks.workflows',
-        'tests.e2e.tasks.dynamic_fanout',
     ]
 )

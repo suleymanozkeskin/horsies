@@ -25,10 +25,16 @@ from horsies import (
     WorkflowSpec,
 )
 
-from tests.e2e.tasks.instance import app
+from tests.e2e.tasks.instance_dynamic_fanout import app
 
 FANOUT_TENANT_ID = 'tenant-1'
 FANOUT_SHARD_SUFFIXES = ('a', 'b', 'c')
+
+
+@app.task(task_name='e2e_fanout_ready')
+def ready_task() -> TaskResult[str, TaskError]:
+    """Readiness probe for the fan-out worker."""
+    return TaskResult(ok='ready')
 
 
 @app.task(task_name='e2e_fanout_list_shards')
