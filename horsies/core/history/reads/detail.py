@@ -8,6 +8,12 @@ decode from the row's snapshot columns: post-cutover, a terminal task's
 attempt rows are deleted by the move, so the snapshot is the only home
 of attempt history and it purges with the row.
 
+The stored status is parsed here, one time, into `TaskStatus`. Schema
+v49 drops the status CHECK of the history parent, so a value that is
+not a member can be stored out of band. The read raises
+`HistoryContractError` for it, as it does for an attempt snapshot that
+does not decode. A reader of `HistoryTaskDetail.status` gets a member.
+
 Absence classifies through the same birth-floor mechanism the generated
 functions use: a v7 birth before the retained-history floor means the
 task, if it ever existed, lies before all retained history — the typed
@@ -33,12 +39,17 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
+from ...types.status import TaskStatus
 from ..archive.attempts import AttemptRecord, decode_attempt_snapshot
 from ..archive.versions import DecodedArchiveValue
 from ..errors import HistoryContractError
 from ..identity.uuid7 import uuid7_birth_at
 from ..names import HEARTBEAT_CLASS_KEY, TASK_DETAIL_FUNCTION
 from ..partitions.catalog import read_attached_birth_floor
+
+_STATUS_BY_VALUE: dict[str, TaskStatus] = {
+    status.value: status for status in TaskStatus
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,7 +67,7 @@ class HistoryTaskDetail:
     task_name: str
     queue_name: str
     priority: int
-    status: str
+    status: TaskStatus
     terminalization_kind: str
     terminal_at: datetime
     retention_class_key: str
@@ -114,12 +125,80 @@ class TaskDetailAbsent:
 type TaskDetailResult = LiveTaskLocation | HistoryTaskDetail | TaskDetailAbsent
 
 
+@dataclass(frozen=True, slots=True)
+class HistoryTaskState:
+    """The status and the workflow flag of a history row. Nothing else."""
+
+    task_id: str
+    status: TaskStatus
+    is_workflow_task: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TaskStateAbsent:
+    """Neither the live table nor history holds the task."""
+
+    task_id: str
+
+
+type TaskStateResult = LiveTaskLocation | HistoryTaskState | TaskStateAbsent
+
+
+async def read_task_state(
+    connection: AsyncConnection,
+    *,
+    task_id: str,
+) -> TaskStateResult:
+    """Resolve one task to LIVE, its history status and workflow flag, or absent.
+
+    It reads the same staged detail function as ``read_task_detail``, but
+    it takes two columns of the history row. It does not decode the attempt
+    snapshot and does not classify an absence against the retained-history
+    floor. It does not write.
+
+    Raises:
+        HistoryContractError: the staged function reports an unknown
+            location, or the stored status is not a ``TaskStatus`` member.
+    """
+    row = (
+        await connection.execute(
+            text(
+                'SELECT location, (detail.task_row).status, '
+                '(detail.task_row).is_workflow_task '
+                f'FROM {TASK_DETAIL_FUNCTION}(CAST(:task_id AS uuid)) '
+                'AS detail'
+            ),
+            {'task_id': task_id},
+        )
+    ).one_or_none()
+    if row is None:
+        return TaskStateAbsent(task_id=task_id)
+    if row.location == 'LIVE':
+        return LiveTaskLocation(task_id=task_id)
+    if row.location != 'HISTORY':
+        raise HistoryContractError(
+            f'staged detail returned unknown location {row.location!r}'
+        )
+    return HistoryTaskState(
+        task_id=task_id,
+        status=_history_status(task_id, row.status),
+        is_workflow_task=row.is_workflow_task,
+    )
+
+
 async def read_task_detail(
     connection: AsyncConnection,
     *,
     task_id: str,
 ) -> TaskDetailResult:
-    """Resolve one task through the staged detail function."""
+    """Resolve one task through the staged detail function.
+
+    Raises:
+        HistoryContractError: the staged function reports an unknown
+            location, or the history row does not decode: its status is
+            not a ``TaskStatus`` member, or its attempt snapshot does not
+            decode.
+    """
     row = (
         await connection.execute(
             text(
@@ -146,7 +225,24 @@ async def read_task_detail(
     return _decode_history_detail(row)
 
 
+def _history_status(task_id: str, value: str) -> TaskStatus:
+    """The stored status of a history row as a ``TaskStatus`` member.
+
+    Raises:
+        HistoryContractError: the stored text is not a member.
+    """
+    match _STATUS_BY_VALUE.get(value):
+        case TaskStatus() as status:
+            return status
+        case None:
+            raise HistoryContractError(
+                f'history row {task_id} has status {value!r}, which is not '
+                'a task status'
+            )
+
+
 def _decode_history_detail(row: Any) -> HistoryTaskDetail:
+    status = _history_status(str(row.task_id), row.status)
     decoded = decode_attempt_snapshot(
         version=row.attempt_archive_version,
         codec=row.attempt_snapshot_codec,
@@ -166,7 +262,7 @@ def _decode_history_detail(row: Any) -> HistoryTaskDetail:
         task_name=row.task_name,
         queue_name=row.queue_name,
         priority=row.priority,
-        status=row.status,
+        status=status,
         terminalization_kind=row.terminalization_kind,
         terminal_at=row.terminal_at,
         retention_class_key=row.retention_class_key,

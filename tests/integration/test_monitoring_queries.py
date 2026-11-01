@@ -17,6 +17,7 @@ applies migrations). Coverage:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncGenerator
@@ -34,6 +35,7 @@ def _test_window() -> HistoryWindow:
     return HistoryWindow(lower=now - timedelta(days=29), upper=now + timedelta(hours=1))
 from pydantic import SecretStr
 from sqlalchemy import event, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -47,9 +49,18 @@ from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.models.workflow_pg import WorkflowModel, WorkflowTaskModel
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
+from horsies.core.history.errors import HistoryContractError
+from horsies.monitoring import queries as queries_module
 from horsies.monitoring import (
+    BreakdownLimit,
+    TaskPage,
+    WorkflowRunsLimit,
     ErrorCategory,
-    MonitoringQueryErrorCode,
+    MonitoringQueryDbOperationFailed,
+    MonitoringQueryHistoryContractViolation,
+    TaskAbsenceReason,
+    TaskDetail,
+    TaskDetailNotFound,
     get_task_detail,
     get_workflow_node,
     get_workflow_run,
@@ -63,11 +74,15 @@ from horsies.monitoring import (
     task_stats,
 )
 from tests.integration.conftest import compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows
+from tests.integration.history_seeding import route_rows, stored_history_status
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
 
 UTC = timezone.utc
+
+# Bound of the detail read that commits a task row while it is open. A lock
+# wait between the two sessions fails the test instead of stopping the run.
+_SNAPSHOT_READ_TIMEOUT_S = 30
 
 # Upper bound for "counts up to now" assertions: generous enough to survive a
 # slow runner, tight enough to catch a span measured from the wrong origin.
@@ -698,7 +713,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -727,7 +742,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -752,7 +767,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -777,7 +792,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=2,
+            limit=BreakdownLimit(value=2),
         )
 
         assert is_ok(result)
@@ -806,7 +821,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -836,7 +851,7 @@ class TestTaskBreakdown:
             error_codes=[],
             error_categories=[],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(result)
@@ -872,8 +887,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=2,
+            page=TaskPage(offset=0, limit=2),
         )
 
         assert is_ok(result)
@@ -902,8 +916,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='asc',
-            offset=1,
-            limit=1,
+            page=TaskPage(offset=1, limit=1),
         )
 
         assert is_ok(page)
@@ -942,8 +955,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir=sort_dir,
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -976,8 +988,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='completed_at',
             sort_dir=sort_dir,
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1015,8 +1026,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='exec_s',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1047,8 +1057,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1077,8 +1086,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1110,8 +1118,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1137,8 +1144,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1170,8 +1176,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1198,8 +1203,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1235,8 +1239,7 @@ class TestListTasks:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_ok(result)
@@ -1278,8 +1281,7 @@ class TestListTasks:
                 retried_only=False,
                 sort_by='enqueued_at',
                 sort_dir='desc',
-                offset=0,
-                limit=50,
+                page=TaskPage(offset=0, limit=50),
             )
         finally:
             event.remove(sync_engine, 'before_cursor_execute', capture_statement)
@@ -1319,8 +1321,7 @@ async def rows_by_category(
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
-        offset=0,
-        limit=200,
+        page=TaskPage(offset=0, limit=200),
     )
     assert is_ok(result)
     return result.ok_value.rows
@@ -1508,7 +1509,7 @@ class TestErrorCategoryFilter:
             error_codes=[],
             error_categories=[ErrorCategory.OUTCOME],
             retried_only=False,
-            limit=50,
+            limit=BreakdownLimit(value=50),
         )
 
         assert is_ok(stats)
@@ -1548,11 +1549,53 @@ class TestErrorCategoryFilter:
 class TestGetTaskDetail:
     """Single task plus attempt history; absence is data, not an error."""
 
-    async def test_missing_task_is_ok_none(self, broker: PostgresBroker) -> None:
-        result = await get_task_detail(broker, str(uuid.uuid4()))
+    async def test_missing_task_is_not_found(self, broker: PostgresBroker) -> None:
+        task_id = str(uuid.uuid4())
+
+        result = await get_task_detail(broker, task_id)
 
         assert is_ok(result)
-        assert result.ok_value is None
+        # A UUIDv4 has no birth, so the history read cannot classify it.
+        assert result.ok_value == TaskDetailNotFound(
+            task_id=task_id, reason=TaskAbsenceReason.NOT_CLASSIFIED,
+        )
+
+    async def test_a_task_inserted_during_the_read_is_not_in_its_snapshot(
+        self,
+        broker: PostgresBroker,
+        session: AsyncSession,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The task row commits after the live read and before the staged
+        read. Both reads see the snapshot of the live read, so the staged
+        read does not find the row live."""
+        # Seed one row first, so the history setup that insert_rows runs
+        # has nothing left to create while the detail read is open.
+        await insert_rows(session, make_task())
+        task = make_task()
+        staged_detail_published = queries_module.staged_detail_published
+
+        async def commit_task_then_probe(connection: Any) -> bool:
+            await insert_rows(session, task)
+            return await staged_detail_published(connection)
+
+        monkeypatch.setattr(
+            queries_module, 'staged_detail_published', commit_task_then_probe,
+        )
+
+        result = await asyncio.wait_for(
+            get_task_detail(broker, task.id), timeout=_SNAPSHOT_READ_TIMEOUT_S,
+        )
+
+        assert is_ok(result), result
+        assert isinstance(result.ok_value, TaskDetailNotFound)
+        # The row is committed: a new read finds it live.
+        monkeypatch.setattr(
+            queries_module, 'staged_detail_published', staged_detail_published,
+        )
+        again = await get_task_detail(broker, task.id)
+        assert is_ok(again)
+        assert isinstance(again.ok_value, TaskDetail)
 
     async def test_returns_attempts_in_ascending_order(
         self, broker: PostgresBroker, session: AsyncSession
@@ -1569,10 +1612,25 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert [a.attempt for a in detail.attempts] == [1, 2]
         assert detail.attempts[0].will_retry is True
         assert detail.error_category == ErrorCategory.OPERATIONAL.value
+
+    async def test_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await insert_rows(session, task)
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            result = await get_task_detail(broker, task.id)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert "'NOT_A_STATUS'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
         self, broker: PostgresBroker, session: AsyncSession
@@ -1584,7 +1642,7 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert detail.workflow_id is None
         assert detail.workflow_task_index is None
 
@@ -1605,7 +1663,7 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert detail.is_workflow_task is True
         assert detail.workflow_id == run.id
         assert detail.workflow_task_index == 3
@@ -1628,7 +1686,7 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert detail.workflow_id is None
         assert detail.workflow_task_index is None
 
@@ -1643,7 +1701,7 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert detail.is_workflow_task is True
         assert detail.leaf.good_until is not None
         assert abs((detail.leaf.good_until - expiry).total_seconds()) < 1
@@ -1668,7 +1726,7 @@ class TestGetTaskDetail:
 
         assert is_ok(result)
         detail = result.ok_value
-        assert detail is not None
+        assert isinstance(detail, TaskDetail)
         assert detail.leaf.failed_reason is None
         assert detail.attempts[0].error_code is None
         assert detail.attempts[0].error_message is None
@@ -1695,8 +1753,7 @@ class TestTaskDurations:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=1,
+            page=TaskPage(offset=0, limit=1),
         )
         assert is_ok(result)
         row = result.ok_value.rows[0]
@@ -1835,7 +1892,7 @@ class TestTaskDurations:
         detail = await get_task_detail(broker, task.id)
 
         assert is_ok(detail)
-        assert detail.ok_value is not None
+        assert isinstance(detail.ok_value, TaskDetail)
         assert detail.ok_value.leaf.queue_s == queue_s
         assert detail.ok_value.leaf.exec_s == exec_s
 
@@ -1896,7 +1953,7 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=30)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
         assert [run.name for run in result.ok_value] == ['beta_flow', 'alpha_flow']
@@ -1912,7 +1969,7 @@ class TestListWorkflowRuns:
         )
 
         result = await list_workflow_runs(
-            broker, name='alpha_flow', status='FAILED', limit=30
+            broker, name='alpha_flow', status='FAILED', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
@@ -1925,7 +1982,7 @@ class TestListWorkflowRuns:
         await insert_rows(session, make_workflow(status='RUNNING'))
 
         result = await list_workflow_runs(
-            broker, name=None, status='NOT_A_STATUS', limit=30
+            broker, name=None, status='NOT_A_STATUS', limit=WorkflowRunsLimit(value=30)
         )
 
         assert is_ok(result)
@@ -1939,7 +1996,7 @@ class TestListWorkflowRuns:
             *[make_workflow(created_at=ago(index + 1)) for index in range(4)],
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=2)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=2))
 
         assert is_ok(result)
         assert len(result.ok_value) == 2
@@ -1958,7 +2015,7 @@ class TestListWorkflowRuns:
             ),
         )
 
-        result = await list_workflow_runs(broker, name=None, status=None, limit=30)
+        result = await list_workflow_runs(broker, name=None, status=None, limit=WorkflowRunsLimit(value=30))
 
         assert is_ok(result)
         walls = {run.name: run.wall_s for run in result.ok_value}
@@ -2192,6 +2249,33 @@ class TestGetWorkflowNode:
         assert node.leaf.task_id == task.id
         assert [a.attempt for a in node.attempts] == [1, 2]
 
+    async def test_backing_history_row_with_an_unknown_status_is_a_contract_violation(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        run = make_workflow()
+        task = make_task(status=TaskStatus.FAILED, is_workflow_task=True)
+        await insert_rows(
+            session,
+            run,
+            task,
+            make_node(
+                workflow_id=run.id,
+                task_index=0,
+                node_id='step-one',
+                status='FAILED',
+                task_id=task.id,
+            ),
+        )
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            result = await get_workflow_node(broker, run.id, 0)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert "'NOT_A_STATUS'" in error.message
+
     async def test_subworkflow_node_has_no_leaf_or_attempts(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
@@ -2328,16 +2412,15 @@ class TestDatabaseFailure:
             retried_only=False,
             sort_by='enqueued_at',
             sort_dir='desc',
-            offset=0,
-            limit=50,
+            page=TaskPage(offset=0, limit=50),
         )
 
         assert is_err(result)
         error = result.err_value
-        assert error.code is MonitoringQueryErrorCode.DB_OPERATION_FAILED
+        assert isinstance(error, MonitoringQueryDbOperationFailed)
         assert error.retryable is True
         assert 'task list query failed' in error.message
-        assert error.exception is not None
+        assert isinstance(error.exception, SQLAlchemyError)
 
     async def test_detail_failure_is_not_confused_with_absence(
         self, unreachable_broker: PostgresBroker
@@ -2345,7 +2428,7 @@ class TestDatabaseFailure:
         result = await get_task_detail(unreachable_broker, str(uuid.uuid4()))
 
         assert is_err(result)
-        assert result.err_value.code is MonitoringQueryErrorCode.DB_OPERATION_FAILED
+        assert isinstance(result.err_value, MonitoringQueryDbOperationFailed)
 
     async def test_aggregate_failure_is_reported(
         self, unreachable_broker: PostgresBroker
@@ -2407,8 +2490,7 @@ async def _unfiltered_list(broker: PostgresBroker) -> Any:
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
-        offset=0,
-        limit=50,
+        page=TaskPage(offset=0, limit=50),
     )
 
 
@@ -2476,8 +2558,7 @@ class TestUnfilteredHistoryTotalContract:
                 retried_only=False,
                 sort_by='enqueued_at',
                 sort_dir='desc',
-                offset=0,
-                limit=50,
+                page=TaskPage(offset=0, limit=50),
             )
 
         assert is_ok(result)
@@ -2537,7 +2618,6 @@ class TestUnfilteredHistoryTotalContract:
         what the boundary owes is the same either way: a typed,
         non-retryable monitoring error and no silent exact fallback.
         """
-        from horsies.core.history.errors import HistoryContractError
         from horsies.monitoring import queries as queries_module
 
         await insert_rows(
@@ -2554,9 +2634,8 @@ class TestUnfilteredHistoryTotalContract:
         result = await _unfiltered_list(broker)
 
         assert is_err(result)
-        assert (
-            result.err_value.code
-            is MonitoringQueryErrorCode.DB_OPERATION_FAILED
-        )
-        assert result.err_value.retryable is False
-        assert 'estimate decode failed' in result.err_value.message
+        error = result.err_value
+        assert isinstance(error, MonitoringQueryHistoryContractViolation)
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.retryable is False
+        assert 'estimate decode failed' in error.message

@@ -99,15 +99,6 @@ def archive_digest(payload: bytes) -> bytes:
     return hashlib.sha256(payload).digest()
 
 
-def decode_history_row_version(version: int) -> ArchiveDecodeResult[int]:
-    """Validate a stored history-row schema version."""
-    match version:
-        case 1:
-            return DecodedArchiveValue(version)
-        case _:
-            return UnknownArchiveVersion(ArchiveDomain.HISTORY_ROW, version)
-
-
 def validate_envelope_contract(
     *,
     domain: ArchiveDomain,

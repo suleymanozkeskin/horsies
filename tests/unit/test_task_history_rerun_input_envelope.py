@@ -124,6 +124,12 @@ class TestDecode:
         assert isinstance(decoded, InputEnvelopeCorrupt)
         assert 'payload is not JSON' in decoded.detail
 
+    def test_lone_surrogate_fails_closed(self) -> None:
+        payload = rb'{"args":[],"kwargs":{"x":"\ud800"},"options":null}'
+        decoded = roundtrip(payload)
+        assert isinstance(decoded, InputEnvelopeCorrupt)
+        assert 'lone surrogate' in decoded.detail
+
     def test_integer_over_the_parse_limit_fails_closed(self) -> None:
         payload = b'{"args":[' + b'1' * 5000 + b'],"kwargs":{},"options":null}'
         decoded = roundtrip(payload)

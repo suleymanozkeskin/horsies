@@ -2,6 +2,7 @@
   "extends": "./pyproject.toml",
   "include": [
     "tests/typing/retry_variant_pin.py",
+    "tests/typing/task_function_attributes_pin.py",
     "tests/typing/async_task_refused_pin.py",
     "tests/typing/workflow_definition_config_pin.py",
     "horsies/core/models/task_send_types.py",
@@ -13,7 +14,19 @@
     "tests/typing/workflow_start_variant_pin.py",
     "horsies/core/workflows/start_types.py",
     "tests/unit/test_workflow_start_variants.py",
-    "tests/unit/test_docs_enum_lists.py"
+    "tests/typing/handle_error_variant_pin.py",
+    "horsies/core/models/workflow/handle_types.py",
+    "tests/unit/test_workflow_handle_error_variants.py",
+    "tests/unit/test_docs_enum_lists.py",
+    "tests/typing/monitoring_error_variant_pin.py",
+    "tests/typing/monitoring_page_pin.py",
+    "horsies/monitoring/pages.py",
+    "tests/unit/test_monitoring_pages.py",
+    "horsies/monitoring/errors.py",
+    "horsies/monitoring/task_actions.py",
+    "tests/unit/test_monitoring_query_variants.py",
+    "tests/unit/test_task_action_variants.py",
+    "tests/unit/test_history_detail_status_parse.py"
   ],
   "reportUnnecessaryTypeIgnoreComment": "error"
 }

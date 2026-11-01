@@ -101,6 +101,20 @@ jobs:
             || { echo 'FAIL: no hashed CSS asset under horsies/web/static/assets'; exit 1; }
           echo 'OK: wheel carries the built web UI'
 
+      - name: Verify the wheel carries the agent skill folder
+        # `horsies skills install` copies this folder from the installed
+        # package. A wheel without it installs cleanly and the command then
+        # fails for every user, so this is release-blocking.
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/horsies-*.whl)
+          contents=$(unzip -l "$wheel")
+          for name in SKILL.md tasks.md workflows.md configs.md monitoring.md; do
+            echo "$contents" | grep -q "horsies/.agents/skills/horsies/$name" \
+              || { echo "FAIL: horsies/.agents/skills/horsies/$name missing from wheel"; exit 1; }
+          done
+          echo 'OK: wheel carries the agent skill folder'
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

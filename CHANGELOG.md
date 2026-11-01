@@ -10,6 +10,12 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Upgrade notes
 
+- **Breaking: `CustomQueueConfig` refuses a queue name that is empty, has
+  whitespace at the start or the end, or is longer than 100 characters (the
+  length of the database `queue_name` column).** The config raises
+  `ConfigurationError` (`HRS-200`) when it is built. Only configs that were
+  already unusable change: a task could not target such a queue, or the
+  database refused the name.
 - **Breaking: a sync call inside a running event loop returns
   `ASYNC_CONTEXT`.** Code that makes a sync call from a coroutine or a
   Jupyter cell must call the `*_async` form. Before, the call blocked that
@@ -76,6 +82,42 @@ and there is no migration contract between pre-1.0 versions.
   `psycopg.Error`, and returns them as `WorkflowStartEnqueueFailed`. Any
   other exception propagates. Before, the start returned every exception
   as `ENQUEUE_FAILED`.
+- **Breaking: `HandleOperationError` is a union of frozen variants, one per
+  `HandleErrorCode` member.** `HandleResult[T]` and the method signatures
+  do not change. Every variant has `code`, `message`, `retryable` and
+  `workflow_id`. Code that reads `err.exception` must match on the variant
+  first; pyright reports each site. `exception` is `BaseException` on
+  `HandleDbOperationFailed`, `HandleStoredDataInvalid`,
+  `HandleResumeRecoveryFailed` and `HandleLoopRunnerFailed`; the other
+  variants have no cause. `HandleEventLoopLimit` carries `loop_limit`.
+  `HandleOperationError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, HandleOperationError)` is not valid on a
+  type alias; match on the variants.
+- **Breaking: `HandleErrorCode.INTERNAL_FAILED` is removed, and a defect in
+  `pause_workflow()` or `resume_workflow()` propagates.** They catch only
+  `sqlalchemy.exc.SQLAlchemyError`. Before, they returned every other
+  exception, also a failed `assert`, as `INTERNAL_FAILED`. Code that names
+  `INTERNAL_FAILED` fails pyright. The web pause and resume routes answer
+  such a defect with HTTP 500, not 503.
+- **New code `HandleErrorCode.STORED_DATA_INVALID`.** `tasks()` returns
+  `HandleStoredDataInvalid` with the parse error for a subworkflow summary
+  that does not parse; before, it returned `DB_OPERATION_FAILED` with
+  `retryable=False` and no cause. `status()` and `cancel()` return it for a
+  stored workflow status that is not a `WorkflowStatus`; before, the
+  `ValueError` propagated. Nothing changed, and the same call returns the
+  same error. `get()` folds it into `BROKER_ERROR`. The web routes answer it
+  with HTTP 500. An exhaustive `match` on `HandleErrorCode` needs a case
+  for it.
+- **New code `HandleErrorCode.RESUME_RECOVERY_FAILED`.** `resume()` returns
+  `HandleResumeRecoveryFailed` when the resume committed and the recovery
+  pass for the workflow tree, which runs after the commit in a second
+  transaction, fails with a database error. The workflow is `RUNNING`; the
+  worker reaper runs the same pass over all workflows. Before, it returned
+  `DB_OPERATION_FAILED`, the code of a failure before the commit. The web
+  resume route answers it as resumed with the `post_resume_recovery_failed`
+  warning and does not read the status again; a `DB_OPERATION_FAILED` from
+  resume is always HTTP 503. An exhaustive `match` on `HandleErrorCode`
+  needs a case for it.
 - **An event loop limit at schema initialization returns
   `EVENT_LOOP_LIMIT`.** Before, a workflow start returned it as
   `ENQUEUE_FAILED`, which `retry_start()` accepted.
@@ -215,6 +257,79 @@ and there is no migration contract between pre-1.0 versions.
   pyright.
 - **An exhaustive `match` on `BrokerErrorCode` or `WorkflowStartErrorCode`
   needs a `LOOP_RUNNER_FAILED` case.**
+- **Breaking: a workflow task node with a `priority` outside 1–100 or a
+  naive `good_until` is refused when the spec is built.**
+  `app.workflow()`, `WorkflowDefinition.build()` and `WorkflowSpec(...)`
+  raise `WorkflowValidationError` with `WORKFLOW_INVALID_PRIORITY`
+  (`HRS-034`) or `WORKFLOW_NAIVE_GOOD_UNTIL` (`HRS-035`). The check covers
+  every task node, root or not, and `horsies check` reports it. A child
+  spec with such a node fails its build, and the engine marks the
+  subworkflow node `WORKFLOW_ENQUEUE_FAILED`. Before, a root node made the
+  start return `VALIDATION_FAILED`, and a node that is not a root started
+  and failed later, when the engine enqueued it.
+- **Breaking: `@app.task('')` raises `TaskDefinitionError` with
+  `TASK_INVALID_OPTIONS` (`HRS-102`).** Before, the task registered: a send
+  returned `ENQUEUE_FAILED` with `retryable=False`, and a workflow start
+  with the task as a root returned `VALIDATION_FAILED`.
+- **Breaking: a defect in the workflow start checks propagates.** The
+  checks before the start transaction return only a
+  `WorkflowValidationError` as `WorkflowStartValidationFailed`. Any other
+  exception propagates, a `ValueError` included. A node that has
+  positional args or `priority=None` when it reaches the start transaction
+  (only possible through `object.__setattr__` after construction) fails an
+  `assert` that names the node. Before, the start returned a `ValueError`,
+  `MultipleValidationErrors` or `SerializationError` from the checks, and a
+  `ValueError` from the transaction, as `VALIDATION_FAILED`.
+- **An exhaustive `match` on `ErrorCode` needs cases for
+  `WORKFLOW_INVALID_PRIORITY` and `WORKFLOW_NAIVE_GOOD_UNTIL`.**
+- **Breaking: `MonitoringQueryError` is a union of three frozen variants,
+  one per `MonitoringQueryErrorCode` member.** Every variant has `code`,
+  `message` and `retryable`. `exception` is `BaseException` on
+  `MonitoringQueryDbOperationFailed` and
+  `MonitoringQueryHistoryContractViolation`. `MonitoringQueryEventLoopLimit`
+  has no `exception` and carries `loop_limit`. Code that reads
+  `err.exception` must match on the variant first; pyright reports each
+  site. `MonitoringQueryError(code=..., ...)` in tests becomes a variant
+  constructor. `isinstance(err, MonitoringQueryError)` is not valid on a
+  type alias; match on the variants.
+- **New code `MonitoringQueryErrorCode.HISTORY_CONTRACT_VIOLATION`.** A
+  monitoring query that reads history data that does not decode returns
+  `MonitoringQueryHistoryContractViolation`, with the
+  `HistoryContractError` in `exception`. `list_tasks` returned it before as
+  `DB_OPERATION_FAILED` with `retryable=False`. `get_task_detail` and
+  `get_workflow_node` raised `HistoryContractError` before; now they return
+  the variant. An exhaustive `match` on `MonitoringQueryErrorCode` needs a
+  case for it. The web read routes answer 500 for it, and 503 for the
+  other two codes, as before.
+- **Breaking: `TaskActionError` is a union of six frozen variants, one per
+  `TaskActionErrorCode` member.** Every variant has `code`, `message`,
+  `retryable` and `task_id`. `current_status` is only on
+  `TaskActionNotCancellable` and `TaskActionWorkflowTask`, and it is a
+  `TaskStatus`. Before, every error had `current_status: TaskStatus | None`.
+  `TASK_IS_WORKFLOW_TASK` now carries the status.
+  `TaskActionDbOperationFailed.exception` holds the database error, and
+  `TaskActionEventLoopLimit.loop_limit` holds the limit.
+  `TaskActionError(code=..., ...)` in tests becomes a variant constructor.
+  `isinstance(err, TaskActionError)` is not valid on a type alias; match on
+  the variants.
+- **`TaskActionErrorCode` is a `str` enum.**
+  `TaskActionErrorCode.TASK_NOT_FOUND == 'TASK_NOT_FOUND'` is now true.
+- **New code `TaskActionErrorCode.STORED_DATA_INVALID`.** `cancel_task`
+  returns `TaskActionStoredDataInvalid` when stored data does not parse:
+  `exception` is the `HistoryContractError` of the history read or the
+  `OutcomeDecodeError` of the cancel outcome. Nothing changed. Before, both
+  exceptions propagated. An exhaustive `match` on `TaskActionErrorCode`
+  needs a case for it. `POST /api/tasks/{task_id}/cancel` answers 500 for
+  it.
+- **A history row whose stored status is not a `TaskStatus` member is
+  stored data that does not parse.** The history detail read parses the
+  status one time and raises `HistoryContractError` for such a value.
+  `get_task_detail` and `get_workflow_node` return
+  `HISTORY_CONTRACT_VIOLATION`; before, they returned the text as the
+  status. `cancel_task` returns `STORED_DATA_INVALID`; before, it returned
+  `TASK_NOT_CANCELLABLE` with `current_status=None`. `rerun_task` raises
+  `HistoryContractError`; before, it treated the row as a source that is
+  not `COMPLETED`.
 - **Breaking: `ContractCode.PYDANTIC_HYDRATION_ERROR` is removed.** The
   library has not returned it since 0.1.2. Code that names it raises
   `AttributeError`; match on `RESULT_DESERIALIZATION_ERROR`,
@@ -240,9 +355,70 @@ and there is no migration contract between pre-1.0 versions.
   a send or schedule is no longer a no-op, and it connects to the broker
   database. The send error messages and the `TaskSendErrorCode`
   documentation use the new name.
+- **Breaking: `WorkflowHandle.results()` and `tasks()` return
+  `HandleWorkflowNotFound` for an id that has no workflow.** The same is
+  true for `results_async()` and `tasks_async()`. Each method reads the
+  workflow row and its nodes in one statement. Before, an unknown id gave
+  `Ok({})` and `Ok([])`, the same values as an existing workflow without
+  results or nodes. An existing workflow before its first stored result
+  still gives `Ok({})`.
+- **Breaking: `get_task_detail` returns `TaskDetailNotFound` for a task that
+  does not exist, not `Ok(None)`.** Its `reason` is a `TaskAbsenceReason`:
+  `PREDATES_RETAINED_HISTORY` (retention can have removed the task),
+  `WITHIN_RETAINED_HISTORY` (retained history covers the id and has no row)
+  or `NOT_CLASSIFIED`. Both are exported from `horsies.monitoring`. Code
+  that checks `detail is None` must match on `TaskDetailNotFound`. The web
+  route still answers 404; for `PREDATES_RETAINED_HISTORY` the detail text
+  says that the id is older than the retained task history.
+  `get_task_detail` and `get_workflow_node` now read in one REPEATABLE READ
+  snapshot. Before, a task row that was committed between the live read and
+  the history read gave `Ok(None)`.
+- **New rerun outcome `RerunSourceCorrupt`.** `rerun_task` returns it, with
+  the `HistoryContractError` as `exception`, when the source history row
+  does not decode: for example a stored status that is not a `TaskStatus`
+  member. Nothing is written. Before, `rerun_task` raised the error into
+  the caller's transaction. It is exported from `horsies`. An exhaustive
+  `match` on `RerunOutcome` needs a case for it.
+- **Breaking: a `SerializationError` in the workflow start transaction
+  propagates.** The transaction encodes only values that the process built
+  and validated before the start: the options that the task decorator
+  serialized, and the node kwargs that spec construction encoded and
+  decoded. A failure there is a defect, for example `task_options_json`
+  that was changed after registration. Before, the start returned it as
+  `VALIDATION_FAILED`. The transaction rolls back as before, and nothing
+  is written.
+- **Breaking: the agent skill files moved into one skill folder.** The
+  five files `SKILL.md`, `tasks.md`, `workflows.md`, `configs.md` and
+  `monitoring.md` are now in `horsies/.agents/skills/horsies/`, not in
+  `horsies/.agents/skills/`. Only `SKILL.md` has frontmatter (`name:
+  horsies`); the four reference files have none. Copy or link the new
+  folder, and remove the old paths from any agent tool setup.
+- **Breaking: `horsies get-docs` downloads the docs of the release tag
+  `v{installed version}`, not the `main` branch.** A development version
+  (for example `0.5.6.dev0` or `0.5.5+local`) has no tag, and the command
+  exits with code 1. Pass `--ref main` to download the `main` branch docs.
+- **Breaking: `list_tasks`, `task_breakdown` and `list_workflow_runs` take a
+  page value.** `list_tasks` takes `page: TaskPage` in place of `offset` and
+  `limit`, `task_breakdown` takes `limit: BreakdownLimit`, and
+  `list_workflow_runs` takes `limit: WorkflowRunsLimit`. Build each with
+  `parse`, which returns `Err(PageRefused)` for a value outside its bounds:
+  `offset` 0 or more, `limit` 1 to 200 and `offset + limit` at most 500 for
+  `list_tasks`, `limit` 1 to 500 for `task_breakdown`, and `limit` 1 to 200 for
+  `list_workflow_runs`. `list_tasks` no longer raises `ValueError`. Before, a
+  negative `limit` gave a different result in each read, and a direct
+  `list_tasks` call with a `limit` from 201 to 500 ran; it is now refused. Web
+  answers do not change.
 
 ### Changed
 
+- New command `horsies skills install --target DIR [--force]`. It copies
+  the skill folder from the installed package to `DIR/horsies/`. `--target`
+  is required, because each agent tool reads a different skills directory.
+  The command leaves an identical copy as it is, refuses to replace a copy
+  that differs unless `--force` is given, and exits with code 1 on any
+  failure. `get-docs` has a new option `--ref main`.
+- The release workflow checks that the built wheel contains the skill
+  folder.
 - Three operations guides are new: Atomic Enqueue and Topology, Deploying
   Code Changes and Testing. The Testing guide documents
   `HORSIES_SUPPRESS_SENDS`.
@@ -388,6 +564,14 @@ and there is no migration contract between pre-1.0 versions.
   and refuses any attribute named `Meta`, also one from a base class. The
   `HRS-025` messages name `config.output`. The run-time `WorkflowMeta`
   that a task receives as `workflow_meta` does not change.
+- **`WorkflowHandle.get()` returns `RetrievalCode.WORKFLOW_NOT_FOUND` when
+  the workflow row is removed after its terminal status was read.**
+  Retention can delete a terminal workflow between the status read and the
+  error read. Before, `get()` returned `OutcomeCode.WORKFLOW_FAILED` for
+  that case, also for a cancelled or expired workflow. A terminal workflow
+  without a stored error gets the `OutcomeCode` of the status that `get()`
+  read (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED` or `WORKFLOW_EXPIRED`), and
+  `get()` no longer makes a free-text `WORKFLOW_<status>` code.
 
 ### Removed
 
@@ -399,9 +583,19 @@ and there is no migration contract between pre-1.0 versions.
   `encode_result_envelope` and `encode_attempt_snapshot` had no caller in the
   library. SQL functions write the stored bytes, and `decode_input_envelope`
   reads a stored rerun input.
+- **Unused archive helpers.** `select_result_payload`, its result types,
+  `decode_history_row_version`, and the registry accessors `is_retained` and
+  `retained_versions` had no caller in the library. `RETAINED_ARCHIVE_VERSIONS`
+  stays: the transcode decoder set reads it.
 
 ### Fixed
 
+- **A task cancel accepts every form of a task id that Python reads as a
+  UUID.** A form such as `urn:uuid:<id>` returned `DB_OPERATION_FAILED`. The
+  cancel now uses the canonical id text, and the result carries it.
+- **A cancel of a task in history reads only the status and the workflow
+  flag.** A history row whose attempt snapshot does not decode no longer
+  fails the cancel.
 - **The web UI banner in the `CUTOVER_REQUIRED` schema state no longer
   reports a version mismatch.** The stored and expected versions are equal in
   this state. The banner now names the one version, says that the offline
@@ -469,6 +663,15 @@ and there is no migration contract between pre-1.0 versions.
   `ValueError`. `CorruptArchiveValue.detail` for these failures is now
   `invalid_json`, not an exception class name. `plan_rows_from_explain` raises
   `HistoryContractError` for the same text.
+- **`loads_json` refuses a lone UTF-16 surrogate.** An escape such as
+  `\ud800` decoded to a string that UTF-8 cannot encode, so the failure came
+  later: one such row aborted a cutover preparation batch, and a rerun of a
+  stored envelope raised `UnicodeEncodeError`. Each reader now refuses the
+  value: `enqueue_async` returns `INVALID_INPUT` and writes nothing, the worker
+  returns `WORKER_SERIALIZATION_ERROR`, cutover preparation counts the row as a
+  decode failure, and a rerun returns `RerunInputCorrupt`. `dumps_json` already
+  refused such a string. A history read refuses it too, as `invalid_json`. A surrogate pair such as `\ud83d\ude00` is one valid
+  character and stays accepted.
 
 ## [0.5.5] - 2026-10-28
 

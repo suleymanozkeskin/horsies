@@ -535,10 +535,10 @@ async def enqueue_workflow_task(
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the workflow start path folds a database or driver
             error into WorkflowStartEnqueueFailed with its own retry loop,
-            resume/lifecycle operations fold them into
-            HandleOperationError, the worker folds them into a phase2
-            finalize error with bounded retries, and the reaper contains
-            each recovery pass as one unit.
+            pause and resume fold a database error into a
+            HandleOperationError variant, the worker folds them into a
+            phase2 finalize error with bounded retries, and the reaper
+            contains each recovery pass as one unit.
     """
     # Atomic: READY → ENQUEUED only if still READY AND workflow is RUNNING
     # PAUSE guard: JOIN with workflows ensures we don't enqueue while paused
@@ -867,10 +867,10 @@ async def enqueue_subworkflow_task(
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the workflow start path folds a database or driver
             error into WorkflowStartEnqueueFailed with its own retry loop,
-            resume/lifecycle operations fold them into
-            HandleOperationError, the worker folds them into a phase2
-            finalize error with bounded retries, and the reaper contains
-            each recovery pass as one unit.
+            pause and resume fold a database error into a
+            HandleOperationError variant, the worker folds them into a
+            phase2 finalize error with bounded retries, and the reaper
+            contains each recovery pass as one unit.
 
     Args:
         session: Database session
@@ -1220,9 +1220,7 @@ async def enqueue_subworkflow_task(
                     error_code=OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                 )
                 return None
-            child_task_options_json: str | None = getattr(
-                child_task.fn, 'task_options_json', None
-            )
+            child_task_options_json: str | None = child_task.fn.task_options_json
             if child_task.good_until is not None:
                 child_base_options: dict[str, Any] = {}
                 if child_task_options_json:
@@ -1669,9 +1667,9 @@ async def on_workflow_task_complete(
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, workflow lifecycle operations fold them
-            into HandleOperationError, and the reaper contains each
-            recovery pass as one unit.
+            with bounded retries, pause and resume fold a database error
+            into a HandleOperationError variant, and the reaper contains
+            each recovery pass as one unit.
 
     ``task_name`` is the completed task's registered name, read by the
     caller from the task row it already holds (worker dispatch/finalize,
@@ -2144,9 +2142,9 @@ async def try_make_ready_and_enqueue(
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, workflow lifecycle operations fold them
-            into HandleOperationError, and the reaper contains each
-            recovery pass as one unit.
+            with bounded retries, pause and resume fold a database error
+            into a HandleOperationError variant, and the reaper contains
+            each recovery pass as one unit.
 
     Supports three join modes:
     - "all": task runs when ALL dependencies are terminal (default)
@@ -2362,9 +2360,9 @@ async def get_dependency_results(
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, workflow lifecycle operations fold them
-            into HandleOperationError, and the reaper contains each
-            recovery pass as one unit.
+            with bounded retries, pause and resume fold a database error
+            into a HandleOperationError variant, and the reaper contains
+            each recovery pass as one unit.
 
     - COMPLETED/FAILED: returns actual TaskResult from stored result
     - SKIPPED: returns sentinel TaskResult with UPSTREAM_SKIPPED error
@@ -2543,9 +2541,9 @@ async def check_workflow_completion(
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, workflow lifecycle operations fold them
-            into HandleOperationError, and the reaper contains each
-            recovery pass as one unit.
+            with bounded retries, pause and resume fold a database error
+            into a HandleOperationError variant, and the reaper contains
+            each recovery pass as one unit.
 
     Result-typing of this completion-path function is deferred to the
     workflow-completion redesign.
@@ -2674,9 +2672,9 @@ async def on_subworkflow_complete(
     Raises:
         Exception: DB/engine errors propagate to the typed seams that own
             recovery: the worker folds them into a phase2 finalize error
-            with bounded retries, workflow lifecycle operations fold them
-            into HandleOperationError, and the reaper contains each
-            recovery pass as one unit.
+            with bounded retries, pause and resume fold a database error
+            into a HandleOperationError variant, and the reaper contains
+            each recovery pass as one unit.
     """
     from horsies.core.models.tasks import TaskResult, SubWorkflowError
 

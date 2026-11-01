@@ -6,9 +6,7 @@ import pytest
 
 from horsies.core.history.archive.versions import (
     ArchiveDomain,
-    DecodedArchiveValue,
     JSON_CONTENT_TYPE,
-    decode_history_row_version,
     validate_envelope_contract,
 )
 from horsies.core.history.transcode.outcomes import ArchiveComponent
@@ -35,24 +33,25 @@ def _component_name(entry: DecoderEntry) -> str:
     return entry.component.value
 
 
-CURRENT_ENTRIES: list[DecoderEntry] = sorted(
-    current_decoder_set().entries, key=_component_name,
+ENVELOPE_ENTRIES: list[DecoderEntry] = sorted(
+    (
+        entry
+        for entry in current_decoder_set().entries
+        if entry.component is not ArchiveComponent.HISTORY_ROW
+    ),
+    key=_component_name,
 )
+"""A history row has no envelope, and no read checks its version."""
 
 
-@pytest.mark.parametrize('entry', CURRENT_ENTRIES, ids=_component_name)
-def test_every_current_entry_decodes(entry: DecoderEntry) -> None:
-    match entry.component:
-        case ArchiveComponent.HISTORY_ROW:
-            decoded = decode_history_row_version(entry.version)
-            assert isinstance(decoded, DecodedArchiveValue)
-        case component:
-            assert validate_envelope_contract(
-                domain=ArchiveDomain[component.value],
-                version=entry.version,
-                codec=entry.codec,
-                content_type=JSON_CONTENT_TYPE,
-            ) is None
+@pytest.mark.parametrize('entry', ENVELOPE_ENTRIES, ids=_component_name)
+def test_every_envelope_entry_decodes(entry: DecoderEntry) -> None:
+    assert validate_envelope_contract(
+        domain=ArchiveDomain[entry.component.value],
+        version=entry.version,
+        codec=entry.codec,
+        content_type=JSON_CONTENT_TYPE,
+    ) is None
 
 
 @pytest.mark.parametrize(

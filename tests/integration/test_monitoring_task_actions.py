@@ -23,6 +23,7 @@ import pytest_asyncio
 from psycopg import sql
 from pydantic import SecretStr
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
@@ -44,12 +45,18 @@ from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker.sql import HORSIES_CLAIM_SQL
+from horsies.core.history.errors import HistoryContractError
 from horsies.monitoring import (
+    TaskActionDbOperationFailed,
     TaskActionErrorCode,
+    TaskActionNotCancellable,
+    TaskActionNotFound,
+    TaskActionStoredDataInvalid,
+    TaskActionWorkflowTask,
     cancel_task,
 )
 from tests.integration.conftest import DB_URL, compute_test_enqueue_sha
-from tests.integration.history_seeding import route_rows
+from tests.integration.history_seeding import route_rows, stored_history_status
 from tests.broker_resources_support import current_resources
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -420,7 +427,7 @@ class TestCancelTaskSucceeds:
         refused = await cancel_task(broker, task.id)
 
         assert is_err(refused)
-        assert refused.err_value.code is TaskActionErrorCode.TASK_NOT_CANCELLABLE
+        assert isinstance(refused.err_value, TaskActionNotCancellable)
         assert refused.err_value.current_status is TaskStatus.RUNNING
         assert (await read_task(session, task.id)).status == 'RUNNING'
 
@@ -490,9 +497,9 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, missing_id)
 
         assert is_err(result)
+        assert isinstance(result.err_value, TaskActionNotFound)
         assert result.err_value.code is TaskActionErrorCode.TASK_NOT_FOUND
         assert result.err_value.task_id == missing_id
-        assert result.err_value.current_status is None
         assert result.err_value.retryable is False
 
     async def test_workflow_bound_task(
@@ -504,7 +511,8 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, task.id)
 
         assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
+        assert isinstance(result.err_value, TaskActionWorkflowTask)
+        assert result.err_value.current_status is TaskStatus.PENDING
         assert (await read_task(session, task.id)).status == 'PENDING'
 
     @pytest.mark.parametrize(
@@ -525,7 +533,7 @@ class TestCancelTaskRefuses:
         result = await cancel_task(broker, task.id, include_running=True)
 
         assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.TASK_NOT_CANCELLABLE
+        assert isinstance(result.err_value, TaskActionNotCancellable)
         assert result.err_value.current_status is status
 
     async def test_second_cancel_is_a_conflict_not_a_second_effect(
@@ -540,9 +548,27 @@ class TestCancelTaskRefuses:
         second = await cancel_task(broker, task.id)
 
         assert is_err(second)
-        assert second.err_value.code is TaskActionErrorCode.TASK_NOT_CANCELLABLE
+        assert isinstance(second.err_value, TaskActionNotCancellable)
         assert second.err_value.current_status is TaskStatus.CANCELLED
         assert (await read_task(session, task.id)).failed_at == first_failed_at
+
+    async def test_history_row_with_an_unknown_status_is_stored_data_invalid(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(status=TaskStatus.FAILED)
+        await persist(session, task)
+
+        async with stored_history_status(session, task.id, 'NOT_A_STATUS'):
+            result = await cancel_task(broker, task.id)
+
+        assert is_err(result)
+        error = result.err_value
+        assert isinstance(error, TaskActionStoredDataInvalid)
+        assert isinstance(error.exception, HistoryContractError)
+        assert error.task_id == task.id
+        assert error.retryable is False
+        assert "'NOT_A_STATUS'" in error.message
+        assert (await read_task(session, task.id)).status == 'FAILED'
 
 
 # --------------------------------------------------------------------------- #
@@ -659,7 +685,7 @@ class TestClaimCancelRace:
             assert row.claimed_by_worker_id is None
         else:
             # The only way to lose is the row having moved past CLAIMED.
-            assert cancelled.err_value.code is TaskActionErrorCode.TASK_NOT_CANCELLABLE
+            assert isinstance(cancelled.err_value, TaskActionNotCancellable)
             assert cancelled.err_value.current_status not in (
                 TaskStatus.PENDING,
                 TaskStatus.CLAIMED,
@@ -710,7 +736,8 @@ class TestWorkflowBoundRowsAreUntouched:
         cancelled = await cancel_task(broker, task.id, include_running=True)
 
         assert is_err(cancelled)
-        assert cancelled.err_value.code is TaskActionErrorCode.TASK_IS_WORKFLOW_TASK
+        assert isinstance(cancelled.err_value, TaskActionWorkflowTask)
+        assert cancelled.err_value.current_status is TaskStatus.FAILED
         row = await read_task(session, task.id)
         assert row.status == 'FAILED'
         assert row.retry_count == 0
@@ -728,5 +755,7 @@ class TestDatabaseFailure:
         result = await cancel_task(unreachable_broker, str(uuid.uuid4()))
 
         assert is_err(result)
-        assert result.err_value.code is TaskActionErrorCode.DB_OPERATION_FAILED
-        assert result.err_value.retryable is True
+        error = result.err_value
+        assert isinstance(error, TaskActionDbOperationFailed)
+        assert error.retryable is True
+        assert isinstance(error.exception, SQLAlchemyError)

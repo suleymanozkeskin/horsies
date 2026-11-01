@@ -30,12 +30,12 @@ from horsies.core.models.task_send_types import TaskSendEventLoopLimit
 from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow import NodeKey
-from horsies.core.models.workflow.handle_types import HandleErrorCode
+from horsies.core.models.workflow.handle_types import HandleErrorCode, HandleEventLoopLimit
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.monitoring.task_actions import (
-    TaskActionError,
     TaskActionErrorCode,
+    TaskActionEventLoopLimit,
     cancel_task,
 )
 from horsies.core.workflows.lifecycle import (
@@ -92,12 +92,14 @@ def test_send_maps_broker_loop_limit_to_send_loop_limit() -> None:
 
 @pytest.mark.unit
 def test_web_task_action_maps_loop_limit_to_503() -> None:
-    error = TaskActionError(
-        code=TaskActionErrorCode.EVENT_LOOP_LIMIT,
+    error = TaskActionEventLoopLimit(
         message=LIMIT_MESSAGE,
-        retryable=False,
         task_id='t-1',
-        current_status=None,
+        loop_limit=EventLoopLimit(
+            limit=MAX_CALLER_EVENT_LOOPS,
+            held_thread_names=('MainThread',),
+            current_thread_name='worker-1',
+        ),
     )
 
     outcome = _task_action_failed(error)
@@ -119,6 +121,7 @@ def _limited_handle() -> tuple[WorkflowHandle[Any], MagicMock]:
 @pytest.mark.parametrize('method', ['status_async', 'results_async', 'tasks_async', 'cancel_async'])
 def test_handle_wrap_methods_return_loop_limit(method: str) -> None:
     handle, broker = _limited_handle()
+    loop_limit = broker.select_resources.return_value.err_value
 
     result = asyncio.run(getattr(handle, method)())
 
@@ -126,6 +129,8 @@ def test_handle_wrap_methods_return_loop_limit(method: str) -> None:
     assert result.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT
     assert result.err_value.retryable is False
     assert result.err_value.workflow_id == WORKFLOW_ID
+    assert isinstance(result.err_value, HandleEventLoopLimit)
+    assert result.err_value.loop_limit is loop_limit
 
 
 @pytest.mark.unit
@@ -173,13 +178,16 @@ def test_start_workflow_returns_loop_limit_before_any_attempt() -> None:
 @pytest.mark.parametrize('operation', [pause_workflow, resume_workflow])
 def test_pause_and_resume_return_loop_limit(operation: Any) -> None:
     broker = MagicMock()
-    attach_loop_limit(broker)
+    loop_limit = attach_loop_limit(broker)
 
     result = asyncio.run(operation(broker, WORKFLOW_ID))
 
     assert is_err(result)
     assert result.err_value.code is HandleErrorCode.EVENT_LOOP_LIMIT
     assert result.err_value.retryable is False
+    assert isinstance(result.err_value, HandleEventLoopLimit)
+    assert result.err_value.loop_limit is loop_limit
+    assert result.err_value.workflow_id == WORKFLOW_ID
 
 
 @dataclass(frozen=True)

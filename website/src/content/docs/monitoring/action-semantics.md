@@ -29,6 +29,7 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 | `RUNNING` | Cancelled **only when the caller opts in**. See below |
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
+| Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
 
 A committed `CANCELLED` is final. Every lifecycle transition is a CAS with an
 expected status, so claim, finalize, auto-retry, and the reaper all no-op
@@ -79,6 +80,7 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | `COMPLETED` | Refused, `RerunNotEligible(COMPLETED_SOURCE)` — a succeeded request is not re-executed by replay |
 | Still live (`PENDING`, `CLAIMED`, `RUNNING`) | Refused, `RerunSourceLive` — its own lifecycle owns retry |
 | Input not retained or undecodable | Refused, `RerunInputUnavailable` or `RerunInputCorrupt` |
+| History row does not decode (for example a stored status that is not a `TaskStatus` member) | Refused, `RerunSourceCorrupt` with the `HistoryContractError` as `exception`; nothing is written |
 | Not found in live or history | Refused, `RerunSourceAbsent` |
 | Row is a workflow node | Refused, `RerunNotEligible(WORKFLOW_TASK)` |
 | Caller key already used | `RerunKeyReplay` (same request) or `RerunKeyConflict` (different request under that key) |
@@ -159,9 +161,12 @@ Compare-and-swap `PAUSED` → `RUNNING`, then re-enqueue synchronously.
 
 Resume runs a scoped recovery pass in a second transaction after the resume
 itself has committed. That pass can fail on its own. When it does, the resume
-has still happened, so the API re-reads the run: if it is `RUNNING`, the response
-is 200 with `warning: "post_resume_recovery_failed"`. Treat that as *resumed,
-check worker logs* — not as a failed resume.
+has still happened: `resume_workflow()` returns `HandleResumeRecoveryFailed`,
+and the response is 200 with `warning: "post_resume_recovery_failed"`. Treat
+that as *resumed, check worker logs* — not as a failed resume. The worker
+reaper runs the same recovery pass over all workflows. A database failure
+before the commit is 503: the resume rolled back, or its commit outcome is
+unknown.
 
 Resume does not clear a stale `error` left on the run by an `on_error='pause'`
 policy.
@@ -238,6 +243,7 @@ concurrency control.
 | 400 | The row is a workflow node; task actions do not apply | Use the workflow actions |
 | 404 | The row no longer exists | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
+| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
 | 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
 
 A failed request is not proof that nothing happened. A network error in

@@ -1,8 +1,3 @@
----
-name: horsies-monitoring
-description: Monitoring guidance for horsies, including the horsies.monitoring query API, the task cancel action, the horsies[web] dashboard, create_monitoring_app, the horsies web CLI, authorization policies, and schema-compatibility states. Use when embedding the dashboard, operating it, or building on the monitoring API.
----
-
 # horsies — Monitoring
 
 Detailed reference for the typed monitoring query API, task actions, and the
@@ -95,17 +90,27 @@ migrations; instead the stored schema version is probed (cached 60 s):
 
 All functions are async, take `broker: PostgresBroker` first, and return
 `MonitoringResult[T] = Result[T, MonitoringQueryError]`. **An absent row is
-`Ok(None)`, not an error** — `Err` means the database operation failed
-(`retryable` marks transient connection errors).
+`Ok(None)`, not an error;** `get_task_detail` returns
+`Ok(TaskDetailNotFound(task_id, reason))` instead. `MonitoringQueryError` is a union of frozen
+variants, one per `MonitoringQueryErrorCode` member; match on the variant.
+Every variant has `code`, `message` and `retryable`. A query is a read, so no
+error changes stored data. HTTP is the status of the web read routes.
+
+<!-- members: MonitoringQueryErrorCode -->
+| Code | Variant | Fields | `retryable` | HTTP | When |
+|---|---|---|---|---|---|
+| `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The database operation failed |
+| `EVENT_LOOP_LIMIT` | `MonitoringQueryEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `list_tasks`, `get_task_detail` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 ```python
 task_stats(broker, *, task_names, queues, workers, error_codes, error_categories, retried_only)
 task_facets(broker, *, statuses, retried_only)          # + error_categories scoping of the code list
-task_breakdown(broker, *, group_by, ..., limit)         # group_by: 'worker' | 'task_name' | 'queue'
-list_tasks(broker, *, statuses, ..., sort_by, sort_dir, offset, limit)
-get_task_detail(broker, task_id)                        # Ok(None) when absent
+task_breakdown(broker, *, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
+list_tasks(broker, *, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
+get_task_detail(broker, task_id)                        # Ok(TaskDetailNotFound) when absent
 list_workflow_names(broker)
-list_workflow_runs(broker, *, name, status, limit)
+list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
 get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices
 get_workflow_node(broker, workflow_id, task_index)
 list_schedules(broker)
@@ -130,7 +135,18 @@ list_schedules(broker)
 A task that reaches a terminal status leaves `horsies_tasks` for the
 `horsies_task_history` archive in the same transaction. Detail, result, and
 attempt-history reads resolve on **both** sides, so a moved task still
-answers.
+answers. `get_task_detail` and `get_workflow_node` read in one REPEATABLE
+READ snapshot, so the live read and the history read see the same rows.
+
+`TaskDetailNotFound.reason` is a `TaskAbsenceReason`. The web route answers
+404 for each reason.
+
+<!-- members: TaskAbsenceReason -->
+| Reason | Meaning |
+|---|---|
+| `PREDATES_RETAINED_HISTORY` | The id's UUIDv7 birth is before the oldest retained history; retention can have removed the task |
+| `WITHIN_RETAINED_HISTORY` | Retained history covers the id's birth and has no row: the task did not exist, or its history partition was removed out of band |
+| `NOT_CLASSIFIED` | The id is not a UUIDv7, no attached history partition has a birth, or the database has no staged history read |
 
 List and aggregate reads are **window-scoped** and take a `HistoryWindow`
 (`resolve_monitoring_window(since=..., until=...)` builds one): the default
@@ -159,11 +175,23 @@ cancel_task(broker, task_id, *, include_running=False) -> Result[TaskCancelled, 
   are managed only by the workflow primitives (`handle.pause/resume/cancel`).
 - There is no manual retry action: a terminal record is immutable, and
   re-execution is a new request through the rerun contract.
-- `TaskActionErrorCode`: `TASK_NOT_FOUND`, `TASK_NOT_CANCELLABLE`,
-  `TASK_IS_WORKFLOW_TASK`, `DB_OPERATION_FAILED`, `EVENT_LOOP_LIMIT`.
-  State-conflict errors carry `current_status`. `EVENT_LOOP_LIMIT` (also in
-  `MonitoringQueryErrorCode`): the broker serves its limit of open event
-  loops and this call ran on a new one; nothing ran; HTTP 503.
+- `TaskActionError` is a union of frozen variants, one per
+  `TaskActionErrorCode` member; match on the variant. Every variant has
+  `code`, `message`, `retryable` and `task_id`. HTTP is the status of
+  `POST /api/tasks/{task_id}/cancel`.
+
+<!-- members: TaskActionErrorCode -->
+| Code | Variant | Fields | `retryable` | HTTP | When |
+|---|---|---|---|---|---|
+| `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id, or the id is not a UUID; nothing changed |
+| `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
+| `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
+| `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the `SQLAlchemyError`) | driver classification | 503 | The transaction failed: it rolled back, or at the commit the commit outcome is unknown. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `EVENT_LOOP_LIMIT` | `TaskActionEventLoopLimit` | `loop_limit` | `False` | 503 | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `HistoryContractError` or `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: a history row that does not decode, for example a history status that is not a `TaskStatus` member, or a cancel outcome row that does not decode; nothing changed |
+
+`cancel_task` raises `RuntimeError` when the cancel outcome contradicts the
+row lock that the call holds. That is a defect, not an outcome.
 
 ## Live Updates
 
@@ -196,8 +224,13 @@ from horsies.monitoring import (
     # Actions
     cancel_task, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
+    TaskActionNotFound, TaskActionNotCancellable, TaskActionWorkflowTask,
+    TaskActionDbOperationFailed, TaskActionEventLoopLimit,
+    TaskActionStoredDataInvalid,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,
+    MonitoringQueryDbOperationFailed, MonitoringQueryEventLoopLimit,
+    MonitoringQueryHistoryContractViolation,
     # Vocabularies
     ErrorCategory, TaskSortField, TaskGroupBy, SortDirection,
     # Response models (unstable pre-1.0)

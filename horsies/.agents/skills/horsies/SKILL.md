@@ -1,6 +1,6 @@
 ---
-name: horsies-quick-reference
-description: Quick orientation for the horsies Python task queue and workflow engine. Use when users need a concise overview and routing to detailed guidance for tasks, workflows, configuration, and monitoring.
+name: horsies
+description: Guidance for the horsies Python task queue and workflow engine (PostgreSQL broker). Use when code has `import horsies`, `from horsies import ...`, `@app.task`, `TaskResult`, `TaskError`, `WorkflowSpec` or `WorkflowDefinition`, or when the user works on horsies tasks, workflows, configuration, scheduling, or monitoring.
 ---
 
 # horsies — Quick Reference
@@ -9,7 +9,7 @@ PostgreSQL-backed background task queue and workflow engine for Python.
 
 This is an **introductory quick reference** — it covers core concepts and
 patterns at a glance. For production-level guidance, see the dedicated
-skill files in this directory:
+reference files in this skill folder (open one only when the task needs it):
 
 | File | When to open |
 |---|---|
@@ -20,7 +20,7 @@ skill files in this directory:
 
 All public symbols: `from horsies import <name>`
 
-For the full API reference, run `horsies get-docs` to download docs locally,
+For the full API reference, run `horsies get-docs` to download the docs of the installed version,
 or read `llms.txt` on the docs site:
 `https://suleymanozkeskin.github.io/horsies/llms.txt`.
 
@@ -274,8 +274,9 @@ from datetime import timedelta
 
 from horsies import (
     rerun_task, RerunTask, RerunEnqueuePolicy,
-    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
-    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay,
 )
 
 outcome = await rerun_task(
@@ -300,6 +301,8 @@ match outcome:
         ...
     case RerunInputUnavailable() | RerunInputCorrupt():
         ...
+    case RerunSourceCorrupt(exception=cause):
+        ...  # the source history row does not decode; nothing was written
     case RerunKeyConflict() | RerunKeyReplay():
         ...
 ```
@@ -325,9 +328,11 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`, `EVENT_LOOP_LIMIT`, `LOOP_RUNNER_FAILED`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
-- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `LOOP_RUNNER_FAILED`, `INTERNAL_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
+- `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `LOOP_RUNNER_FAILED`, `EVENT_LOOP_LIMIT`, `ASYNC_CONTEXT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
+
+`HandleOperationError` is a union with one variant per `HandleErrorCode` member (`HandleWorkflowNotFound`, `HandleDbOperationFailed`, `HandleStoredDataInvalid`, `HandleResumeRecoveryFailed`, `HandleLoopRunnerFailed`, `HandleEventLoopLimit`, `HandleAsyncContext`); match on the variant. `HandleResumeRecoveryFailed` means `resume()` committed and only its recovery pass failed: the workflow is `RUNNING`.
 
 `EVENT_LOOP_LIMIT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`, monitoring codes): a broker keeps one resource set per open event loop, up to 5 loops plus its sync runner loop. The next open loop gets this error and nothing runs; it clears when one of those loops closes.
 
@@ -341,7 +346,9 @@ horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
-horsies get-docs                         # download docs locally
+horsies get-docs                         # download the docs of the installed version
+horsies get-docs --ref main              # download the main branch docs (needed for a development version)
+horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)
 
 # Recycle each child after N tasks to bound memory (default 100, per-child,
 # staggered; forces spawn). Tune per deployment; 0 disables (keeps fork).

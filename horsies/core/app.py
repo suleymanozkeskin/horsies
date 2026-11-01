@@ -132,7 +132,7 @@ class Horsies:
         self.run_schema_migrations = run_schema_migrations
         self._broker: Optional['PostgresBroker'] = None
         self._broker_init_lock = threading.Lock()
-        self.tasks: TaskRegistry[Callable[..., Any]] = TaskRegistry()
+        self.tasks: TaskRegistry['TaskFunction[Any, Any]'] = TaskRegistry()
         self.logger = get_logger('app')
         self._discovered_task_modules: list[str] = []
         self._workflow_builders: list[_WorkflowBuilderMeta] = []
@@ -288,7 +288,8 @@ class Horsies:
         Task options are validated against TaskOptions model and app configuration.
 
         Raises:
-            TaskDefinitionError: invalid options, mapper, or error code.
+            TaskDefinitionError: empty task name, invalid options, mapper,
+                or error code.
             ConfigurationError: queue name not in app config.
             RegistryError: duplicate task name from a different source.
                 All three fire at import/definition time by design — a task
@@ -298,6 +299,18 @@ class Horsies:
 
         def decorator(fn: Callable[P, 'TaskResult[T, TaskError]']):
             fn_location = SourceLocation.from_function(fn)
+
+            if task_name == '':
+                raise TaskDefinitionError(
+                    message='task name is empty',
+                    code=ErrorCode.TASK_INVALID_OPTIONS,
+                    location=fn_location,
+                    notes=[
+                        f"task '{fn.__name__}'",
+                        "app.task('') received an empty task name",
+                    ],
+                    help_text='pass a task name that is not empty, for example the function name',
+                )
 
             if 'auto_retry_for' in task_options_kwargs:
                 raise TaskDefinitionError(
@@ -746,8 +759,8 @@ class Horsies:
                             )
                         )
 
-            task_options_json = getattr(task, 'task_options_json', None)
-            if not isinstance(task_options_json, str) or not task_options_json:
+            task_options_json = task.task_options_json
+            if not task_options_json:
                 continue
 
             options_result = loads_json(task_options_json)

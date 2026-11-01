@@ -1,8 +1,3 @@
----
-name: horsies-workflows
-description: Workflow DAG guidance for horsies, including WorkflowSpec, TaskNode and SubWorkflowNode, WorkflowDefinition, WorkflowHandle, failure semantics, and validation errors HRS-001-HRS-033. Use when building, validating, or troubleshooting workflows.
----
-
 # horsies — Workflows
 
 Detailed reference for building, starting, and managing workflow DAGs.
@@ -85,7 +80,11 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
 child = SubWorkflowNode(workflow_def=ChildPipeline, kwargs={"source_url": "https://..."})
 ```
 
-A `WorkflowSpec(...)` built directly has no broker and no bound queue or priority. Do not start it as a top-level workflow: `start()` returns `BROKER_NOT_CONFIGURED`. For a top-level workflow, use `app.workflow()` or `build(app)`.
+A `WorkflowSpec(...)` built directly has `broker=None` and no bound queue or priority on its `TaskNode` items.
+
+- `start()` returns `BROKER_NOT_CONFIGURED` only when `broker` is `None`.
+- With `broker=` passed, the start runs the checks. Each top-level `TaskNode` must have `queue` and `priority` set. If one is `None`, `start()` returns `VALIDATION_FAILED` with `HRS-014` (queue) or `HRS-015` (priority).
+- For a top-level workflow, use `app.workflow()` or `build(app)`. They set the broker and bind the queue and priority.
 
 Requirements:
 - Must return a **fresh** `WorkflowSpec` per call (not cached).
@@ -115,11 +114,11 @@ class TaskNode(Generic[OkT]):
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}  # inject upstream TaskResult
     workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
     queue: str | None = None                  # override @task decorator queue
-    priority: int | None = None               # override @task decorator priority
+    priority: int | None = None               # 1 (highest)..100 (lowest); outside raises HRS-034 at build
     allow_failed_deps: bool = False
     join: Literal['all', 'any', 'quorum'] = 'all'
     min_success: int | None = None            # required when join='quorum'
-    good_until: datetime | None = None        # task expiry deadline
+    good_until: datetime | None = None        # task expiry deadline; naive raises HRS-035 at build
     node_id: str | None = None                # auto-assigned if None
     # Assigned by WorkflowSpec:
     index: int | None = None                  # position in DAG (0-based)
@@ -251,7 +250,7 @@ match spec.start():
 | Code | Retryable | When |
 |---|---|---|
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
-| `VALIDATION_FAILED` | No | DAG validation, serialization, or args error, or a retry of another workflow's error |
+| `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
 | `LOOP_RUNNER_FAILED` | No | Sync `spec.start()` could not run the call on the broker's sync runner (stopped, thread did not start, or scheduling failed); nothing was written. A stopped runner does not start again: call `await spec.retry_start_async(err)` or use a new broker |
@@ -286,7 +285,7 @@ status = handle.status()       # works — queries DB by workflow_id
 result = handle.get()          # works — polls for completion
 ```
 
-All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or direct construction. If the `workflow_id` does not exist, methods return `Err(HandleOperationError(WORKFLOW_NOT_FOUND))` or `TaskResult(err=TaskError(WORKFLOW_NOT_FOUND))`.
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or direct construction. If the `workflow_id` does not exist, methods return `Err(HandleWorkflowNotFound)` or `TaskResult(err=TaskError(WORKFLOW_NOT_FOUND))`.
 
 ### Two error strategies
 
@@ -310,11 +309,12 @@ async def get_async(self, timeout_ms: int | None = None) -> TaskResult[OutT, Tas
 def result_for(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 async def result_for_async(self, node: TaskNode[OkT] | NodeKey[OkT]) -> TaskResult[OkT, TaskError]
 
-# All results keyed by node_id
+# All results keyed by node_id. Ok({}) before any node has a result;
+# Err(HandleWorkflowNotFound) when no workflow has the id.
 def results(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 async def results_async(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]
 
-# Task info list
+# Task info list. Err(HandleWorkflowNotFound) when no workflow has the id.
 def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]
 async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]
 
@@ -343,8 +343,9 @@ appearing during a pause are expected, not a fault.
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
 - `COMPLETED` → returns output task's `TaskResult` (or `TaskResult(ok={node_id: TaskResult, ...})` if no `output`).
-- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`.
+- `FAILED` / `CANCELLED` → returns `TaskResult(err=TaskError(...))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when no error is stored.
 - `EXPIRED` → returns `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_EXPIRED))`. The error `data` holds the policy name and the age.
+- The workflow row is removed after `get()` read its terminal status (retention) → `TaskResult(err=TaskError(error_code=RetrievalCode.WORKFLOW_NOT_FOUND))`.
 - `PAUSED` → returns immediately with `TaskResult(err=TaskError(error_code=OutcomeCode.WORKFLOW_PAUSED))`.
 - Timeout → returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT))`.
 
@@ -354,25 +355,32 @@ Non-blocking single DB query. Returns `RESULT_NOT_READY` if the task hasn't comp
 
 ### HandleOperationError / HandleErrorCode
 
-```python
-@dataclass(slots=True, frozen=True)
-class HandleOperationError:
-    code: HandleErrorCode
-    message: str
-    retryable: bool
-    workflow_id: str
-    exception: BaseException | None = None
-```
+`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
 <!-- members: HandleErrorCode -->
-| Code | Retryable | When |
-|---|---|---|
-| `WORKFLOW_NOT_FOUND` | No | Workflow ID doesn't exist |
-| `DB_OPERATION_FAILED` | Maybe | DB query/commit failure |
-| `LOOP_RUNNER_FAILED` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
-| `INTERNAL_FAILED` | No | `pause_workflow()` / `resume_workflow()` raised an exception that is not a database error |
-| `EVENT_LOOP_LIMIT` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
-| `ASYNC_CONTEXT` | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+| Code | Variant | Other fields | Retryable | After the failure |
+|---|---|---|---|---|
+| `WORKFLOW_NOT_FOUND` | `HandleWorkflowNotFound` | – | No | No workflow has this id; nothing changed |
+| `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | driver classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
+| `LOOP_RUNNER_FAILED` | `HandleLoopRunnerFailed` | `exception: BaseException` | No | A sync method could not run the call on the broker's sync runner; nothing ran |
+| `EVENT_LOOP_LIMIT` | `HandleEventLoopLimit` | `loop_limit: EventLoopLimit` | No | The broker serves its limit of open event loops and this call ran on a new one; nothing ran |
+| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `RetrievalCode.ASYNC_CONTEXT` instead) |
+
+```python
+from horsies import Err, HandleResumeRecoveryFailed, Ok
+
+match handle.resume():
+    case Ok(True):
+        ...  # resumed
+    case Ok(False):
+        ...  # not PAUSED; nothing changed
+    case Err(HandleResumeRecoveryFailed()):
+        ...  # resumed; the recovery pass failed and the reaper runs it again
+    case Err(err):
+        print(f"[{err.code}] {err.message}")
+```
 
 ## Enums
 
@@ -578,7 +586,7 @@ def process(*, data: TaskResult[int, TaskError]) -> TaskResult[str, TaskError]:
 node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 ```
 
-## Validation Errors (HRS-001–HRS-033)
+## Validation Errors (HRS-001–HRS-035)
 
 <!-- members: ErrorCode subset -->
 | Code | Name | Trigger |
@@ -615,6 +623,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-031 | `WORKFLOW_KWARGS_NOT_SERIALIZABLE` | kwargs value fails serialization |
 | HRS-032 | `WORKFLOW_INVALID_ID` | supplied `workflow_id` is not a UUID |
 | HRS-033 | `WORKFLOW_INVALID_DEFINITION_CONFIG` | `WorkflowDefinition` class defines `Meta`, or its `config` is not a `WorkflowDefinitionConfig` (raised at class creation) |
+| HRS-034 | `WORKFLOW_INVALID_PRIORITY` | A `TaskNode` `priority` is outside 1–100 |
+| HRS-035 | `WORKFLOW_NAIVE_GOOD_UNTIL` | A `TaskNode` `good_until` is a naive `datetime` (no `tzinfo`) |
 
 ## Known Constraints
 
@@ -643,6 +653,9 @@ from horsies import (
     WorkflowHandle, WorkflowTaskInfo,
     # Handle result types
     HandleResult, HandleOperationError, HandleErrorCode,
+    HandleWorkflowNotFound, HandleDbOperationFailed, HandleStoredDataInvalid,
+    HandleResumeRecoveryFailed, HandleLoopRunnerFailed, HandleEventLoopLimit,
+    HandleAsyncContext,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
     WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,

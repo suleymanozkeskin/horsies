@@ -19,6 +19,7 @@ from typing import Dict, List, Optional, Union
 from horsies.core.codec.json_value import (
     StrictJsonError,
     _parse_finite_float,
+    _reject_lone_surrogate,
     _reject_nonstandard_json_constant,
     _validate_json_native,
 )
@@ -100,20 +101,23 @@ def loads_json(s: Optional[str]) -> SerdeResult[Json]:
     non-finite floats past the producer-side strict fence. Routes through
     ``parse_float=_parse_finite_float`` for the same reason: a numeric literal
     such as ``1e9999`` never reaches ``parse_constant``, and ``float()`` would
-    turn it into ``inf``.
+    turn it into ``inf``. ``_reject_lone_surrogate`` then refuses a string that
+    UTF-8 cannot encode, which ``dumps_json`` also refuses.
     """
     if not s:
         return Ok(None)
     try:
-        return Ok(json.loads(
+        parsed: Json = json.loads(
             s,
             parse_constant=_reject_nonstandard_json_constant,
             parse_float=_parse_finite_float,
-        ))
+        )
+        _reject_lone_surrogate(s, parsed)
     except StrictJsonError as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
     except (json.JSONDecodeError, ValueError) as exc:
         return Err(SerializationError(f'JSON parse failed: {exc}'))
+    return Ok(parsed)
 
 
 def loads_json_bytes(payload: bytes) -> SerdeResult[Json]:

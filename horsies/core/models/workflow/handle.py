@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import (
@@ -12,6 +13,7 @@ from typing import (
     Callable,
     Coroutine,
     Generic,
+    Literal,
     TypeVar,
     assert_never,
     cast,
@@ -62,7 +64,7 @@ from horsies.core.models.tasks import (
     RetrievalCode,
     OutcomeCode,
 )
-from horsies.core.types.result import Ok, Err, is_err
+from horsies.core.types.result import Ok, Err, Result, is_err
 from horsies.core.types.status import TASK_TERMINAL_STATES
 
 from .context import SubWorkflowSummary
@@ -73,7 +75,15 @@ from .enums import (
     WorkflowStatus,
     WorkflowTaskStatus,
 )
-from .handle_types import HandleErrorCode, HandleOperationError, HandleResult
+from .handle_types import (
+    HandleAsyncContext,
+    HandleDbOperationFailed,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
+    HandleResult,
+    HandleStoredDataInvalid,
+    HandleWorkflowNotFound,
+)
 from .nodes import NodeKey
 
 logger = get_logger('workflow.handle')
@@ -122,14 +132,20 @@ GET_WORKFLOW_RESULT_SQL = text("""
 """)
 
 GET_WORKFLOW_ERROR_SQL = text("""
-    SELECT error, status FROM horsies_workflows WHERE id = :wf_id
+    SELECT error FROM horsies_workflows WHERE id = :wf_id
 """)
 
+# The node reads start from the workflow row, so one statement tells "no
+# workflow" (no row) from "no matching node" (one row whose
+# workflow_task_id is NULL). See ``_workflow_node_rows``.
 GET_WORKFLOW_TASK_RESULTS_SQL = text("""
-    SELECT node_id, task_name, result, is_subworkflow, sub_definition_key
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-      AND result IS NOT NULL
+    SELECT wt.id AS workflow_task_id, wt.node_id, wt.task_name, wt.result,
+           wt.is_subworkflow, wt.sub_definition_key
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt
+           ON wt.workflow_id = w.id
+          AND wt.result IS NOT NULL
+    WHERE w.id = :wf_id
 """)
 
 GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
@@ -141,12 +157,14 @@ GET_WORKFLOW_TASK_RESULT_BY_NODE_SQL = text("""
 """)
 
 GET_WORKFLOW_TASKS_SQL = text("""
-    SELECT node_id, task_index, task_name, status, result,
-           started_at, completed_at, sub_workflow_id, sub_workflow_summary,
-           is_subworkflow, sub_definition_key
-    FROM horsies_workflow_tasks
-    WHERE workflow_id = :wf_id
-    ORDER BY task_index
+    SELECT wt.id AS workflow_task_id, wt.node_id, wt.task_index, wt.task_name,
+           wt.status, wt.result, wt.started_at, wt.completed_at,
+           wt.sub_workflow_id, wt.sub_workflow_summary,
+           wt.is_subworkflow, wt.sub_definition_key
+    FROM horsies_workflows w
+    LEFT JOIN horsies_workflow_tasks wt ON wt.workflow_id = w.id
+    WHERE w.id = :wf_id
+    ORDER BY wt.task_index
 """)
 
 CANCEL_WORKFLOW_SQL = text("""
@@ -275,6 +293,48 @@ def _async_context_task_result(operation: str) -> TaskResult[Any, TaskError]:
             ),
         ),
     )
+
+
+def _parse_stored_workflow_status(
+    workflow_id: str, stored_status: str,
+) -> Result[WorkflowStatus, HandleStoredDataInvalid]:
+    """Parse a stored ``horsies_workflows.status`` value.
+
+    The column has no CHECK constraint, so a value that is not a
+    ``WorkflowStatus`` is stored data that does not parse.
+    """
+    try:
+        return Ok(WorkflowStatus(stored_status))
+    except ValueError as exc:
+        return Err(HandleStoredDataInvalid(
+            message=(
+                f'Workflow {workflow_id} has stored status {stored_status!r}, '
+                'which is not a WorkflowStatus'
+            ),
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
+
+
+type _TerminalErrorStatus = Literal[
+    WorkflowStatus.FAILED,
+    WorkflowStatus.CANCELLED,
+    WorkflowStatus.EXPIRED,
+]
+"""A terminal workflow status that ``get()`` reports as an error."""
+
+
+def _terminal_outcome_code(status: _TerminalErrorStatus) -> OutcomeCode:
+    """The ``OutcomeCode`` of a terminal error status without a stored error."""
+    match status:
+        case WorkflowStatus.FAILED:
+            return OutcomeCode.WORKFLOW_FAILED
+        case WorkflowStatus.CANCELLED:
+            return OutcomeCode.WORKFLOW_CANCELLED
+        case WorkflowStatus.EXPIRED:
+            return OutcomeCode.WORKFLOW_EXPIRED
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 class _OutputlessTerminals:
@@ -569,7 +629,7 @@ class WorkflowHandle(Generic[OutT]):
     ``TaskResult(err=TaskError(BROKER_ERROR, ...))``.
 
     Every sync method called on a thread that runs an event loop returns
-    ``ASYNC_CONTEXT`` (``HandleErrorCode`` for the wrap strategy,
+    ``ASYNC_CONTEXT`` (``HandleAsyncContext`` for the wrap strategy,
     ``RetrievalCode`` for the fold strategy) and runs nothing. Use the
     ``*_async`` form there.
     """
@@ -587,13 +647,12 @@ class WorkflowHandle(Generic[OutT]):
 
     def _event_loop_limit(
         self, loop_limit: EventLoopLimit, operation: str,
-    ) -> Err[HandleOperationError]:
+    ) -> Err[HandleEventLoopLimit]:
         """Build the wrap-strategy error for the event loop limit."""
-        return Err(HandleOperationError(
-            code=HandleErrorCode.EVENT_LOOP_LIMIT,
+        return Err(HandleEventLoopLimit(
             message=f'{operation} for workflow {self.workflow_id}: {loop_limit.describe()}',
-            retryable=False,
             workflow_id=self.workflow_id,
+            loop_limit=loop_limit,
         ))
 
     # ─── wrap-strategy sync helpers ──────────────────────────────────
@@ -606,27 +665,24 @@ class WorkflowHandle(Generic[OutT]):
     ) -> HandleResult[_T]:
         """Sync bridge for wrap-strategy async methods.
 
-        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
-        and runs nothing. A runner failure returns ``LOOP_RUNNER_FAILED``;
-        nothing ran. Any other exception propagates, as from the async form.
+        On a thread that runs an event loop it returns
+        ``Err(HandleAsyncContext)`` and runs nothing. A runner failure returns
+        ``HandleLoopRunnerFailed``; nothing ran. Any other exception
+        propagates, as from the async form.
         """
         if in_running_event_loop():
-            return Err(HandleOperationError(
-                code=HandleErrorCode.ASYNC_CONTEXT,
+            return Err(HandleAsyncContext(
                 message=async_context_message(
                     f'WorkflowHandle.{operation}()',
                     f'handle.{operation}_async(...)',
                 ),
-                retryable=False,
                 workflow_id=self.workflow_id,
             ))
         try:
             return self.broker.run_sync(coro_fn, *args)
         except LoopRunnerError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.LOOP_RUNNER_FAILED,
+            return Err(HandleLoopRunnerFailed(
                 message=f'Loop runner failed for {operation}: {exc}',
-                retryable=False,
                 workflow_id=self.workflow_id,
                 exception=exc,
             ))
@@ -674,8 +730,17 @@ class WorkflowHandle(Generic[OutT]):
                 pass
         return await self._status(resources)
 
-    async def _status(self, resources: BrokerResources) -> HandleResult[WorkflowStatus]:
-        """Read the workflow status with already-selected resources."""
+    async def _status(
+        self, resources: BrokerResources,
+    ) -> Result[
+        WorkflowStatus,
+        HandleWorkflowNotFound | HandleDbOperationFailed | HandleStoredDataInvalid,
+    ]:
+        """Read the workflow status with already-selected resources.
+
+        It takes selected resources and is async, so it returns neither
+        ``HandleEventLoopLimit`` nor ``HandleAsyncContext``.
+        """
         try:
             async with resources.session_factory() as session:
                 result = await session.execute(
@@ -684,16 +749,13 @@ class WorkflowHandle(Generic[OutT]):
                 )
                 row = result.fetchone()
                 if row is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {self.workflow_id} not found',
-                        retryable=False,
                         workflow_id=self.workflow_id,
                     ))
-                return Ok(WorkflowStatus(row.status))
+                return _parse_stored_workflow_status(self.workflow_id, row.status)
         except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
+            return Err(HandleDbOperationFailed(
                 message=f'DB query failed for workflow {self.workflow_id} status: {exc}',
                 retryable=is_retryable_connection_error(exc),
                 workflow_id=self.workflow_id,
@@ -758,26 +820,22 @@ class WorkflowHandle(Generic[OutT]):
                 status_r = await self._status(resources)
 
                 if is_err(status_r):
-                    handle_err = status_r.err_value
-                    match handle_err.code:
-                        case HandleErrorCode.WORKFLOW_NOT_FOUND:
+                    status_err = status_r.err_value
+                    match status_err:
+                        case HandleWorkflowNotFound():
                             error_code: BuiltInTaskCode = RetrievalCode.WORKFLOW_NOT_FOUND
-                        case HandleErrorCode.EVENT_LOOP_LIMIT:
-                            error_code = RetrievalCode.EVENT_LOOP_LIMIT
-                        case HandleErrorCode.ASYNC_CONTEXT:
-                            raise AssertionError(
-                                'WorkflowHandle.get_async status read for workflow '
-                                f'{self.workflow_id} returned ASYNC_CONTEXT; only a '
-                                'sync facade returns it, and this read is async',
-                            )
-                        case _:
+                        case HandleDbOperationFailed():
                             error_code = OperationalErrorCode.BROKER_ERROR
+                        case HandleStoredDataInvalid():
+                            error_code = OperationalErrorCode.BROKER_ERROR
+                        case _ as unreachable:
+                            assert_never(unreachable)
                     return cast(
                         'TaskResult[OutT, TaskError]',
                         TaskResult(
                             err=TaskError(
                                 error_code=error_code,
-                                message=handle_err.message,
+                                message=status_err.message,
                             ),
                         ),
                     )
@@ -792,7 +850,7 @@ class WorkflowHandle(Generic[OutT]):
                         | WorkflowStatus.CANCELLED
                         | WorkflowStatus.EXPIRED
                     ):
-                        return await self._get_error(resources)
+                        return await self._get_error(resources, status)
                     case WorkflowStatus.PAUSED:
                         return cast(
                             'TaskResult[OutT, TaskError]',
@@ -908,8 +966,24 @@ class WorkflowHandle(Generic[OutT]):
                 ),
             )
 
-    async def _get_error(self, resources: BrokerResources) -> TaskResult[OutT, TaskError]:
-        """Fetch failed workflow error."""
+    async def _get_error(
+        self, resources: BrokerResources, status: _TerminalErrorStatus,
+    ) -> TaskResult[OutT, TaskError]:
+        """Read the stored error of a workflow whose terminal status was read.
+
+        ``status`` is the status that the status read parsed. A terminal
+        status does not change, so this read does not read it again.
+
+        Outcomes:
+            - No row (retention deleted the workflow after the status
+              read): ``RetrievalCode.WORKFLOW_NOT_FOUND``.
+            - A stored error object that decodes: that ``TaskError``.
+            - A stored error that is not JSON, or an object that does not
+              decode: ``RESULT_DESERIALIZATION_ERROR``.
+            - No stored error, or stored JSON that is not an object: the
+              ``OutcomeCode`` of ``status``.
+            - A database error: ``BROKER_ERROR``.
+        """
         try:
             async with resources.session_factory() as session:
                 result = await session.execute(
@@ -917,11 +991,25 @@ class WorkflowHandle(Generic[OutT]):
                     {'wf_id': self.workflow_id},
                 )
                 row = result.fetchone()
-                if row and row.error:
+                if row is None:
+                    return cast(
+                        'TaskResult[OutT, TaskError]',
+                        TaskResult(
+                            err=TaskError(
+                                error_code=RetrievalCode.WORKFLOW_NOT_FOUND,
+                                message=(
+                                    f'Workflow {self.workflow_id} not found: '
+                                    'the row was removed after its '
+                                    f'{status.value} status was read'
+                                ),
+                            )
+                        ),
+                    )
+                if row.error:
                     loads_r = loads_json(row.error)
                     if is_err(loads_r):
                         if (
-                            row.status == WorkflowStatus.EXPIRED.value
+                            status is WorkflowStatus.EXPIRED
                             and str(row.error).startswith(
                                 'paused_workflow_auto_cancel_after:'
                             )
@@ -984,24 +1072,12 @@ class WorkflowHandle(Generic[OutT]):
                             'TaskResult[OutT, TaskError]',
                             TaskResult(err=validated_err),
                         )
-                status_str = row.status if row else 'FAILED'
-                match status_str:
-                    case WorkflowStatus.FAILED.value:
-                        fallback_code: OutcomeCode | str = (
-                            OutcomeCode.WORKFLOW_FAILED
-                        )
-                    case WorkflowStatus.CANCELLED.value:
-                        fallback_code = OutcomeCode.WORKFLOW_CANCELLED
-                    case WorkflowStatus.EXPIRED.value:
-                        fallback_code = OutcomeCode.WORKFLOW_EXPIRED
-                    case _:
-                        fallback_code = f'WORKFLOW_{status_str}'
                 return cast(
                     'TaskResult[OutT, TaskError]',
                     TaskResult(
                         err=TaskError(
-                            error_code=fallback_code,
-                            message=f'Workflow {status_str.lower()}',
+                            error_code=_terminal_outcome_code(status),
+                            message=f'Workflow {status.value.lower()}',
                         )
                     ),
                 )
@@ -1127,12 +1203,35 @@ class WorkflowHandle(Generic[OutT]):
 
     # ─── results ─────────────────────────────────────────────────────
 
+    def _workflow_node_rows(
+        self, rows: Sequence[Any],
+    ) -> Result[Sequence[Any], HandleWorkflowNotFound]:
+        """Split the rows of the workflow row LEFT JOIN its nodes.
+
+        No row: no workflow has this id. One row whose ``workflow_task_id``
+        is NULL: the workflow exists and no node matched, so ``Ok([])``.
+        Otherwise every row is a node.
+        """
+        match rows:
+            case []:
+                return Err(HandleWorkflowNotFound(
+                    message=f'Workflow {self.workflow_id} not found',
+                    workflow_id=self.workflow_id,
+                ))
+            case [only] if only.workflow_task_id is None:
+                return Ok([])
+            case _:
+                return Ok(rows)
+
     def results(self) -> HandleResult[dict[str, TaskResult[Any, TaskError]]]:
         """
         Get all task results keyed by unique identifier.
 
         Keys are `node_id` values. If a TaskNode did not specify a node_id,
         WorkflowSpec auto-assigns one as "{workflow_name}:{task_index}".
+
+        ``Ok({})``: the workflow exists and no node has a stored result yet.
+        ``Err(HandleWorkflowNotFound)``: no workflow has this id.
         """
         return self._sync_call(self.results_async, 'results')
 
@@ -1155,9 +1254,14 @@ class WorkflowHandle(Generic[OutT]):
                     GET_WORKFLOW_TASK_RESULTS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+                match self._workflow_node_rows(result.fetchall()):
+                    case Err() as not_found:
+                        return not_found
+                    case Ok(node_rows):
+                        pass
 
                 out: dict[str, TaskResult[Any, TaskError]] = {}
-                for row in result.fetchall():
+                for row in node_rows:
                     loads_r = loads_json(row.result)
                     if is_err(loads_r):
                         out[row.node_id] = TaskResult(
@@ -1178,8 +1282,7 @@ class WorkflowHandle(Generic[OutT]):
                     )
                 return Ok(out)
         except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
+            return Err(HandleDbOperationFailed(
                 message=f'DB query failed for workflow {self.workflow_id} results: {exc}',
                 retryable=is_retryable_connection_error(exc),
                 workflow_id=self.workflow_id,
@@ -1189,7 +1292,11 @@ class WorkflowHandle(Generic[OutT]):
     # ─── tasks ───────────────────────────────────────────────────────
 
     def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]:
-        """Get status of all tasks in workflow."""
+        """Get status of all tasks in workflow.
+
+        ``Ok([])``: the workflow exists and has no node.
+        ``Err(HandleWorkflowNotFound)``: no workflow has this id.
+        """
         return self._sync_call(self.tasks_async, 'tasks')
 
     async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]:
@@ -1206,9 +1313,14 @@ class WorkflowHandle(Generic[OutT]):
                     GET_WORKFLOW_TASKS_SQL,
                     {'wf_id': self.workflow_id},
                 )
+                match self._workflow_node_rows(result.fetchall()):
+                    case Err() as not_found:
+                        return not_found
+                    case Ok(node_rows):
+                        pass
 
                 out: list[WorkflowTaskInfo] = []
-                for row in result.fetchall():
+                for row in node_rows:
                     task_result_value: TaskResult[Any, TaskError] | None = None
                     if row.result:
                         loads_r = loads_json(row.result)
@@ -1235,28 +1347,26 @@ class WorkflowHandle(Generic[OutT]):
                     if row.sub_workflow_summary:
                         summary_loads_r = loads_json(row.sub_workflow_summary)
                         if is_err(summary_loads_r):
-                            return Err(HandleOperationError(
-                                code=HandleErrorCode.DB_OPERATION_FAILED,
+                            return Err(HandleStoredDataInvalid(
                                 message=(
                                     f'sub_workflow_summary JSON corrupt for node '
                                     f'{row.node_id}: {summary_loads_r.err_value}'
                                 ),
-                                retryable=False,
                                 workflow_id=self.workflow_id,
+                                exception=summary_loads_r.err_value,
                             ))
                         try:
                             summary = SubWorkflowSummary.from_json(
                                 summary_loads_r.ok_value
                             )
                         except ValueError as summary_exc:
-                            return Err(HandleOperationError(
-                                code=HandleErrorCode.DB_OPERATION_FAILED,
+                            return Err(HandleStoredDataInvalid(
                                 message=(
                                     f'sub_workflow_summary invalid for node '
                                     f'{row.node_id}: {summary_exc}'
                                 ),
-                                retryable=False,
                                 workflow_id=self.workflow_id,
+                                exception=summary_exc,
                             ))
 
                     out.append(WorkflowTaskInfo(
@@ -1272,8 +1382,7 @@ class WorkflowHandle(Generic[OutT]):
                     ))
                 return Ok(out)
         except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
+            return Err(HandleDbOperationFailed(
                 message=f'DB query failed for workflow {self.workflow_id} tasks: {exc}',
                 retryable=is_retryable_connection_error(exc),
                 workflow_id=self.workflow_id,
@@ -1339,14 +1448,19 @@ class WorkflowHandle(Generic[OutT]):
                 )
                 exists_row = exists.fetchone()
                 if exists_row is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {self.workflow_id} not found',
-                        retryable=False,
                         workflow_id=self.workflow_id,
                     ))
 
-                status_val = WorkflowStatus(exists_row.status)
+                # An Err returns before the commit: the transaction rolls back.
+                match _parse_stored_workflow_status(
+                    self.workflow_id, exists_row.status,
+                ):
+                    case Err() as stored_data_invalid:
+                        return stored_data_invalid
+                    case Ok(status_val):
+                        pass
                 if status_val != WorkflowStatus.CANCELLED:
                     # Non-cancellable state (COMPLETED, FAILED) → no-op
                     return Ok(None)
@@ -1450,8 +1564,7 @@ class WorkflowHandle(Generic[OutT]):
                 await session.commit()
             return Ok(None)
         except SQLAlchemyError as exc:
-            return Err(HandleOperationError(
-                code=HandleErrorCode.DB_OPERATION_FAILED,
+            return Err(HandleDbOperationFailed(
                 message=f'Cancel failed for workflow {self.workflow_id}: {exc}',
                 retryable=is_retryable_connection_error(exc),
                 workflow_id=self.workflow_id,
@@ -1471,7 +1584,7 @@ class WorkflowHandle(Generic[OutT]):
 
         Returns:
             Ok(True) if workflow was paused, Ok(False) if not RUNNING (no-op).
-            Err(HandleOperationError) if workflow not found or infrastructure failure.
+            Err(HandleOperationError) on failure: match on the variant.
         """
         return self._sync_call(self.pause_async, 'pause')
 
@@ -1480,7 +1593,7 @@ class WorkflowHandle(Generic[OutT]):
 
         Returns:
             Ok(True) if workflow was paused, Ok(False) if not RUNNING (no-op).
-            Err(HandleOperationError) if workflow not found or infrastructure failure.
+            Err(HandleOperationError) on failure: match on the variant.
         """
         from horsies.core.workflows.engine import pause_workflow
 
@@ -1497,7 +1610,7 @@ class WorkflowHandle(Generic[OutT]):
 
         Returns:
             Ok(True) if workflow was resumed, Ok(False) if not PAUSED (no-op).
-            Err(HandleOperationError) if workflow not found or infrastructure failure.
+            Err(HandleOperationError) on failure: match on the variant.
         """
         return self._sync_call(self.resume_async, 'resume')
 
@@ -1506,7 +1619,7 @@ class WorkflowHandle(Generic[OutT]):
 
         Returns:
             Ok(True) if workflow was resumed, Ok(False) if not PAUSED (no-op).
-            Err(HandleOperationError) if workflow not found or infrastructure failure.
+            Err(HandleOperationError) on failure: match on the variant.
         """
         from horsies.core.workflows.engine import resume_workflow
 

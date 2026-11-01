@@ -1,8 +1,3 @@
----
-name: horsies-tasks
-description: Task authoring and execution guidance for horsies, including @app.task, TaskResult, send and schedule APIs, retry behavior, exception mapping, and serialization pitfalls. Use when implementing, debugging, or reviewing task-related code.
----
-
 # horsies — Tasks
 
 Detailed reference for defining, sending, and handling tasks.
@@ -25,7 +20,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `task_name` | `str` | required | Unique identifier. Duplicate names raise `RegistryError(HRS-301)`. |
+| `task_name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
 | `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
@@ -146,7 +141,7 @@ Results from `handle.get()` / `handle.result_for()` when data is not (yet) avail
 <!-- members: RetrievalCode -->
 - `WAIT_TIMEOUT` — `get()` timed out; task may still be running, not cached, re-pollable
 - `TASK_NOT_FOUND` — task ID does not exist
-- `WORKFLOW_NOT_FOUND` — workflow ID does not exist
+- `WORKFLOW_NOT_FOUND` — workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
 - `RESULT_NOT_AVAILABLE` — result cache never set
 - `RESULT_NOT_READY` — result not ready yet
 - `EVENT_LOOP_LIMIT` — the broker serves its limit of open event loops and this is a new one; not cached, clears when one of those loops closes
@@ -792,9 +787,9 @@ from horsies import (
     from_node,
     # Rerun (re-execute a terminal task as a new request)
     rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome,
-    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunNotEligible,
-    RerunInputUnavailable, RerunInputCorrupt, RerunKeyConflict, RerunKeyReplay,
-    NotEligibleReason,
+    RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
+    RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
+    RerunKeyConflict, RerunKeyReplay, NotEligibleReason,
     # Result primitives
     Result, Ok, Err, is_ok, is_err,
 )

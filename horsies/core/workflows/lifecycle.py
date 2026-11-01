@@ -51,12 +51,16 @@ from horsies.core.models.workflow import (
 )
 from horsies.core.models.workflow.handle import _OUTPUTLESS_TERMINALS
 from horsies.core.models.workflow.typing_utils import _resolve_source_node_ok_type
-from horsies.core.errors import WorkflowValidationError, MultipleValidationErrors, ErrorCode
+from horsies.core.errors import WorkflowValidationError, ErrorCode
 from horsies.core.utils.db import is_retryable_connection_error
 from horsies.core.models.workflow.handle_types import (
-    HandleErrorCode,
-    HandleOperationError,
+    HandleAsyncContext,
+    HandleDbOperationFailed,
+    HandleEventLoopLimit,
+    HandleLoopRunnerFailed,
     HandleResult,
+    HandleResumeRecoveryFailed,
+    HandleWorkflowNotFound,
 )
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
@@ -102,9 +106,10 @@ _START_RETRY_MAX_MS: Final[int] = 2000
 def _ser_or_raise(result: SerdeResult[str], context: str) -> str:
     """Extract a serde Result or raise with context.
 
-    Used inside the DB transaction zone of ``start_workflow_async``
-    where ``SerializationError`` is caught and converted to
-    ``Err(SERIALIZATION_FAILED)``.
+    Used inside the start transaction of ``start_workflow_async`` and by
+    ``expire_paused_workflows``. Every value it gets there was built and
+    validated in the process, so a ``SerializationError`` is a defect: the
+    start transaction does not catch it, and the transaction rolls back.
     """
     if _is_err(result):
         raise SerializationError(f'Failed to serialize {context}: {result.err_value}')
@@ -115,9 +120,10 @@ def _encode_node_kwargs_or_raise(task: Any) -> dict[str, Any]:
     """Encode a TaskNode's static kwargs through strict-serde phase 3.
 
     Routes through `encode_kwargs(task.fn, task.kwargs)` so each kwarg is
-    encoded against its declared parameter type. Raises
-    ``SerializationError`` on encode failure so the caller's existing
-    transaction-zone handling converts it to ``SERIALIZATION_FAILED``.
+    encoded against its declared parameter type. Spec construction already
+    bound, encoded and decoded every kwarg, so an encode failure here is a
+    defect. It raises ``SerializationError`` with the node name; the start
+    transaction does not catch it.
     """
     underlying = underlying_task_fn(task.fn)
     try:
@@ -175,10 +181,10 @@ def root_retry_and_deadline(
 
     Mirrors enqueue_workflow_task's task_options parsing. One deliberate
     difference: the promotion path folds corrupt options into a FAILED task
-    (it re-reads rows written by another transaction); here the JSON was
-    serialized moments ago in this same call, so corruption is a horsies
-    bug — raise SerializationError and fail the whole start loudly
-    (VALIDATION_FAILED, transaction rolled back).
+    (it re-reads rows written by another transaction); here the JSON is the
+    task decorator's own serialization of a validated ``TaskOptions``, so
+    corruption is a defect. The start transaction does not catch the
+    ``SerializationError``: it propagates, and the transaction rolls back.
 
     Raises:
         SerializationError: task_options_json does not parse to an object,
@@ -256,19 +262,26 @@ async def start_workflow_async(
     Returns:
         ``Ok(WorkflowHandle)`` on success.
         ``Err(WorkflowStartError)`` on failure; match on the variant. A
-        database or driver error is ``WorkflowStartEnqueueFailed``. Any other
-        exception from the start transaction is a defect and propagates.
+        ``WorkflowValidationError`` from prevalidation is
+        ``WorkflowStartValidationFailed``. A database or driver error in the
+        start transaction is ``WorkflowStartEnqueueFailed``. Any other
+        exception from prevalidation or from the start transaction is a
+        defect and propagates, also a ``SerializationError``: the start
+        transaction encodes only values that the process built and
+        validated before the start. The transaction then rolls back.
 
     Notes:
         If workflow_id is provided and already exists, returns existing handle
         (best-effort idempotent by workflow_id, not payload-verified).
     """
-    # Deferred import to avoid circular dependency with engine.py
+    # Deferred imports: engine.py and task_decorator.py each load this
+    # module when they are imported.
     from horsies.core.workflows.engine import (
         drain_parent_propagations_in_session,
         enqueue_workflow_task,
         enqueue_subworkflow_task,
     )
+    from horsies.core.task_decorator import resolve_node_queue
 
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
@@ -318,14 +331,9 @@ async def start_workflow_async(
                 )
     except asyncio.CancelledError:
         raise
-    except (WorkflowValidationError, MultipleValidationErrors, ValueError) as exc:
-        return Err(WorkflowStartValidationFailed(
-            message=str(exc),
-            workflow_name=spec.name,
-            workflow_id=wf_id,
-            exception=exc,
-        ))
-    except SerializationError as exc:
+    except WorkflowValidationError as exc:
+        # The checks above raise only WorkflowValidationError on purpose.
+        # Any other exception is a defect and propagates.
         return Err(WorkflowStartValidationFailed(
             message=str(exc),
             workflow_name=spec.name,
@@ -467,9 +475,9 @@ async def start_workflow_async(
                 # context assembly and conflict checks.
                 #
                 # NOTE: serialization failures (_ser_or_raise) raise while
-                # building params, before any INSERT executes — the
-                # transaction rolls back with no partial state, same
-                # guarantee the old mid-loop raise had.
+                # building params, before any INSERT executes. They are
+                # defects and propagate; the transaction rolls back with no
+                # partial state.
                 node_params: list[dict[str, Any]] = []
                 fast_root_task_params: list[dict[str, Any]] = []
                 fast_root_indexes: list[int] = []
@@ -496,7 +504,11 @@ async def start_workflow_async(
 
                     if isinstance(node, SubWorkflowNode):
                         # SubWorkflowNode: no fn, queue, priority, good_until
-                        guard_no_positional_args(node.name, node.args)
+                        assert not node.args, (
+                            f"SubWorkflowNode '{node.name}' reached the start "
+                            f'transaction with {len(node.args)} positional args; '
+                            'spec construction refuses them'
+                        )
                         if is_root:
                             slow_root_nodes.append(node)
                         node_params.append({
@@ -534,13 +546,15 @@ async def start_workflow_async(
 
                     # TaskNode: has fn, queue, priority, good_until
                     task = node
-                    guard_no_positional_args(task.name, task.args)
+                    assert not task.args, (
+                        f"TaskNode '{task.name}' reached the start transaction "
+                        f'with {len(task.args)} positional args; spec '
+                        'construction refuses them'
+                    )
 
                     # Get task_options_json from the task function (set by @task decorator)
                     # and merge in TaskNode.good_until if set
-                    task_options_json: str | None = getattr(
-                        task.fn, 'task_options_json', None
-                    )
+                    task_options_json: str | None = task.fn.task_options_json
                     if task.good_until is not None:
                         # Merge good_until from TaskNode into task_options
                         base_options: dict[str, Any] = {}
@@ -559,24 +573,13 @@ async def start_workflow_async(
                         )
 
                     encoded_kwargs = _encode_node_kwargs_or_raise(task)
-                    # Queue: use override, else task's declared queue, else "default"
-                    resolved_queue = (
-                        task.queue
-                        or getattr(task.fn, 'task_queue_name', None)
-                        or 'default'
+                    resolved_queue = resolve_node_queue(task)
+                    # Prevalidation refused priority=None for every TaskNode
+                    # in spec.tasks, and the spec and its nodes are frozen.
+                    assert task.priority is not None, (
+                        f"TaskNode '{task.name}' reached the start transaction "
+                        'with priority=None; start prevalidation refuses it'
                     )
-                    # Priority is bound before persist: app.workflow() binds it,
-                    # and start validation rejects unbound top-level specs (the
-                    # WORKFLOW_UNRESOLVED_PRIORITY guard earlier in this
-                    # function). Treat a residual None as an invariant violation
-                    # — fail closed, never guess a literal default.
-                    if task.priority is None:
-                        raise WorkflowValidationError(
-                            message='TaskNode reached enqueue with unresolved priority',
-                            code=ErrorCode.WORKFLOW_UNRESOLVED_PRIORITY,
-                            notes=[f"TaskNode '{task.name}' has priority=None"],
-                            help_text='build the workflow via app.workflow() so queue/priority bind before start',
-                        )
                     resolved_priority = task.priority
                     args_json = _ser_or_raise(dumps_json([]), 'positional args')  # kwargs-only: positional args not persisted
 
@@ -748,22 +751,6 @@ async def start_workflow_async(
 
         except asyncio.CancelledError:
             raise
-        except SerializationError as exc:
-            # Deterministic — never retry.
-            return Err(WorkflowStartValidationFailed(
-                message=str(exc),
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                exception=exc,
-            ))
-        except ValueError as exc:
-            # guard_no_positional_args — deterministic, never retry.
-            return Err(WorkflowStartValidationFailed(
-                message=str(exc),
-                workflow_name=spec.name,
-                workflow_id=wf_id,
-                exception=exc,
-            ))
         except (SQLAlchemyError, PsycopgError) as exc:
             # A database or driver error. Any other exception is a defect
             # and propagates.
@@ -871,13 +858,12 @@ def start_workflow(
 
 def _event_loop_limit(
     workflow_id: str, operation: str, loop_limit: EventLoopLimit,
-) -> Err[HandleOperationError]:
+) -> Err[HandleEventLoopLimit]:
     """Build the lifecycle error for the event loop limit. Nothing ran."""
-    return Err(HandleOperationError(
-        code=HandleErrorCode.EVENT_LOOP_LIMIT,
+    return Err(HandleEventLoopLimit(
         message=f'{operation} of workflow {workflow_id}: {loop_limit.describe()}',
-        retryable=False,
         workflow_id=workflow_id,
+        loop_limit=loop_limit,
     ))
 
 
@@ -904,10 +890,12 @@ async def pause_workflow(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
-        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
-        open event loops and this is a new one; nothing ran.
+        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
+        ``Err(HandleDbOperationFailed)`` on a database error; the
+        transaction rolled back, or its commit outcome is unknown.
+        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
+        of open event loops and this is a new one; nothing ran.
+        Any other exception propagates.
     """
     match await broker.select_resources():
         case Err(loop_limit):
@@ -927,10 +915,8 @@ async def pause_workflow(
                     {'wf_id': workflow_id},
                 )
                 if exists.fetchone() is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {workflow_id} not found',
-                        retryable=False,
                         workflow_id=workflow_id,
                     ))
                 return Ok(False)
@@ -980,18 +966,9 @@ async def pause_workflow(
             await session.commit()
             return Ok(True)
     except SQLAlchemyError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.DB_OPERATION_FAILED,
+        return Err(HandleDbOperationFailed(
             message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
             retryable=is_retryable_connection_error(exc),
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Pause failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))
@@ -1046,10 +1023,10 @@ def pause_workflow_sync(
 
     Inner async ``Err`` passes through unchanged.
     A failure of the broker's sync runner is returned as
-    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
     as from the async form.
-    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    changes nothing.
+    On a thread that runs an event loop it returns ``HandleAsyncContext``
+    and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1058,7 +1035,7 @@ def pause_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was paused.
         ``Ok(False)`` if workflow exists but is not RUNNING (no-op).
-        ``Err(...)`` on failure — see ``HandleErrorCode``.
+        ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
         LoopRunnerError,
@@ -1067,22 +1044,18 @@ def pause_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleOperationError(
-            code=HandleErrorCode.ASYNC_CONTEXT,
+        return Err(HandleAsyncContext(
             message=async_context_message(
                 f'pause_workflow_sync for workflow {workflow_id}',
                 'pause_workflow(broker, workflow_id)',
             ),
-            retryable=False,
             workflow_id=workflow_id,
         ))
     try:
         return broker.run_sync(pause_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.LOOP_RUNNER_FAILED,
+        return Err(HandleLoopRunnerFailed(
             message=f'Loop runner failed for pause_workflow_sync(): {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))
@@ -1110,10 +1083,15 @@ async def resume_workflow(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(WORKFLOW_NOT_FOUND)`` if workflow does not exist.
-        ``Err(DB_OPERATION_FAILED)`` on infrastructure failure.
-        ``Err(EVENT_LOOP_LIMIT)`` if the broker already serves its limit of
-        open event loops and this is a new one; nothing ran.
+        ``Err(HandleWorkflowNotFound)`` if workflow does not exist.
+        ``Err(HandleDbOperationFailed)`` on a database error before the
+        resume commits; the transaction rolled back, or its commit outcome
+        is unknown.
+        ``Err(HandleResumeRecoveryFailed)`` on a database error in the
+        recovery pass after the commit; the workflow is RUNNING.
+        ``Err(HandleEventLoopLimit)`` if the broker already serves its limit
+        of open event loops and this is a new one; nothing ran.
+        Any other exception propagates.
     """
     # Deferred imports to avoid circular dependency with engine.py
     from horsies.core.workflows.engine import (
@@ -1145,10 +1123,8 @@ async def resume_workflow(
                     {'wf_id': workflow_id},
                 )
                 if exists.fetchone() is None:
-                    return Err(HandleOperationError(
-                        code=HandleErrorCode.WORKFLOW_NOT_FOUND,
+                    return Err(HandleWorkflowNotFound(
                         message=f'Workflow {workflow_id} not found',
-                        retryable=False,
                         workflow_id=workflow_id,
                     ))
                 return Ok(False)
@@ -1222,7 +1198,15 @@ async def resume_workflow(
             await drain_parent_propagations_in_session(session, broker)
 
             await session.commit()
+    except SQLAlchemyError as exc:
+        return Err(HandleDbOperationFailed(
+            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
+            retryable=is_retryable_connection_error(exc),
+            workflow_id=workflow_id,
+            exception=exc,
+        ))
 
+    try:
         # A task can finish while this transaction has resumed a child workflow
         # but before that status change is visible to the task-completion
         # callback. The callback observes PAUSED and correctly avoids
@@ -1247,24 +1231,16 @@ async def resume_workflow(
                 tree_ids,
             )
             await recovery_session.commit()
-
-        return Ok(True)
     except SQLAlchemyError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.DB_OPERATION_FAILED,
-            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=is_retryable_connection_error(exc),
+        return Err(HandleResumeRecoveryFailed(
+            message=(
+                f'Workflow {workflow_id} resumed; the recovery pass for its '
+                f'tree failed: {type(exc).__name__}: {exc}'
+            ),
             workflow_id=workflow_id,
             exception=exc,
         ))
-    except Exception as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.INTERNAL_FAILED,
-            message=f'Resume failed for workflow {workflow_id}: {type(exc).__name__}: {exc}',
-            retryable=False,
-            workflow_id=workflow_id,
-            exception=exc,
-        ))
+    return Ok(True)
 
 
 
@@ -1375,10 +1351,10 @@ def resume_workflow_sync(
 
     Inner async ``Err`` passes through unchanged.
     A failure of the broker's sync runner is returned as
-    ``LOOP_RUNNER_FAILED``; nothing ran. Any other exception propagates,
+    ``HandleLoopRunnerFailed``; nothing ran. Any other exception propagates,
     as from the async form.
-    On a thread that runs an event loop it returns ``ASYNC_CONTEXT`` and
-    changes nothing.
+    On a thread that runs an event loop it returns ``HandleAsyncContext``
+    and changes nothing.
 
     Args:
         broker: PostgreSQL broker for database operations.
@@ -1387,7 +1363,7 @@ def resume_workflow_sync(
     Returns:
         ``Ok(True)`` if workflow was resumed.
         ``Ok(False)`` if workflow exists but is not PAUSED (no-op).
-        ``Err(...)`` on failure — see ``HandleErrorCode``.
+        ``Err(...)`` on failure — see ``HandleOperationError``.
     """
     from horsies.core.utils.loop_runner import (
         LoopRunnerError,
@@ -1396,22 +1372,18 @@ def resume_workflow_sync(
     )
 
     if in_running_event_loop():
-        return Err(HandleOperationError(
-            code=HandleErrorCode.ASYNC_CONTEXT,
+        return Err(HandleAsyncContext(
             message=async_context_message(
                 f'resume_workflow_sync for workflow {workflow_id}',
                 'resume_workflow(broker, workflow_id)',
             ),
-            retryable=False,
             workflow_id=workflow_id,
         ))
     try:
         return broker.run_sync(resume_workflow, broker, workflow_id)
     except LoopRunnerError as exc:
-        return Err(HandleOperationError(
-            code=HandleErrorCode.LOOP_RUNNER_FAILED,
+        return Err(HandleLoopRunnerFailed(
             message=f'Loop runner failed for resume_workflow_sync(): {exc}',
-            retryable=False,
             workflow_id=workflow_id,
             exception=exc,
         ))
