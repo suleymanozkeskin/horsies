@@ -181,6 +181,7 @@ from .core.history.rerun.operations import (
 )
 from .core.types.result import Result, Ok, Err, is_ok, is_err
 from .core.codec import JsonValue, StrictJsonError
+from .core.types.json_value import JsonDict, JsonInput, JsonList
 
 __all__ = [
     # Version
@@ -363,6 +364,9 @@ __all__ = [
     'is_ok',
     'is_err',
     # Codec boundary types
+    'JsonDict',
+    'JsonInput',
+    'JsonList',
     'JsonValue',
     'StrictJsonError',
 ]

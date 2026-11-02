@@ -423,14 +423,20 @@ class TestRecoveryLimitPayloads:
             is OperationalErrorCode.WORKFLOW_RECOVERY_LIMIT_REACHED
         )
 
-    def test_an_error_that_does_not_encode_raises(self) -> None:
-        """A defect is loud. It does not store a fallback text."""
+    def test_a_lone_surrogate_in_the_text_is_escaped(self) -> None:
+        """An error reports a failure, so its text must not fail to encode."""
         error = TaskError(
             error_code=OperationalErrorCode.WORKFLOW_RECOVERY_LIMIT_REACHED,
             message='unescaped \ud800',
         )
-        with pytest.raises(StrictJsonError):
-            recovery_limit_payloads(error)
+
+        payloads = recovery_limit_payloads(error)
+
+        stored = loads_json(payloads.workflow_error_json)
+        assert is_ok(stored)
+        decoded = decode_task_error(stored.ok_value)
+        assert decoded.error_code is OperationalErrorCode.WORKFLOW_RECOVERY_LIMIT_REACHED
+        assert decoded.message == 'unescaped \\ud800'
 
     def test_a_value_that_does_not_serialize_raises(self) -> None:
         with pytest.raises(SerializationError):

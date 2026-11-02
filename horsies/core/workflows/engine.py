@@ -48,6 +48,7 @@ from horsies.core.codec.typed import (
     encode_task_error,
     encode_task_result,
     encode_value,
+    reportable_error,
     validate_task_result_envelope,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
@@ -1303,8 +1304,12 @@ async def enqueue_subworkflow_task(
             # Spec construction in build_with() encoded and decoded these
             # kwargs, so a refusal here is a defect and raises.
             try:
-                encoded_child_sub_kwargs = encode_subworkflow_kwargs(
-                    child_sub.workflow_def, child_sub.kwargs,
+                encoded_child_sub_kwargs = (
+                    dict(child_sub.wire_kwargs)
+                    if child_sub.wire_kwargs is not None
+                    else encode_subworkflow_kwargs(
+                        child_sub.workflow_def, child_sub.kwargs,
+                    )
                 )
             except (StrictJsonError, ValueValidationError) as exc:
                 raise SerializationError(
@@ -1381,9 +1386,15 @@ async def enqueue_subworkflow_task(
             # build_with() encoded and decoded these kwargs, so a refusal
             # here is a defect and raises.
             try:
-                child_task_underlying_fn = underlying_task_fn(child_task.fn)
-                encoded_child_task_kwargs = dict(
-                    encode_kwargs(child_task_underlying_fn, child_task.kwargs),
+                encoded_child_task_kwargs = (
+                    dict(child_task.wire_kwargs)
+                    if child_task.wire_kwargs is not None
+                    else dict(
+                        encode_kwargs(
+                            underlying_task_fn(child_task.fn),
+                            child_task.kwargs,
+                        ),
+                    )
                 )
             except (StrictJsonError, ValueValidationError) as exc:
                 raise SerializationError(
@@ -3261,7 +3272,7 @@ async def get_workflow_failure_error(
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
                 return _ser_or_raise(
-                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
+                    dumps_json(encode_task_error(reportable_error(err_tr.err))),
                     f'first task error of workflow {workflow_id}',
                 )
         return None
@@ -3299,7 +3310,7 @@ async def get_workflow_failure_error(
                 # `sub_workflow_summary`) survive the round-trip.
                 # `encode_value(err, TaskError)` would silently downcast.
                 return _ser_or_raise(
-                    dumps_json(encode_value(err_tr.err, type(err_tr.err))),
+                    dumps_json(encode_task_error(reportable_error(err_tr.err))),
                     f'first task error of workflow {workflow_id}',
                 )
 

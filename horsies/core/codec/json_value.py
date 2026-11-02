@@ -31,6 +31,8 @@ import math
 from itertools import chain
 from typing import Final, NoReturn, cast
 
+from horsies.core.types.json_value import JsonValue
+
 
 __all__ = [
     'JSON_TEXT_TOO_DEEP',
@@ -44,17 +46,6 @@ __all__ = [
     '_reject_lone_surrogate',
     'escape_lone_surrogates',
 ]
-
-
-type JsonValue = (
-    None
-    | bool
-    | int
-    | float
-    | str
-    | list['JsonValue']
-    | dict[str, 'JsonValue']
-)
 
 
 type _JsonContainer = list[JsonValue] | dict[str, JsonValue]
@@ -71,6 +62,14 @@ depth parameter, so this bound fails closed before Python's recursion limit.
   levels. So each value that `encode_value` accepts stays inside the bound.
 - It is far below the recursion limit of 1000, which also counts the frames of
   the caller.
+"""
+
+MAX_TYPED_JSON_DEPTH: Final = 200
+"""The deepest nesting of a value that crosses the wire under a declared type.
+
+A typed value is read in strict JSON mode, and pydantic's JSON parser stops at this
+depth. `MAX_JSON_DEPTH` stays higher, because the engine puts envelopes around a
+value. This is one named value, so the docs, the refusal text and the test agree.
 """
 
 JSON_TEXT_TOO_DEEP: Final = f'JSON text is nested deeper than {MAX_JSON_DEPTH} levels'

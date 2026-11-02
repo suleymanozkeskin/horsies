@@ -487,7 +487,9 @@ class TestWorkflowNodeKwargs:
         def node_fn(*, count: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=count)
 
-        node = SimpleNamespace(fn=node_fn, kwargs={'count': MARKER}, name='node-a')
+        node = SimpleNamespace(
+            fn=node_fn, kwargs={'count': MARKER}, name='node-a', wire_kwargs=None,
+        )
 
         with pytest.raises(SerializationError) as caught:
             _encode_node_kwargs_or_raise(node)

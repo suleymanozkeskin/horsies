@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pydantic import TypeAdapter, ValidationError
 from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogates
 from horsies.core.codec.kwargs import (
-    encode_kwargs,
+    encode_kwargs_read_back,
     fill_omitted_defaults,
     missing_required_kwargs,
 )
@@ -1342,12 +1342,15 @@ def create_task_wrapper(
             try:
                 try:
                     if result.is_ok():
-                        # Validate ok value against T. Lax validation coerces
-                        # (e.g. '5' → 5 for a declared int); return the coerced
-                        # value so an in-process caller sees the same value a
-                        # wire consumer decodes — otherwise local and remote
-                        # observations of the same task diverge.
-                        validated_ok = ok_type_adapter.validate_python(result.ok)
+                        # Validate the ok value against T. A validator can
+                        # transform it, so return the validated value: an
+                        # in-process caller then sees the value that a wire
+                        # consumer decodes.
+                        validated_ok = ok_type_adapter.validate_python(
+                            result.ok,
+                            strict=True,
+                            extra='forbid',
+                        )
                         if validated_ok is not result.ok:
                             result = TaskResult(ok=validated_ok)
                     else:
@@ -1783,7 +1786,7 @@ def create_task_wrapper(
         kwargs_json: str | None = None
         if kwargs_dict:
             try:
-                encoded_kwargs = encode_kwargs(fn, kwargs_dict)
+                encoded_kwargs = encode_kwargs_read_back(fn, kwargs_dict)
             except (StrictJsonError, ValueValidationError) as exc:
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to encode kwargs for {task_name}: {exc}',
