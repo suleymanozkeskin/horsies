@@ -301,6 +301,8 @@ Enqueue task for immediate execution. Keyword-only — positional arguments are 
 Async variant of `.send()`. Use in async code (FastAPI, etc.).
 This does not execute the task locally; it only enqueues. Keyword-only.
 
+`.send()` refuses a call that cannot run, with nothing stored: a missing required argument, a wrong value, an unknown key, and a value that the worker could not read back. Each gives `TaskSendValidationFailed`.
+
 **Returns:** `TaskSendResult[TaskHandle[T]]`
 
 ### `.schedule(delay, **kwargs) -> TaskSendResult[TaskHandle[T]]`

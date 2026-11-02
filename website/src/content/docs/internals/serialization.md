@@ -65,11 +65,12 @@ Each `results_by_id` entry is itself a `__h_task_result__` envelope; the consume
 
 The worker calls `encode_task_result(result, ok_type)` after the user function returns. The codec:
 
-1. Validates `result.ok` against `ok_type` via `TypeAdapter` (raises `ValueValidationError` on shape mismatch or serializer failure; the text holds no input value).
-2. Emits the envelope.
-3. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (`type`, `module`, `message`, `repr`, `traceback`).
+1. Validates `result.ok` against `ok_type` in strict mode (raises `ValueValidationError` on a wrong value or a serializer failure; the text holds no input value).
+2. Reads the value back with the decode that a reader uses, and refuses a value that a reader cannot read or that loses data. See [Strict Values](#strict-values).
+3. Emits the envelope.
+4. Flattens any live `BaseException` carried on `TaskError.exception` into a `FlattenedException` (`type`, `module`, `message`, `repr`, `traceback`).
 
-Encode failures surface as `WORKER_SERIALIZATION_ERROR`.
+An ok value that fails surfaces as `WORKER_SERIALIZATION_ERROR`. An error never fails here: see [The Error Path](#the-error-path).
 
 ```python
 from horsies.core.codec.typed import encode_task_result
@@ -88,7 +89,7 @@ The consumer holds the declared `ok_type` (from the task registry) and calls `de
 
 1. `validate_task_result_envelope` checks the marker and structural shape.
 2. If `err` is populated, `decode_task_error` runs first — no `ok_type` is required to surface failed tasks, including those whose task name is unknown locally. It refuses a key that the error type does not declare, and an error without `error_code`. The refusal names the cause.
-3. Otherwise `TypeAdapter[ok_type].validate_python(envelope["ok"])` materializes the typed value.
+3. Otherwise the ok slot is read through its JSON text in strict mode, against `ok_type`.
 
 Distinct decode-error surfaces:
 
@@ -114,9 +115,11 @@ Values flowing through a task signature must classify as **one** of:
 - A concrete `BaseModel` subclass (not bare `BaseModel`).
 - A `@dataclass`.
 - `list[T]`, `tuple[T, ...]`, `dict[str, T]`, `Literal[...]`, `Annotated[T, ...]`, `T | None`, or a discriminated union — recursively classified.
-- `TaskResult[T, TaskError]` (anywhere `T` is one of the above; `err_t` must be `TaskError`).
+- `TaskResult[T, TaskError]` or `TaskResult[T, TaskError] | None`, as a whole parameter only. The engine fills it through `args_from`. `err_t` must be `TaskError`, and a default must be `None`.
 
 Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
+
+The same rules apply to each parameter of a `build_with` that a `SubWorkflowNode` targets, because its kwargs are stored and read back. See [Subworkflows](/horsies/concepts/workflows/subworkflows/).
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -146,6 +149,79 @@ def validate_input(
 ) -> TaskResult[dict[str, JsonValue], TaskError]:
     return TaskResult(ok=data)
 ```
+
+## Strict Values
+
+The codec validates in strict mode at every boundary. A wrong value is refused, not converted.
+
+| Value | Declared type | Result |
+| ----- | ------------- | ------ |
+| `"7"`, `7.0`, `True` | `int` | Refused |
+| `"yes"`, `1` | `bool` | Refused |
+| `1700000000`, `"2026-01-01"` | `datetime` | Refused |
+| `"red"` | an `Enum` | Refused. Pass the member |
+| `(1, 2)`, `{1, 2}` | `list[int]` | Refused |
+| `1` | `float` | Accepted, as `1.0` |
+| `{"n": 1}` | a `BaseModel` | Accepted, checked field by field |
+| `{"n": 1}` | a dataclass | Refused. Pass an instance |
+
+A stored value is read through its JSON text, also in strict mode. A datetime reads from its string, and `"7"` does not read as an int.
+
+**Read-back.** `.send()`, a schedule, a workflow definition and a task result decode what they encoded, with the decode that the worker uses. A value that a reader cannot read is refused before it is stored. This finds a value that validation does not see, such as a mutated instance or `model_construct`.
+
+**Lost data.** The value and its read-back are compared. These are refused:
+
+- An unknown key in a dict, at any depth.
+- A subclass instance with fields that the declared type does not have. A subclass with no new field is accepted.
+- A model field that a serializer drops, when its value differs from the default.
+
+**Unknown keys on read.** A stored key that the model no longer declares is ignored, so old rows stay readable after a model change. See [Change a Model](/horsies/operations/deploying-code-changes/#change-a-model).
+
+**Omitted parameters.** An omitted parameter crosses no wire, so its default is validated before the task body runs, and the function gets the returned value. A list or a dict default is a fresh copy for each run. A model default stays the same object.
+
+**Validators.** A validator can run more than once on one value, because the wrapper, the encode and the read each run it. Write validators that give the same result when they run again.
+
+## Shapes Refused at Definition
+
+`@app.task` and each `SubWorkflowNode` refuse a shape that cannot cross the wire, or that cancels the check. Each spelling gets the same answer: `Annotated`, a `Field` default, a decorator, a stdlib or a pydantic dataclass, nested or generic.
+
+| Shape | Why | Instead |
+| ----- | --- | ------- |
+| `Field(exclude=True)`, `exclude_if` | The field is not written, so the reader gets the default | Keep the field out of this type |
+| `alias`, `alias_generator` or `AliasPath` with a key that the read does not accept | The written key does not read back | Set `populate_by_name=True` or `serialize_by_alias=True`, or add the field name to `AliasChoices` |
+| `extra='allow'` | Extra fields have no type | Declare each field, or add a `dict[str, T]` field |
+| `PlainValidator`, `WrapValidator`, `mode='plain'`, `mode='wrap'` | The validator replaces or can skip the check | `AfterValidator` or `BeforeValidator` |
+| `SkipValidation`, any position that accepts any value | No check runs | A concrete type, or `JsonValue` |
+| A class or metadata with its own `__get_pydantic_core_schema__`, `GetPydanticSchema` | The hook replaces the check | A type from the allow list |
+| `computed_field` with `extra='forbid'` | The field is written, and the read refuses it | Remove one of the two |
+| `Json[T]` | The value is written as JSON, not as a JSON string | Declare `T` |
+| `Literal` with a plain `Enum` member | The member is written as its value, and `Literal` refuses that | The `Enum` type, or a `str` or `int` Enum |
+| A dataclass with `revalidate_instances` other than `never` | Revalidation drops the fields of a subclass | Remove the setting |
+| A default that does not hold its declared type | The reader or the function would get a wrong type | A default that is a value of the type |
+
+A default is checked against the type only. No validator runs at import, because a validator can need a model, a context or a service.
+
+A self-check runs each rule once per process. The rules read core schema keys that pydantic owns, so a pydantic that renames a key crashes loud, with the rule, the version and the fix. It does not switch a rule off.
+
+## What the Contract Does Not Cover
+
+- `PrivateAttr` and an attribute set outside the declared fields are not part of the data, so they do not cross the wire.
+- A validator that replaces an instance on purpose, such as `AfterValidator` that builds a base class, keeps its result.
+- A serializer on a dataclass that drops a field with a default is not found. A required field is refused at read-back.
+- `default_factory` is not called at definition, because it may have side effects. A wrong type is refused on each write. A read of an old row with the key missing is not checked.
+- A field default is not validated at read, as in pydantic. Write it in its final form, or set `validate_default=True`.
+- A constraint on a union, such as `Annotated[int | float, Field(gt=0)] = -1`, is not checked on a default.
+
+## The Error Path
+
+An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
+
+- A lone surrogate in the code, the message or the exception text is escaped.
+- `TaskError.data` must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value. Pyright flags most of these at the call.
+- A `SubWorkflowError` keeps its class, its id, its status and its counts. If its output cannot cross, the output is `None`.
+- A `TaskError` subclass with extra fields does not cross the wire, and comes back as a plain `TaskError`. Put the values in `data`, and match on `error_code`.
+
+A `str` or `dict` subclass in `data` passes and reads as a plain `str` or `dict`. A `StrEnum` member reads as its value.
 
 ## Pydantic Models in Workflows
 
@@ -257,7 +333,7 @@ PEP 695 type alias. Re-exported as `horsies.JsonValue`.
 
 Raised by strict codec primitives and the JSON parse guards for strict JSON violations. The parse guards reject the constants `NaN`, `Infinity` and `-Infinity`, and a numeric literal outside the finite binary64 range, such as `1e9999`. A literal that underflows, such as `1e-9999`, parses to `0.0`. They also reject a string with a lone surrogate, such as `\ud800`; a surrogate pair in JSON text is one valid character and stays accepted. `encode_value` refuses each string that `dumps_json` refuses: a lone surrogate in a string or in a dict key raises `StrictJsonError` at any depth. In a Python `str`, a surrogate pair is two code points, so it is refused too. `encode_value` and `decode_value` also raise `StrictJsonError` when the error text of a validator holds a lone surrogate, because pydantic cannot build that text. The text names the kwarg and holds no input value. `dumps_json` / `loads_json` return `SerdeResult` and wrap stringification or parse failures as `SerializationError`. Re-exported as `horsies.StrictJsonError`.
 
-`MAX_JSON_DEPTH` (300) is the deepest nesting of lists and dicts at the JSON boundary. `dumps_json` and the fence of `encode_value` at a `JsonValue` position refuse a deeper value and a value that holds itself. `loads_json` refuses a deeper text, so each walker that gets a parsed value stays inside the recursion limit of Python. The bound is above the limit of a pydantic dump, which refuses at 255 levels: a value that `encode_value` accepts also passes the bound inside its envelope.
+`MAX_TYPED_JSON_DEPTH` (200) is the deepest nesting of a value under a declared type, the limit of the strict JSON read. A deeper value is refused at read-back. `MAX_JSON_DEPTH` (300) is the deepest nesting of lists and dicts at the JSON boundary, which also holds the envelopes around a value. `dumps_json` and the fence of `encode_value` at a `JsonValue` position refuse a deeper value and a value that holds itself. `loads_json` refuses a deeper text, so each walker that gets a parsed value stays inside the recursion limit of Python. The bound is above the limit of a pydantic dump, which refuses at 255 levels: a value that `encode_value` accepts also passes the bound inside its envelope.
 
 ## Things to Avoid
 

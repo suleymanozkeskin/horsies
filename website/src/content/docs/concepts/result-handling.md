@@ -78,7 +78,7 @@ When the library itself encounters an error (not your task code), it uses one of
 | Code | When |
 | ---- | ---- |
 | `UNHANDLED_EXCEPTION` | Task raised an uncaught exception |
-| `TASK_EXCEPTION` | Task returned `None` instead of a `TaskResult`, or the worker caught an exception outside the task wrapper (for example `KeyboardInterrupt`) |
+| `TASK_EXCEPTION` | The worker caught an exception outside the task wrapper, or a validator raised on a default |
 | `WORKER_CRASHED` | A child process died (the worker sees it at once), or the worker died (detected via missing heartbeats) |
 | `BROKER_ERROR` | Broker failed while retrieving the result |
 | `WORKER_RESOLUTION_ERROR` | Worker couldn't find the task in registry |
@@ -93,7 +93,7 @@ When the library itself encounters an error (not your task code), it uses one of
 <!-- members: ContractCode -->
 | Code | When |
 | ---- | ---- |
-| `RETURN_TYPE_MISMATCH` | Returned value doesn't match declared type |
+| `RETURN_TYPE_MISMATCH` | The returned value does not fit the declared type, or it is not a `TaskResult`, including `None` |
 | `NO_TYPE_AVAILABLE` | A successful result could not be decoded because the caller does not have the task's declared success type locally registered |
 | `WORKFLOW_CTX_MISSING_ID` | Workflow context is missing required ID |
 

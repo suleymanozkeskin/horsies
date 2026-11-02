@@ -25,6 +25,11 @@ before you upgrade.
 - **Workflow recovery limit:** a workflow whose recovery raises a persistent
   error in `workflow_recovery_failure_limit` reaper passes fails with
   `WORKFLOW_RECOVERY_LIMIT_REACHED`.
+- **Strict type contract:** a wrong value is refused at every boundary, not
+  converted. `.send()`, schedules, workflow definitions and task results prove
+  that a reader gets a value back before it is stored. `@app.task` refuses each
+  shape that cannot cross the wire, and `build_with` follows the same rules. A
+  bad `TaskError.data` no longer costs a task its error code.
 - **Strict JSON boundary:** every JSON parse goes through `codec/json_io.py`.
   `loads_json` refuses nesting deeper than 300 levels, a number outside the
   finite binary64 range and a lone UTF-16 surrogate.
@@ -41,6 +46,61 @@ before you upgrade.
   0.5.5 process stores without a code. A 0.5.5 broker checks the schema
   version once, at its first use, so a 0.5.5 process that is already running
   does not stop on a v52 database.
+
+#### Strict type contract
+
+- **Values are strict at every boundary.** A conversion is refused: `"7"`,
+  `7.0` or `True` for an `int`, `"yes"` for a `bool`, an epoch number or a str
+  for a `datetime`, a str for an `Enum`, `UUID` or `Decimal`, a set for a list.
+  A stored value is read through its JSON text in strict mode, so a datetime
+  still reads from its string. A model with `ConfigDict(strict=True)` now
+  round-trips.
+- **A value is proved before it is stored.** `.send()`, schedules, workflow
+  definitions and task results decode what they encoded. A mutated instance,
+  `model_construct` or a dataclass with a wrong field no longer fails in the
+  worker with `WORKER_SERIALIZATION_ERROR`: `.send()` returns
+  `TaskSendValidationFailed` with nothing stored. A task result gets one more
+  decode in the child, in proportion to its size.
+- **Data is not lost with no error.** An unknown key is refused at any depth at
+  send, and a subclass with fields that the declared type lacks is refused. An
+  unknown key on read stays ignored, so old rows stay readable after a model
+  change. The Deploying Code Changes page has a recipe for each model change.
+- **`.send()` refuses a call that cannot run.** A missing required argument, and
+  a task that requires a parameter only a workflow can fill.
+- **`@app.task` refuses each shape that cannot cross the wire.**
+  `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`,
+  `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, `Literal` with a
+  plain `Enum`, a key that the read does not accept, a nested `TaskResult`, a
+  generator function, and a dataclass with `revalidate_instances`. Each spelling
+  gets the same answer. A dataclass field with a leading underscore is checked.
+- **Defaults hold their declared type.** A parameter or a field default is checked
+  at definition, with no user code. An omitted parameter is validated before the
+  task body runs, so the function gets its declared type. A list or a dict default
+  is a fresh copy for each run.
+- **`Annotated` holds on a return type.** A constraint or a discriminator was
+  dropped. A stored value outside a constraint now reads as
+  `RESULT_DESERIALIZATION_ERROR`.
+- **A receiver of `args_from` gets the type that it declares,** in a worker and
+  in `build_with`. A constraint or a validator on the receiver now runs.
+- **Workflow wiring.** `Annotated` is ignored at every depth when types are
+  compared. `bool` wired to `int` is refused. `WorkflowDefinition[Any]` cannot feed
+  `args_from` or be an output.
+- **`build_with` follows the task rules** for each `SubWorkflowNode` target, because
+  its kwargs cross the wire. Hints that do not resolve are refused and no longer
+  fall back to `JsonValue`.
+- **A wrong return is `RETURN_TYPE_MISMATCH`.** `return 5` and `return None` no
+  longer take the exception path, so `exception_mapper` and
+  `default_unhandled_error_code` do not apply. This replaces the earlier meaning of
+  `TASK_EXCEPTION` for a returned `None`: that code now means an exception outside
+  the task body. A policy with `auto_retry_for=['TASK_EXCEPTION']` no longer retries
+  a forgotten `return`.
+- **An error keeps its code.** `TaskError.data` is typed as `JsonValue`. A value that
+  cannot cross becomes `{'data_refused': <cause>}`, and a lone surrogate in the text
+  is escaped. The code stays, so `auto_retry_for` and routing still match. A
+  `SubWorkflowError` keeps its class. A `TaskError` subclass with extra fields comes
+  back as a plain `TaskError`.
+- **`MAX_TYPED_JSON_DEPTH` is 200,** the deepest value under a declared type.
+  `MAX_JSON_DEPTH` stays 300.
 
 #### Worker process model
 
