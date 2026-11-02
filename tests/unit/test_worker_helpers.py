@@ -2898,10 +2898,10 @@ class TestCapacityReleaseWake:
 
     @pytest.mark.asyncio
     async def test_a_consumed_release_does_not_wake_again(self) -> None:
-        """One release causes one extra pass, not a claim loop that spins.
+        """One release causes one more pass, not a claim loop that spins.
 
-        Passes: 1 releases, 2 follows the wake, 3 starts the next round,
-        whose wait blocks until stop; 4 is the pass after that wait.
+        Passes: 1 releases, 2 follows the wake, and its wait blocks until stop.
+        A stop claims nothing more.
         """
         worker = _make_worker()
         worker._queues = [asyncio.Queue()]
@@ -2924,7 +2924,89 @@ class TestCapacityReleaseWake:
         worker._stop.set()
         await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
 
-        assert passes == 4
+        assert passes == 2
+
+    @pytest.mark.asyncio
+    async def test_one_wake_gets_one_pass(self) -> None:
+        """Each NOTIFY wake claims once, with no second pass behind it."""
+        worker = _make_worker()
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> bool:
+            nonlocal passes
+            passes += 1
+            return False
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        assert passes == 1
+        worker._queues[0].put_nowait('wake')
+        await asyncio.sleep(0.05)
+        assert passes == 2
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 2
+
+    @pytest.mark.asyncio
+    async def test_a_limited_pass_that_claimed_runs_again_with_no_wait(self) -> None:
+        """Under max_claim_batch a pass can leave ready work and free slots, and
+        no NOTIFY announces that work, so the next pass does not wait for one."""
+        worker = _make_worker()
+        worker.cfg.max_claim_batch = 1
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> bool:
+            nonlocal passes
+            passes += 1
+            return passes < 3
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 3
+
+    @pytest.mark.asyncio
+    async def test_an_unlimited_pass_that_claimed_waits(self) -> None:
+        """With no max_claim_batch one pass takes all that the budget allows."""
+        worker = _make_worker()
+        worker.cfg.max_claim_batch = 0
+        worker._queues = [asyncio.Queue()]
+        worker._resilience = WorkerResilienceConfig(
+            notify_poll_interval_ms=_LONG_POLL_MS,
+        )
+        worker._start_with_resilience_config = AsyncMock()  # type: ignore[method-assign]
+        worker.stop = AsyncMock(side_effect=worker._stop.set)  # type: ignore[method-assign]
+        passes = 0
+
+        async def _claim_pass() -> bool:
+            nonlocal passes
+            passes += 1
+            return True
+
+        worker._claim_and_dispatch_all = AsyncMock(side_effect=_claim_pass)  # type: ignore[method-assign]
+        loop = asyncio.create_task(worker.run_forever())
+        await asyncio.sleep(0.05)
+        worker._stop.set()
+        await asyncio.wait_for(loop, timeout=_WAKE_TIMEOUT_S)
+
+        assert passes == 1
 
 
 @pytest.mark.unit

@@ -885,19 +885,20 @@ class Worker(
             backoff = self._make_retry_backoff()
             while not self._stop.is_set():
                 try:
-                    # Single budgeted claim pass, then wait for new NOTIFY.
-                    # A capacity release during a pass leaves the wake set,
-                    # so the next wait returns at once.
+                    # One budgeted claim pass per wake. A NOTIFY or a capacity
+                    # release during the pass leaves the wake set, so the next
+                    # wait returns at once.
                     self._capacity_released.clear()
-                    await self._claim_and_dispatch_all()
+                    claimed = await self._claim_and_dispatch_all()
 
-                    # Wait for a NOTIFY from any queue or a local capacity
-                    # release (coalesce bursts).
-                    await self._wait_for_any_notify(
-                        poll_interval_ms=self._resilience.notify_poll_interval_ms
-                    )
-                    self._capacity_released.clear()
-                    await self._claim_and_dispatch_all()
+                    # A pass under max_claim_batch can stop with free slots and
+                    # ready work, and no NOTIFY announces that work.
+                    if not (claimed and self.cfg.max_claim_batch > 0):
+                        # Wait for a NOTIFY from any queue or a local capacity
+                        # release (coalesce bursts).
+                        await self._wait_for_any_notify(
+                            poll_interval_ms=self._resilience.notify_poll_interval_ms
+                        )
                     backoff.reset()
                 except asyncio.CancelledError:
                     raise
