@@ -248,7 +248,7 @@ def update_stock_levels(
             err=TaskError(
                 error_code=NO_WORKFLOW_CONTEXT,
                 message='update_stock_levels runs only as a workflow node',
-                data={'feed_node_ids': feed_node_ids},
+                data={'feed_node_ids': list(feed_node_ids)},
             ),
         )
 
@@ -287,7 +287,7 @@ def update_stock_levels(
             err=TaskError(
                 error_code=QUORUM_NOT_MET,
                 message='no supplier feed reached the aggregate',
-                data={'missing': missing},
+                data={'missing': list(missing)},
             ),
         )
 
