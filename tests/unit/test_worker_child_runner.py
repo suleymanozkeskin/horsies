@@ -939,9 +939,7 @@ def _registered_tasks() -> dict[str, Any]:
 
 _LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
     (str, TaskResult(ok=f'text{chr(0xd800)}')),
-    (str, f'text{chr(0xd800)}'),
     (dict[str, int], TaskResult(ok={f'key{chr(0xd800)}': 1})),
-    (dict[str, int], {f'key{chr(0xd800)}': 1}),
     (
         str,
         TaskResult(
@@ -1135,7 +1133,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_ok_type = int
-        mock_task.return_value = 42
+        mock_task.return_value = TaskResult(ok=42)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['kwargs_json'] = None
 
@@ -1149,25 +1147,28 @@ class TestRunTaskEntryErrorPaths:
             f'expected no error for NULL kwargs_json, got: {err}'
         )
 
-    def test_task_returns_none(
+    def test_a_wrapper_that_returns_no_task_result_is_a_defect(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """Task returning None → TASK_EXCEPTION."""
+        """The wrapper turns each return into a `TaskResult`, so another
+        value here is a defect in the library. It ends as TASK_EXCEPTION."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
-        mock_task.return_value = None
+        mock_task.task_ok_type = int
+        mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
+            ok, payload, _ = _run_task_entry(**_run_entry_defaults)
 
         assert ok is True
-        assert reason == 'Task returned None'
-        parsed = _parse_task_result(payload)
-        err = parsed.get('err') or parsed.get('error')
-        assert err['error_code'] == {'__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value}
+        err = _parse_task_result(payload)['err']
+        assert err['error_code'] == {
+            '__builtin_task_code__': OperationalErrorCode.TASK_EXCEPTION.value,
+        }
+        assert 'task wrapper' in err['message']
 
     def test_task_raises_exception(
         self,
@@ -1191,39 +1192,11 @@ class TestRunTaskEntryErrorPaths:
         assert 'ValueError' in err['message']
         assert 'boom' in err['message']
 
-    def test_task_returns_plain_value_wrapped(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """Task returning a plain value → wrapped into TaskResult(ok=value).
-
-        Strict-serde phase 5: encoding routes through
-        ``encode_task_result(out, task.task_ok_type)``, so the mock task
-        must declare a real ``task_ok_type`` (pydantic-resolvable).
-        """
-        patches = _make_run_task_patches()
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.task_ok_type = int
-        mock_task.return_value = 42
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-
-        with _apply_patches(patches):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
-
-        assert ok is True
-        assert reason is None
-        parsed = _parse_task_result(payload)
-        # Phase 5 wire format: ``__h_task_result__`` envelope.
-        assert parsed.get('__h_task_result__') is True
-        assert parsed.get('ok') == 42
-
     @pytest.mark.parametrize(
         ('ok_type', 'returned'),
         _LONE_SURROGATE_RETURNS,
         ids=[
-            'ok-string', 'plain-string', 'ok-key', 'plain-key',
-            'error-message', 'error-data-key',
+            'ok-string', 'ok-key', 'error-message', 'error-data-key',
         ],
     )
     def test_a_lone_surrogate_in_a_return_value_ends_the_task(
@@ -1537,27 +1510,6 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_ok_type = str
         mock_task.return_value = TaskResult(ok='data')
-        mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
-
-        with _apply_patches(patches), patch(
-            'horsies.core.worker.child_runner.dumps_json',
-            return_value=Err(SerializationError('cannot serialize')),
-        ):
-            ok, payload, reason = _run_task_entry(**_run_entry_defaults)
-
-        assert ok is True
-        assert reason is not None and 'SerializationError' in reason
-
-    def test_dumps_json_failure_on_plain_value(
-        self,
-        _run_entry_defaults: dict[str, Any],
-    ) -> None:
-        """When dumps_json fails wrapping a plain value → WORKER_SERIALIZATION_ERROR."""
-        patches = _make_run_task_patches()
-        mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
-        mock_task = MagicMock()
-        mock_task.task_ok_type = int
-        mock_task.return_value = 42
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches), patch(

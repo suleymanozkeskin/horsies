@@ -52,7 +52,7 @@ __all__ = [
 ]
 
 
-_DOCS_URL = 'https://suleymanozkeskin.github.io/horsies/internals/strict-serde'
+_DOCS_URL = 'https://suleymanozkeskin.github.io/horsies/internals/serialization/'
 
 INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
     TaskError,

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Annotated, Any
 
 import pytest
 import pytest_asyncio
+from pydantic import Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -141,6 +142,33 @@ class ParamChildWorkflow(WorkflowDefinition[int]):
         raw_value = _extract_taskresult_value(value)
 
         @app.task(task_name='param_child_task')
+        def child_task(*, value: int) -> TaskResult[int, TaskError]:
+            return TaskResult(ok=value)
+
+        node = TaskNode(fn=child_task, kwargs={'value': raw_value})
+        return app.workflow(
+            name=cls.name,
+            tasks=[node],
+            output=node,
+            on_error=OnError.FAIL,
+        )
+
+
+class ConstrainedChildWorkflow(WorkflowDefinition[int]):
+    """Child workflow whose build_with declares a constraint on its input."""
+
+    name = 'constrained_child_workflow'
+    definition_key = 'tests.constrained_child.v1'
+
+    @classmethod
+    def build_with(
+        cls,
+        app: Horsies,
+        value: TaskResult[Annotated[int, Field(gt=0)], TaskError],
+    ) -> Any:
+        raw_value = _extract_taskresult_value(value)
+
+        @app.task(task_name='constrained_child_task')
         def child_task(*, value: int) -> TaskResult[int, TaskError]:
             return TaskResult(ok=value)
 
@@ -556,6 +584,42 @@ class TestSubworkflowIntegration:
         tr = _decode_task_result(result_json)
         assert tr is not None and tr.is_ok()
         assert tr.unwrap() == 7
+
+    async def test_build_with_refuses_a_value_outside_its_constraint(
+        self,
+        setup: tuple[AsyncSession, PostgresBroker, Horsies],
+    ) -> None:
+        """The value of `args_from` is held to the type that `build_with`
+        declares, so the child never starts."""
+        session, broker, app = setup
+
+        producer_task = make_simple_task(app, 'sub_constrained_producer')
+
+        node_a: TaskNode[int] = TaskNode(fn=producer_task, kwargs={'value': 7})
+        node_child: SubWorkflowNode[int] = SubWorkflowNode(
+            workflow_def=ConstrainedChildWorkflow,
+            waits_for=[node_a],
+            args_from={'value': node_a},
+        )
+        spec = _workflow(app, 
+            name='parent_workflow_constrained',
+            tasks=[node_a, node_child],
+            output=node_child,
+        )
+
+        handle = await start_ok(spec, broker)
+        await self._complete_task(
+            session, broker, handle.workflow_id, 0, TaskResult(ok=-1)
+        )
+
+        row = await self._get_workflow_task_row(session, handle.workflow_id, 1)
+        assert row is not None
+        status, child_id, result_json = row
+        assert status == 'FAILED'
+        assert child_id is None
+        failed = _decode_task_result(result_json)
+        assert failed is not None and failed.is_err()
+        assert 'does not fit the type' in (failed.err_value.message or '')
 
     async def test_child_failure_propagates_to_parent_node(
         self,

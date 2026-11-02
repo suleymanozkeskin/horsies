@@ -846,7 +846,7 @@ class TestErrorMessageShape:
         assert 'banned type `Any`' in msg
         assert 'Fix:' in msg
         assert 'See:' in msg
-        assert 'strict-serde' in msg
+        assert 'internals/serialization/' in msg
 
     def test_error_for_return_names_return_position(self) -> None:
         def f() -> TaskResult[Any, TaskError]: ...

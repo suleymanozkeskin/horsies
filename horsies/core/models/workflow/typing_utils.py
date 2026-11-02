@@ -317,17 +317,48 @@ def _format_type_name(annotation: Any | None) -> str:
     return repr(annotation)
 
 
+def _without_annotated(annotation: Any) -> Any:
+    """Return `annotation` with `Annotated` removed at every depth.
+
+    `get_type_hints` removes it at every depth, so a small function holds the
+    annotation for it. An annotation that does not resolve, such as an
+    unresolved forward reference, is returned as it is: the compare then
+    refuses it, as it does for any unknown type.
+    """
+
+    def holder() -> None: ...
+
+    holder.__annotations__ = {'return': annotation}
+    try:
+        return get_type_hints(holder)['return']
+    except (NameError, TypeError):
+        return annotation
+
+
 def _is_ok_type_compatible(source_ok: Any, expected_ok: Any) -> bool:
     """
     Return True if source TaskResult ok-type can be injected into expected type.
 
+    This compares types only. `Annotated` metadata is removed from both sides,
+    at every depth. A constraint on the target is enforced on the value at run
+    time, see `conform_to_target`.
+
     Rules:
       - Any on either side is treated as compatible
       - Exact match is compatible
-      - source subclass of expected is compatible for concrete classes
+      - source subclass of expected is compatible for concrete classes, but
+        bool is not compatible with int: strict validation refuses it
       - Union expected accepts if any branch is compatible
       - Union source is compatible only if all branches are compatible
     """
+    return _plain_types_compatible(
+        _without_annotated(source_ok),
+        _without_annotated(expected_ok),
+    )
+
+
+def _plain_types_compatible(source_ok: Any, expected_ok: Any) -> bool:
+    """`_is_ok_type_compatible` on types that hold no `Annotated`."""
     if source_ok is Any or expected_ok is Any:
         return True
     if source_ok == expected_ok:
@@ -336,14 +367,19 @@ def _is_ok_type_compatible(source_ok: Any, expected_ok: Any) -> bool:
     expected_origin = get_origin(expected_ok)
     if expected_origin in (Union, UnionType):
         return any(
-            _is_ok_type_compatible(source_ok, branch) for branch in get_args(expected_ok)
+            _plain_types_compatible(source_ok, branch)
+            for branch in get_args(expected_ok)
         )
 
     source_origin = get_origin(source_ok)
     if source_origin in (Union, UnionType):
         return all(
-            _is_ok_type_compatible(branch, expected_ok) for branch in get_args(source_ok)
+            _plain_types_compatible(branch, expected_ok)
+            for branch in get_args(source_ok)
         )
+
+    if source_ok is bool and expected_ok is int:
+        return False
 
     if isinstance(source_ok, type) and isinstance(expected_ok, type):
         try:

@@ -27,6 +27,7 @@ from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     encode_kwargs,
     encode_subworkflow_kwargs,
+    subworkflow_target_ok_type,
     underlying_task_fn,
 )
 from horsies.core.codec.json_io import (
@@ -40,6 +41,7 @@ from horsies.core.codec.task_options import stored_max_retries
 from horsies.core.codec.error_payload import serialize_error_payload
 from horsies.core.codec.typed import (
     Json,
+    conform_to_target,
     decode_task_error,
     decode_task_result,
     encode_task_error,
@@ -1142,7 +1144,32 @@ async def enqueue_subworkflow_task(
                     # The wire ``__h_taskresult_envelope__`` form is reserved
                     # for the worker-bound TaskNode ``args_from`` path that
                     # crosses the broker.
-                    kwargs[kwarg_name] = dep_result
+                    target_ok_type = subworkflow_target_ok_type(
+                        workflow_def, kwarg_name,
+                    )
+                    if target_ok_type is None:
+                        kwargs[kwarg_name] = dep_result
+                        continue
+                    match conform_to_target(dep_result, target_ok_type):
+                        case Ok(ok_value=conformed):
+                            kwargs[kwarg_name] = conformed
+                        case Err(err_value=refusal):
+                            await _fail_enqueued_task(
+                                session,
+                                workflow_id,
+                                task_index,
+                                (
+                                    f"args_from value for '{kwarg_name}' does not "
+                                    f'fit the type that build_with declares '
+                                    f'(subworkflow task {task_index}): '
+                                    f'{escape_lone_surrogates(str(refusal))[:200]}'
+                                ),
+                                broker,
+                                error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+                            )
+                            return None
+                        case _ as unreachable:
+                            assert_never(unreachable)
 
     # 4. Build child WorkflowSpec (parameterized)
     try:

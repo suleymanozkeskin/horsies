@@ -34,12 +34,14 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
 )
 from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
+from horsies.core.types.result import Err, Ok, Result
 
 
 __all__ = [
     'Json',
     'TypeAnnotation',
     'ValueValidationError',
+    'conform_to_target',
     'decode_task_error',
     'decode_task_result',
     'decode_value',
@@ -264,6 +266,38 @@ def encode_value(
     return dumped_json
 
 
+def conform_to_target(
+    result: TaskResult[Any, TaskError],
+    target_ok_type: TypeAnnotation,
+) -> Result[TaskResult[Any, TaskError], ValueValidationError | StrictJsonError]:
+    """Validate a dependency result against the type that the receiver declares.
+
+    An `args_from` result is decoded with the source's type, so a constraint or
+    a validator on the receiver's `TaskResult[T, TaskError]` has not run. This
+    runs them on the decoded value, and the receiver gets the value they
+    return. It validates the value, not the wire form: a subclass stays a
+    subclass, and a source that the wiring check accepts does not fail on a
+    key that the target forbids.
+
+    An error result passes unchanged, because it has no ok value.
+
+    Args:
+        result: The decoded result of the dependency.
+        target_ok_type: The `T` of the receiver's parameter.
+
+    Returns:
+        Ok with the result to give to the receiver, or Err with the refusal.
+        The text of a refusal holds no input value.
+    """
+    if result.is_err():
+        return Ok(result)
+    adapter = _get_adapter(target_ok_type)
+    try:
+        return Ok(TaskResult(ok=_validate_strict(adapter, result.ok_value)))
+    except (StrictJsonError, ValueValidationError) as refusal:
+        return Err(refusal)
+
+
 def decode_value(
     json_value: Json,
     expected_type: TypeAnnotation,
@@ -334,6 +368,19 @@ def _validate(
         failure = StrictJsonError(
             lone_surrogate_text('a validation error', location),
         )
+    raise failure
+
+
+def _validate_strict(adapter: TypeAdapter[Any], value: object) -> object:
+    """`adapter.validate_python(value, strict=True)` with the refusals of `_validate`."""
+    failure: StrictJsonError | ValueValidationError
+    try:
+        try:
+            return adapter.validate_python(value, strict=True)
+        except ValidationError as error:
+            failure = ValueValidationError(validation_summary(error, ()))
+    except UnicodeEncodeError:
+        failure = StrictJsonError(lone_surrogate_text('a validation error', ()))
     raise failure
 
 

@@ -1325,8 +1325,8 @@ class TestCreateTaskWrapperExecution:
         assert result.is_ok()
         assert result.ok == 6
 
-    def test_returns_none_produces_task_exception(self) -> None:
-        """Function returning None produces TASK_EXCEPTION error."""
+    def test_returns_none_is_a_return_type_mismatch(self) -> None:
+        """A forgotten return is the same defect as any other wrong return."""
         def bad_fn(*, x: int) -> TaskResult[int, TaskError]:
             return None  # type: ignore[return-value]
 
@@ -1337,7 +1337,7 @@ class TestCreateTaskWrapperExecution:
 
         assert result.is_err()
         assert result.err is not None
-        assert result.err.error_code == OperationalErrorCode.TASK_EXCEPTION
+        assert result.err.error_code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'returned None' in (result.err.message or '')
 
     def test_return_type_mismatch_produces_error(self) -> None:
