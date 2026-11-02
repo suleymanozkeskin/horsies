@@ -36,6 +36,7 @@ from horsies.core.errors import (
 from horsies.core.logging import get_logger
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.scheduler import Scheduler
+from horsies.core.worker.config import ChildPreload
 from horsies.core.worker.worker import Worker, WorkerConfig
 from horsies.core.types.result import Err, Ok, is_err, is_ok
 from horsies.core.utils.imports import (
@@ -551,6 +552,7 @@ def worker_command(args: argparse.Namespace) -> None:
         max_tasks_per_child=args.max_tasks_per_child,
         max_memory_per_child_mb=args.max_memory_per_child_mb,
         drain_timeout_s=args.drain_timeout,
+        child_preload=ChildPreload(args.child_preload),
         recovery_config=app.config.recovery,
         retention_config=app.config.retention,
         resilience_config=app.config.resilience,
@@ -1166,6 +1168,18 @@ Examples:
                 'deadline the worker kills their children, and each task takes '
                 'the crash path. Set it below the stop window of your '
                 'supervisor. Default: 300'
+            ),
+        )
+        worker_parser.add_argument(
+            '--child-preload',
+            choices=[mode.value for mode in ChildPreload],
+            default=ChildPreload.LIBRARY.value,
+            help=(
+                'What a Linux worker imports once before it forks children. '
+                'library: library code. app: library and app, so children '
+                'share module state, and the worker refuses to start if the '
+                'import leaves a thread or a socket. none: every child starts '
+                'with exec. Other platforms always use exec. Default: library'
             ),
         )
 

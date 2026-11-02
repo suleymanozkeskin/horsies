@@ -128,7 +128,7 @@ def _read_parent_frames(
         os._exit(BAD_PARENT_FRAME_EXIT_CODE)
 
 
-def _bind_to_parent(parent_pid: int) -> None:
+def bind_to_parent(parent_pid: int) -> None:
     """Exit with the parent, also when C code in a task holds the GIL.
 
     Linux only: the control thread needs the GIL, this kernel signal does not.
@@ -142,7 +142,7 @@ def _bind_to_parent(parent_pid: int) -> None:
         os._exit(PARENT_GONE_EXIT_CODE)
 
 
-def _ignore_stop_signals() -> None:
+def ignore_stop_signals() -> None:
     """Leave shutdown to the parent, also when a signal reaches every process.
 
     SIGTERM gets a handler, not ``SIG_IGN``: ``exec`` resets a handler but
@@ -153,7 +153,7 @@ def _ignore_stop_signals() -> None:
     signal.signal(signal.SIGTERM, lambda _signum, _frame: None)
 
 
-def _read_init_frame(sock: socket.socket) -> InitFrame:
+def read_init_frame(sock: socket.socket) -> InitFrame:
     """Read the first frame, bounded. Exits when the parent never sends it."""
     sock.settimeout(INIT_FRAME_TIMEOUT_S)
     try:
@@ -215,7 +215,7 @@ def _bounded_result(frame: RunFrame, wire: WireResult) -> WireResult:
     return True, serialize_error_payload(failure), message
 
 
-def _flush_output() -> None:
+def flush_output() -> None:
     """Flush before ``os._exit``, which skips it. A closed stream is no failure."""
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -234,11 +234,11 @@ def _run_or_exit(run_task: RunTaskFn, frame: RunFrame, init: InitFrame) -> WireR
     try:
         return run_task(frame, init)
     except SystemExit as exc:
-        _flush_output()
+        flush_output()
         os._exit(exc.code if isinstance(exc.code, int) else 1)
     except BaseException:
         logger.critical('Task %s escaped the task runner', frame.task_id, exc_info=True)
-        _flush_output()
+        flush_output()
         os._exit(1)
 
 
@@ -256,9 +256,9 @@ def serve(
     from ``run_task``: the parent sees the exit and recovers the row by its
     status. Does not write to the database itself.
     """
-    _ignore_stop_signals()
-    _bind_to_parent(parent_pid)
-    init = _read_init_frame(sock)
+    ignore_stop_signals()
+    bind_to_parent(parent_pid)
+    init = read_init_frame(sock)
     work: queue.SimpleQueue[RunFrame | StopFrame] = queue.SimpleQueue()
     threading.Thread(
         target=_read_parent_frames,
@@ -292,13 +292,18 @@ def serve(
                 assert_never(unreachable)
 
 
-def _boot_app(init: InitFrame) -> None:
-    """Restore the parent's import state, then run the child initializer."""
-    from horsies.core.worker.child_runner import _child_initializer
-
+def restore_parent_state(init: InitFrame) -> None:
+    """Restore the import state and the names that the worker's process had."""
     sys.path[:] = list(init.parent_sys_path)
     sys.argv[:] = list(init.parent_argv)
     multiprocessing.current_process().name = init.process_name
+
+
+def boot_app(init: InitFrame) -> None:
+    """Restore the parent's import state, then run the child initializer."""
+    from horsies.core.worker.child_runner import _child_initializer
+
+    restore_parent_state(init)
     _child_initializer(
         init.app_locator,
         list(init.imports),
@@ -312,7 +317,7 @@ def _boot_app(init: InitFrame) -> None:
     )
 
 
-def _run_task(frame: RunFrame, init: InitFrame) -> WireResult:
+def run_child_task(frame: RunFrame, init: InitFrame) -> WireResult:
     from horsies.core.worker.child_runner import _run_task_entry
 
     return _run_task_entry(
@@ -343,7 +348,7 @@ def main(argv: Sequence[str]) -> NoReturn:
         sys.stderr.write(f'child_main: bad arguments: {list(argv)!r}\n')
         sys.exit(BAD_ARGUMENTS_EXIT_CODE)
     fd, parent_pid = parsed
-    serve(socket.socket(fileno=fd), parent_pid, _boot_app, _run_task)
+    serve(socket.socket(fileno=fd), parent_pid, boot_app, run_child_task)
     sys.exit(0)
 
 

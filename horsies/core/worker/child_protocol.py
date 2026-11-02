@@ -105,8 +105,39 @@ class ResultFrame:
     rss: RssReading
 
 
+@dataclass(frozen=True, slots=True)
+class PreloadReadyFrame:
+    """Preload parent to worker: imports are done, so forks can start."""
+
+    pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class ChildForkedFrame:
+    """Preload parent to worker: the child exists, and it has left this parent."""
+
+    pid: int
+
+
+@dataclass(frozen=True, slots=True)
+class ForkFailedFrame:
+    """Preload parent to worker: this fork failed. The preload parent stays up."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class PreloadRefusedFrame:
+    """Preload parent to worker: it cannot fork safely, and it exits."""
+
+    reason: str
+
+
 ParentFrame: TypeAlias = InitFrame | RunFrame | StopFrame
 ChildFrame: TypeAlias = ReadyFrame | ResultFrame
+PreloadFrame: TypeAlias = (
+    PreloadReadyFrame | ChildForkedFrame | ForkFailedFrame | PreloadRefusedFrame
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +272,21 @@ def encode_child_frame(frame: ChildFrame) -> EncodedFrame:
                 },
                 frame.result_json.encode('utf-8'),
             )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def encode_preload_frame(frame: PreloadFrame) -> EncodedFrame:
+    """Encode a frame from the preload parent to the worker."""
+    match frame:
+        case PreloadReadyFrame():
+            return _pack({'kind': 'preload_ready', 'pid': frame.pid}, b'')
+        case ChildForkedFrame():
+            return _pack({'kind': 'child_forked', 'pid': frame.pid}, b'')
+        case ForkFailedFrame():
+            return _pack({'kind': 'fork_failed', 'reason': frame.reason}, b'')
+        case PreloadRefusedFrame():
+            return _pack({'kind': 'preload_refused', 'reason': frame.reason}, b'')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -404,4 +450,24 @@ def decode_child_frame(
             case _:
                 return Err(MalformedFrame(f'unknown child frame {kind!r}'))
     except (_BadField, ValueError, OverflowError, RecursionError) as exc:
+        return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
+
+
+def decode_preload_frame(meta_bytes: bytes) -> Result[PreloadFrame, MalformedFrame]:
+    """Build a preload frame from received bytes. Preload frames have no body."""
+    try:
+        meta = _load_meta(meta_bytes)
+        kind = _text(meta, 'kind')
+        match kind:
+            case 'preload_ready':
+                return Ok(PreloadReadyFrame(pid=_whole(meta, 'pid')))
+            case 'child_forked':
+                return Ok(ChildForkedFrame(pid=_whole(meta, 'pid')))
+            case 'fork_failed':
+                return Ok(ForkFailedFrame(reason=_text(meta, 'reason')))
+            case 'preload_refused':
+                return Ok(PreloadRefusedFrame(reason=_text(meta, 'reason')))
+            case _:
+                return Err(MalformedFrame(f'unknown preload frame {kind!r}'))
+    except (_BadField, ValueError) as exc:
         return Err(MalformedFrame(f'{type(exc).__name__}: {exc}'))
