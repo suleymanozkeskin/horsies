@@ -98,7 +98,9 @@ before you upgrade.
   `TASK_EXCEPTION` for a returned `None`: that code now means an exception outside
   the task body. A policy with `auto_retry_for=['TASK_EXCEPTION']` no longer retries
   a forgotten `return`.
-- **An error keeps its code.** `TaskError.data` is typed as `JsonValue`. A value that
+- **An error keeps its code.** `TaskError.data` is typed as `JsonValue`, so pyright
+  flags a `list[str]` or `dict[str, int]` variable there: write `list(ids)` or
+  `dict(counts)`. A value that
   cannot cross becomes `{'data_refused': <cause>}`, and a lone surrogate in the text
   is escaped. The code stays, so `auto_retry_for` and routing still match. A
   `SubWorkflowError` keeps its class. A `TaskError` subclass with extra fields comes

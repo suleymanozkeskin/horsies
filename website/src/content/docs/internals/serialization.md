@@ -217,7 +217,7 @@ A self-check runs each rule once per process. The rules read core schema keys th
 An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
 
 - A lone surrogate in the code, the message or the exception text is escaped.
-- `TaskError.data` must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value. Pyright flags most of these at the call.
+- `TaskError.data` must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value. Pyright flags most of these at the call. `JsonValue` holds `list[JsonValue]`, and a list is invariant, so pyright also flags a `list[str]` or `dict[str, int]` variable. Write `list(ids)` or `dict(counts)`.
 - A `SubWorkflowError` keeps its class, its id, its status and its counts. If its output cannot cross, the output is `None`.
 - A `TaskError` subclass with extra fields does not cross the wire, and comes back as a plain `TaskError`. Put the values in `data`, and match on `error_code`.
 
