@@ -91,6 +91,7 @@ export default defineConfig({
 						{ label: 'Workflow Semantics', slug: 'concepts/workflows/workflow-semantics' },
 						{ label: 'Workflow API', slug: 'concepts/workflows/workflow-api' },
 						{ label: 'Subworkflows', slug: 'concepts/workflows/subworkflows' },
+						{ label: 'Typed Node Builder', slug: 'concepts/workflows/typed-node-builder' },
 					],
 				},
 				{
@@ -155,6 +156,12 @@ export default defineConfig({
 					],
 				},
 				{
+					label: 'Troubleshooting',
+					items: [
+						{ label: 'PgBouncer', slug: 'troubleshooting/pgbouncer' },
+					],
+				},
+				{
 					label: 'Internals',
 					items: [
 						{ label: 'Database Schema', slug: 'internals/database-schema' },
@@ -166,6 +173,8 @@ export default defineConfig({
 					label: 'Migrations',
 					items: [
 						{ label: 'Migrating to 0.1.2', slug: 'migrations/migration-to-0-1-2' },
+						{ label: 'Migrating to 0.5.0', slug: 'migrations/migration-to-0-5-0' },
+						{ label: 'Migrating to 0.6.0', slug: 'migrations/migration-to-0-6-0' },
 					],
 				},
 				{

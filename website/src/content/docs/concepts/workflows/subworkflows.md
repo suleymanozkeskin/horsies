@@ -1,7 +1,7 @@
 ---
 title: Workflows and Subworkflows
 summary: Defining, composing, and running workflows with SubWorkflowNode.
-related: [workflow-semantics, result-handling]
+related: [workflow-semantics, ../../concepts/result-handling]
 tags: [concepts, workflows, subworkflows, composition]
 ---
 

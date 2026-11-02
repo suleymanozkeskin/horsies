@@ -1,7 +1,7 @@
 ---
 title: Workflow Semantics
 summary: DAG-based workflow behavior, failure handling, and dependency resolution.
-related: [workflow-api, subworkflows, result-handling, ../../tasks/retry-policy]
+related: [workflow-api, subworkflows, ../../concepts/result-handling, ../../tasks/retry-policy]
 tags: [concepts, workflows, DAG, semantics]
 ---
 

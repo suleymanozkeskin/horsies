@@ -1,7 +1,7 @@
 ---
 title: Broker Config
 summary: PostgreSQL connection settings via PostgresConfig.
-related: [app-config, ../../internals/postgres-broker]
+related: [app-config]
 tags: [configuration, PostgresConfig, database]
 ---
 
